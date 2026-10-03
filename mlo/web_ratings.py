@@ -718,7 +718,11 @@ def run_web_ratings(config, fetch=None):
     the per-source network waits overlap instead of queueing. One album's
     identity is read ONCE (the release-group id and the names the sources are
     asked by), its ALBUM rating is fetched once and written to every track,
-    and each track's own rating is fetched for that track.
+    and each track's own rating is fetched for that track — the album answer
+    and every track answer of one album ride the SAME bounded pool, so a
+    track's RYM wait no longer blocks the next track's MusicBrainz ask (the
+    two hosts have separate 1 req/s locks; only the waits overlap, the request
+    COUNT per host is unchanged).
 
     Nothing is invented: a track whose recording has no rating keeps no
     WEBRATING, an album no source answered for keeps no ALBUMWEBRATING, and
@@ -762,13 +766,36 @@ def run_web_ratings(config, fetch=None):
     counts = {"ok": 0, "skip": 0, "fail": 0}
     pbar = _make_pbar(total=len(albums), desc="Web ratings", unit="album")
 
+    # THE LANE POLICY — the one mlo.accurip.run_generate_accurip documents. One
+    # album is one lane, and the TRACKS inside an album share the budget that
+    # lane was given: the rating pool one album may open is the SAME budget
+    # DIVIDED among the album lanes, never one width per album, so a Run All
+    # over N albums cannot turn into lanes x N requests in flight. The album
+    # budget itself is mlo.stats.worker_count's (capped at 8, the ceiling the
+    # other network scripts declare). A single-album run — the Import Wizard's
+    # case, which never reaches the album pool — has items=1, so `workers` is 1
+    # lane and `track_width` hands that whole width to its tracks.
+    workers = worker_count(config, maximum=6, items=len(albums))
+    track_width = max(1, worker_count(config, maximum=8) // max(1, workers))
+
     def _one_album(album_dir):
         """Everything one album costs; runs on a worker thread.
 
-        Every counter it touches is local (returned as a dict) so the pool
-        never races on shared state — the shape mlo.lyrics_fetch uses for its
-        tracks, applied one level up because the ALBUM answer is fetched once
-        for the whole folder.
+        The album's own answer and every track's are fetched on ONE pool of
+        `track_width` lanes, and the writes run once it has JOINED — every
+        counter is a local here, so the pool never races on shared state, the
+        shape mlo.lyrics_fetch uses for its tracks, applied one level up
+        because the ALBUM answer is fetched once for the whole folder.
+
+        The overlap is the point: MusicBrainz (1 req/s) and RYM/Wayback
+        (1 req/s) are separate hosts with separate locks, so a strictly serial
+        track loop let one track's RYM wait block the next track's MB ask and
+        vice versa. Per-host request COUNT is unchanged — still one ask per
+        source per entity — only the WAITS overlap. Order is unchanged too:
+        each answer is parsed and aggregated in the configured source order
+        (see ``_rate``), and the writes below visit ``rows`` (sorted file
+        names) in order, so a ThreadPool completion order can never reach a
+        tag.
         """
         out = {"album": album_dir, "album_rating": None, "tracks": 0,
                "wrote": 0, "skipped": 0, "by_source": {}, "errors": [],
@@ -800,13 +827,33 @@ def run_web_ratings(config, fetch=None):
         if not rows:
             return out
         artist, album, rg = _album_identity(rows)
-        album_answer = album_rating(artist, album, rg, config, fetch)
+
+        def _track_answer(row):
+            """One track's own rating — its OWN row, nothing shared."""
+            return track_rating(row["artist"] or row["albumartist"],
+                                row["title"], row["rec_mbid"],
+                                config, fetch)
+
+        if track_width == 1:
+            album_answer = album_rating(artist, album, rg, config, fetch)
+            answers = [_track_answer(row) for row in rows]
+        else:
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=track_width) as ex:
+                # The album's own ask goes first and on its own lane, while the
+                # track asks are already in flight; the answer is awaited once
+                # for the whole folder.
+                album_fut = ex.submit(album_rating, artist, album, rg,
+                                      config, fetch)
+                track_futs = [ex.submit(_track_answer, row) for row in rows]
+                album_answer = album_fut.result()
+                answers = [fut.result() for fut in track_futs]
         out["album_rating"] = album_answer
-        for row in rows:
+        # The writes happen on THIS thread, once the pool has joined, in the
+        # sorted-`rows` order — each track writes only its own file, and the
+        # counters below are the album's own dict.
+        for row, track_answer in zip(rows, answers):
             out["tracks"] += 1
-            track_answer = track_rating(row["artist"] or row["albumartist"],
-                                        row["title"], row["rec_mbid"],
-                                        config, fetch)
             res = write_ratings(row["af"], album=album_answer,
                                 track=track_answer, cfg=config, force=force)
             if res.get("error"):
@@ -824,7 +871,6 @@ def run_web_ratings(config, fetch=None):
             _drop_tag_cache([album_dir])
         return out
 
-    workers = worker_count(config, maximum=6, items=len(albums))
     results = []
     try:
         if len(albums) == 1 or workers == 1:

@@ -256,7 +256,9 @@ is what makes the script look at a file it has already processed:
 `force_lyrics` (1), `force_cue` (2), `force_reencode_flac` (3), `force_reencode_images`
 (5), `force_audit` (6), `force_dr_replaygain` (7), `force_auto_tag` (8),
 `force_accurip` (9), `force_audiometa` (12), `force_mood` (16), `force_xlit` (17),
-`force_tracklist` (15). Grade (4) needs none — it re-reads.
+`force_tracklist` (15), `force_web_ratings` (24). Grade (4) needs none — it re-reads.
+Script 24 is fill-only, so its flag is what re-fetches a rating a file already
+carries (R362).
 Fetch lyrics (13) has NO flag since v4.4.0: a run fills what is missing and
 never replaces stored words, so there is no "redo" for it to force (R330) —
 replacing one track's lyrics is the manual route's job.
@@ -6101,6 +6103,58 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   rate-limited client, and a link that cannot be resolved fails that row BEFORE
   the album is moved — nothing is imported as something else, and nothing
   half-imported is left behind. A row left blank imports the way it always did.
+
+- **R362 — the Finish step's script box carries the one-shot Force switch.**
+  The wizard's *Run scripts after import* box has the same Force toggle and
+  per-script picker the Optimization page uses — one component, two surfaces
+  (`web/src/components/ForceRun.tsx`: `useForceRun` + `ForceControl`), so the
+  two cannot drift — and both the box's **Run all** and the **Done** press send
+  the resulting dict (`forceRun ? forceDict(forceSel) : undefined`, the shape
+  R11 defines). Force re-runs the ticked scripts even where they would skip as
+  already done; it is one-shot (browser-local `mlo.runAll.force` /
+  `mlo.force.sel`), it never writes the saved Settings, and with Force OFF the
+  run omits the dict so the saved switches apply — exactly the rule R11 already
+  states for every import path. The report under the button says "(forced)", and
+  the completion toast says so too. Script 24 (Web ratings) joins the force
+  table with the alias `web_ratings` → `force_web_ratings`
+  (`server/script_runners.py`, `web/src/lib/force.ts`, `SettingsPage`'s master
+  list): the pass stays fill-only, and its switch is what re-fetches a rating a
+  file already carries. Pinned by `tools/test_script_menus.py`.
+
+- **R363 — a tool that cannot REACH a file is not a verdict about its audio.**
+  On Windows the CRT the bundled tools link against stops at
+  `mlo.subproc.MAX_PATH_LIMIT` (260) characters, and flac.exe does not accept
+  the `\\?\` prefix that lifts the limit in the Windows API (measured on this
+  machine: 259 characters opens, 260 answers "can't open input file … No such
+  file or directory"). The long-path bridge runs first — 8.3 alias, else a
+  temporary junction (`mlo.subproc.tool_path`) — but when it cannot be made the
+  file is verified by the ffmpeg decode-and-compare path instead of being
+  reported from the tool's open failure: a stream that states an MD5 is `ok` or
+  `md5-mismatch` from the decode, one that states none is `md5-absent`, and only
+  with no decoder at all is it `md5-unknown` — whose reason names the length
+  limit rather than inventing a missing flac.exe. So the grade's
+  "FLAC MD5 not verified" can no longer come from a path the tool never opened.
+  `mlo.subproc.tool_unreachable` is the one place that question is asked, and
+  `tools/test_flac_md5.py`'s long-path section pins all four answers.
+
+- **R364 — waits on different hosts overlap, and no lane claims the machine.**
+  Script 24's album answer and its tracks' answers ride ONE bounded pool: the
+  per-host request COUNT is unchanged (still one ask per source per entity) and
+  so is the configured source ORDER — answers are parsed and aggregated in
+  `provider_order`, and the writes visit the rows in sorted-name order, so a
+  thread-pool completion order never reaches a tag. What changes is only the
+  waiting: a track's RYM/Wayback wait no longer blocks the next track's
+  MusicBrainz ask, because those two hosts have separate 1 req/s locks. One
+  album is one lane and its tracks share that lane's slice of the shared budget
+  — the policy `mlo.accurip.run_generate_accurip` documents for its transport —
+  so a Run All over N albums cannot multiply the requests in flight; a
+  single-album run is one lane and gets the whole width. Script 9's per-lane
+  ffmpeg WAV transport likewise takes `tool_threads(config, lanes)` — the
+  per-lane share `mlo.flac`, `mlo.remux` and `mlo.images` already use — instead
+  of every lane's ffmpeg claiming every core. Pinned by
+  `tools/test_web_ratings.py` (the same injected answers written byte-identically
+  with and without the overlap) and `tools/test_accurip_roundtrip.py` (the
+  transport argv).
 
 ## 8. Recommended runbook
 

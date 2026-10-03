@@ -1175,7 +1175,7 @@ export default function SettingsPage() {
         },
         {
           k: "web_ratings_enabled", label: "Web ratings (script 24)", type: "bool",
-          help: "Asks the public sources below for an album's and each track's score and writes them beside your own stars as WEBRATING / ALBUMWEBRATING (plus a _SOURCE tag naming who answered). Your own RATING is never touched — the star field always prefers it, and a web value is drawn in its own dimmer tone. Folded in fill-only, so nothing already on a file is overwritten unless force_web_ratings is set by hand.",
+          help: "Asks the public sources below for an album's and each track's score and writes them beside your own stars as WEBRATING / ALBUMWEBRATING (plus a _SOURCE tag naming who answered). Your own RATING is never touched — the star field always prefers it, and a web value is drawn in its own dimmer tone. Folded in fill-only, so nothing already on a file is overwritten unless force_web_ratings is set — by hand or through the Force menu (24 · Web ratings re-fetch).",
         },
         {
           k: "web_ratings_sources", label: "Web rating sources — priority order, asked top to bottom", type: "multi",
@@ -1428,6 +1428,9 @@ export default function SettingsPage() {
     // (`web/src/lib/force.ts` keeps the two lists in step; it used to be
     // missing here, which left the master toggle unable to turn the fixer off).
     { k: "layout_apply", label: "20 · Layout fix (rename / gather)" },
+    // Script 24's runner only FILLS a missing web-rating tag; this switch is
+    // what re-fetches one a file already carries.
+    { k: "force_web_ratings", label: "24 · Web ratings re-fetch" },
   ];
 
   /** The server-side notification switches — one per event kind the backend

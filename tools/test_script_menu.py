@@ -124,8 +124,10 @@ EXPECTED_FILE_KINDS = {"track", "playlist"}
 # four must be reachable from the menu, one entry per flag. 13 is NOT (since
 # v4.4.0): a lyrics run fills what is missing and never replaces stored words,
 # so it has no re-run to force (R330) — replacing one track's lyrics is
-# `POST /api/lyrics/auto` with force, not a library-wide script run.
-EXPECTED_FORCED = {1, 2, 3, 5, 6, 7, 8, 9, 10, 12, 15, 16, 17, 20}
+# `POST /api/lyrics/auto` with force, not a library-wide script run. 24 is here
+# since its flag joined the UI force tables (R362): the pass fills only, and
+# forcing it re-fetches a rating the file already carries.
+EXPECTED_FORCED = {1, 2, 3, 5, 6, 7, 8, 9, 10, 12, 15, 16, 17, 20, 24}
 
 FAILED: list = []
 

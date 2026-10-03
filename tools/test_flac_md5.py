@@ -51,10 +51,12 @@ sys.path.insert(0, ROOT)
 import mlo.audit as mlo_audit  # noqa: E402
 import mlo.flac as mlo_flac  # noqa: E402
 import mlo.grader as mlo_grader  # noqa: E402
+import mlo.subproc as mlo_subproc  # noqa: E402
 from mlo.audio import AudioFile  # noqa: E402
 from mlo.config import DEFAULT_CONFIG, normalize_config  # noqa: E402
 from mlo.flac import (  # noqa: E402
-    MD5_ABSENT, MD5_MISMATCH, MD5_OK, decoded_md5, stream_md5_state,
+    MD5_ABSENT, MD5_MISMATCH, MD5_OK, MD5_UNKNOWN, decoded_md5,
+    stream_md5_state,
 )
 from mlo.tools import detect_all_tools  # noqa: E402
 
@@ -157,6 +159,37 @@ def build_fixtures(root):
     nomd5 = retamper(honest, os.path.join(fx, "nomd5.flac"), b"\x00" * 16)
     return {"honest": honest, "tampered": tampered, "nomd5": nomd5,
             "wav": wav, "dir": fx}
+
+
+# A path long enough that flac.exe's MSVC CRT cannot open it: measured, 259
+# characters opened and 260 failed with "can't open input file", and the
+# Windows long-path limit is what mlo.subproc.MAX_PATH_LIMIT now names.
+LONG_PATH_TARGET = 300
+
+
+def build_long_path_fixture(root, src_flac):
+    """A copy of *src_flac* at a path of >= LONG_PATH_TARGET characters.
+
+    Built from <=100-character components (a single name may not exceed 255)
+    under *root*. None off Windows — every path there is long enough — and on
+    a Windows box that cannot create such a path (long-path support off).
+    """
+    if os.name != "nt":
+        return None
+    folder = os.path.join(root, "long-path")
+    try:
+        for i in range(8):
+            if len(os.path.join(folder, "long.flac")) >= LONG_PATH_TARGET:
+                break
+            folder = os.path.join(folder, f"component-{i:02d}-" + "x" * 80)
+            os.makedirs(folder, exist_ok=True)
+        dest = os.path.join(folder, "long.flac")
+        if len(dest) < LONG_PATH_TARGET:
+            return None
+        shutil.copyfile(src_flac, dest)
+        return dest
+    except OSError:
+        return None
 
 
 def stated(path):
@@ -300,6 +333,65 @@ def check_states(fx):
     digest, err = decoded_md5(fx["honest"], FFMPEG_EXE, 16)
     check("ffmpeg's decoded digest == the stated STREAMINFO MD5",
           digest == stated(fx["honest"]), f"{digest} vs {stated(fx['honest'])} {err}")
+
+
+# --------------------------------------------------------------------------- #
+# 2b. A path past flac.exe's MAX_PATH limit is still verified (not failed)
+# --------------------------------------------------------------------------- #
+def check_long_path(fx, root):
+    print("\n== a path longer than flac.exe's CRT limit (mlo.subproc) ==")
+    path = build_long_path_fixture(root, fx["honest"])
+    if not path:
+        skip("no path over MAX_PATH could be built on this platform")
+        return
+    if not (FLAC_EXE and FFMPEG_EXE):
+        skip("no flac/ffmpeg: the long-path verdict needs a decoder")
+        return
+    check("the fixture's path really is at/over MAX_PATH",
+          len(path) >= mlo_subproc.MAX_PATH_LIMIT, f"{len(path)}")
+    check("Python itself opens it (only the tool was ever the problem)",
+          os.path.isfile(path), path)
+
+    # With whatever bridge this volume offers, the answer must be the audio's
+    # own — never the tool's open failure.
+    st = stream_md5_state(path, FLAC_EXE, FFMPEG_EXE)
+    check("a >=260-char path -> ok (verified, never 'error')",
+          st[0] == MD5_OK, str(st))
+    st = stream_md5_state(path, None, FFMPEG_EXE)
+    check("the same path with flac_exe=None -> ok (the decode decides)",
+          st[0] == MD5_OK, str(st))
+
+    st = stream_md5_state(path, None, None)
+    check("no decoder at all -> md5-unknown with a reason, never a failure",
+          st[0] == MD5_UNKNOWN and bool(st[1])
+          and "can't open input file" not in st[1], str(st))
+
+    # The reported failure was the case where NO bridge could be made (8.3
+    # names off and the junction refused), so flac.exe was handed the long
+    # path and its "can't open input file" was read as an unverified file.
+    # tool_path is what a bridge-less volume returns its input from, so
+    # removing it reproduces exactly that machine — on any machine.
+    real_tool_path = mlo_subproc.tool_path
+
+    def _no_bridge(p):
+        return p
+
+    mlo_subproc.tool_path = _no_bridge
+    try:
+        check("the bridge was what made the path reachable: without it the "
+              "path is out of the tool's reach",
+              mlo_subproc.tool_unreachable(path), str(len(path)))
+        st = stream_md5_state(path, FLAC_EXE, FFMPEG_EXE)
+        check("unbridged >=260-char path -> ok (flac's open failure is never "
+              "the verdict; the ffmpeg decode answers)",
+              st[0] == MD5_OK, str(st))
+        st = stream_md5_state(path, FLAC_EXE, None)
+        check("unbridged path with no ffmpeg -> md5-unknown with a reason, "
+              "never the flac open failure",
+              st[0] == MD5_UNKNOWN and bool(st[1])
+              and "can't open input file" not in st[1], str(st))
+    finally:
+        mlo_subproc.tool_path = real_tool_path
 
 
 # --------------------------------------------------------------------------- #
@@ -927,6 +1019,7 @@ def main():
             return 2
         fx = check_fixtures(tmp)
         check_states(fx)
+        check_long_path(fx, tmp)
         check_tag_writes(fx, tmp)
         check_chain_scripts(fx, tmp)
         check_optimize(fx, tmp)

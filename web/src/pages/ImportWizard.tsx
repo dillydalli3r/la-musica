@@ -19,6 +19,7 @@ import CoverSearchModal from "../components/CoverSearchModal";
 import GenreSourcesTray from "../components/GenreSourcesTray";
 import CoverImg, { TrackCover } from "../components/CoverImg";
 import PageHeader from "../components/PageHeader";
+import { ForceControl, useForceRun } from "../components/ForceRun";
 import { useI18n } from "../lib/i18n";
 import MetadataReviewModal from "../components/MetadataReviewModal";
 import type {
@@ -27,6 +28,7 @@ import type {
   ScriptRunResult, Track, UnpackedTree,
 } from "../types";
 import { DEFAULT_RUN_ALL, SCRIPT_LABEL } from "../lib/scripts";
+import { forceDict } from "../lib/force";
 import { fmtCounts, fmtSteps } from "../lib/fmt";
 import { GENRE_COUNT_MAX, GENRE_FAMILIES, canonicalGenre, familyOf, splitGenres } from "../lib/genres";
 
@@ -409,6 +411,7 @@ function detectAlbums(imports: ImportFile[], fallbackName: string): AlbumGroup[]
 
 export default function ImportWizard() {
   const { t } = useI18n();
+  const { forceRun, toggle: toggleForce, forceSel, setSel } = useForceRun();
   const [params, setParams] = useSearchParams();
   const albumParam = params.get("album");
   const initialAlbum = albumParam ?? null;
@@ -3003,24 +3006,27 @@ const runTickedHere = async () => {
     toast("Tick a script first");
     return;
   }
+  // One-shot Force, the same switch the Optimization page sends: re-run the
+  // ticked scripts even where they would skip as already done.
+  const force = forceRun ? forceDict(forceSel) : undefined;
   setRunningTicked(true);
-  setFinishMsg("Running the ticked scripts…");
+  setFinishMsg(`Running the ticked scripts${force ? " (forced)" : ""}…`);
   setRunRows(null);
   try {
     // The boxes' own order, which is the import chain until the user changes
     // them — aimed at this wizard's album(s) only. Sent as `runAfterImportIds`
     // itself: the same expression Finish sends, so the two can never diverge.
-    beginRun(`Run scripts — ${runAfterImportIds.length} script(s) on ${targets.length} album(s)`);
-    const res = await api.run(runAfterImportIds, targets);
+    beginRun(`Run scripts${force ? " (forced)" : ""} — ${runAfterImportIds.length} script(s) on ${targets.length} album(s)`);
+    const res = await api.run(runAfterImportIds, targets, force);
     const rows = rowsFromResults(res.results ?? []);
     setRunRows(rows);
     const failed = rows.filter((r) => !r.ok && !r.skipped);
     if (failed.length) toast.error(`${failed.length} script(s) failed — see the step`);
-    else toast.success(`${runAfterImportIds.length} script(s) finished`);
+    else toast.success(`${runAfterImportIds.length} script(s) finished${force ? " (forced)" : ""}`);
     setFinishMsg(
       failed.length
         ? `Scripts: ${failed.length} of ${runAfterImportIds.length} failed — ${failed[0].error}`
-        : `Scripts: ${runAfterImportIds.length} finished on ${targets.length} album${targets.length > 1 ? "s" : ""}`
+        : `Scripts: ${runAfterImportIds.length} finished on ${targets.length} album${targets.length > 1 ? "s" : ""}${force ? " (forced)" : ""}`
     );
   } catch (e) {
     setFinishMsg(startProblem("Scripts", e));
@@ -3036,6 +3042,9 @@ const runTickedHere = async () => {
 
 
 const finish = async () => {
+  // Whether this Finish's ticked run went out forced — the completion toast
+  // says so, the same "(forced)" the Optimization page uses.
+  let forced = false;
   try {
     // The digital release's OWN three answers first — SOURCE, the untimed
     // lyrics this install refuses, and the album description — through the
@@ -3065,8 +3074,10 @@ const finish = async () => {
     // runs what a bulk import would have run on this album —
     // nothing wider, and nothing narrower.
     const targets = albumTargets();
+    const force = forceRun ? forceDict(forceSel) : undefined;
     if (runAfterImportIds.length && targets.length) {
-      await api.run(runAfterImportIds, targets);
+      forced = !!force;
+      await api.run(runAfterImportIds, targets, force);
     }
   } catch (e) {
     toast.error(String(e));
@@ -3076,7 +3087,10 @@ const finish = async () => {
   qc.invalidateQueries({ queryKey: ["importSource"] });
   qc.invalidateQueries({ queryKey: ["album"] });
   setParams({});
-  toast(uploaded.length > 1 ? `Imported ${uploaded.length} albums — enrich each from its album page` : "Import complete — album graded");
+  toast(
+    (uploaded.length > 1 ? `Imported ${uploaded.length} albums — enrich each from its album page` : "Import complete — album graded") +
+      (forced ? " (scripts forced)" : "")
+  );
 };
 
   const switchAlbum = (i: number) => {
@@ -5109,6 +5123,10 @@ const finish = async () => {
               not run. Progress shows at the top of the window. Scripts can also be run individually anytime from the
               album page.
             </div>
+            <div className="text-[10px] text-zinc-600 mt-1">
+              Force re-runs the ticked scripts even where they are already done. It is one-shot — it applies only to
+              runs started here and does not change the saved Settings.
+            </div>
             <div className="flex items-center gap-2 mt-3 flex-wrap">
               <button
                 className="btn-primary !py-1.5 text-xs tap"
@@ -5119,6 +5137,7 @@ const finish = async () => {
                 <Wand2 className={`h-3.5 w-3.5 ${runningTicked ? "animate-spin" : ""}`} />
                 {runningTicked ? "Running…" : "Run all"}
               </button>
+              <ForceControl forceRun={forceRun} toggle={toggleForce} forceSel={forceSel} setSel={setSel} />
               <span className="text-[10px] text-zinc-500">
                 Run all runs every ticked script — the import chain until you change them. There is no separate
                 "re-run the import chain" button here any more: the chain

@@ -1,15 +1,15 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Check, ChevronDown, ChevronDown as Down, ChevronUp as Up, FolderTree, Gauge, Play, RefreshCw, Wand2, X, Zap,
+  Check, ChevronDown as Down, ChevronUp as Up, FolderTree, Gauge, Play, RefreshCw, Wand2, X,
 } from "lucide-react";
 import { api } from "../api";
 import { toast, useStore } from "../store";
 import { ProgressInline } from "../components/ProgressBar";
 import Modal from "../components/Modal";
 import PageHeader from "../components/PageHeader";
-import Popover from "../components/Popover";
-import { FORCE_SCRIPTS, forceDict, loadForceSel, saveForceSel } from "../lib/force";
+import { ForceControl, useForceRun } from "../components/ForceRun";
+import { FORCE_SCRIPTS, forceDict } from "../lib/force";
 import { SCRIPTS, DEFAULT_RUN_ALL, isScriptId } from "../lib/scripts";
 import type { LayoutIssue, LayoutReport, ScriptRunResult } from "../types";
 
@@ -28,23 +28,6 @@ function loadSel(): number[] {
   return [];
 }
 
-/** One-shot force state (toggle + per-script selection) shared by Run All.
- * Extracted from the old header so any surface reuses the same behavior. */
-function useForceRun() {
-  const [forceRun, setForceRun] = useState(() => localStorage.getItem("mlo.runAll.force") === "1");
-  const [forceSel, setForceSel] = useState<Record<string, boolean>>(loadForceSel);
-  const toggle = () => {
-    const v = !forceRun;
-    setForceRun(v);
-    localStorage.setItem("mlo.runAll.force", v ? "1" : "0");
-  };
-  const setSel = (next: Record<string, boolean>) => {
-    setForceSel(next);
-    saveForceSel(next);
-  };
-  return { forceRun, toggle, forceSel, setSel };
-}
-
 /** Optimization hub: Run All (+ Force), per-script runs and a library
  * refresh — everything that used to live in the top bar, in one place. */
 export default function OptimizationPage() {
@@ -52,12 +35,6 @@ export default function OptimizationPage() {
   const { progress } = useStore();
   const { data: config } = useQuery({ queryKey: ["config"], queryFn: api.config });
   const { forceRun, toggle: toggleForce, forceSel, setSel } = useForceRun();
-  const [forceMenu, setForceMenu] = useState(false);
-  // The Force menu is the tallest flyout in the app (14 flags + its All/None
-  // row): measured from this trigger it opens into whatever room the window
-  // leaves and scrolls inside it, instead of running past the bottom edge with
-  // its lower flags unreachable (#53).
-  const forceBtn = useRef<HTMLButtonElement>(null);
   const [busy, setBusy] = useState(false);
   // The last run's own per-script report, on the page. A run that failed some
   // of its scripts used to say "see console" and leave it there — the one
@@ -153,70 +130,7 @@ export default function OptimizationPage() {
           >
             <Play className="h-3.5 w-3.5" /> Run All
           </button>
-          <div className="relative flex items-center">
-            <button
-              className={`btn-ghost text-xs tap rounded-r-none border-r-0 ${forceRun ? "!text-accent border border-accent/50" : ""}`}
-              onClick={toggleForce}
-              title="Force the selected scripts on the next runs — ignores their 'already done' skips (one-shot, saved Settings are untouched)"
-            >
-              <Zap className={`h-3.5 w-3.5 ${forceRun ? "fill-current" : ""}`} /> Force
-              {forceRun && (
-                <span className="ml-1 text-[10px] font-mono opacity-80">
-                  {FORCE_SCRIPTS.filter((f) => forceSel[f.key]).length}/{FORCE_SCRIPTS.length}
-                </span>
-              )}
-            </button>
-            <button
-              ref={forceBtn}
-              className={`btn-ghost text-xs tap min-w-11 md:min-w-0 rounded-l-none !px-1 ${forceRun ? "!text-accent" : ""}`}
-              onClick={() => setForceMenu(!forceMenu)}
-              title="Choose which scripts are forced"
-              aria-haspopup="menu"
-              aria-expanded={forceMenu}
-            >
-              <ChevronDown className="h-3.5 w-3.5" />
-            </button>
-            <Popover
-              open={forceMenu}
-              onClose={() => setForceMenu(false)}
-              align="left"
-              fixed
-              anchorRef={forceBtn}
-              panelClass="w-60 p-1.5"
-            >
-                  <div className="text-[10px] uppercase tracking-wider text-zinc-500 px-1 pb-1.5">
-                    Force when Force is on
-                  </div>
-                  {FORCE_SCRIPTS.map((f) => (
-                    <label key={f.key} className="flex items-center gap-2 px-1 py-1 rounded text-xs text-zinc-300 hover:bg-panel cursor-pointer select-none">
-                      <input
-                        type="checkbox"
-                        checked={forceSel[f.key] !== false}
-                        onChange={(e) => setSel({ ...forceSel, [f.key]: e.target.checked })}
-                      />
-                      {f.label}
-                    </label>
-                  ))}
-                  <div className="flex items-center gap-1.5 pt-1.5 mt-1 border-t border-border">
-                    <button
-                      className="btn-ghost !py-1 text-[11px] tap flex-1 inline-flex items-center justify-center gap-1"
-                      onClick={() => setSel(Object.fromEntries(FORCE_SCRIPTS.map((f) => [f.key, true])))}
-                    >
-                      <Check className="h-3 w-3" /> All
-                    </button>
-                    <button
-                      className="btn-ghost !py-1 text-[11px] tap flex-1"
-                      onClick={() => setSel(Object.fromEntries(FORCE_SCRIPTS.map((f) => [f.key, false])))}
-                    >
-                      None
-                    </button>
-                  </div>
-                  <div className="text-[10px] text-zinc-600 px-1 pt-1">
-                    Force is a one-shot switch — saved Settings are not changed. It applies to every run
-                    started here: Run All, Run selected and the single-script buttons.
-                  </div>
-            </Popover>
-          </div>
+          <ForceControl forceRun={forceRun} toggle={toggleForce} forceSel={forceSel} setSel={setSel} />
           <button
             className="btn-ghost text-xs tap"
             disabled={busy}

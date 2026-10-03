@@ -429,6 +429,53 @@ ok(stats["modified_count"] >= 1 and stats["error_count"] == 0,
    f"…and it reports the work it did ({stats['modified_count']} written, "
    f"{stats['skipped_count']} already current, {stats['errors']})")
 
+print("== each WAV transport lane takes ONE lane's share of the thread budget ==")
+# Script 9 used to spawn each track's ffmpeg with no -threads, so the pool's N
+# lanes at once each claimed every core — oversubscription that made the
+# decode slower. The argv now carries tool_threads(config, lanes), the same
+# per-lane cap mlo.flac/mlo.remux put on their per-file ffmpeg processes. The
+# command builder is pure, so both branches are asserted without decoding;
+# the pool is then driven with run_tool stubbed to capture the real argv its
+# workers build, so the config -> lanes -> share path is exercised too.
+import mlo.accurip as accurip_lane  # noqa: E402
+
+_SRC = os.path.join(TMP, "lane-src.wav")
+_DST = os.path.join(TMP, "lane-dst.wav")
+
+bare = accurip_lane._wav_transport_command(FFMPEG, _SRC, _DST, "pcm_s16le")
+ok(bare == [FFMPEG, "-v", "error", "-i", _SRC, "-f", "wav",
+            "-acodec", "pcm_s16le", _DST],
+   f"a 0/unknown thread budget adds NO -threads flag ({bare})")
+capped = accurip_lane._wav_transport_command(FFMPEG, _SRC, _DST, "pcm_s16le", 3)
+ok(capped == [FFMPEG, "-v", "error", "-threads", "3", "-i", _SRC, "-f", "wav",
+              "-acodec", "pcm_s16le", _DST],
+   f"a positive budget adds exactly one -threads N ({capped})")
+
+_SEEN_ARGS = []
+
+
+def _capture_run_tool(cmd, **kwargs):
+    _SEEN_ARGS.append(list(cmd))
+    open(cmd[-1], "wb").close()  # the lane checks its WAV exists
+    return subprocess.CompletedProcess(cmd, 0, "", "")
+
+
+_real_run_tool = accurip_lane.run_tool
+try:
+    accurip_lane.run_tool = _capture_run_tool
+    lane_dir = os.path.join(TMP, "lane-argv")
+    os.makedirs(lane_dir, exist_ok=True)
+    # worker_limit=4 over two tracks -> 2 lanes, so each lane's share is 4//2.
+    accurip_lane._convert_to_wavs(FFMPEG, [T1, T2], lane_dir, cfg(worker_limit=4))
+finally:
+    accurip_lane.run_tool = _real_run_tool
+
+lane_shares = [c[c.index("-threads") + 1] if "-threads" in c else None
+               for c in _SEEN_ARGS]
+ok(len(_SEEN_ARGS) == 2 and lane_shares == ["2", "2"],
+   f"two lanes split the worker_limit of 4 into -threads 2 each "
+   f"({_SEEN_ARGS})")
+
 print("== a missing tool is named, with where to install it ==")
 import mlo.accurip as accurip_mod  # noqa: E402
 import mlo.tools as tools_mod  # noqa: E402

@@ -243,8 +243,8 @@ RUNNERS: dict[int, tuple[str, "callable"]] = {
     # public sources: the album's score on every track, and each track's own.
     # Album-scoped, one provider chain per album, and it only ever FILLS — a
     # value the file already holds is left alone unless `force_web_ratings` is
-    # set (a config key, not a UI force switch: no web change accompanies this
-    # script). Its feature switch is `web_ratings_enabled`.
+    # set (the "24 · Web ratings re-fetch" Force switch, or the config key by
+    # hand). Its feature switch is `web_ratings_enabled`.
     24: ("Web ratings", _optional("mlo.web_ratings", "run_web_ratings")),
 }
 
@@ -299,6 +299,9 @@ _FORCE_KEYS = {
     # report the script used to be, so the wizard's `{}` and a saved force
     # selection (neither names this key) both leave the library alone.
     20: ("layout_apply",),
+    # 24 re-fetches the web-rating tags for tracks that already carry them
+    # (otherwise an existing value is left alone).
+    24: ("force_web_ratings",),
 }
 _FORCE_ALIASES = {
     "lyrics": "force_lyrics",
@@ -314,6 +317,7 @@ _FORCE_ALIASES = {
     "mood": "force_mood",
     "xlit": "force_xlit",
     "layout": "layout_apply",
+    "web_ratings": "force_web_ratings",
 }
 # Scripts whose feature has its own on/off switch: with it off the runner is a
 # no-op at best and a crash at worst, so a chain skips them instead. A tuple

@@ -43,6 +43,13 @@ _ACTIVE_LOCK = threading.Lock()
 # The path handed to the tool is always absolute, so a junction can never
 # change what a tool interprets as a relative path.
 LONG_PATH_MIN = 240          # below MAX_PATH with room for a tool's own suffix
+# Where the CRT the bundled tools are built against actually stops, measured
+# on this machine with the vendored flac.exe 1.5.0 (MSVC): a 259-character
+# path was opened, and 260 answered "ERROR: can't open input file <path>:
+# No such file or directory". The limit is hard — the tool does not accept the
+# \\?\ prefix that lifts it in the Windows API — so a path at or over this
+# length that tool_path() could not bridge is unreachable by the tool for good.
+MAX_PATH_LIMIT = 260
 _BRIDGE_ROOT = os.path.join(tempfile.gettempdir(), "mlo-longpath")
 _bridges = {}                # normalized directory -> junction path
 _bridge_lock = threading.Lock()
@@ -148,6 +155,23 @@ def tool_path(path):
         return path
     link = _junction_for(folder)
     return os.path.join(link, name) if link else path
+
+
+def tool_unreachable(path):
+    r"""True when the path a tool would be handed is still out of its reach.
+
+    ``tool_path`` bridges what it can, but the bridge is not always available
+    — 8.3 short names are often disabled on data drives, and a folder whose
+    junction cannot be made is left as it was. A tool given such a path opens
+    it through the MSVC CRT, which stops at ``MAX_PATH_LIMIT`` characters
+    (measured: flac.exe 1.5.0 opens 259, refuses 260 with "ERROR: can't open
+    input file ...: No such file or directory", and rejects a \\?\ prefix),
+    so a caller about to trust the tool's answer asks this first. POSIX has
+    no such limit, and anything below the limit is reachable unchanged.
+    """
+    if not _can_short or not isinstance(path, str):
+        return False
+    return len(tool_path(path)) >= MAX_PATH_LIMIT
 
 
 def _argv_with_tool_paths(args):

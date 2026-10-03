@@ -43,7 +43,8 @@ from .discs import album_discs, _disc_pattern_for, _disc_expected_name, CUE_FILE
 from .naming import cue_ref_names, name_key
 from .paths import AUDIO_EXTS, app_data_dir, fsync_dir
 from .stats import (is_audio_file, _collect_targets, new_stats,
-                    _make_pbar, _pbar_skip, _pbar_update, worker_count)
+                    _make_pbar, _pbar_skip, _pbar_update, worker_count,
+                    tool_threads)
 from .subproc import run_tool
 from .tagtext import is_cd_media
 from .ui import log, c, Color, print_header
@@ -317,6 +318,24 @@ def _wav_transport_timeout(src):
     return timeout
 
 
+def _wav_transport_command(ffmpeg_exe, src, dst, codec, threads=0):
+    """The ffmpeg argv for ONE track's lossless WAV transport.
+
+    Pure, like :func:`mlo.flac.convert_command`, so a test can assert the exact
+    line without decoding anything. *threads* > 0 caps this lane: the pool in
+    :func:`_convert_to_wavs` runs several of these decodes at once, so each one
+    takes ONE lane's share of the run's budget (R79) instead of every core per
+    lane — the same cap mlo.flac/mlo.remux put on their per-file ffmpeg
+    processes. 0 (or less) adds nothing, leaving ffmpeg's own default; the
+    placement before `-i` makes it the DECODER's thread count, and it changes
+    no sample, so the WAV stays the source audio.
+    """
+    cmd = [ffmpeg_exe, "-v", "error"]
+    if int(threads or 0) > 0:
+        cmd += ["-threads", str(int(threads))]
+    return cmd + ["-i", src, "-f", "wav", "-acodec", codec, dst]
+
+
 def _convert_to_wavs(ffmpeg_exe, track_paths, tmp_dir, config, transport=None):
     """Decode each track to WAV in tmp_dir, keeping its own channel layout,
     sample rate and bit depth (no upmix/resample/truncation — the WAV must be
@@ -352,6 +371,12 @@ def _convert_to_wavs(ffmpeg_exe, track_paths, tmp_dir, config, transport=None):
     workers = (worker_count(config, maximum=8, items=len(tasks))
                if transport is None
                else max(1, min(int(transport), len(tasks))))
+    # One lane's share of the run's thread budget, not every core per lane:
+    # this pool runs *workers* ffmpeg processes at once, so each takes
+    # tool_threads(config, workers) — the policy every other per-lane external
+    # tool already uses (mlo.flac, mlo.remux, mlo.images; R79). Without it the
+    # N lanes each claimed the whole machine, which is slower, not faster.
+    lane_threads = tool_threads(config, workers)
     errors = []
 
     def _one(pair):
@@ -361,7 +386,7 @@ def _convert_to_wavs(ffmpeg_exe, track_paths, tmp_dir, config, transport=None):
             return (src, f"cannot transport to WAV without changing the "
                          f"samples ({reason})")
         proc = run_tool(
-            [ffmpeg_exe, "-v", "error", "-i", src, "-f", "wav", "-acodec", codec, dst],
+            _wav_transport_command(ffmpeg_exe, src, dst, codec, lane_threads),
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
             timeout=_wav_transport_timeout(src),
         )

@@ -716,6 +716,88 @@ else:
     eq(stats3["modified_count"], 0, "web_ratings_enabled off writes nothing")
     ok(len(calls) == asked, "…and asks no source")
 
+    # The per-track pool must not let a COMPLETION order reach a tag. Two runs
+    # over the same album content: one pinned to one lane per album (so the
+    # track asks are serial, `track_width` 1), one with a wide track pool. The
+    # injected fetcher makes RYM the slow one, so within a track the fast MB
+    # answer lands first — a completion-ordered aggregation would title the
+    # provenance "MusicBrainz; RateYourMusic"; the contract says the CONFIGURED
+    # order. Every tag on disk must be byte-identical between the two runs.
+    import threading
+    import time as _time
+
+    def make_same_album(base, name, tracks):
+        folder = os.path.join(base, name)
+        os.makedirs(folder)
+        for i, (title, rec) in enumerate(tracks, 1):
+            path = os.path.join(folder, f"{i:02d} {title}.flac")
+            make_flac(path)
+            g = FLAC(path)
+            g["TITLE"] = [title]
+            g["ARTIST"] = ["Artist"]
+            g["ALBUMARTIST"] = ["Artist"]
+            g["ALBUM"] = [name]
+            g["MUSICBRAINZ_RELEASEGROUPID"] = [
+                "f5093c06-23e3-404f-aeaa-40f72885ee3a"]
+            g["MUSICBRAINZ_TRACKID"] = [rec]
+            g.save()
+        return folder
+
+    def slow_fetch(source, kind, ident, cfg):
+        """MB answers at once; RYM answers LAST, deliberately."""
+        if source == "rateyourmusic":
+            _time.sleep(0.08 if kind == "album" else 0.05)
+            if kind == "album":
+                return {"rating": {"value": 4.18, "count": 49366}}
+            return {"rating": {"value": 4.67, "count": 17654}}
+        if source == "musicbrainz":
+            return MB_ALBUM if kind == "album" else MB_TRACK_OWN
+        return None
+
+    base = tempfile.mkdtemp(prefix="mlo_web_ratings_race_")
+    race_tracks = [("Paranoid Android", "rec-1"), ("Let Down", "rec-2"),
+                   ("Karma Police", "rec-3")]
+    serial_dir = make_same_album(base, "Serial", race_tracks)
+    conc_dir = make_same_album(base, "Concurrent", race_tracks)
+    sources = ["rateyourmusic", "musicbrainz"]
+    seen_threads = set()
+
+    def threaded_fetch(source, kind, ident, cfg):
+        seen_threads.add(threading.get_ident())
+        return slow_fetch(source, kind, ident, cfg)
+
+    s_serial = wr.run_web_ratings(
+        {"targets": [serial_dir], "web_ratings_sources": sources,
+         "worker_limit": 1}, fetch=slow_fetch)
+    seen_threads.clear()
+    s_conc = wr.run_web_ratings(
+        {"targets": [conc_dir], "web_ratings_sources": sources,
+         "worker_limit": 8}, fetch=threaded_fetch)
+    ok(len(seen_threads) > 1,
+       "the wide run really fanned the album and its tracks over >1 thread "
+       f"(saw {len(seen_threads)})")
+    eq(s_conc["modified_count"], 3, "the wide run wrote every track")
+    eq(s_serial["modified_count"], 3, "the pinned run wrote every track")
+
+    tags = ("WEBRATING", "WEBRATING_SOURCE", "ALBUMWEBRATING",
+            "ALBUMWEBRATING_SOURCE")
+    names = sorted(f for f in os.listdir(serial_dir) if f.endswith(".flac"))
+    eq(sorted(f for f in os.listdir(conc_dir) if f.endswith(".flac")), names,
+       "both runs wrote the same track files")
+    for name in names:
+        a = FLAC(os.path.join(serial_dir, name))
+        b = FLAC(os.path.join(conc_dir, name))
+        for tag in tags:
+            eq(list(b.get(tag) or []), list(a.get(tag) or []),
+               f"{name}: {tag} is byte-identical to the serial run")
+    eq(list(FLAC(os.path.join(conc_dir, names[0])).get("WEBRATING_SOURCE")),
+       ["RateYourMusic; MusicBrainz"],
+       "…and the labels are the CONFIGURED order, never the completion order")
+    ok(all(FLAC(os.path.join(conc_dir, n)).get("WEBRATING")
+           for n in names),
+       "…and every track carries a WEBRATING from both sources")
+    shutil.rmtree(base, ignore_errors=True)
+
     for d in (tmp, library):
         shutil.rmtree(d, ignore_errors=True)
 

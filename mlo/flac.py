@@ -12,7 +12,7 @@ from .containers import (
     CODECS, CODEC_KEEP, codec_extra_args, codec_is_lossless, encoder_args,
     file_codec, _write_flac_tags, _identity_missing, _enabled,
 )
-from .subproc import run_tool
+from .subproc import run_tool, tool_unreachable
 from .paths import AUDIO_EXTS, tools_dir, trash_file
 from .tools import detect_all_tools, _version_meets
 from .stats import (
@@ -299,6 +299,13 @@ def stream_md5_state(path, flac_exe=None, ffmpeg_exe=None, af=None):
     file with ffmpeg and hashing the samples against the digest the header
     states — a decode either way; nothing here trusts a header on its own.
 
+    A path the tool cannot reach — on Windows still at least
+    ``subproc.MAX_PATH_LIMIT`` characters after ``tool_path`` has tried its
+    bridge, which is longer than flac.exe's CRT can open — is never handed to
+    flac: the same ffmpeg decode answers it instead. That is why the verdict
+    does not depend on the long-path bridge succeeding, only on a decoder
+    being able to read the file.
+
     *digest* is the digest the file states ("" when it states none), and *af*
     an already-open AudioFile the caller holds (the same one-field read).
     """
@@ -308,7 +315,8 @@ def stream_md5_state(path, flac_exe=None, ffmpeg_exe=None, af=None):
         from .accurip import stream_md5 as _stated
         stated = _stated(path, af)
 
-    if ext == ".flac" and flac_exe and os.path.isfile(flac_exe):
+    if (ext == ".flac" and flac_exe and os.path.isfile(flac_exe)
+            and not tool_unreachable(path)):
         try:
             proc = run_tool([flac_exe, "-t", path], stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, text=True, encoding="utf-8",
@@ -336,8 +344,15 @@ def stream_md5_state(path, flac_exe=None, ffmpeg_exe=None, af=None):
     if not stated:
         return MD5_ABSENT, "the stream states no MD5 (all zero)", ""
     if not (ffmpeg_exe and os.path.isfile(ffmpeg_exe)):
-        return (MD5_UNKNOWN,
-                "no flac.exe or ffmpeg to verify the digest with", stated)
+        if flac_exe and os.path.isfile(flac_exe):
+            # flac.exe is there but this path is past what its CRT can open
+            # (the branch above declined it) — saying "no flac.exe" would
+            # misplace the blame, and a tool's open failure is never a verdict.
+            why = ("flac.exe cannot open a path this long and there is no "
+                   "ffmpeg to decode it with")
+        else:
+            why = "no flac.exe or ffmpeg to verify the digest with"
+        return MD5_UNKNOWN, why, stated
     bits = pcm_format(path)[0]
     if bits not in _PCM_CODECS:
         # Without the stream's own bit depth there is no representation the

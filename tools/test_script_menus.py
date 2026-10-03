@@ -295,6 +295,17 @@ def force_keys():
     return set(keys), mapped
 
 
+def force_settings_keys():
+    """The config keys in SettingsPage's master `FORCE_KEYS` list.
+
+    That list drives the page's "force everything" master toggle, so it has to
+    cover every force switch the app offers — a key missing here is one the
+    master toggle silently cannot turn on or off."""
+    src = read("web/src/pages/SettingsPage.tsx")
+    block = re.search(r"const FORCE_KEYS[^=]*=\s*\[(.*?)\n  \];", src, re.S)
+    return [m.group(1) for m in re.finditer(r'\{\s*k:\s*"(\w+)"', block.group(1))] if block else []
+
+
 def force_callers(web_files):
     """Every force dict a UI caller sends must name a key the server accepts.
 
@@ -385,6 +396,20 @@ def check_apply_force(check):
     scoped6 = apply({"audit": True}, sid=6)
     check("...and applies it for the script that owns it",
           scoped6["force_audit"] is True, str(scoped6))
+    # Script 24 joined the force tables late (it was config-only): pin its own
+    # key, both spellings, and that the authoritative clear reaches it.
+    check("script 24 maps to force_web_ratings in _FORCE_KEYS",
+          sr._FORCE_KEYS.get(24) == ("force_web_ratings",),
+          str(sr._FORCE_KEYS.get(24)))
+    web = apply({"web_ratings": True})
+    check("the web_ratings alias sets force_web_ratings",
+          web["force_web_ratings"] is True and sum(web.values()) == 1, str(web))
+    web_by_id = apply({"24": True})
+    check("script id 24 sets the same flag as the web_ratings alias",
+          web_by_id == web, f"id={web_by_id}")
+    cleared = apply({})
+    check("an empty dict clears force_web_ratings first",
+          cleared["force_web_ratings"] is False, str(cleared))
 
 
 def import_paths_do_not_send_an_empty_force():
@@ -619,6 +644,16 @@ def main():
     keys, mapped = force_keys()
     check("every force switch maps to a /api/run force key",
           keys <= mapped, f"unmapped={sorted(keys - mapped)}")
+    settings_keys = force_settings_keys()
+    alias_block = re.search(r"_FORCE_ALIASES = \{(.*?)\n\}", read("server/script_runners.py"), re.S).group(1)
+    mapped_config = set(re.findall(r'"\w+":\s*"(\w+)"', alias_block))
+    check("Settings' master force list covers every mapped force config key",
+          mapped_config <= set(settings_keys),
+          f"missing={sorted(mapped_config - set(settings_keys))} extra={sorted(set(settings_keys) - mapped_config)}")
+    check("the Force menu offers 24 · Web ratings re-fetch",
+          '{ key: "web_ratings", label: "24 · Web ratings re-fetch" }' in read("web/src/lib/force.ts"))
+    check("the Settings master list offers force_web_ratings",
+          '{ k: "force_web_ratings", label: "24 · Web ratings re-fetch" }' in read("web/src/pages/SettingsPage.tsx"))
     fallbacks, wrong = force_defaults_are_false()
     check("one-shot force treats unselected keys as off",
           not fallbacks and not wrong,
