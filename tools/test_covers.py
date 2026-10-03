@@ -53,6 +53,7 @@ Run:  python tools/test_covers.py
 import contextlib
 import copy
 import hashlib
+import io
 import json
 import os
 import shutil
@@ -171,7 +172,7 @@ def cover_lines(count, source="itunes", big="https://img.test/a{}.jpg",
 # candidate was measured from (`mlo.cover_choice` reads all of them).
 ROW_KEYS = {"source", "small", "big", "title", "artist", "tracks", "url",
             "width", "height", "format", "bytes", "front", "kind",
-            "release_cover", "rank"}
+            "release_cover", "rank", "cover_likeness", "cover_blank"}
 
 
 def release_of(artist, album, tracks=None):
@@ -289,6 +290,87 @@ assert probes == [], probes
 
 
 # --------------------------------------------------------------------------- #
+# 2b) The cover-likeness metric — the shared layer `mlo.cover_choice`'s
+#     appearance tier reads: real bytes decoded, a blank card gated, memoized,
+#     and never fatal
+# --------------------------------------------------------------------------- #
+from PIL import Image as _PILImage, ImageDraw as _PILDraw  # noqa: E402
+
+
+def _striped(w=256, h=256):
+    """A high-detail image (alternating bars) with real pixel data."""
+    img = _PILImage.new("RGB", (w, h), (0, 0, 0))
+    draw = _PILDraw.Draw(img)
+    for x in range(0, w, 32):
+        draw.rectangle([x, 0, x + 15, h - 1], fill=(255, 255, 255))
+    buf = io.BytesIO()
+    img.save(buf, "JPEG", quality=90)
+    return buf.getvalue()
+
+
+def _solid(w=256, h=256):
+    """A near-solid card (a colour, a placeholder) — not cover art."""
+    buf = io.BytesIO()
+    _PILImage.new("RGB", (w, h), (128, 128, 128)).save(buf, "JPEG")
+    return buf.getvalue()
+
+
+STRIPES, SOLID = _striped(), _solid()
+assert intg._image_look(STRIPES)["blank"] is False, intg._image_look(STRIPES)
+assert intg._image_look(STRIPES)["likeness"] > 0.5, intg._image_look(STRIPES)
+assert intg._image_look(SOLID) == {"likeness": 0.0, "blank": True}, intg._image_look(SOLID)
+# Bytes that are not a readable image are UNKNOWN, never called blank — a
+# truncated fetch or an error page must not condemn a candidate.
+assert intg._image_look(png(10, 10)) is None       # a header, no pixel data
+assert intg._image_look(b"<html>not an image</html>") is None
+assert intg._image_look(b"") is None
+
+clear_caches()
+probes = stub_probe({"https://img.test/look.jpg": STRIPES})
+got = intg.cover_look("https://img.test/look.jpg")
+assert got and got["blank"] is False, got
+assert intg.cover_look("https://img.test/look.jpg") == got
+assert len(probes) == 1, probes                     # memoized, like the size
+assert intg.cover_look("") is None and intg.cover_look(None) is None
+assert len(probes) == 1, probes
+# A probe that explodes is unknown, not fatal.
+clear_caches()
+stub_probe({}, error=True)
+assert intg.cover_look("https://img.test/boom.jpg") is None
+
+# …and the finder attaches it to the rows: the detailed image scores, the solid
+# one is flagged blank (the policy's own hard gate).
+clear_caches()
+stub_cov([json.dumps({"type": "cover", "source": "qobuz",
+                      "smallCoverUrl": "https://img.test/photo-500.jpg",
+                      "bigCoverUrl": "https://img.test/photo.jpg",
+                      "releaseInfo": {"title": "OK Computer", "artist": "Radiohead",
+                                      "tracks": 12, "url": "https://rel/"}}),
+          json.dumps({"type": "cover", "source": "qobuz",
+                      "smallCoverUrl": "https://img.test/flat-500.jpg",
+                      "bigCoverUrl": "https://img.test/flat.jpg",
+                      "releaseInfo": {"title": "OK Computer", "artist": "Radiohead",
+                                      "tracks": 12, "url": "https://rel/"}})])
+stub_json({})
+stub_probe({"https://img.test/photo-500.jpg": STRIPES,
+            "https://img.test/photo.jpg": STRIPES,
+            "https://img.test/flat-500.jpg": SOLID,
+            "https://img.test/flat.jpg": SOLID})
+_look_cfg = {"cover_sources": [], "cover_country": "us"}
+_looks = {r["big"]: r for r in intg.cover_search("Radiohead", "OK Computer",
+                                                 cfg=_look_cfg)["results"]}
+assert _looks["https://img.test/photo.jpg"]["cover_likeness"] is not None, _looks
+assert _looks["https://img.test/photo.jpg"]["cover_blank"] is None, _looks
+assert _looks["https://img.test/flat.jpg"]["cover_blank"] is True, _looks
+# …and the policy rejects the blank one out loud.
+_chosen, _ranked, _notes = cc.choose_covers(
+    [dict(r) for r in _looks.values()], dict(_look_cfg, cover_resize_enabled=False))
+_flat = next(c for c in _ranked if c.url == "https://img.test/flat.jpg")
+assert _flat.rejected and "near-solid" in _flat.rejected, _flat
+assert _chosen and _chosen.url == "https://img.test/photo.jpg", _chosen
+
+
+# --------------------------------------------------------------------------- #
 # 3) The COV request: the app's headers, a non-empty source list
 # --------------------------------------------------------------------------- #
 clear_caches()
@@ -381,7 +463,10 @@ assert rows[0] == {"source": "deezer", "small": "https://img.test/b-500.jpg",
                    # stub has no bytes for this URL), which does not reject a
                    # row whose size the provider itself stated
                    "format": "", "bytes": 0, "front": None, "kind": None,
-                   "release_cover": None, "rank": 0}, rows[0]
+                   "release_cover": None, "rank": 0,
+                   # no look was measured for it either (the URL answered
+                   # nothing), which is unknown, not blank
+                   "cover_likeness": None, "cover_blank": None}, rows[0]
 # ...and its rank is the position COV listed it in (its own relevance order)
 assert [r["rank"] for r in rows] == [0, 1, 2], rows
 # probed from the file, not from the URL's own "500x0w" hint
@@ -389,8 +474,12 @@ assert (rows[1]["width"], rows[1]["height"]) == (3000, 3000), rows[1]
 assert (rows[2]["width"], rows[2]["height"]) == (None, None), rows[2]
 # The row that STATED its own size is probed too — for the container the policy
 # judges it on (and the probe's own reading wins when it has one; this row's
-# probe answered nothing, so its own 1400 survives).
-assert sorted(probes) == sorted(["https://img.test/b.jpg", IMG]), probes
+# probe answered nothing, so its own 1400 survives). Each row's image is also
+# probed for its cover-likeness (its `small` thumbnail, then the `big` image).
+assert sorted(set(probes)) == sorted([
+    "https://img.test/b.jpg", IMG, "https://img.test/b-500.jpg",
+    "https://img.test/a-500.jpg"]), probes
+assert probes.count(IMG) == 2, probes      # once for the size, once for the look
 
 # Only the first COVER_PROBE_LIMIT rows are probed; the rest carry null.
 clear_caches()
@@ -400,9 +489,13 @@ probes = stub_probe(dict.fromkeys(
     [f"https://img.test/a{i}.jpg" for i in range(intg.COVER_PROBE_LIMIT + 2)],
     png(1000, 1000)))
 rows = intg.cover_search("Radiohead", "OK Computer", cfg=CFG)["results"]
-assert len(probes) == intg.COVER_PROBE_LIMIT, len(probes)
+assert set(probes) == {f"https://img.test/a{i}.jpg"
+                       for i in range(intg.COVER_PROBE_LIMIT)} | {
+    f"https://img.test/a{i}-500.jpg"
+    for i in range(intg.COVER_PROBE_LIMIT)}, probes
 assert rows[intg.COVER_PROBE_LIMIT - 1]["width"] == 1000, rows[-3]
 assert rows[-1]["width"] is None and rows[-1]["height"] is None, rows[-1]
+assert rows[-1]["cover_likeness"] is None, rows[-1]
 
 # A probe that explodes does not fail the search.
 clear_caches()
@@ -418,7 +511,9 @@ stub_cov(cover_lines(1))
 stub_json({})
 probes = stub_probe({IMG: b"\x00\x01\x02" * 40})
 rows = intg.cover_search("Radiohead", "OK Computer", cfg=CFG)["results"]
-assert rows[0]["width"] is None and probes == ["https://img.test/a0.jpg"], rows
+assert rows[0]["width"] is None and probes[0] == "https://img.test/a0.jpg", rows
+assert set(probes) == {"https://img.test/a0.jpg",
+                       "https://img.test/a0-500.jpg"}, probes
 
 # The limit is the stream's own cap (and 1 is honoured).
 clear_caches()
@@ -448,7 +543,9 @@ out = intg.cover_search("Radiohead", "OK Computer", cfg=CFG,
                         release_group_mbid=CAA_RG)
 assert out["provider"] == "cov", out
 assert [c[0] for c in calls] == [f"{intg.CAA_BASE}/release-group/{CAA_RG}"], calls
-assert probes == ["https://img.test/a0.jpg"], probes
+assert probes[0] == "https://img.test/a0.jpg", probes
+assert set(probes) == {"https://img.test/a0.jpg",
+                       "https://img.test/a0-500.jpg"}, probes
 
 # (b) zero results, release-group MBID known → Cover Art Archive, front first
 clear_caches()
@@ -476,12 +573,13 @@ assert rows[0]["title"] == "OK Computer" and rows[0]["artist"] == "Radiohead"
 assert rows[0]["url"] == f"{intg.CAA_BASE}/release-group/{CAA_RG}", rows[0]
 assert (rows[0]["width"], rows[0]["height"]) == (1500, 1500), rows[0]
 assert [c[0] for c in calls] == [f"{intg.CAA_BASE}/release-group/{CAA_RG}"], calls
-# Sorted, not ordered: the dimensions of several rows are probed in a pool,
-# so which probe lands in the recorder first is a scheduling detail. What
-# matters — and what the rows above assert — is that each row got ITS OWN
-# size back.
-assert sorted(probes) == sorted([CAA_IMAGE,
-                                 "https://coverartarchive.org/release/abc/back.png"]), probes
+# Sorted, not ordered: the dimensions and looks of several rows are probed in
+# a pool, so which probe lands in the recorder first is a scheduling detail.
+# What matters — and what the rows above assert — is that each row got ITS OWN
+# size back, and that only these rows' images were measured.
+assert set(probes) == {CAA_IMAGE, "https://coverartarchive.org/release/abc/back.png",
+                       "https://coverartarchive.org/release/abc/123-500.jpg",
+                       "https://coverartarchive.org/release/abc/back-500.jpg"}, probes
 
 # (c) no MBID → Deezer, and the real album's cover sorts ahead of a karaoke one
 clear_caches()
@@ -530,8 +628,10 @@ assert rows[0]["title"] == "OK Computer" and rows[0]["tracks"] == 12, rows[0]
 assert (rows[0]["width"], rows[0]["height"]) == (3000, 3000), rows[0]
 assert [c[0] for c in calls] == [f"{intg.DEEZER_API}/search/album",
                                  "https://itunes.apple.com/search"], calls
-assert sorted(probes) == sorted([BIG3000,
-                                 "https://is1-ssl.mzstatic.com/image/thumb/Music/x/3000x3000bb.jpg"]), probes
+assert set(probes) == {BIG3000,
+                       "https://is1-ssl.mzstatic.com/image/thumb/Music/x/3000x3000bb.jpg",
+                       ART100,
+                       "https://is1-ssl.mzstatic.com/image/thumb/Music/x/100x100bb.jpg"}, probes
 
 # (e) a dead meta-search is a fallback case, not an error
 clear_caches()
@@ -608,6 +708,22 @@ assert intg.resolve_cov_search(None, "GB", saved)[1] == "gb"
 intg.cov_catalog = lambda timeout=15.0: {**copy.deepcopy(CATALOG),
                                          "active_source_limit": 1}
 assert intg.resolve_cov_search(["itunes", "deezer"], None, saved)[0] == ["itunes"]
+intg.cov_catalog = lambda timeout=15.0: copy.deepcopy(CATALOG)
+# The Cover Art Archive's MusicBrainz catalogue is NOT a default source, even
+# when COV reports it enabled — the store list is the app's own judgement — but
+# a caller that names it explicitly still reaches it (validated like every id).
+_with_mb = {**copy.deepcopy(CATALOG),
+            "sources": copy.deepcopy(CATALOG["sources"]) + [
+                {"id": "musicbrainz", "name": "MusicBrainz", "enabled": True,
+                 "color": None, "countries": ["us"]}]}
+intg.cov_catalog = lambda timeout=15.0: copy.deepcopy(_with_mb)
+assert intg._cov_enabled_ids() == ["deezer", "itunes"], intg._cov_enabled_ids()
+assert "musicbrainz" not in intg._cov_sources(), intg._cov_sources()
+assert intg.resolve_cov_search(None, None, {"cover_sources": [],
+                                            "cover_country": "us"})[0] == \
+    ["deezer", "itunes"]
+assert intg.resolve_cov_search(["musicbrainz"], None, {"cover_sources": []})[0] == \
+    ["musicbrainz"]
 intg.cov_catalog = lambda timeout=15.0: copy.deepcopy(CATALOG)
 # the saved `cover_sources`/`cover_country` keys exist in the shipped config
 assert mlo_config.DEFAULT_CONFIG["cover_sources"] == []

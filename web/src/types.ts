@@ -1638,6 +1638,17 @@ export interface ImportPrompt {
   families: ImportFamilyGap[];
 }
 
+/** A manual import the user left unfinished (GET /api/import/sessions): the
+ *  wizard's persisted bookmark. `step` is the numeric wizard step it was left
+ *  on; the tray's "Continue import" links back to `/import?album=&step=`. */
+export interface ImportSession {
+  album: string;
+  album_name: string;
+  step: number;
+  staged: boolean;
+  at: number | null;
+}
+
 /** One album POST /api/library/add created (or found already there): the
  *  framework album on disk. `created` is false for a folder that was already
  *  a real album. */

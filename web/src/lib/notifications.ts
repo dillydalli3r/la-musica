@@ -108,6 +108,8 @@ export function linkFor(kind: string, data?: Record<string, unknown>): string {
       return album ? `/album/${encodeURIComponent(album)}` : "/library";
     case "import_needs_data":
       return album ? `/import?album=${encodeURIComponent(album)}` : "/import";
+    case "import_unfinished":
+      return album ? `/import?album=${encodeURIComponent(album)}` : "/import";
     case "script_done":
     case "script_failed":
       return "/in-progress";
@@ -226,6 +228,22 @@ export function clearAll() {
  *  page, not an outcome the server announced, so it must never pop a banner on
  *  a phone. */
 export const GRADE_WARNING_KIND = "grade_warning";
+
+/** The tray's kind for a manual import the user left unfinished. Like
+ *  GRADE_WARNING_KIND this is a datapoint re-read from the server (the session
+ *  list, GET /api/import/sessions), not an outcome announced on `/ws/events` —
+ *  deliberately NOT in OS_KINDS/PUSH_KINDS, so it never pops a banner on a
+ *  phone. The wizard writes/dismisses the underlying session; the tray only
+ *  mirrors it. */
+export const IMPORT_UNFINISHED_KIND = "import_unfinished";
+
+/** The stable tray id for one album's unfinished import: the wizard dismisses
+ *  exactly this when the album is finished, and the sync that ingests the
+ *  session list keys on it, so the two never disagree about which album a row
+ *  is about. */
+export function importSessionNotificationId(album: string): string {
+  return `import-session:${str(album).replace(/\\/g, "/").toLowerCase()}`;
+}
 
 /** Record a WARNING the app derived from a payload it already reads, rather
  *  than one the server announced on `/ws/events`.

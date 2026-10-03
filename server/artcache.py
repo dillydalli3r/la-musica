@@ -344,7 +344,13 @@ def _get(url, headers, timeout):
 
 
 def _caa_front(rg_mbid, size=1200):
-    """Cover Art Archive's front cover for a RELEASE GROUP at *size* px."""
+    """Cover Art Archive's front cover for a RELEASE GROUP at *size* px.
+
+    The ONE caller is the framework album's PLACEHOLDER cover
+    (`server.pending_albums.write_placeholder_cover`): the album's own art, by
+    identity, which R201 keeps. It is deliberately NOT a fallback tier any more
+    — see `_fallback_candidates`.
+    """
     rg = str(rg_mbid or "").strip()
     return "%s/release-group/%s/front-%d" % (intg.CAA_BASE, rg, size) if rg else ""
 
@@ -376,19 +382,20 @@ def _fallback_candidates(artist, album, rg, cfg, timeout):
     """(url, source) pairs to try after the original URL failed — LAZILY.
 
     Each tier only touches the network when every tier before it has already
-    failed, so a working Cover Art Archive costs Apple and Deezer nothing.
+    failed, so a working iTunes costs Deezer nothing.
 
-    The last two tiers are ALBUM lookups (`/search/album`, entity=album), so
-    they are asked only when there is an album to ask about. Asked with an
-    artist alone they answer with whatever that artist's most popular release
-    is — a DIFFERENT album, which is the one thing this module must never
-    hand a caller that cannot tell it apart from what it asked for. A cover
-    with no album name has no album tier to fall back to; the Cover Art
-    Archive's release-group tier above is the one that answers by identity, and
-    only a display path may reach either (a write passes `substitute=False`).
+    The Cover Art Archive is deliberately NOT a tier any more: a cover WRITE is
+    exact (it must store the picture it was given, not the archive's), and a
+    display fallback that served one album's release-group art in place of a
+    row whose own URL refused is exactly the wrong-picture bug this module
+    exists to prevent. The remaining tiers are ALBUM lookups
+    (`/search/album`, entity=album), so they are asked only when there is an
+    album to ask about. Asked with an artist alone they answer with whatever
+    that artist's most popular release is — a DIFFERENT album, which is the one
+    thing this module must never hand a caller that cannot tell it apart from
+    what it asked for. A cover with no album name has no fallback tier at all,
+    and a write (`substitute=False`) may reach none of them.
     """
-    if rg:
-        yield _caa_front(rg), "coverartarchive"
     if album:
         two = (("itunes", _itunes_art_url), ("deezer", _deezer_art_url))
         for source, find in two:
@@ -428,9 +435,9 @@ def fetch_art(url, *, artist="", album="", release_group_mbid="", cfg=None,
 
     `source` names who actually answered: "url" for the URL asked about, the
     same picture's largest copy for an Apple URL whose own copy is missing
-    ("applemusic"), a fallback id ("coverartarchive", "itunes", "deezer")
-    otherwise. A URL that is not on the allowlist, and a total failure, both
-    return ``(None, None, None)``.
+    ("applemusic"), a fallback id ("itunes" or "deezer") otherwise. A URL that
+    is not on the allowlist, and a total failure, both return
+    ``(None, None, None)``.
 
     Every entry is written under THE URL THAT ANSWERED, so a cache hit is
     always that URL's own bytes: a fallback's image can never be served for the

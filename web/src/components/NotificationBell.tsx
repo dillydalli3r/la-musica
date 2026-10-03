@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { useQuery } from "@tanstack/react-query";
 import { AlertTriangle, Bell, BellOff, BellRing, Send, X } from "lucide-react";
 import {
   disablePush,
@@ -20,11 +21,15 @@ import {
   clearAll,
   dismiss,
   GRADE_WARNING_KIND,
+  IMPORT_UNFINISHED_KIND,
+  importSessionNotificationId,
+  ingestDerived,
   markAllRead,
   openNotification,
   registerNavigator,
   useNotifications,
 } from "../lib/notifications";
+import { api } from "../api";
 import { useI18n } from "../lib/i18n";
 import Popover from "./Popover";
 import { toast } from "../store";
@@ -72,6 +77,32 @@ export default function NotificationBell() {
     const stop = startEventStream();
     return stop;
   }, []);
+
+  // Manual imports left unfinished on the SERVER (GET /api/import/sessions),
+  // re-read once per app load — which is exactly "you came back to an import
+  // you never finished" — and mirrored into the tray as a Continue row. The
+  // store is read-only here: the wizard writes and clears the underlying
+  // session (and dismisses this same row) when the album is finished.
+  const { data: sessionData } = useQuery({
+    queryKey: ["importSessions"],
+    queryFn: api.importSessions,
+    staleTime: Infinity,
+    retry: false,
+  });
+  const syncedSessions = useRef(false);
+  useEffect(() => {
+    if (syncedSessions.current || !sessionData) return;
+    syncedSessions.current = true;
+    for (const s of sessionData.sessions) {
+      ingestDerived({
+        id: importSessionNotificationId(s.album),
+        kind: IMPORT_UNFINISHED_KIND,
+        title: `Continue import — ${s.album_name || s.album}`,
+        body: `Left unfinished at step ${s.step + 1} — pick up where you left off.`,
+        link: `/import?album=${encodeURIComponent(s.album)}&step=${s.step}`,
+      });
+    }
+  }, [sessionData]);
 
   useEffect(() => registerNavigator((to) => navigate(to)), [navigate]);
 

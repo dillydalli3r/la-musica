@@ -33,9 +33,14 @@ was MEASURED from rather than what its name suggests:
 artist, its title, its track count), which rule 2 reads and the payload hands
 back so a caller can see what a candidate set was judged against.
 
-The rules, in the order they decide. Each is a tier weighted so heavily that
-no lower tier can ever outvote a higher one, which is why the score IS the
-order (the same positional encoding `mlo.release_choice` uses, base 9):
+The rules, in the order they decide. Each is a tier with a level in [0, 1] and
+a weight (`_TIER_WEIGHTS`); the score is the weighted SUM of the levels, not a
+positional encoding, so a tier can be outvoted by enough of the others. The two
+biggest weights are image size and cover-likeness, which is how a slightly
+smaller but clearly better-looking cover can win; the remaining tiers (format,
+source, square, quality, release, identity, kind, the provider's own order)
+decide the difference between two otherwise comparable images. The hard
+REJECTIONS below are unchanged and always decide before any ranking.
 
 1. release   the release GROUP's front cover beats one release's own. The group
              image is the album's own art — it is the reference the finder shows
@@ -62,8 +67,10 @@ order (the same positional encoding `mlo.release_choice` uses, base 9):
              rules use elsewhere in this app — undersized is acceptable
              (nothing is ever upscaled), oversized is the problem.
 5. source    the configured `cover_sources` order (the shipped default is
-             `DEFAULT_SOURCE_ORDER`); a source the order does not name ranks
-             after every configured one.
+             `DEFAULT_SOURCE_ORDER`, which no longer names the Cover Art
+             Archive); a store source the order does not name ranks after every
+             configured one. An identity read (the release-group/release front)
+             is not a store source and is neither preferred nor blamed here.
 6. format    JPEG (the library's own cover format, `cover_jpeg_quality`) beats
              WebP/PNG/other, which are re-encoded when written.
 7. square    the configured cover aspect — a non-square image is centre-cropped
@@ -75,6 +82,39 @@ order (the same positional encoding `mlo.release_choice` uses, base 9):
              invented its extra pixels), ranks below a clean full-size image.
 9. rank      the provider's own order — the last tiebreak, and nothing else.
 
+The weighted mix (each level in [0, 1], the weights summing to 1.0):
+
+    appearance 0.22   the image's own cover-likeness (below)
+    size       0.20   the decoded shorter side against the target
+    release    0.14   the album's own art over one edition's
+    identity   0.12   how well the row's own release matches this album
+    quality    0.08   a re-compressed or upscaled thumbnail
+    source     0.07   the configured `cover_sources` order
+    kind       0.06   front over back/other
+    format     0.05   JPEG over WebP/PNG/other
+    square     0.05   the aspect the writer would crop
+    rank       0.01   the provider's own order
+
+Cover-likeness is measured from the image's own bytes in the SHARED search
+layer (`server.integrations._attach_looks`), memoized like `image_dimensions`
+so the finder dialog and the unattended import rank identically: the row's
+`small` thumbnail is fetched through the same ranged-GET probe, decoded with
+Pillow, converted to grayscale, downscaled to `COVER_LOOK_SIZE` and scored on
+its mean neighbour difference (edge energy) against `COVER_LOOK_DETAIL_REF`.
+An image whose detail is below `COVER_LOOK_MIN_DETAIL` is a near-solid card,
+not artwork, and is REJECTED; every other measured image carries a 0..1
+`cover_likeness` on its row. A row nobody measured (the probe is deliberately
+bounded to the first `COVER_PROBE_LIMIT` rows) is neither rewarded nor blamed
+for it: it scores the candidate set's own median cover-likeness, so being
+unmeasured is never an advantage or a penalty.
+
+The Cover Art Archive's identity reads are not one of the configured STORE
+sources, so the source order never prefers or blames them; their standing comes
+from rule 1 (the release-group front is the album's own art). The archive is
+not a default source any more, and is not asked by the meta-search or served as
+a fallback, but a caller/config that names "musicbrainz" explicitly still ranks
+its rows by that order.
+
 Rejection is separate from ranking, and a rejected candidate is still REPORTED
 with the reason it was rejected (never silently dropped, and never silently
 substituted by a worse one):
@@ -83,6 +123,8 @@ substituted by a worse one):
 * no image URL at all,
 * an empty answer (0 bytes),
 * bytes that are not a decodable JPEG/PNG/WebP image,
+* an image whose own pixels are near-solid/blank — a colour card or a
+  placeholder is not cover art (the appearance metric's own hard gate),
 * a row whose own release contradicts the album — a different artist, or a
   different album by the same artist (rule 2): the wrong album's art must
   never be the automatic pick, however big or pretty it is,
@@ -140,18 +182,43 @@ SEARCH_LIMIT = 40
 # the picks and the picker cannot disagree. The order is the app's own quality
 # judgement — Qobuz/Apple/Tidal/Bandcamp publish full-resolution artwork,
 # Deezer serves at most 1000px, Spotify's covers are re-encoded, and Discogs
-# and MusicBrainz/CAA carry what users uploaded.
+# carries what users uploaded.
+#
+# The Cover Art Archive is deliberately NOT here: its MusicBrainz source is a
+# user-upload database, not a store, so the meta-search no longer asks it by
+# default and no fallback serves the archive. Its IDENTITY reads stay — the
+# release-group front is still the album's own art, the reference the
+# candidates are compared against (rule 1), and a caller/config that selects
+# "musicbrainz" explicitly still ranks the archive by that order.
 DEFAULT_SOURCE_ORDER = ("qobuz", "applemusic", "tidal", "bandcamp", "deezer",
-                        "spotify", "itunes", "discogs", "musicbrainz")
+                        "spotify", "itunes", "discogs")
 
-# The scoring is a positional encoding of the tier tuple, base 9, most
-# significant tier first — a bigger score IS a better pick and no lower tier
-# can outvote a higher one (see mlo.release_choice, which this mirrors). The
-# base is the number of tiers, so a new rule raises it and the three tuples
-# below together — never one of them alone.
-_SCORE_BASE = 9
+# The score is a WEIGHTED MIX of the tiers, not a positional encoding: every
+# tier contributes its level in [0, 1] times the weight below, and the score is
+# their sum (so it stays in [0, 1]). The weights are the policy's own statement
+# of how much each fact matters, and they are read here and nowhere else. The
+# two biggest are the image's size and its own cover-likeness (see
+# `_appearance_level`), so a slightly smaller but clearly better-looking cover
+# can win; the remaining tiers decide the difference between two otherwise
+# comparable images. A new rule is added to all three tuple/dict pairs at once.
 _TIER_NAMES = ("release", "identity", "kind", "size", "source", "format",
-               "square", "quality", "rank")
+               "square", "quality", "rank", "appearance")
+_TIER_WEIGHTS = {
+    "appearance": 0.22,
+    "size": 0.20,
+    "release": 0.14,
+    "identity": 0.12,
+    "quality": 0.08,
+    "source": 0.07,
+    "kind": 0.06,
+    "format": 0.05,
+    "square": 0.05,
+    "rank": 0.01,
+}
+# How many buckets the provider's own order is quantised into: its first answer
+# is a full tier, the eighth and later a zero — never more (a provider's
+# relevance order is a tiebreak, not a quality measure).
+_RANK_STEPS = 8
 # What a tie-break sentence calls each tier.
 _TIER_LABELS = {
     "release": "the album's own cover (the release group's art, then the matched release's)",
@@ -163,6 +230,7 @@ _TIER_LABELS = {
     "square": "the square-aspect rule",
     "quality": "the thumbnail/upscale check",
     "rank": "the provider's own order",
+    "appearance": "the image's own cover-likeness",
 }
 
 # The container ladder: the library re-encodes every cover to JPEG at
@@ -204,13 +272,20 @@ _RULES = (
     "a front cover beats the back/other images a provider labels",
     "the larger decoded side wins up to the configured target — an oversized "
     "or upscaled file is never rewarded over a clean one at the target size",
-    "the configured cover_sources order decides after the size",
+    "the configured cover_sources order decides among otherwise comparable "
+    "rows; the Cover Art Archive is no longer in the default order (its "
+    "identity reads are not store sources, and rule 1 is what carries them)",
     "JPEG (the library's own cover format) beats WebP/PNG/other, which are "
     "re-encoded when they are written",
     "a square image beats one the writer would have to centre-crop",
     "a re-compressed thumbnail — and above all an upscaled one — ranks below "
     "a clean full-size image",
     "the provider's own order only ever breaks a tie",
+    "the image's own cover-likeness — grayscale detail/edge energy measured "
+    "from its bytes, the row's small thumbnail — is weighed with the traits "
+    "above (see _TIER_WEIGHTS): the two biggest weights are the image size "
+    "and this appearance term, so a slightly smaller but clearly better-"
+    "looking cover can win. A near-solid/blank image is rejected outright",
     "a candidate below the cover target (the minimum server.api_cover._cover_metrics "
     "reports and the grader enforces) is rejected, not silently ranked last — "
     "and so is one whose size was never measured while that minimum is set",
@@ -312,7 +387,8 @@ def policy_config(cfg=None):
 
 
 def policy_report(cfg=None):
-    """The policy as data — the Settings keys, the ladder and the rules."""
+    """The policy as data — the Settings keys, the weights, the ladder and the
+    rules."""
     conf = policy_config(cfg)
     return {
         "target": conf["cover_target_size"],
@@ -321,6 +397,11 @@ def policy_report(cfg=None):
         "square_threshold": conf["cover_square_threshold"],
         "enforce_square": conf["cover_enforce_square"],
         "jpeg_quality": conf.get("cover_jpeg_quality", 90),
+        "weights": {name: _TIER_WEIGHTS[name] for name in _TIER_NAMES},
+        "appearance": ("cover-likeness: grayscale detail/edge energy of the "
+                       "image's own bytes (the row's small thumbnail), 0..1, "
+                       "higher is more cover-like; a near-solid image is "
+                       "rejected as not cover art"),
         "rules": list(_RULES),
     }
 
@@ -353,6 +434,8 @@ class Candidate:
     rank: int = 0
     index: int = 0
     side: Optional[int] = None
+    cover_likeness: Optional[float] = None
+    cover_blank: Optional[bool] = None
     score: float = 0.0
     reasons: tuple = ()
     rejected: str = ""
@@ -368,6 +451,8 @@ class Candidate:
             "format": self.format or None, "bytes": self.bytes,
             "front": self.front, "kind": self.kind or None,
             "release_cover": self.release_cover, "rank": self.rank,
+            "cover_likeness": self.cover_likeness,
+            "cover_blank": self.cover_blank,
             "score": self.score, "reasons": list(self.reasons),
             "rejected": self.rejected or None,
         }
@@ -381,6 +466,10 @@ class _Context:
     minimum: int
     square_threshold: float
     enforce_square: bool
+    # The cover-likeness an UNMEASURED row is scored at: the candidate set's own
+    # median measured looks, so being unmeasured (the probe is bounded) is
+    # neither an advantage nor a penalty. 0.5 when nothing was measured.
+    look_default: float = 0.5
     # The album being covered, as `identity=` handed it over: what the rows are
     # checked against (rule 2). All three may be unknown — an album with no
     # tags and no marker is searched for by whatever it has, and nothing is
@@ -505,10 +594,12 @@ def _rejection(row, url, side, ctx, identity="same", identity_why=""):
     Checked before anything is scored: a candidate the finder itself failed on
     (a provider error), one with no URL to write, one the probe found nothing
     at all behind, one whose bytes are not an image this app can decode, one
-    whose own release CONTRADICTS the album (`identity` "other" — a karaoke,
-    tribute or other-album row), and one below the floor — the target the write
-    path and the grader both call the minimum, which nothing here may quietly
-    step around. That floor covers an UNKNOWN size as well: while one is
+    whose own pixels are near-solid/blank (the appearance metric's gate, so a
+    colour card or placeholder is never the pick), one whose own release
+    CONTRADICTS the album (`identity` "other" — a karaoke, tribute or
+    other-album row), and one below the floor — the target the write path and
+    the grader both call the minimum, which nothing here may quietly step
+    around. That floor covers an UNKNOWN size as well: while one is
     configured, a row whose image was never measured has no evidence it can
     reach it, so it may be listed and applied by hand but never picked here.
 
@@ -535,6 +626,9 @@ def _rejection(row, url, side, ctx, identity="same", identity_why=""):
         if nbytes and not _format_of(row):
             return (f"{nbytes} bytes that are not a JPEG/PNG/WebP image — the "
                     f"URL did not answer with cover art")
+    if row.get("cover_blank"):
+        return ("the image is near-solid or blank — a colour card is not "
+                "cover art (the cover-likeness check rejected it)")
     if identity == "other":
         return f"{identity_why} — it is not this album's cover"
     if ctx.minimum > 0:
@@ -624,12 +718,23 @@ def _size_level(size, ctx):
             f"file at the target")
 
 
-def _source_level(source, ctx):
-    """(level, reason) for rule 5 — the configured source order."""
+def _source_level(row, source, ctx):
+    """(level, reason) for rule 5 — the configured source order.
+
+    The order ranks STORE rows. A Cover Art Archive identity read (the
+    release-group or release front, `release_cover` not None) is not one of
+    those sources: when the order names its source it is ranked by it like any
+    other, and otherwise it is neither preferred nor blamed — its standing is
+    rule 1's, which is what makes the album's own art the reference.
+    """
     if source in ctx.order:
         i = ctx.order.index(source)
         return ((len(ctx.order) - i) / len(ctx.order),
                 f"{source} — preferred source (order {i + 1} of {len(ctx.order)})")
+    if row.get("release_cover") is not None:
+        return (0.5, "the Cover Art Archive's identity read — not one of the "
+                     "configured store sources, so the order neither prefers "
+                     "nor blames it")
     return 0.0, f"{source or 'no source'} — not in the configured cover source order"
 
 
@@ -702,13 +807,40 @@ def _quality_level(row, size, ctx):
 def _rank_level(rank):
     """(level, reason) for rule 9 — the provider's own order, bucket by bucket.
 
-    Quantised to the same buckets the score is written in (0.._SCORE_BASE-1),
-    so "the first row a provider listed" is a full tier and the last bucket is
-    a zero — never more.
+    Quantised to `_RANK_STEPS` buckets, so "the first row a provider listed" is
+    a full level and the last bucket is a zero — never more.
     """
     r = max(0, int(rank or 0))
-    return (1.0 - min(r, _SCORE_BASE - 1) / (_SCORE_BASE - 1),
+    return (1.0 - min(r, _RANK_STEPS - 1) / (_RANK_STEPS - 1),
             f"the provider's own order: #{r + 1}" if r else "the provider's first answer")
+
+
+def _appearance_level(row, ctx):
+    """(level, reason) for rule 10 — the image's own cover-likeness.
+
+    The level is the 0..1 metric the shared search layer stored on the row
+    (`server.integrations._attach_looks`): grayscale detail/edge energy of the
+    image's own bytes, measured from the row's `small` thumbnail. It carries
+    the second-biggest weight, which is how a slightly smaller but clearly
+    better-looking cover can win.
+
+    A row nobody measured — the probe is deliberately bounded to the first
+    `COVER_PROBE_LIMIT` rows — is neither rewarded nor blamed: it is scored at
+    the candidate set's own median looks (`ctx.look_default`), so being
+    unmeasured is never an advantage over a measured row, nor a penalty.
+    """
+    look = row.get("cover_likeness")
+    if look is None:
+        return (ctx.look_default,
+                "the image's cover-likeness was not measured — neither "
+                "rewarded nor blamed for it")
+    try:
+        level = max(0.0, min(1.0, float(look)))
+    except (TypeError, ValueError):
+        return (ctx.look_default,
+                "the image's cover-likeness was not measured — neither "
+                "rewarded nor blamed for it")
+    return level, f"cover-likeness {level:.2f} — detail measured from the image itself"
 
 
 def _evaluate(row, ctx, index):
@@ -732,8 +864,10 @@ def _evaluate(row, ctx, index):
             width=width, height=height, format=_format_of(row),
             bytes=row.get("bytes"), front=row.get("front"),
             kind=str(row.get("kind") or ""), release_cover=row.get("release_cover"),
-            rank=rank, index=index, side=side, score=0.0,
-            reasons=(), rejected=rejected)
+            rank=rank, index=index, side=side,
+            cover_likeness=row.get("cover_likeness"),
+            cover_blank=row.get("cover_blank"),
+            score=0.0, reasons=(), rejected=rejected)
 
     reasons = []
     level_release, why = _release_level(row)
@@ -745,7 +879,7 @@ def _evaluate(row, ctx, index):
     reasons.append(why)
     level_size, why = _size_level(size, ctx)
     reasons.append(why)
-    level_source, why = _source_level(source, ctx)
+    level_source, why = _source_level(row, source, ctx)
     reasons.append(why)
     level_format, why = _format_level(row)
     if why:
@@ -758,6 +892,8 @@ def _evaluate(row, ctx, index):
         reasons.append(why)
     level_rank, why = _rank_level(rank)
     reasons.append(why)
+    level_appearance, why = _appearance_level(row, ctx)
+    reasons.append(why)
 
     cand = Candidate(
         source=source, url=url, small=str(row.get("small") or ""),
@@ -766,30 +902,47 @@ def _evaluate(row, ctx, index):
         width=width, height=height, format=_format_of(row), bytes=row.get("bytes"),
         front=row.get("front"), kind=str(row.get("kind") or ""),
         release_cover=row.get("release_cover"), rank=rank, index=index,
-        side=side, reasons=tuple(reasons))
+        side=side, cover_likeness=row.get("cover_likeness"),
+        cover_blank=row.get("cover_blank"), reasons=tuple(reasons))
     return ((level_release, level_identity, level_kind, level_size, level_source,
-             level_format, level_square, level_quality, level_rank), cand)
+             level_format, level_square, level_quality, level_rank,
+             level_appearance), cand)
 
 
 def _score(levels):
-    """The tier tuple as one number in [0, 1) — see `_SCORE_BASE`."""
-    total, place = 0.0, 1.0
-    for level in levels:
-        place /= _SCORE_BASE
-        total += int(round(level * (_SCORE_BASE - 1))) * place
-    return round(total, 4)
+    """The tier tuple as one number in [0, 1] — the weighted sum of the levels
+    with `_TIER_WEIGHTS` (see the module docstring)."""
+    return round(sum(_TIER_WEIGHTS[name] * level
+                     for name, level in zip(_TIER_NAMES, levels)), 4)
+
+
+def _deciding_index(winner_levels, loser_levels):
+    """The tier the winner actually won on: the biggest weighted advantage.
+
+    A tier that favours the loser is never named — the sentence a user reads is
+    "what this image had over that one", so a negative contribution (the winner
+    is worse there but good enough elsewhere) cannot be it. None when every
+    tier ties.
+    """
+    best_i, best = None, 1e-12
+    for i, name in enumerate(_TIER_NAMES):
+        gain = (winner_levels[i] - loser_levels[i]) * _TIER_WEIGHTS[name]
+        if gain > best:
+            best, best_i = gain, i
+    return best_i
 
 
 def _deciding_reason(levels, other_levels, other):
     """The tier the winner actually won on, said out loud.
 
     `reasons` otherwise lists the winner's own facts; this is the one sentence
-    naming WHY it beat the runner-up, which is what a user asks when two
-    candidates look alike — and `lost` for every loser is its mirror.
+    naming WHY it beat the runner-up — the tier with the biggest weighted
+    advantage, which is what a user asks when two candidates look alike — and
+    `_lost_reason` is its mirror.
     """
-    for i, (mine, theirs) in enumerate(zip(levels, other_levels)):
-        if mine != theirs:
-            return f"ranked above {_label(other)} on {_TIER_LABELS[_TIER_NAMES[i]]}"
+    i = _deciding_index(levels, other_levels)
+    if i is not None:
+        return f"ranked above {_label(other)} on {_TIER_LABELS[_TIER_NAMES[i]]}"
     return (f"tied with {_label(other)} on every rule — the provider's own "
             f"order kept")
 
@@ -803,11 +956,32 @@ def _label(cand):
 
 def _lost_reason(levels, winner_levels, winner):
     """Why a ranked LOSER did not win — the deciding tier, from the other side."""
-    for i, (mine, theirs) in enumerate(zip(levels, winner_levels)):
-        if mine != theirs:
-            return f"lost to {_label(winner)} on {_TIER_LABELS[_TIER_NAMES[i]]}"
+    i = _deciding_index(winner_levels, levels)
+    if i is not None:
+        return f"lost to {_label(winner)} on {_TIER_LABELS[_TIER_NAMES[i]]}"
     return (f"tied with {_label(winner)} on every rule — the provider's own "
             f"order kept")
+
+
+def _look_default(rows):
+    """The cover-likeness an UNMEASURED row is scored at: the set's own median
+    measured looks (0.5 when nothing was measured).
+
+    Being unmeasured is a consequence of the deliberately bounded probe, not a
+    fact about the image, so it must not shift a row against or ahead of a
+    measured one. Blank images (look 0.0) are their own hard rejection and do
+    not drag the median down.
+    """
+    looks = sorted(float(r.get("cover_likeness")) for r in (rows or ())
+                   if isinstance(r, Mapping)
+                   and isinstance(r.get("cover_likeness"), (int, float))
+                   and not isinstance(r.get("cover_likeness"), bool)
+                   and not r.get("cover_blank"))
+    if not looks:
+        return 0.5
+    mid = len(looks) // 2
+    return (looks[mid] if len(looks) % 2
+            else round((looks[mid - 1] + looks[mid]) / 2, 4))
 
 
 def rank_covers(rows, cfg=None, *, identity=None):
@@ -825,7 +999,7 @@ def rank_covers(rows, cfg=None, *, identity=None):
     then by the order the candidates arrived in, so identical inputs always
     rank identically.
     """
-    ctx = _context(cfg, identity)
+    ctx = _context(cfg, identity, look_default=_look_default(rows))
     scored, rejected = [], []
     for i, row in enumerate(rows or []):
         if not isinstance(row, Mapping):
@@ -835,7 +1009,10 @@ def rank_covers(rows, cfg=None, *, identity=None):
             rejected.append(cand)
         else:
             scored.append((levels, cand))
-    scored.sort(key=lambda pair: (tuple(-v for v in pair[0]), pair[1].index))
+    # The score IS the ranking: the weighted sum decides, and the order the
+    # candidates arrived in only breaks an exact tie, so identical inputs always
+    # rank identically.
+    scored.sort(key=lambda pair: (-_score(pair[0]), pair[1].index))
     out = []
     for position, (levels, cand) in enumerate(scored):
         reasons = list(cand.reasons)
@@ -850,7 +1027,7 @@ def rank_covers(rows, cfg=None, *, identity=None):
     return out
 
 
-def _context(cfg=None, identity=None):
+def _context(cfg=None, identity=None, *, look_default=0.5):
     conf = policy_config(cfg)
     ident = identity if isinstance(identity, Mapping) else {}
     return _Context(order=tuple(conf["cover_sources"]),
@@ -858,6 +1035,7 @@ def _context(cfg=None, identity=None):
                     minimum=int(conf["cover_minimum"] or 0),
                     square_threshold=float(conf["cover_square_threshold"] or 0.0),
                     enforce_square=bool(conf["cover_enforce_square"]),
+                    look_default=float(look_default),
                     artist=str(ident.get("artist") or "").strip(),
                     album=str(ident.get("album") or "").strip(),
                     tracks=_int(ident.get("tracks")))

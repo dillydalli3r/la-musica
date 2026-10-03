@@ -794,6 +794,24 @@ try:
     # A stated rating IS written, for every track — and the provider that
     # stated it is reported back per track.
     _stamp_lib = stamped["items"][0]["album_path"]
+
+    # The MusicBrainz LINK ids a file already carries are the USER's: an import
+    # whose release was not explicitly chosen for this album (the album-page
+    # finish, a re-run) must not replace them with the edition it resolved.
+    # `force_ids=True` — a pinned release — is the explicit exception; every
+    # OTHER identity slot (DATE here) is still force-written.
+    _written["01 - track.wav"]["MUSICBRAINZ_ALBUMID"] = "user-picked-release"
+    _written["01 - track.wav"]["MUSICBRAINZ_RELEASEGROUPID"] = "user-picked-group"
+    _written["01 - track.wav"]["DATE"] = "1990"
+    _link_rel = {"id": "rel-9", "release_group_id": "rg-9", "date": "1994-05-06",
+                 "title": "Stamp", "artists": [], "media": []}
+    imports._stamp_mb_tags(_stamp_lib, _link_rel)
+    assert _written["01 - track.wav"]["MUSICBRAINZ_ALBUMID"] == "user-picked-release", _written["01 - track.wav"]
+    assert _written["01 - track.wav"]["MUSICBRAINZ_RELEASEGROUPID"] == "user-picked-group", _written["01 - track.wav"]
+    assert _written["01 - track.wav"]["DATE"] == "1994-05-06", _written["01 - track.wav"]
+    imports._stamp_mb_tags(_stamp_lib, _link_rel, force_ids=True)
+    assert _written["01 - track.wav"]["MUSICBRAINZ_ALBUMID"] == "rel-9", _written["01 - track.wav"]
+    assert _written["01 - track.wav"]["MUSICBRAINZ_RELEASEGROUPID"] == "rg-9", _written["01 - track.wav"]
     _intg.resolve_advisory_route = lambda **kw: {
         "value": 1, "source": "deezer-isrc", "checked": ["deezer-isrc"]}
     adv = imports.fetch_advisories([_stamp_lib], CFG)

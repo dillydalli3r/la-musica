@@ -74,6 +74,9 @@ function matchesRoute(pattern, link) {
     registerNavigator,
     openNotification,
     resolveTarget,
+    IMPORT_UNFINISHED_KIND,
+    importSessionNotificationId,
+    OS_KINDS,
   } = mod;
 
   console.log("== the payload a frame must carry ==");
@@ -130,6 +133,7 @@ function matchesRoute(pattern, link) {
     // derived from the entity ids the older emitters already publish
     linkFor("import_done", { album_path: "F:/Music/A/B" }),
     linkFor("import_needs_data", { album_path: "F:/Music/A/B" }),
+    linkFor("import_unfinished", { album_path: "F:/Music/A/B" }),
     linkFor("script_done", {}),
     linkFor("script_failed", {}),
     linkFor("grade_done", {}),
@@ -144,6 +148,17 @@ function matchesRoute(pattern, link) {
   check(
     "an emit site's own link wins over the derived one",
     ingest({ type: "event", event: "update_available", title: "x", data: { link: "/library" }, at: at + 3, seq: 1_712_345_681_901 }).link === "/library"
+  );
+
+  console.log("== an unfinished import's tray id is stable ==");
+  check(
+    "the id folds path case and separators",
+    importSessionNotificationId("F:\\Music\\A\\B") === importSessionNotificationId("f:/music/a/b") &&
+      importSessionNotificationId("F:/Music/A/B").startsWith("import-session:")
+  );
+  check(
+    "the kind never pops an OS notification",
+    IMPORT_UNFINISHED_KIND === "import_unfinished" && !(IMPORT_UNFINISHED_KIND in OS_KINDS)
   );
 
   console.log("== the badge, opening the panel and clearing ==");

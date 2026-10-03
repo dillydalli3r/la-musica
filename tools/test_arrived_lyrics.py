@@ -211,7 +211,7 @@ def install_stubs():
     imports.run_metadata_step = stub_step(staged=False, applied={})
     imports.run_cover_step = stub_step(fetched=False, applied={}, source=None,
                                        note="", staged=False, candidates=0)
-    imports._stamp_release = lambda album_dir, release, cfg: (0, 0)
+    imports._stamp_release = lambda album_dir, release, cfg, **kwargs: (0, 0)
     script_runners.run_chain = stub_chain
     from server import integrations
     _real_resolve = integrations.resolve_release

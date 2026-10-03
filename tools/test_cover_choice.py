@@ -97,10 +97,21 @@ eq(report["minimum"], 1200, "the minimum IS that target (the floor the grader en
 eq(report["sources"], list(cc.DEFAULT_SOURCE_ORDER),
    "an empty cover_sources means the shipped default order")
 ok(len(report["rules"]) >= 8, "the policy reports its rules in prose", report["rules"])
-# The score is a positional encoding with one bucket per tier: a rule added
-# without raising the base would silently overflow the tier above it.
-eq(len(cc._TIER_NAMES), cc._SCORE_BASE,
-   "the tier tuple has exactly one slot per score bucket")
+# The score is a weighted mix with one weight per tier, summing to 1.0, and the
+# two biggest terms are image size and cover-likeness — that is what lets a
+# slightly smaller but clearly better-looking cover win.
+eq(set(cc._TIER_WEIGHTS), set(cc._TIER_NAMES),
+   "every tier has exactly one weight")
+eq(round(sum(cc._TIER_WEIGHTS.values()), 6), 1.0, "the weights sum to 1.0")
+eq(set(sorted(cc._TIER_WEIGHTS, key=cc._TIER_WEIGHTS.get,
+              reverse=True)[:2]), {"size", "appearance"},
+   "size and appearance are the two biggest weights")
+ok(cc._TIER_WEIGHTS["appearance"] > cc._TIER_WEIGHTS["release"],
+   "and appearance outweighs every lower trait", cc._TIER_WEIGHTS)
+eq(report["weights"], dict(cc._TIER_WEIGHTS),
+   "the policy reports its weights")
+has(report["appearance"], "cover-likeness",
+    "and describes the appearance metric it weighs them with")
 ok(all(n in cc._TIER_LABELS for n in cc._TIER_NAMES),
    "and every tier has a label a tie-break sentence can name", cc._TIER_NAMES)
 eq(cc.policy_config({"cover_sources": ["deezer", "qobuz"]})["cover_sources"],
@@ -114,6 +125,17 @@ eq(intg.COV_SOURCE_PRIORITY, list(cc.DEFAULT_SOURCE_ORDER),
    "the finder's source priority IS the policy's default order")
 eq(intg.COV_FALLBACK_SOURCES, list(cc.DEFAULT_SOURCE_ORDER),
    "and so is its offline fallback list")
+# …and the Cover Art Archive is not a source there any more: no default source
+# list names MusicBrainz, and the archive is not a fallback either. Its identity
+# reads stay (checked in section 4).
+ok("musicbrainz" not in cc.DEFAULT_SOURCE_ORDER,
+   "the shipped source order no longer names MusicBrainz/CAA")
+eq(intg.COV_DEFAULT_DISABLED, ("musicbrainz",),
+   "the meta-search keeps it off by default")
+eq(intg.COVER_FALLBACKS, ("deezer", "itunes"),
+   "the fallback chain is the two name-based store lookups")
+ok("coverartarchive" not in intg.COVER_FALLBACKS,
+   "and the archive is not a fallback any more", intg.COVER_FALLBACKS)
 
 # --------------------------------------------------------------------------- #
 # 2. size: a clean 1200px cover beats a huge one, and says why
@@ -429,6 +451,67 @@ eq(cc.url_size_hint("https://cdn-images.dzcdn.net/images/cover/x/1000x1000-00000
    1000, "Deezer's largest request is read too")
 eq(cc.url_size_hint("https://cdn.test/plain.jpg"), None,
    "a URL that states no size is not guessed at")
+
+# --------------------------------------------------------------------------- #
+# 7b. cover-likeness: the image's own detail is the second-biggest weight, so a
+#     clearly better-looking cover can beat a slightly larger one; a blank
+#     image is rejected; an unmeasured row is neither rewarded nor blamed
+# --------------------------------------------------------------------------- #
+print("\ncover-likeness")
+# Same source, same format, both under the target (no floor): one is bigger but
+# flat, the other is slightly smaller and detailed — appearance outweighs size.
+flat_big = dict(cand("qobuz", 1300, cover_likeness=0.05),
+                big="https://cdn.test/qobuz/flat-big.jpg")
+sharp_small = dict(cand("qobuz", 1100, cover_likeness=0.95),
+                   big="https://cdn.test/qobuz/sharp-small.jpg")
+chosen, ranked, notes = cc.choose_covers([flat_big, sharp_small], no_floor)
+eq(chosen.url, sharp_small["big"],
+   "a slightly smaller but clearly better-looking cover wins")
+has(chosen.reasons[-1], "cover-likeness",
+    "and the deciding sentence names the cover-likeness tier")
+has(" ".join(by_url(ranked, sharp_small["big"]).reasons), "cover-likeness 0.95",
+    "the winner's own facts state its measured detail")
+has(" ".join(by_url(ranked, flat_big["big"]).reasons), "cover-likeness 0.05",
+    "and the flat image says what it measured")
+
+# A near-solid image is not cover art: the metric's hard gate rejects it, and
+# the rejection is stated like every other — never silently dropped.
+blank = dict(cand("qobuz", 1200, cover_likeness=0.0, cover_blank=True),
+             big="https://cdn.test/qobuz/blank.jpg")
+chosen, ranked, notes = cc.choose_covers([blank, at_target], CFG)
+blank_row = by_url(ranked, blank["big"])
+ok(blank_row.rejected != "", "a near-solid image is rejected", blank_row)
+has(blank_row.rejected, "near-solid or blank",
+    "and the rejection names why it is not cover art")
+eq(chosen.url, at_target["big"], "a real cover is still the pick")
+has("\n".join(notes), "near-solid or blank", "and the notes carry it")
+
+# …while an image whose looks were never MEASURED is not blank: nothing here may
+# claim a colour card just because it could not be probed.
+nolook = dict(cand("qobuz", 1200), big="https://cdn.test/qobuz/nolook.jpg")
+chosen, ranked, notes = cc.choose_covers([nolook], CFG)
+ok(chosen is not None and not chosen.rejected,
+   "an unmeasured image is not called blank")
+has(" ".join(chosen.reasons), "cover-likeness was not measured",
+    "and says its looks were never measured")
+
+# An unmeasured row scores the set's own MEDIAN measured look, so being
+# unmeasured is neither an advantage nor a penalty: here the two rows tie
+# exactly and the arrival order keeps the first.
+measured = dict(cand("qobuz", 1200, cover_likeness=0.9),
+                big="https://cdn.test/qobuz/measured.jpg")
+unmeasured = dict(cand("qobuz", 1200), big="https://cdn.test/qobuz/unmeasured.jpg")
+chosen, ranked, notes = cc.choose_covers([unmeasured, measured], CFG)
+eq(by_url(ranked, unmeasured["big"]).score,
+   by_url(ranked, measured["big"]).score,
+   "an unmeasured row scores exactly what the median measured row scores")
+eq(chosen.url, unmeasured["big"], "so the exact tie keeps the first arrival")
+eq(cc._look_default([{"cover_likeness": 0.2}, {"cover_likeness": 0.9},
+                     {"cover_likeness": 0.4}, {}]), 0.4,
+   "the median of the measured looks is what an unmeasured row takes")
+eq(cc._look_default([{}, {"cover_likeness": 0.0, "cover_blank": True}]), 0.5,
+   "a blank image's zero does not drag the median down")
+eq(cc._look_default([{}]), 0.5, "with nothing measured the neutral middle stands")
 
 # --------------------------------------------------------------------------- #
 # 8. the notes: what every source did, and the winner's own report

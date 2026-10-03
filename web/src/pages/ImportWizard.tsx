@@ -31,6 +31,7 @@ import { DEFAULT_RUN_ALL, SCRIPT_LABEL } from "../lib/scripts";
 import { forceDict } from "../lib/force";
 import { fmtCounts, fmtSteps } from "../lib/fmt";
 import { GENRE_COUNT_MAX, GENRE_FAMILIES, canonicalGenre, familyOf, splitGenres } from "../lib/genres";
+import { dismiss as dismissNotification, importSessionNotificationId } from "../lib/notifications";
 
 const STEPS = ["Select & separate", "Links", "Match", "Covers", "Genres", "Lyrics", "Advisory", "Finish"];
 
@@ -677,6 +678,25 @@ export default function ImportWizard() {
   /** Album folder whose metadata review modal is open (metadata_review only). */
   const [reviewPath, setReviewPath] = useState<string | null>(null);
 
+  // Remember this manual import so the app can offer to continue it after a
+  // reload: a short debounce collapses a step change's several state writes
+  // into ONE request, and the write is what the tray's "Continue import" row is
+  // built from (GET /api/import/sessions, read by NotificationBell). `finish`
+  // clears it again. Only step 1+ has anything to resume — step 0 is the
+  // upload that has not happened yet.
+  const lastSession = useRef("");
+  useEffect(() => {
+    if (!albumPath || step < 1) return;
+    const key = `${albumPath}|${step}`;
+    if (lastSession.current === key) return;
+    const name = uploaded.find((u) => u.path === albumPath)?.name || "";
+    const timer = setTimeout(() => {
+      lastSession.current = key;
+      api.importSessionSave(albumPath, step, name, staged).catch(() => {});
+    }, 700);
+    return () => clearTimeout(timer);
+  }, [albumPath, step, staged, uploaded]);
+
   // ---- artist image / artist description / album description -----------
   // What an import owes besides the audio; the artwork step accounts for all
   // three. The artist is resolved by NAME exactly like the fetch route does
@@ -942,26 +962,17 @@ export default function ImportWizard() {
       if (cancelled) return;
       if (!id) {
         setDetectStatus("none");
-        // The OPT-IN route, and the only automatic one from a fingerprint to
-        // a release: `import_acoustid_autofill` (Settings → Import, off by
-        // default). It cannot answer from tags, so it runs before the name
-        // guard below — an album whose files carry no tags at all is exactly
-        // the case it exists for. With the setting off, nothing here touches
-        // the fingerprint: the release stays empty until the user pastes a
-        // link, searches, or presses "Match from fingerprint".
-        if (cfg?.import_acoustid_autofill) {
-          attempt.done = true;
-          if (autoSearched.current !== albumPath) {
-            autoSearched.current = albumPath;
-            matchReleaseFromFingerprint();
-          }
-          return;
-        }
         // No MBID in the tags either: the fetch the step offers runs here.
         // Leaving step 0 ("Import … into library") IS the continue that used
         // to be followed by remembering to press "Fetch release & auto-match"
         // on every album, so the wizard asks MusicBrainz for the release the
         // album's own tags name. Once per album (`autoSearched`).
+        //
+        // The FINGERPRINT is deliberately NOT consulted here: it is a
+        // statement about the AUDIO, never about which EDITION the user wants,
+        // so a manual MusicBrainz link (or the album's tags) is the default
+        // and an AcoustID match only ever happens on the explicit "Match from
+        // fingerprint" press.
         //
         // With no name to ask about yet, this is NOT the end of the attempt:
         // the album's tags arrive with the library payload, which is why
@@ -986,7 +997,7 @@ export default function ImportWizard() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [step, albumPath, trackList, releaseId, cfg?.import_acoustid_autofill]);
+  }, [step, albumPath, trackList, releaseId]);
 
   // Manual "Detect from tags" — always available, one click.
   const detectFromTags = async () => {
@@ -2665,6 +2676,13 @@ export default function ImportWizard() {
           : `No new lyrics found${rest ? ` — ${rest}` : ""}`
       );
       qc.invalidateQueries({ queryKey: ["library"] });
+      // The fetch wrote lyrics to disk (embedded tag and/or .lrc). The
+      // per-track editor reads them from `["tags", path]`, and react-query
+      // keeps an already-resolved EMPTY answer fresh for `staleTime` (60s) —
+      // so without this the pane kept saying "No lyrics yet" while the file
+      // now had them (the row's kind chip updated from the rescan; the panel,
+      // feeding off the stale tags query, did not).
+      qc.invalidateQueries({ queryKey: ["tags"] });
       // The files changed on disk: re-read them so the step's "Lyrics" marks
       // come from what the fetch actually wrote.
       await rescanTracks();
@@ -2762,6 +2780,9 @@ export default function ImportWizard() {
         }
       }
       await api.mbAssign(writes, staged);
+      // The lyrics were just written (embedded and/or .lrc): drop the editor's
+      // cached read so it shows what was saved rather than its stale answer.
+      qc.invalidateQueries({ queryKey: ["tags"] });
       setLyricsNotice(
         untimed ? `${untimed} track(s) have lyrics without timestamps — not saved as .lrc` : null
       );
@@ -2838,13 +2859,13 @@ export default function ImportWizard() {
   /** The release field's OWN action: fingerprint the album, and use the
    *  release the fingerprint matches.
    *
-   *  The interactive path never lets a fingerprint choose a release by itself
-   *  — the wizard's automatic detect reads the album's TAGS (`/api/album/
-   *  mbdetect`) and the release it fetches is the one those tags name. This is
-   *  the button that asks the other question, one press at a time, and it is
-   *  the only route from an AcoustID match to a release besides the opt-in
-   *  `import_acoustid_autofill` setting. It ends in the SAME flow a manual id
-   *  takes (`acceptAcoustidRelease` → `pickRelease`), so tags are written by one
+   *  The interactive path never lets a fingerprint choose a release by itself:
+   *  the wizard's automatic detect reads the album's TAGS (`/api/album/
+   *  mbdetect`), then asks MusicBrainz by name — and a manually entered
+   *  MusicBrainz link is authoritative. This is the button that asks the other
+   *  question, one press at a time, and it is the ONLY route from an AcoustID
+   *  match to a release. It ends in the SAME flow a manual id takes
+   *  (`acceptAcoustidRelease` → `pickRelease`), so tags are written by one
    *  writer either way, and accepting the match also files its ACOUSTID pair. */
   const matchReleaseFromFingerprint = async () => {
     const paths = uploaded.length ? uploaded.map((a) => a.path) : albumPath ? [albumPath] : [];
@@ -3086,6 +3107,15 @@ const finish = async () => {
   qc.invalidateQueries({ queryKey: ["importPrompts"] });
   qc.invalidateQueries({ queryKey: ["importSource"] });
   qc.invalidateQueries({ queryKey: ["album"] });
+  // The import reached Finish: drop the resume bookmark and the tray row built
+  // from it, for every album this run covered.
+  const done = uploaded.length ? uploaded.map((u) => u.path) : albumPath ? [albumPath] : [];
+  for (const p of done) {
+    api.importSessionDismiss(p).catch(() => {});
+    dismissNotification(importSessionNotificationId(p));
+  }
+  lastSession.current = "";
+  qc.invalidateQueries({ queryKey: ["importSessions"] });
   setParams({});
   toast(
     (uploaded.length > 1 ? `Imported ${uploaded.length} albums — enrich each from its album page` : "Import complete — album graded") +
@@ -4955,26 +4985,37 @@ const finish = async () => {
                       : `Show ${stepTracks.length} track result${stepTracks.length === 1 ? "" : "s"}`}
                   </button>
                   {(advRowsOpen ?? stepTracks.length <= 8) && (
-                    // Condensed on wide screens: one-line rows in up to three
-                    // columns, so a 28-track album is ~10 rows tall instead of
-                    // 28. Each row still carries its own disc/track badge, so
-                    // the reader matches on the number they know.
-                    <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-x-4 gap-y-0.5">
+                    // Condensed on wide screens: up to three columns, so a
+                    // 28-track album is ~10 rows tall instead of 28. Each row
+                    // is a two-line cell — the number and title, then the
+                    // outcome line — because that line (`0 (not explicit) ·
+                    // Apple (album editions), iTunes (song search) ·
+                    // re-checked — …`) is far too long to sit beside the title
+                    // in a third of the width: as an unshrinkable flex item it
+                    // simply painted over the next column. Letting it wrap
+                    // inside the cell is what keeps every track's line whole
+                    // and inside its own column.
+                    <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-x-4 gap-y-1">
                       {stepTracks.map((t) => (
-                        <div key={t.path} className="flex items-center gap-1.5 text-[11px] min-w-0">
-                          <TrackNoBadge disc={discNoOf(t.path)} track={trackNoOf(t.path)} />
-                          <span className="flex-1 truncate text-zinc-400">{displayTitle(t.path)}</span>
+                        <div key={t.path} className="min-w-0 text-[11px] leading-tight py-0.5">
+                          <div className="flex items-center gap-1.5 min-w-0">
+                            <TrackNoBadge disc={discNoOf(t.path)} track={trackNoOf(t.path)} />
+                            <span className="flex-1 truncate text-zinc-400">{displayTitle(t.path)}</span>
+                          </div>
                           {/* The line carries what happened to THIS track's value
                               (`status`): a re-check the sources agreed with and a
                               gate refusal are not a write, and a bare "0 written"
                               would blur all three. */}
-                          <span className="text-zinc-300 shrink-0" title="what the sources said, who said it, and what this run did with the value">
+                          <div
+                            className="min-w-0 break-words text-zinc-300"
+                            title="what the sources said, who said it, and what this run did with the value"
+                          >
                             {advisoryLine(
                               replyFor(advReply.values, t.path),
                               answerSources(replyFor(advReply.answers, t.path), replyFor(advReply.sources, t.path)),
                               replyFor(advReply.status, t.path)
                             )}
-                          </span>
+                          </div>
                         </div>
                       ))}
                     </div>

@@ -20,6 +20,7 @@ import type {
   ImportBulkResult,
   ImportPrompt,
   ImportScriptsPreview,
+  ImportSession,
   ImportSettleResult,
   ImportSourceResult,
   LayoutReport,
@@ -2719,6 +2720,23 @@ export const api = {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path, staged }),
+    }),
+  /** Manual imports the user left unfinished — the wizard's persisted
+   *  bookmarks, newest first. The tray turns each into "Continue import". */
+  importSessions: () => json<{ sessions: ImportSession[] }>(`${API}/import/sessions`),
+  /** Bookmark (or refresh) one album's unfinished manual import. */
+  importSessionSave: (album: string, step: number, album_name = "", staged = false) =>
+    json<{ session: ImportSession | null }>(`${API}/import/sessions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ album, step, album_name, staged }),
+    }),
+  /** Forget one album's unfinished import, or all of them (no argument). */
+  importSessionDismiss: (album?: string) =>
+    json<{ ok: boolean }>(`${API}/import/sessions/dismiss`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ album: album ?? null }),
     }),
   importScriptsPreview: (paths: string[] = []) =>
     json<ImportScriptsPreview>(

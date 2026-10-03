@@ -7761,6 +7761,12 @@ COV_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
 COV_SOURCE_PRIORITY = list(_cover_choice.DEFAULT_SOURCE_ORDER)
 COV_MAX_SOURCES = 9
 COV_FALLBACK_SOURCES = list(_cover_choice.DEFAULT_SOURCE_ORDER)
+# Sources the meta-search never asks by DEFAULT, even when COV reports them
+# enabled: the Cover Art Archive's MusicBrainz source is a user-upload
+# database, not a store, so it is off the shipped list. A caller or a saved
+# `cover_sources` that names it explicitly is still honoured — it is validated
+# against the catalogue like every other id.
+COV_DEFAULT_DISABLED = ("musicbrainz",)
 
 _cov_info_cache = {"at": 0.0, "info": {}}
 _cov_sources_cache = {"at": 0.0, "ids": []}
@@ -7811,8 +7817,10 @@ def cov_catalog(timeout=15.0):
 
 
 def _cov_enabled_ids(timeout=15.0):
-    """Source ids COV reports as enabled, in priority order."""
-    enabled = [s["id"] for s in cov_catalog(timeout)["sources"] if s.get("enabled", True)]
+    """Source ids COV reports as enabled, in priority order — minus the ones
+    the app does not ship as defaults (`COV_DEFAULT_DISABLED`)."""
+    enabled = [s["id"] for s in cov_catalog(timeout)["sources"]
+               if s.get("enabled", True) and s["id"] not in COV_DEFAULT_DISABLED]
     ordered = [s for s in COV_SOURCE_PRIORITY if s in enabled]
     ordered += [s for s in enabled if s not in ordered]
     return ordered or list(COV_FALLBACK_SOURCES)
@@ -7864,7 +7872,8 @@ def resolve_cov_search(sources=None, country=None, cfg=None):
 
 def _cover_row(source, small, big, title=None, artist=None, tracks=None,
                url=None, width=None, height=None, front=None, kind=None,
-               release_cover=None, rank=None, format=None, nbytes=None):
+               release_cover=None, rank=None, format=None, nbytes=None,
+               cover_likeness=None, cover_blank=None):
     """One search result. Every provider (COV and each fallback) answers this
     exact shape, so the finder never has to know which one answered: the keys
     it already reads (`source`, `small`, `big`, `title`, `artist`, `tracks`,
@@ -7880,12 +7889,16 @@ def _cover_row(source, small, big, title=None, artist=None, tracks=None,
     the album's own art, which the policy prefers) or one RELEASE's own front
     cover (True, an edition's art) or neither stated (``None``).
     `rank` is the provider's own order (0 = its first answer), which
-    `mlo.cover_choice` reads as its last tiebreak."""
+    `mlo.cover_choice` reads as its last tiebreak. `cover_likeness` (0..1) and
+    `cover_blank` are filled afterwards by `_attach_looks` — how much detail
+    the image itself has, and whether it is a near-solid card the policy
+    rejects."""
     return {"source": source, "small": small or None, "big": big or None,
             "title": title or None, "artist": artist or None, "tracks": tracks,
             "url": url or None, "width": width, "height": height,
             "format": format, "bytes": nbytes, "front": front,
-            "kind": kind, "release_cover": release_cover, "rank": rank}
+            "kind": kind, "release_cover": release_cover, "rank": rank,
+            "cover_likeness": cover_likeness, "cover_blank": cover_blank}
 
 
 def _cov_headers():
@@ -8003,6 +8016,15 @@ COVER_PROBE_BYTES = 65536
 # "unknown" and shows as such.
 COVER_PROBE_LIMIT = 24
 COVER_PROBE_WORKERS = 8
+# The cover-likeness probe: how much detail the image itself has. A thumbnail
+# is small enough to be fetched WHOLE through the same ranged-GET seam (a
+# truncated full-size JPEG would not decode), then converted to grayscale and
+# downscaled before its edge energy is read. A near-solid image (a colour card,
+# a placeholder) has almost no neighbour difference and is not cover art.
+COVER_LOOK_BYTES = 262144
+COVER_LOOK_SIZE = 64
+COVER_LOOK_MIN_DETAIL = 2.0        # mean |Δ| on 0..255 below this = near-solid
+COVER_LOOK_DETAIL_REF = 16.0       # the detail a clean, detailed cover shows
 
 
 def _image_size(data):
@@ -8200,6 +8222,112 @@ def _attach_dimensions(rows, limit=COVER_PROBE_LIMIT, timeout=10.0):
             row["bytes"] = size["bytes"]
 
 
+def _image_look(data):
+    """``{"likeness", "blank"}`` for image *data*, or None when it cannot be
+    read.
+
+    The metric `mlo.cover_choice`'s appearance tier is: decode the bytes with
+    Pillow, convert to grayscale, downscale to `COVER_LOOK_SIZE`, and read the
+    mean absolute difference between neighbouring pixels (edge energy) in both
+    directions. Below `COVER_LOOK_MIN_DETAIL` there is no structure at all — a
+    solid colour card, not artwork — and the image is flagged blank (the
+    policy's hard rejection). Otherwise the level is that detail against
+    `COVER_LOOK_DETAIL_REF`, capped at 1.0.
+
+    Bytes this cannot decode (a truncated fetch, an HTML error page, an exotic
+    format) are UNKNOWN, not blank: nothing here may claim an image is a colour
+    card just because it could not be opened.
+    """
+    try:
+        import io
+        from PIL import Image
+        with Image.open(io.BytesIO(data)) as img:
+            img.load()
+            gray = img.convert("L").resize((COVER_LOOK_SIZE, COVER_LOOK_SIZE))
+        w, h = gray.size
+        if w < 2 or h < 2:
+            return None
+        px = list(gray.getdata())
+        dx = sum(abs(px[r * w + i] - px[r * w + i + 1])
+                 for r in range(h) for i in range(w - 1)) / float(h * (w - 1))
+        dy = sum(abs(px[i] - px[i + w])
+                 for i in range((h - 1) * w)) / float((h - 1) * w)
+        detail = (dx + dy) / 2.0
+        if detail < COVER_LOOK_MIN_DETAIL:
+            return {"likeness": 0.0, "blank": True}
+        return {"likeness": round(min(1.0, detail / COVER_LOOK_DETAIL_REF), 4),
+                "blank": False}
+    except Exception:
+        return None
+
+
+def _probe_look(url, timeout=10.0):
+    """One look probe of one URL — public hosts, 256 KB, never raises."""
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        if (parsed.scheme not in ("http", "https")
+                or not _public_host(parsed.hostname)):
+            return None
+        data = _probe_get(url, COVER_LOOK_BYTES, timeout)
+        if not data:
+            return None
+        return _image_look(data)
+    except Exception:
+        return None
+
+
+def cover_look(url, timeout=10.0):
+    """The image at *url* as the look probe found it, or None when unknown.
+
+    ``{"likeness", "blank"}`` — how much detail the image has and whether it is
+    a near-solid card. Memoized 30 days exactly like `image_dimensions` (memory
+    + the app's shared value cache), so the finder dialog and the unattended
+    import measure once and rank identically.
+    """
+    url = str(url or "").strip()
+    if not url:
+        return None
+    got = _genre_cached("cover_look", url, lambda: _probe_look(url, timeout))
+    return got if isinstance(got, dict) else None
+
+
+def _row_look(row, timeout=10.0):
+    """The row's own look: its `small` thumbnail first (small enough to be
+    fetched whole), then its `big` image as the fallback."""
+    for url in (row.get("small"), row.get("big")):
+        if not url:
+            continue
+        got = cover_look(url, timeout)
+        if got is not None:
+            return got
+    return None
+
+
+def _attach_looks(rows, limit=COVER_PROBE_LIMIT, timeout=10.0):
+    """Fill each row's own cover-likeness: the image's real detail.
+
+    The first *limit* rows, in the same small pool as `_attach_dimensions` —
+    the same bound and the same reason: a search must not become an image
+    downloader. A row nobody measured keeps `cover_likeness` None, and
+    `mlo.cover_choice` scores it at the set's median looks rather than blaming
+    it. A near-solid image gets `cover_blank`, which the policy rejects.
+    """
+    todo = [r for r in rows[:limit]
+            if r.get("cover_likeness") is None and not r.get("cover_blank")]
+    if not todo:
+        return
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=COVER_PROBE_WORKERS) as pool:
+        looks = list(pool.map(lambda r: _row_look(r, timeout), todo))
+    for row, got in zip(todo, looks):
+        if not got:
+            continue
+        row["cover_likeness"] = got.get("likeness")
+        if got.get("blank"):
+            row["cover_blank"] = True
+
+
 # --------------------------------------------------------------------------- #
 # The identity providers — asked by ID, not by name
 # --------------------------------------------------------------------------- #
@@ -8212,11 +8340,14 @@ def _attach_dimensions(rows, limit=COVER_PROBE_LIMIT, timeout=10.0):
 # both are known, and the group's image is what wins: one pressing's sleeve is
 # not the album's art.
 #
-# The fallbacks below are reached only when neither has anything; each is a
-# single lookup, and each states in the search's `sources` report what it did.
+# The fallbacks below are reached only when the name search has nothing; each
+# is a single lookup, and each states in the search's `sources` report what it
+# did. The Cover Art Archive is NOT among them any more: its identity reads run
+# above whenever an id is known, and it is not a store whose artwork should
+# quietly stand in for one that refused.
 CAA_BASE = "https://coverartarchive.org"
 DEEZER_API = "https://api.deezer.com"
-COVER_FALLBACKS = ("coverartarchive", "deezer", "itunes")
+COVER_FALLBACKS = ("deezer", "itunes")
 
 
 # Apple serves one artwork asset under as many addresses as its stores name
@@ -8391,7 +8522,7 @@ def _source_row(pid, status, *, count=None, detail=""):
     return row
 
 
-def _cover_fallback(artist, album, limit, cfg, rg_mbid, timeout):
+def _cover_fallback(artist, album, limit, cfg, timeout):
     """(rows, provider, report) from the FIRST fallback that answers.
 
     Only ever reached when the meta-search and the release's own cover came
@@ -8402,14 +8533,8 @@ def _cover_fallback(artist, album, limit, cfg, rg_mbid, timeout):
     """
     report = []
     for pid in COVER_FALLBACKS:
-        if pid == "coverartarchive" and not str(rg_mbid or "").strip():
-            report.append(_source_row(pid, "skipped",
-                                      detail="no release-group id to ask about"))
-            continue
         try:
-            if pid == "coverartarchive":
-                rows = _caa_covers(rg_mbid, limit, artist, album, timeout)
-            elif pid == "deezer":
+            if pid == "deezer":
                 rows = _deezer_covers(artist, album, limit, timeout)
             else:
                 rows = _itunes_covers(artist, album, limit, cfg, timeout)
@@ -8427,13 +8552,13 @@ def cover_search(artist, album, limit=_cover_choice.SEARCH_LIMIT, timeout=60.0, 
     """Album covers for artist/album → ``{"results", "provider", "sources"}``.
 
     Every row is ``{source, small, big, title, artist, tracks, url, width,
-    height, format, bytes, front, kind, release_cover, rank}``: the keys the
-    finder already reads, plus what the candidate was MEASURED from — the
-    image's real pixel size, container and byte count, read from the file
-    itself for the first ``COVER_PROBE_LIMIT`` rows (``None`` means unknown — a
-    probe can never fail the search), whether the provider labels it the front
-    cover of the release it belongs to, and its own rank in that provider's
-    order.
+    height, format, bytes, front, kind, release_cover, rank, cover_likeness,
+    cover_blank}``: the keys the finder already reads, plus what the candidate
+    was MEASURED from — the image's real pixel size, container and byte count,
+    read from the file itself for the first ``COVER_PROBE_LIMIT`` rows
+    (``None`` means unknown — a probe can never fail the search), whether the
+    provider labels it the front cover of the release it belongs to, and its
+    own rank in that provider's order.
 
     ``sources`` is the report `mlo.cover_choice.source_notes` turns into the
     pick's notes: one row per source that was asked — used / empty / error /
@@ -8441,9 +8566,14 @@ def cover_search(artist, album, limit=_cover_choice.SEARCH_LIMIT, timeout=60.0, 
     tried and which source was never asked (no id, no key, switched off).
 
     ``provider`` names who answered first: ``"cov"`` for the meta-search, the
-    fallback id that filled in (``coverartarchive``/``deezer``/``itunes``), and
-    ``None`` when nobody had anything at all — an empty answer is STATED, never
-    left as a silent zero-result.
+    fallback id that filled in (``deezer``/``itunes``), and ``None`` when
+    nobody had anything at all — an empty answer is STATED, never left as a
+    silent zero-result.
+
+    Every row is also MEASURED for its own cover-likeness (`_attach_looks`,
+    memoized like the size probe): a near-solid image is flagged blank and the
+    policy rejects it, and any other measured image carries a 0..1
+    `cover_likeness` `mlo.cover_choice`'s appearance tier weighs with the size.
 
     ``sources``/``country`` override the SAVED defaults (`cover_sources`,
     `cover_country`) for this one search only — nothing here writes config.
@@ -8552,8 +8682,7 @@ def cover_search(artist, album, limit=_cover_choice.SEARCH_LIMIT, timeout=60.0, 
             detail="no release id to ask about — only the release group"))
 
     if not results:
-        rows, pid, more = _cover_fallback(artist, album, limit, cfg,
-                                          release_group_mbid, timeout)
+        rows, pid, more = _cover_fallback(artist, album, limit, cfg, timeout)
         report.extend(more)
         results = rows
         provider = pid
@@ -8562,6 +8691,7 @@ def cover_search(artist, album, limit=_cover_choice.SEARCH_LIMIT, timeout=60.0, 
             report.append(_source_row(pid, "skipped",
                                       detail="not asked — the sources above answered"))
     _attach_dimensions(results)
+    _attach_looks(results)
     return {"results": results, "provider": provider, "sources": report}
 
 

@@ -1098,16 +1098,11 @@ DEFAULT_CONFIG = {
     # to the existing title/artist search when fpcalc is missing, no key is
     # configured, or nothing matches.
     "import_acoustid": True,
-    # The FINGERPRINT never chooses a release by itself during an interactive
-    # import: the wizard's automatic detect reads the album's TAGS
-    # (`/api/album/mbdetect`), and an album whose tags name no release waits
-    # for a press on "Match from fingerprint" beside the release field. This is
-    # the opt-in that lets the fingerprint fill it anyway — off by default, in
-    # the owner's words, because "it actually shouldn't auto-fill purely based
-    # on the AcoustID": a fingerprint is evidence about the AUDIO and never
-    # about which EDITION the user wants. Unattended imports match under
-    # `import_acoustid` and are not affected by this.
-    "import_acoustid_autofill": False,
+    # The FINGERPRINT never chooses a release: it is evidence about the AUDIO,
+    # never about which EDITION the user wants. An interactive import matches
+    # from the album's own TAGS (and a manually entered MusicBrainz link, which
+    # is authoritative), and only the explicit "Match from fingerprint" press
+    # ever consults AcoustID — nothing auto-fills from a fingerprint.
     "acoustid_enabled": True,
     "acoustid_api_key": "",
     # SUBMITTING to AcoustID is a second credential, not a second app key: the

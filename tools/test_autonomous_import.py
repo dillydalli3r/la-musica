@@ -231,7 +231,7 @@ def stub_resolve(mbid):
              "artists": [{"name": "Test Artist"}]}, mbid)
 
 
-def stub_genres(album_dir, release, cfg):
+def stub_genres(album_dir, release, cfg, **kwargs):
     """The genres family's own action (`imports._stamp_release`).
 
     The ONE step that FETCHES a genre — recorded like the others so a test can

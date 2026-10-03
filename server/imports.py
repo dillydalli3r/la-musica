@@ -153,7 +153,13 @@ def _release_country_tag(release):
     return _LIST_SEP.join(codes) or singular
 
 
-def _stamp_mb_tags(album_dir, release):
+# The MusicBrainz link ids a user owns: when a file already states one,
+# `_stamp_mb_tags` leaves it alone unless the caller explicitly chose the
+# release (force_ids). Every other identity slot is still force-written.
+_MB_LINK_KEYS = ("MUSICBRAINZ_ALBUMID", "MUSICBRAINZ_RELEASEGROUPID")
+
+
+def _stamp_mb_tags(album_dir, release, force_ids=False):
     """Write the exact MusicBrainz release identity into the tags so beets /
     grading work with the release the import is for.
 
@@ -163,6 +169,16 @@ def _stamp_mb_tags(album_dir, release):
     the naming script and grading off the wrong release. Per-track
     number/title/artist tags are corrected only when they contradict the
     chosen release, so a matching uploader's spelling survives.
+
+    The two LINK ids are the exception, and the one the user owns: a file that
+    already states a MUSICBRAINZ_ALBUMID / MUSICBRAINZ_RELEASEGROUPID keeps it,
+    so the MusicBrainz link someone pasted in the wizard (or the tag a previous
+    import wrote) can never be replaced by the different edition this run
+    happened to resolve. `force_ids=True` is the caller saying the release was
+    EXPLICITLY chosen for this album (a bulk pin, a hand-download match) and
+    may therefore land over an existing value; the raw writers
+    (`/api/mb/assign`, `/api/import/commit`) remain the ways to change a link
+    by hand.
 
     Every track is ONE container rewrite, and the tracks are stamped side by
     side — see `_stamp_one`."""
@@ -248,6 +264,12 @@ def _stamp_mb_tags(album_dir, release):
             want[key] = value
 
         for k, v in identity.items():
+            if (k in _MB_LINK_KEYS and not force_ids
+                    and str(af.get_tag(k) or "").strip()):
+                # The file already names a release/group: that is the user's
+                # link (or a previous import's), and this run's resolved
+                # edition does not get to replace it. See the docstring.
+                continue
             add(k, v)
         # LANGUAGE is the release's own TEXT REPRESENTATION (`language` off
         # MusicBrainz's release lookup: `jpn`, `eng`, …), which script 17's
@@ -680,6 +702,11 @@ def _finish_album(path, cfg, progress=None, force=None, release=None,
     entry point), and every early return below — a review stop, a missing
     folder, no configured chain — has to release it on the way out.
     """
+    # A release the CALLER handed in was explicitly chosen for this album (a
+    # wizard pick, a download's resolved match, a bulk pin); one resolved below
+    # from the album's own tags is the app's own guess. Only the explicit
+    # choice may replace a MusicBrainz link the file already carries.
+    explicit_release = bool(release)
     out = {"path": path, "scripts": [], "chain": [], "errors": [],
            "chained": False, "chain_off": False, "note": "",
            "skipped_families": []}
@@ -882,7 +909,8 @@ def _finish_album(path, cfg, progress=None, force=None, release=None,
                 rel = None
         if rel:
             try:
-                written, failed = _stamp_release(path, rel, run_cfg)
+                written, failed = _stamp_release(path, rel, run_cfg,
+                                                 force_ids=explicit_release)
                 out["genres"] = {"written": written, "failed": failed}
                 if failed:
                     out["errors"].append(
@@ -4078,7 +4106,7 @@ def _stamp_release_identity(album_dir, release, cfg):
     return fill_release_identity(files, release, cfg)
 
 
-def _stamp_release(album_dir, release, cfg):
+def _stamp_release(album_dir, release, cfg, force_ids=False):
     """Write the release identity into the album's tags.
 
     Returns ``(written, failed)`` — a file whose tags cannot be written is
@@ -4112,7 +4140,7 @@ def _stamp_release(album_dir, release, cfg):
 
     rel = _release_for_stamping(release)
     try:
-        _stamp_mb_tags(album_dir, rel)
+        _stamp_mb_tags(album_dir, rel, force_ids=force_ids)
     except Exception:
         traceback.print_exc()
     files = _audio_files(album_dir)
@@ -4670,7 +4698,10 @@ def _bulk_one(item, cfg):
     stamp_error = None
     if release:
         try:
-            written, failed = _stamp_release(album, release, cfg)
+            # The release was PINNED by the user for this album (the bulk
+            # item's own `mbid`/`release`), so its link ids land even over an
+            # existing one — this is the explicit choice `force_ids` is for.
+            written, failed = _stamp_release(album, release, cfg, force_ids=True)
             if failed:
                 stamp_error = (f"release tags written to {written} file(s); "
                                f"{failed} file(s) could not be tagged")

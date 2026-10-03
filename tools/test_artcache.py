@@ -151,46 +151,54 @@ assert len(calls) == 1, calls
 #    THAT ANSWERED — never under the URL it stood in for.
 # --------------------------------------------------------------------------- #
 reset()
-calls = stub_get({CAA: (200, JPEG, "image/jpeg")})
-data, ctype, source = artcache.fetch_art(
-    PRIMARY, artist="Radiohead", album="OK Computer", release_group_mbid="rg-1")
-assert data == JPEG and ctype == "image/jpeg", (data, ctype)
-assert source == "coverartarchive", source
-assert [u for u, _h in calls] == [PRIMARY, CAA], calls
-# the answering URL holds its own bytes…
-assert os.path.isfile(os.path.join(artcache.cache_dir(), artcache._key(CAA) + ".bin"))
-# …and the URL that was asked about holds NOTHING: an entry there would hold a
-# picture its own URL never served, and every later caller of that URL would
-# be handed it as that URL's image.
-assert not os.path.isfile(os.path.join(artcache.cache_dir(), artcache._key(PRIMARY) + ".bin"))
-# the next view of the same row answers the SAME bytes: the fallback's own
-# entry is what answers, so the fallback is not fetched twice — only the row's
-# own URL is asked again (a CDN that refused once may come back)
-before = len(calls)
-assert artcache.fetch_art(PRIMARY, artist="Radiohead", album="OK Computer",
-                          release_group_mbid="rg-1")[0] == JPEG
-again = [u for u, _h in calls[before:]]
-assert again == [PRIMARY], again
+_orig_itunes, _orig_deezer = artcache._itunes_art_url, artcache._deezer_art_url
+artcache._itunes_art_url = lambda a, al, cfg, t: ITUNES
+artcache._deezer_art_url = lambda a, al, cfg, t: DEEZER
+try:
+    calls = stub_get({ITUNES: (200, JPEG3000, "image/jpeg")})
+    data, ctype, source = artcache.fetch_art(
+        PRIMARY, artist="Radiohead", album="OK Computer", release_group_mbid="rg-1")
+    assert data == JPEG3000 and ctype == "image/jpeg", (data, ctype)
+    assert source == "itunes", source
+    assert [u for u, _h in calls] == [PRIMARY, ITUNES], calls
+    # the answering URL holds its own bytes…
+    assert os.path.isfile(os.path.join(artcache.cache_dir(), artcache._key(ITUNES) + ".bin"))
+    # …and the URL that was asked about holds NOTHING: an entry there would hold a
+    # picture its own URL never served, and every later caller of that URL would
+    # be handed it as that URL's image.
+    assert not os.path.isfile(os.path.join(artcache.cache_dir(), artcache._key(PRIMARY) + ".bin"))
+    # the next view of the same row answers the SAME bytes: the fallback's own
+    # entry is what answers, so the fallback is not fetched twice — only the row's
+    # own URL is asked again (a CDN that refused once may come back)
+    before = len(calls)
+    assert artcache.fetch_art(PRIMARY, artist="Radiohead", album="OK Computer",
+                              release_group_mbid="rg-1")[0] == JPEG3000
+    again = [u for u, _h in calls[before:]]
+    assert again == [PRIMARY], again
 
-# The reason that keying matters, as the bug it was: album A's search fetched a
-# row's URL, the CDN refused and album A's fallback image (ANOTHER ALBUM's
-# cover) was cached under that URL — so album B's cover write, asking for the
-# same row's URL, was answered with album A's image and wrote it to the wrong
-# album's folder. Each identity now reaches its own answer.
-reset()
-OTHER_CAA = "https://coverartarchive.org/release-group/rg-2/front-1200"
-calls = stub_get({CAA: (200, JPEG, "image/jpeg"), OTHER_CAA: (200, PNG, "image/png")})
-assert artcache.fetch_art(PRIMARY, artist="Radiohead", album="OK Computer",
-                          release_group_mbid="rg-1")[0] == JPEG
-data, _ctype, source = artcache.fetch_art(PRIMARY, artist="Radiohead",
-                                          album="Kid A", release_group_mbid="rg-2")
-assert (data, source) == (PNG, "coverartarchive"), (data, source)
+    # The reason that keying matters, as the bug it was: album A's search fetched a
+    # row's URL, the CDN refused and album A's fallback image (ANOTHER ALBUM's
+    # cover) was cached under that URL — so album B's cover write, asking for the
+    # same row's URL, was answered with album A's image and wrote it to the wrong
+    # album's folder. Each identity now reaches its own answer.
+    reset()
+    OTHER_ITUNES = ("https://is1-ssl.mzstatic.com/image/thumb/other/"
+                    "3000x3000bb.jpg")
+    artcache._itunes_art_url = lambda a, al, cfg, t: (
+        OTHER_ITUNES if al == "Kid A" else ITUNES)
+    calls = stub_get({ITUNES: (200, JPEG3000, "image/jpeg"),
+                      OTHER_ITUNES: (200, PNG, "image/png")})
+    assert artcache.fetch_art(PRIMARY, artist="Radiohead", album="OK Computer")[0] == JPEG3000
+    data, _ctype, source = artcache.fetch_art(PRIMARY, artist="Radiohead", album="Kid A")
+    assert (data, source) == (PNG, "itunes"), (data, source)
+finally:
+    artcache._itunes_art_url, artcache._deezer_art_url = _orig_itunes, _orig_deezer
 
 # --------------------------------------------------------------------------- #
 # 4b) A cover WRITE never receives another provider's image (`substitute=False`)
 # --------------------------------------------------------------------------- #
 reset()
-calls = stub_get({CAA: (200, JPEG, "image/jpeg")})
+calls = stub_get({ITUNES: (200, JPEG3000, "image/jpeg")})
 assert artcache.fetch_art(PRIMARY, artist="Radiohead", album="OK Computer",
                           release_group_mbid="rg-1", substitute=False) == \
     (None, None, None)
@@ -214,7 +222,7 @@ calls = stub_get({APPLE_BIG: (200, JPEG3000, "image/jpeg")})
 data, ctype, source = artcache.fetch_art(
     APPLE_DEAD, artist="Radiohead", album="In Rainbows", release_group_mbid="rg-1")
 assert (data, source) == (JPEG3000, "applemusic"), (data, source)
-assert [u for u, _h in calls] == [APPLE_DEAD, APPLE_BIG], calls   # CAA never asked
+assert [u for u, _h in calls] == [APPLE_DEAD, APPLE_BIG], calls   # no fallback asked
 # and the url that DID answer is the one that keeps the entry
 assert os.path.isfile(os.path.join(artcache.cache_dir(), artcache._key(APPLE_BIG) + ".bin"))
 before = len(calls)
@@ -249,18 +257,19 @@ before = len(calls)
 assert artcache.fetch_art(PRIMARY)[0] == JPEG
 assert len(calls) == before + 1, calls   # refetched, not trusted
 
-# The chain is CAA → iTunes → Deezer, and it is LAZY: with the Cover Art
-# Archive answering, neither of the other two is even asked for a URL.
+# The chain is iTunes → Deezer, and it is LAZY: with iTunes answering, Deezer
+# is not even asked for a URL.
 reset()
 asked = []
 artcache._itunes_art_url = lambda a, al, cfg, t: asked.append("itunes") or ITUNES
 artcache._deezer_art_url = lambda a, al, cfg, t: asked.append("deezer") or DEEZER
-calls = stub_get({CAA: (200, JPEG, "image/jpeg")})
+calls = stub_get({ITUNES: (200, JPEG3000, "image/jpeg")})
 artcache.fetch_art(PRIMARY, artist="Radiohead", album="OK Computer",
                    release_group_mbid="rg-1")
-assert asked == [], asked
+assert asked == ["itunes"], asked
+assert [u for u, _h in calls] == [PRIMARY, ITUNES], calls
 
-# With no MBID (and a dead primary) iTunes answers next…
+# A dead primary falls straight through to the first tier…
 reset()
 asked = []
 calls = stub_get({ITUNES: (200, JPEG3000, "image/jpeg")})
@@ -279,13 +288,14 @@ assert asked == ["itunes", "deezer"], asked
 assert source == "deezer", source
 assert [u for u, _h in calls] == [PRIMARY, DEEZER], calls
 
-# The iTunes and Deezer tiers are ALBUM lookups: with no album name there is
-# nothing for them to answer ABOUT, and asked anyway they answer with whatever
-# that artist's most popular release is — a DIFFERENT album's cover. That is
-# the art the user never picked: it gets cached under the row's own URL for a
-# month and, on the finder's "Use this cover", written into the library as if
-# it were the row's image. An artist alone therefore falls back to the
-# release-group tier (which answers by identity) and to nothing else.
+# The remaining tiers are ALBUM lookups: with no album name there is nothing
+# for them to answer ABOUT, and asked anyway they answer with whatever that
+# artist's most popular release is — a DIFFERENT album's cover. That is the art
+# the user never picked: it gets cached under the row's own URL for a month
+# and, on the finder's "Use this cover", written into the library as if it were
+# the row's image. An artist alone therefore falls back to NOTHING, and the
+# Cover Art Archive is no longer a tier at all — an id with no name reaches no
+# provider.
 _real_itunes_tier, _real_deezer_tier = artcache._itunes_art_url, artcache._deezer_art_url
 try:
     reset()
@@ -297,8 +307,7 @@ try:
     assert artcache.fetch_art(PRIMARY, artist="Radiohead") == (None, None, None)
     assert asked == [], asked
     assert [u for u, _h in calls] == [PRIMARY], calls
-    # …while the album's OWN identity still falls back exactly as before, and
-    # the release-group tier still answers an id-only request.
+    # …while the album's OWN identity still falls back exactly as before.
     reset()
     asked = []
     calls = stub_get({ITUNES: (200, JPEG3000, "image/jpeg")})
@@ -307,13 +316,14 @@ try:
     assert asked == [("itunes", "In Rainbows")], asked
     assert source == "itunes" and data == JPEG3000, (source, data)
 
+    # …and an id alone (no album, no artist) reaches no provider: the archive is
+    # not a fallback any more, so there is nothing to ask about.
     reset()
     asked = []
     calls = stub_get({CAA: (200, JPEG, "image/jpeg")})
-    data, _ctype, source = artcache.fetch_art(PRIMARY, release_group_mbid="rg-1")
-    assert source == "coverartarchive" and data == JPEG, (source, data)
+    assert artcache.fetch_art(PRIMARY, release_group_mbid="rg-1") == (None, None, None)
     assert asked == [], asked
-    assert [u for u, _h in calls] == [PRIMARY, CAA], calls
+    assert [u for u, _h in calls] == [PRIMARY], calls
 finally:
     artcache._itunes_art_url, artcache._deezer_art_url = _real_itunes_tier, _real_deezer_tier
 

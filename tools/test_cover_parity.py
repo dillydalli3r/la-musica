@@ -58,6 +58,7 @@ import copy
 import io
 import json
 import os
+import random
 import sys
 import tempfile
 
@@ -176,9 +177,19 @@ def cov_event(source, url, release=REL, **extra):
 
 
 def image(w, h, fmt="jpeg"):
-    """Real image bytes of exactly w×h, so the probe reads a real size."""
+    """Real image bytes of exactly w×h, so the probe reads a real size.
+
+    The picture is a fixed, detailed block pattern (never a solid colour), so
+    the cover-likeness metric sees a cover-like image in every scenario: the
+    ranking then rests on the facts each scenario is built around, not on the
+    stub's pixels. Deterministic — one seeded 16×16 pattern, upscaled.
+    """
+    rng = random.Random(1234)
+    seed = Image.new("L", (16, 16))
+    seed.putdata([rng.randrange(0, 256) for _ in range(256)])
+    img = seed.resize((w, h), Image.NEAREST).convert("RGB")
     buf = io.BytesIO()
-    Image.new("RGB", (w, h), (30, 90, 200)).save(buf, "JPEG" if fmt == "jpeg" else "PNG")
+    img.save(buf, "JPEG" if fmt == "jpeg" else "PNG")
     return buf.getvalue()
 
 

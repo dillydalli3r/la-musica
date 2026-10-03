@@ -68,7 +68,7 @@ from typing import Dict, List, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from server import imports
+from server import import_sessions, imports
 
 router = APIRouter()
 
@@ -350,6 +350,57 @@ def import_prompt_dismiss(req: DismissRequest):
     from server import import_autonomy
     _guard([req.path], req.staged)
     return {"ok": import_autonomy.clear(req.path, load_config())}
+
+
+# --------------------------------------------------------------------------- #
+# Unfinished MANUAL imports. A prompt above is raised after a run has finished;
+# a session here is a wizard run that never reached Finish, bookmarked by the
+# client as its step changes so the tray can offer to continue it. See
+# :mod:`server.import_sessions`.
+# --------------------------------------------------------------------------- #
+class SessionRequest(BaseModel):
+    album: str
+    step: int = 1
+    album_name: str = ""
+    staged: bool = False  # the wizard's album folder, wherever the user put it
+
+
+class SessionDismissRequest(BaseModel):
+    # None = forget every session (the wizard's "start over").
+    album: Optional[str] = None
+
+
+@router.get("/api/import/sessions")
+def import_sessions_list():
+    """Manual imports the user left unfinished, newest first.
+
+    Read-only, so it keeps answering while ``manual_import_enabled`` is off —
+    a user who turned the wizard off still needs the list to clear.
+    """
+    from mlo.config import load_config
+    return {"sessions": import_sessions.sessions(load_config())}
+
+
+@router.post("/api/import/sessions")
+def import_session_save(req: SessionRequest):
+    """Bookmark (or refresh) an unfinished manual import of one album."""
+    from mlo.config import load_config
+    _guard([req.album], req.staged)
+    return {"session": import_sessions.upsert(
+        req.album, req.step, req.album_name, req.staged, load_config())}
+
+
+@router.post("/api/import/sessions/dismiss")
+def import_session_dismiss(req: SessionDismissRequest):
+    """Forget one album's unfinished import, or all of them.
+
+    No folder guard: this only deletes a bookmark, and a staged album lives
+    outside the library by design — requiring the guard would make a staged
+    session impossible to clear.
+    """
+    from mlo.config import load_config
+    import_sessions.dismiss(req.album, load_config())
+    return {"ok": True}
 
 
 # --------------------------------------------------------------------------- #

@@ -1329,13 +1329,53 @@ rating.
   to store a below-target cover. A manual apply stays warning-only: the user
   picked that exact image. **The album's reference cover is the release GROUP's**
   (`coverartarchive.org/release-group/<rg>/front-500`): it is the image the
-  finder shows beside the candidates, the wizard's Links/Covers preview, and what
-  the policy's first rule prefers — and the **matched release's own front cover
-  ranks just below it, above any row found by name search**: a named edition is
-  evidence, a text match is a guess, and inverting those two is how the owner's
-  Toxicity import took a store row's blue-tinted art (a different pressing) over
-  the release's own cover. Both are asked when both ids are known, and the
-  group's cover being absent falls back to the release's.
+  finder shows beside the candidates, the wizard's Links/Covers preview, and the
+  level rule 1 scores highest (the release group's art, then the matched
+  release's, then a row found by name search) — and the **matched release's own
+  front cover ranks just below it, above any row found by name search**: a named
+  edition is evidence, a text match is a guess, and inverting those two is how
+  the owner's Toxicity import took a store row's blue-tinted art (a different
+  pressing) over the release's own cover. Both are asked when both ids are
+  known, and the group's cover being absent falls back to the release's.
+- **R56g — the cover score is a WEIGHTED MIX, not a positional order.** The
+  policy's tiers no longer decide lexicographically: each contributes its level
+  in [0, 1] times a weight (`mlo.cover_choice._TIER_WEIGHTS`, summing to 1.0 —
+  appearance 0.22, size 0.20, release 0.14, identity 0.12, quality 0.08,
+  source 0.07, kind 0.06, format 0.05, square 0.05, rank 0.01), and the score
+  is their sum. The two biggest weights are image size and **cover-likeness**,
+  so a slightly smaller but clearly better-looking cover can win; the rest
+  decide the difference between two otherwise comparable images. Cover-likeness
+  is measured from the image's own bytes in the SHARED search layer
+  (`server.integrations._attach_looks`, memoized 30 days like
+  `image_dimensions`), so the dialog and the unattended import rank identically:
+  the row's `small` thumbnail is fetched through the same ranged-GET probe
+  (256 KB), decoded with Pillow, converted to grayscale, downscaled to 64×64,
+  and scored on its mean neighbour difference (edge energy). A near-solid/blank
+  image (detail below `COVER_LOOK_MIN_DETAIL`) is REJECTED as not cover art; any
+  other measured image carries a 0..1 `cover_likeness` on its row. Only the
+  first `COVER_PROBE_LIMIT` rows are measured, and a row nobody measured is
+  neither rewarded nor blamed — it scores the candidate set's own MEDIAN
+  measured cover-likeness. The tier the winner actually won on (the biggest
+  weighted advantage over the runner-up) is the one the deciding sentence names.
+  Pinned by `tools/test_cover_choice.py` (the weights sum, the blank gate, the
+  median, a better-looking smaller cover beating a flat larger one) and
+  `tools/test_covers.py` (the metric decoded from real bytes and attached to
+  the finder's rows).
+- **R56h — the Cover Art Archive is not a default source.** Its MusicBrainz
+  catalogue is a user-upload database, not a store, so it is off the shipped
+  `DEFAULT_SOURCE_ORDER` (qobuz, applemusic, tidal, bandcamp, deezer, spotify,
+  itunes, discogs) and `integrations._cov_enabled_ids`/`resolve_cov_search`
+  never add it on their own — though a caller or a saved `cover_sources` that
+  names `musicbrainz` explicitly is honoured (validated against the COV
+  catalogue, as every id is). The archive is likewise no longer in
+  `integrations.COVER_FALLBACKS` (now `("deezer", "itunes")`) nor in
+  `server.artcache._fallback_candidates`, so no display path serves it in place
+  of a row whose own URL refused. What stays is the IDENTITY read: the
+  release-group front (the reference) and the release's own front are still
+  asked whenever an id is known, and the policy's source tier neither prefers
+  nor blames them (an identity read is not a store source; rule 1 carries it).
+  Pinned by `tools/test_cover_choice.py`, `tools/test_covers.py` and
+  `tools/test_artcache.py`.
 - **R163 — the autonomous fetch asks the release group and ranks by that
   reference, and it derives the group id when only the release is tagged.** What
   R56b promises is only true if the query actually carries the group:
@@ -1360,11 +1400,13 @@ rating.
   (release group `b1392450-e666-3926-a536-22c65f834433`, no release id given):
   22 candidates ranked, the group's own front cover won —
   `coverartarchive.org/release/30702389-…/30730533321.jpg`, 1400×1400 JPEG,
-  `release_cover: false`, score 0.9997 — above the Tidal/Apple 1400–4000 px rows
-  (0.6624/0.6619) and with the karaoke/tribute rows (*Vitamin String Quartet*,
-  *Mother Falcon*, *Molotov Cocktail Piano*) rejected by name; the sources
-  report is part of the payload, so a search that could not ask the group says
-  so.
+  `release_cover: false` — over the Tidal/Apple 1400–4000 px rows (rule 1 and
+  the front-vs-other label give it a lead the store rows' source pull cannot
+  overturn, and a 4000 px file is *not* better than one at the target: it is
+  only ever downscaled, so it scores the size tier's bottom), and with the
+  karaoke/tribute rows (*Vitamin String Quartet*, *Mother Falcon*, *Molotov
+  Cocktail Piano*) rejected by name; the sources report is part of the payload,
+  so a search that could not ask the group says so.
 - **R56c — a cover is never framed by a decorative border in the UI.** No
   border, ring or outline is drawn around a cover wherever it appears — the
   album grid, the library and list rows, the fullscreen player, the album
@@ -1408,8 +1450,9 @@ rating.
   default (`server.main`'s `/api/cover/search`), by `cover_search`'s signature
   and by the import chain's `imports.COVER_REVIEW_LIMIT`. The import used to ask
   for 12 (a pick-one screenful) while the dialog's route asked 40, so a policy
-  winner past the twelfth row — the size tier outranks the source tier, so a
-  bigger image from a lower-priority source can sit anywhere in the list — was
+  winner past the twelfth row — the weighted mix (R56g) lets a lower-priority
+  source's image lead on size and cover-likeness, so the winner can sit anywhere
+  in the list — was
   invisible to the unattended path and it landed an image the dialog never
   showed. The row SET, not only the rule, is therefore what "the same pick"
   means: `tools/test_cover_parity.py` drives both entry points (`GET
@@ -2395,22 +2438,49 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
     own Run All is the explicit, user-started library-wide path and is not what
     an import runs).
 
-- **R340 — the fingerprint never chooses a release by itself during an
-  interactive import.** The wizard's automatic detect reads the album's own
-  TAGS (`GET /api/album/mbdetect`: a MusicBrainz release id in any track's
-  tags) and, when they name none, searches MusicBrainz for the album its tags
-  describe — both are evidence about what the files SAY they are. An AcoustID
-  fingerprint is evidence about the AUDIO, and what it matches is a release
-  group with many editions: the one press that accepts it is
-  **Match from fingerprint**, the button beside the release field
-  (`ImportWizard.matchReleaseFromFingerprint`), which ends in the same
-  `useAcoustidRelease` → `pickRelease` flow a manually pasted id takes, so the
-  tags are written by one writer either way and the accepted match files its
-  `ACOUSTID_ID`/`ACOUSTID_FINGERPRINT` pair. `import_acoustid_autofill`
-  (Settings → Import, **off by default**) is the opt-in that lets that same
-  match run automatically at the Links step — it is the ONLY automatic route
-  from a fingerprint to a release. Unattended imports are unaffected: a bulk
-  import matches under `import_acoustid` on its own.
+- **R340 — the fingerprint never chooses a release by itself, EVER.** The
+  wizard's automatic detect reads the album's own TAGS (`GET /api/album/
+  mbdetect`: a MusicBrainz release id in any track's tags) and, when they name
+  none, searches MusicBrainz for the album its tags describe — both are
+  evidence about what the files SAY they are, and a manually entered link is
+  authoritative over both. An AcoustID fingerprint is evidence about the AUDIO,
+  and what it matches is a release group with many editions, so it never picks
+  one: the ONLY press that uses it is **Match from fingerprint**, the button
+  beside the release field (`ImportWizard.matchReleaseFromFingerprint`), which
+  ends in the same `acceptAcoustidRelease` → `pickRelease` flow a manually
+  pasted id takes, so the tags are written by one writer either way and the
+  accepted match files its `ACOUSTID_ID`/`ACOUSTID_FINGERPRINT` pair. There is
+  no setting that lets a fingerprint fill a release automatically — the old
+  `import_acoustid_autofill` opt-in is gone — so nothing the user did not ask
+  for can ever replace the MusicBrainz link they entered.
+
+- **R344 — a MusicBrainz link a file already carries is the USER's, and an
+  import never replaces it with the edition it happened to resolve.**
+  `server.imports._stamp_mb_tags` force-writes the release identity, but the
+  two LINK ids — `MUSICBRAINZ_ALBUMID`, `MUSICBRAINZ_RELEASEGROUPID` — are left
+  alone when the file already states one; `force_ids=True` is the caller saying
+  the release was EXPLICITLY chosen for this album (a bulk pin, a download
+  match), which is when the id may land over an existing value. Changing a link
+  by hand stays the raw writers' (`POST /api/mb/assign`, `POST /api/
+  import/commit`). So a MusicBrainz link pasted in the wizard survives every
+  later re-import, and an album that arrived tagged with another pressing's id
+  keeps it until the user says otherwise. The other identity slots
+  (DATE/country/status/label/catalog number) are still force-written, as R287
+  documents. Pinned by `tools/test_import_pipeline.py`.
+
+- **R345 — a manual import that was never finished is REMEMBERED, and the tray
+  offers to continue it.** The wizard bookmarks the album it is on at each step
+  (`server.import_sessions`, one entry per album in
+  `<music>/.mlo/data/import_sessions.json`, written through
+  `POST /api/import/sessions`), and clears the bookmark when the album reaches
+  Finish (`POST /api/import/sessions/dismiss`). A client restores the list from
+  `GET /api/import/sessions` on load and the notification tray shows one
+  **Continue import** row per unfinished album, linking back to
+  `/import?album=…&step=…` so the wizard re-opens on that album at the step it
+  was left on. A bookmark whose folder is gone is pruned on read. This is NOT
+  R121's gap prompt: a prompt is raised AFTER a finished run reports what its
+  sources could not supply, while a session is a run that has not reached
+  Finish at all. Pinned by `tools/test_import_sessions.py`.
 
 - **R164 — a script that moves an album reports the folder the album is in
   WHEN THE SCRIPT RETURNS, and the chain follows it.** A script that takes an
