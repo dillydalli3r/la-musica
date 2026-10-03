@@ -1683,6 +1683,29 @@ table and the auto-update worker cannot disagree.
   whose binaries name their shared library by an absolute RPATH travels with
   that library and is run through a launcher, so an install can never land a
   tool the host cannot start.
+- **R67b — a tools folder two hosts share keeps BOTH hosts' installs.** R67a
+  puts the tools beside the library, and one library can be read by two installs
+  at once: the Docker container's `/music` is the very folder a desktop install
+  writes. pip unpacks the wheels of whichever OS runs it into that folder, so a
+  package built for another OS or CPython cannot be imported here and is not
+  THIS host's install — `mlo.tools.python_pkg_path` reads each vendored
+  folder's own `.dist-info/WHEEL` and counts only one whose tags this host can
+  load (`py3-none-any`, and the stable-ABI `cp3x-abi3`, belong to every host; a
+  folder with no WHEEL at all is never hidden for lack of evidence). Measured on
+  the owner's library, whose `.mlo/tools` holds the container's linux
+  `librosa v1.0.0` (485 MB, `numpy … cp312-manylinux…`) beside the desktop's
+  `librosa v0.11.0`: the newest-version pick took the linux folder, its numpy C
+  extension cannot be imported by the Windows interpreter, and every
+  librosa-backed tag — MOOD/ENERGY (16) and BPM/INITIALKEY (12), in a run and
+  during an import — silently stopped being written, because the analysis call
+  is wrapped in a try/except. The same fact holds on the install side: a version
+  the other host already holds is installed BESIDE that folder
+  (`<pkg> v<version>-<platform>-<interpreter>`, e.g. `librosa v1.0.0-win-amd64-cp313`),
+  because installing over it would merge two numpy builds into one folder —
+  which detection then refuses for both hosts — and the failed-install path
+  DELETES the folder, an install this host never made; and the stale-version
+  pruner never removes another host's folder, which is not this one's to
+  replace.
 - **R68 — the page's own action is always on screen.** Install/Update-all is
   sticky (it does not scroll away with the first rows) and is disabled only when
   there is nothing this host can install, with the reason in its title. It never

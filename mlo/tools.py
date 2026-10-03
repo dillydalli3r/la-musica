@@ -1,6 +1,9 @@
 """Auto-detection of external encoder tools in the app's tools folder."""
 import os
+import platform
 import re
+import sys
+import sysconfig
 
 from .paths import tools_dirs
 
@@ -634,8 +637,111 @@ def pip_import_present(folder, pkg):
             or os.path.isfile(os.path.join(folder, top + ".py")))
 
 
+def _py_tag_runs_here(py_tag, abi_tag):
+    """Whether one WHEEL `Tag:`'s python part covers THIS interpreter.
+
+    `cp313` is this CPython exactly; `py3` declares no interpreter at all; and
+    `cp38` under an `abi3` ABI is the stable ABI, which every CPython from 3.8
+    up can load."""
+    if py_tag == f"cp{sys.version_info.major}{sys.version_info.minor}":
+        return True
+    if py_tag.startswith("py3"):
+        return True
+    if "abi3" in abi_tag and py_tag.startswith("cp"):
+        digits = py_tag[2:]
+        if digits.isdigit():
+            return (int(digits[0]), int(digits[1:] or 0)) <= sys.version_info[:2]
+    return False
+
+
+def _platform_tag_runs_here(plat_tag):
+    """Whether one WHEEL `Tag:`'s platform part is THIS host's."""
+    if plat_tag in ("any", "none"):
+        return True
+    machine = platform.machine().lower()
+    if os.name == "nt":
+        if plat_tag == "win32":
+            return sys.maxsize <= 2 ** 32        # a 32-bit interpreter
+        return plat_tag == f"win_{machine}"
+    if sys.platform == "darwin":
+        return plat_tag.startswith("macosx") and plat_tag.endswith(machine)
+    return (plat_tag.startswith(("linux", "manylinux", "musllinux"))
+            and plat_tag.endswith(machine))
+
+
+def _wheel_tag_runs_here(tag):
+    """One full `Tag:` line (`cp313-cp313-win_amd64`) against this host.
+
+    Each of the three parts may be a DOT-joined set — `py2.py3`, and
+    `manylinux_2_17_x86_64.manylinux2014_x86_64` — and any combination in the
+    set is enough. A line this cannot parse is NOT a reason to hide a package:
+    only a tag positively shown to be another host's counts against it."""
+    parts = tag.split("-")
+    if len(parts) != 3:
+        return True
+    py_tags, abi_tag, plat_tags = parts
+    return (any(_py_tag_runs_here(py, abi_tag) for py in py_tags.split("."))
+            and any(_platform_tag_runs_here(plat)
+                    for plat in plat_tags.split(".")))
+
+
+def pip_wheels_run_here(folder):
+    """Whether every wheel vendored in *folder* can run on THIS host.
+
+    The rule a tools folder shared by two hosts needs. The tools live beside
+    the LIBRARY (mlo.paths.tools_dir), and one library can be read by two
+    installs at once — the Docker container's /music is the same folder a
+    desktop install writes — so pip unpacks the wheels of whichever platform
+    runs it into that folder. pip records each wheel's platform in its own
+    `.dist-info/WHEEL`, and a folder built for another OS or CPython (a numpy
+    that is `cp312-cp312-manylinux…` on a Windows interpreter) cannot be
+    imported here: the C extension fails at import. Because the folder's NAME
+    ("librosa v1.0.0") outranks the working "librosa v0.11.0", the
+    newest-version pick handed the app that folder and every librosa-backed tag
+    — MOOD/ENERGY (16) and BPM/INITIALKEY (12), in a run and during an import —
+    silently stopped being computed instead of using the copy that runs.
+
+    A folder with nothing to judge — no `.dist-info`, or a WHEEL stating no
+    tags — is accepted: unproven is not foreign, and a package must never be
+    hidden from the app.
+    """
+    try:
+        entries = os.listdir(folder)
+    except OSError:
+        return False
+    for entry in entries:
+        if not entry.endswith(".dist-info"):
+            continue
+        try:
+            with open(os.path.join(folder, entry, "WHEEL"), encoding="utf-8",
+                      errors="replace") as fh:
+                tags = [line.split(":", 1)[1].strip()
+                        for line in fh if line.startswith("Tag:")]
+        except (OSError, IndexError):
+            continue
+        if tags and not any(_wheel_tag_runs_here(tag) for tag in tags):
+            return False
+    return True
+
+
+def host_tag():
+    """This host's own wheel platform + interpreter, e.g. `win-amd64-cp313`.
+
+    The name fragment a pip install adds when `<pkg> v<version>` is already
+    taken by ANOTHER host's install (fetchdeps._pip_install_dir): it says
+    which host the folder belongs to, and no other host computes the same
+    one."""
+    return (f"{sysconfig.get_platform()}-"
+            f"cp{sys.version_info.major}{sys.version_info.minor}")
+
+
 def _pip_pkg_dirs(pkg):
-    """[(version, dir)] for every vendored install of *pkg* in a tools folder."""
+    """[(version, dir)] for every vendored install of *pkg* in a tools folder.
+
+    Only installs THIS host can import count (pip_wheels_run_here): a folder
+    another host built into the shared tools folder is not an install of this
+    one, and letting its version win is what stopped the analysis tags whose
+    wheels it cannot load (see pip_wheels_run_here)."""
     out = []
     for root in tools_dirs():
         if not os.path.isdir(root):
@@ -649,6 +755,8 @@ def _pip_pkg_dirs(pkg):
             if not (os.path.isdir(full) and entry.lower().startswith(pkg.lower())):
                 continue
             if not pip_import_present(full, pkg):
+                continue
+            if not pip_wheels_run_here(full):
                 continue
             out.append((_pkg_dist_version(full, pkg) or _pkg_folder_version(entry, pkg),
                         full))

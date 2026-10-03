@@ -271,9 +271,14 @@ def rows_with(installed, upstream):
          fetchdeps.upstream_versions) = real
 
 
-def vendor_pip_pkg(deps_dir, key, version):
+def vendor_pip_pkg(deps_dir, key, version, tags=None):
     """A folder shaped the way `pip install --target` leaves one, dist-info
-    included: that metadata is what detection reads the version from."""
+    included: that metadata is what detection reads the version from.
+
+    *tags* writes those `Tag:` lines into the dist-info's own `WHEEL`, which is
+    where mlo.tools reads the platform a vendored folder was built for; the
+    default of None writes no WHEEL at all — a folder with nothing to judge,
+    which detection accepts."""
     top = tools_mod.PIP_IMPORT_NAMES.get(key, key)
     root = os.path.join(deps_dir, f"{key} v{version}")
     os.makedirs(os.path.join(root, top), exist_ok=True)
@@ -281,6 +286,11 @@ def vendor_pip_pkg(deps_dir, key, version):
     dist = os.path.join(root, f"{key.replace('-', '_')}-{version}.dist-info")
     os.makedirs(dist, exist_ok=True)
     open(os.path.join(dist, "METADATA"), "w").close()
+    if tags:
+        with open(os.path.join(dist, "WHEEL"), "w") as fh:
+            fh.write("Wheel-Version: 1.0\n")
+            for tag in tags:
+                fh.write(f"Tag: {tag}\n")
     return root
 
 
@@ -1102,6 +1112,130 @@ with tempfile.TemporaryDirectory() as tmp:
         fetchdeps._api_json, fetchdeps.run_tool = real[1], real[2]
         restore_deps(real[0])
 
+
+
+# --------------------------------------------------------------------------- #
+# 15. A tools folder shared with another host keeps BOTH hosts' installs
+# --------------------------------------------------------------------------- #
+# The tools live beside the LIBRARY (mlo.paths.tools_dir), and one library can
+# be read by two installs at once: the Docker container's /music is the very
+# folder a desktop install writes. pip unpacks the wheels of whichever OS runs
+# it into that folder, and the folder's NAME outranks the copy that works —
+# measured on the owner's library, whose .mlo/tools holds the container's linux
+# `librosa v1.0.0` (485 MB, `numpy … cp312-manylinux…`) beside the desktop's
+# `librosa v0.11.0`: `python_pkg_path` took the linux folder, its numpy C
+# extension cannot be imported by a Windows interpreter, and every
+# librosa-backed tag — MOOD/ENERGY (16) and BPM/INITIALKEY (12), in a run and
+# during an import — stopped being written, silently, because the analysis call
+# is wrapped in a try/except.
+#
+# Two promises are pinned here: detection never hands the app a folder THIS
+# host cannot import, and an install never writes into — or prunes — another
+# host's folder.
+import platform as _platform  # noqa: E402
+
+HOST_PY = f"cp{sys.version_info.major}{sys.version_info.minor}"
+# Built from the host's OWN facts, inverted, so the case is deterministic on
+# every platform this suite runs on: the same interpreter, the other OS.
+if os.name == "nt":
+    NATIVE_PLATFORM, FOREIGN_PLATFORM = f"win_{_platform.machine().lower()}", \
+        "manylinux_2_28_x86_64"
+else:
+    NATIVE_PLATFORM, FOREIGN_PLATFORM = "manylinux_2_28_x86_64", \
+        f"win_{_platform.machine().lower()}"
+
+
+def tag(*platforms):
+    return [f"{HOST_PY}-{HOST_PY}-{p}" for p in platforms]
+
+
+with tempfile.TemporaryDirectory() as tmp:
+    real = (sandbox_deps(tmp),)
+    try:
+        foreign = vendor_pip_pkg(tmp, "librosa", "1.0.0", tags=tag(FOREIGN_PLATFORM))
+        native = vendor_pip_pkg(tmp, "librosa", "0.11.0", tags=tag(NATIVE_PLATFORM))
+
+        check("a folder another host built is not an install of this one",
+              tools_mod.pip_wheels_run_here(native)
+              and not tools_mod.pip_wheels_run_here(foreign))
+        check(f"the newer FOREIGN folder does not win the version "
+              f"({tools_mod.python_pkg_path('librosa')})",
+              tools_mod.python_pkg_path("librosa") == native)
+        check("...nor the version the row reports",
+              tools_mod.python_pkg_version("librosa") == "0.11.0")
+
+        # The three shapes that must NOT be hidden: nothing to judge (no WHEEL
+        # at all), a wheel that belongs to every host, and the stable ABI —
+        # `cp3x-abi3` runs on every newer CPython, so a working install must
+        # never be read as another host's.
+        plain = vendor_pip_pkg(tmp, "yt-dlp", "2026.8.19")
+        pure = vendor_pip_pkg(tmp, "beets", "2.4.0", tags=["py3-none-any"])
+        abi3 = vendor_pip_pkg(
+            tmp, "eac-logchecker", "0.8.1",
+            tags=[f"cp{sys.version_info.major}{max(sys.version_info.minor - 1, 0)}"
+                  f"-abi3-{NATIVE_PLATFORM}"])
+        check("a folder with no WHEEL at all is never hidden",
+              tools_mod.python_pkg_path("yt-dlp") == plain)
+        check("a pure-python wheel belongs to every host",
+              tools_mod.python_pkg_path("beets") == pure)
+        check("an abi3 wheel of an older CPython is this host's",
+              tools_mod.python_pkg_path("eac-logchecker") == abi3)
+
+        # A wheel for a different INTERPRETER is another host's too, even on
+        # the same OS: the desktop bundle and this checkout need not run the
+        # same Python. (Older than either of the folders above, so it changes
+        # nothing about which version wins.)
+        stale = vendor_pip_pkg(tmp, "librosa", "0.10.0",
+                               tags=[f"cp27-cp27-{NATIVE_PLATFORM}"])
+        check("a folder pip built for another CPython is not this host's",
+              not tools_mod.pip_wheels_run_here(stale))
+
+        # The install half: a version the other host already holds must NOT be
+        # installed over (pip would merge two numpy builds into one folder,
+        # which detection then refuses for both hosts — and the failure path
+        # would delete an install this host never made).
+        seen = {}
+        real_tool = fetchdeps.run_tool
+
+        def _pip(cmd, **kw):
+            dest = cmd[cmd.index("--target") + 1]
+            seen["dest"] = dest
+            top = os.path.join(dest, "librosa")
+            os.makedirs(top, exist_ok=True)
+            open(os.path.join(top, "__init__.py"), "w").close()
+            dist = os.path.join(dest, "librosa-1.0.0.dist-info")
+            os.makedirs(dist, exist_ok=True)
+            with open(os.path.join(dist, "WHEEL"), "w") as fh:
+                for t in tag(NATIVE_PLATFORM):
+                    fh.write(f"Tag: {t}\n")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        fetchdeps.run_tool = _pip
+        try:
+            with upstream_cache({"librosa": {"version": "1.0.0",
+                                             "checked_at": 0.0, "error": None}}):
+                got = fetchdeps.install_dependency("librosa", log=lambda m: None)
+        finally:
+            fetchdeps.run_tool = real_tool
+
+        check(f"an install of a version the other host holds succeeds (got {got!r})",
+              got == "1.0.0")
+        check(f"...landing BESIDE that folder, not in it ({seen.get('dest')})",
+              os.path.basename(seen.get("dest", "")).startswith("librosa v1.0.0-")
+              and seen.get("dest", "").endswith(tools_mod.host_tag()))
+        # The other host's folder — and its install — survive the whole run:
+        # nothing merged into it, nothing pruned it, and the version it holds
+        # was not read as this host's either.
+        check("...leaving the other host's install untouched",
+              os.path.isdir(os.path.join(foreign, "librosa-1.0.0.dist-info")))
+        check("...and the stale-version pruner leaves it alone too",
+              os.path.isdir(foreign))
+        check(f"...so this host reads its own copy "
+              f"({tools_mod.python_pkg_path('librosa')})",
+              tools_mod.python_pkg_path("librosa") != foreign
+              and tools_mod.python_pkg_version("librosa") == "1.0.0")
+    finally:
+        restore_deps(real[0])
 
 
 if FAILURES:

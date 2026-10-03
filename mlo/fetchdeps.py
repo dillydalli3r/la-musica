@@ -67,7 +67,9 @@ from .paths import tools_dir, tools_dirs
 from .subproc import run_tool
 from .tools import (
     detect_all_tools,
+    host_tag,
     pip_import_present,
+    pip_wheels_run_here,
     python_pkg_path,
     python_pkg_version,
 )
@@ -1632,11 +1634,19 @@ def _remove_older_versions(prefix, keep_dir):
     #
     # Only the CURRENT tools folder is pruned: the pre-move one is somebody
     # else's install (this app no longer writes there), so an update must not
-    # delete it.
+    # delete it. The same holds for a folder ANOTHER HOST installed into this
+    # one (pip_wheels_run_here): the library — and so the tools folder — can be
+    # shared with an install on another OS, and its wheels are not this host's
+    # to delete.
     rx = re.compile(rf"^{re.escape(prefix)}\s+v(?:\d|latest$)", re.IGNORECASE)
     for entry in os.listdir(root):
         full = os.path.join(root, entry)
         if os.path.isdir(full) and rx.match(entry) and entry != keep_dir:
+            if not pip_wheels_run_here(full):
+                # Another host's pip install: it lives in this shared folder
+                # because the library is shared, and pruning it would delete an
+                # install THIS one cannot replace (see fetchdeps._pip_install_dir).
+                continue
             shutil.rmtree(full, ignore_errors=True)
 
 
@@ -1650,6 +1660,26 @@ def _pip_python():
         if found:
             return found
     raise RuntimeError("vendored Python packages need a Python interpreter on PATH")
+
+
+def _pip_install_dir(key, target):
+    """Where a pip install of *key* v*target* lands: `<key> v<target>`, or a
+    name carrying THIS host's tag when that folder belongs to another host.
+
+    A tools folder is shared by every install that reads the library, and one
+    library can be read by two hosts at once — the Docker container's /music is
+    the same folder a desktop install writes. pip unpacks the wheels of the
+    platform it runs on, so ONE version cannot be shared by two of them:
+    installing over the other host's folder would merge two numpy builds into
+    it (a folder mlo.tools.pip_wheels_run_here then refuses for both hosts, so
+    the install would not even be seen), and the failed-install path DELETES
+    the folder — an install this host never made. The first free name wins.
+    """
+    root = tools_dir()
+    plain = os.path.join(root, f"{key} v{target}")
+    if not os.path.isdir(plain) or pip_wheels_run_here(plain):
+        return plain
+    return os.path.join(root, f"{key} v{target}-{host_tag()}")
 
 
 def _install_pip_package(key, log=print, progress=None):
@@ -1680,7 +1710,7 @@ def _install_pip_package(key, log=print, progress=None):
         # anything upstream publishes — an update must never walk a copy back.
         log(f"{display} is already at v{installed} — nothing to install")
         return installed
-    dest_dir = os.path.join(tools_dir(), f"{key} v{target}")
+    dest_dir = _pip_install_dir(key, target)
     log(f"Downloading {display} v{target} (pip) …")
     cmd = [
         _pip_python(), "-m", "pip", "install",
