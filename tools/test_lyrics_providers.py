@@ -13,7 +13,9 @@ could still win a "synced or nothing" run. Pinned here:
   * the NetEase and Kugou scoring picks the RIGHT candidate out of the real
     payloads they returned (cover versions with a matching title but another
     artist lose), and the synced LRC really is available as plain text,
-  * every provider failing returns None instead of raising.
+  * every provider failing returns None instead of raising,
+  * requests are throttled PER HOST: two different providers may start at once,
+    while two requests to the same host stay a full _MIN_GAP apart.
 
 Payloads below are captured from the live APIs (see the module docstring of
 mlo/lyrics_providers.py); no network is used.
@@ -24,6 +26,9 @@ import base64
 import json
 import os
 import sys
+import time
+import urllib.error
+import urllib.parse
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -358,6 +363,69 @@ with Patch(lp, _get_json=fake_api([], asked)):
     assert lp.fetch_lyrics(CFG, "", "Alison") is None
     assert lp.fetch_lyrics(CFG, "Slowdive", None) is None
     assert asked == [], asked
+
+
+# --------------------------------------------------------------------------- #
+# The politeness gap is PER HOST: a wait on one server must not queue another
+# --------------------------------------------------------------------------- #
+class _StubResponse:
+    """A 200 answer shaped like urlopen's context manager."""
+
+    status = 200
+
+    def read(self):
+        return b"{}"
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class _StubTransport:
+    """`urllib` stand-in for `_request`: urlopen notes when a call left."""
+
+    error = urllib.error
+
+    def __init__(self, starts):
+        self.starts = starts
+        self.parse = urllib.parse
+        self.request = self      # so the module's `urllib.request.X` reaches us
+
+    def Request(self, url, data=None, headers=None):
+        return url
+
+    def urlopen(self, req, timeout=None):
+        self.starts.append(time.perf_counter())
+        return _StubResponse()
+
+
+def gate_starts(*urls):
+    """When `_request` actually left, one entry per URL, in order.
+
+    The REAL gate and the REAL `_request` run; only the transport is a stub, so
+    the spacing measured here is the spacing a provider would pay.
+    """
+    starts = []
+    lp._last_request.clear()
+    try:
+        with Patch(lp, urllib=_StubTransport(starts)):
+            for url in urls:
+                lp._request(url, retries=1)
+    finally:
+        lp._last_request.clear()
+    return starts
+
+
+# two hosts share nothing, so the second call leaves at once ...
+first, second = gate_starts("https://a.example/x", "https://b.example/x")
+assert second - first < lp._MIN_GAP / 2, \
+    f"two different hosts must not queue ({second - first:.3f}s apart)"
+# ... the SAME host still waits the full gap out
+first, second = gate_starts("https://a.example/x", "https://a.example/x")
+assert second - first >= lp._MIN_GAP - 0.02, \
+    f"the same host must stay a gap apart ({second - first:.3f}s)"
 
 
 # --------------------------------------------------------------------------- #

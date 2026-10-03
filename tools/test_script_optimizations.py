@@ -19,6 +19,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
+import urllib.error
+import urllib.parse
 import wave
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -764,9 +767,14 @@ def check_worker_budget_semantics(tmp):
 
 
 def check_lyrics_fetch_concurrency(tmp):
-    """Script 13: N tracks overlap their provider waits (bounded lanes)."""
-    import time
-    from mlo import lyrics_fetch
+    """Script 13: N tracks overlap their provider waits (bounded lanes), and
+    one provider's politeness wait never queues another HOST's request.
+
+    The gate was ONE global ``_last_request``/``_MIN_GAP`` for the whole
+    process, so a MusicBrainz or Wayback wait made every NetEase/Kugou/QQ/Kuwo
+    probe queue behind it. It is keyed by the URL's hostname now.
+    """
+    from mlo import lyrics_fetch, lyrics_providers
 
     lib_seq, _album, _seq_files = _lyric_album(tmp, "fetch_lib_seq", 4)
     lib_par, _album, _par_files = _lyric_album(tmp, "fetch_lib_par", 4)
@@ -806,6 +814,61 @@ def check_lyrics_fetch_concurrency(tmp):
        f"script 13: {len(_seq_files)} tracks x {LATENCY * 1000:.0f} ms of provider "
        f"wait take {t_par:.2f} s with lanes vs {t_seq:.2f} s one at a time "
        f"({t_seq / t_par:.1f}x)")
+
+    # The politeness gap is PER HOST now. The REAL `_request` and its gate run
+    # here against a stub transport that notes when each call actually left, so
+    # what is timed is what a provider would pay: two different hosts start
+    # together, the same host still waits out the full gap.
+    class _Response:
+        status = 200
+
+        def read(self):
+            return b"{}"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    class _Transport:
+        """`urllib` stand-in: urlopen records when a request left."""
+
+        error = urllib.error
+
+        def __init__(self, starts):
+            self.starts = starts
+            self.parse = urllib.parse
+            self.request = self
+
+        def Request(self, url, data=None, headers=None):
+            return url
+
+        def urlopen(self, req, timeout=None):
+            self.starts.append(time.perf_counter())
+            return _Response()
+
+    def gate_starts(*urls):
+        starts = []
+        real_urllib = lyrics_providers.urllib
+        lyrics_providers.urllib = _Transport(starts)
+        lyrics_providers._last_request.clear()
+        try:
+            for url in urls:
+                lyrics_providers._request(url, retries=1)
+            return list(starts)
+        finally:
+            lyrics_providers.urllib = real_urllib
+            lyrics_providers._last_request.clear()
+
+    first, second = gate_starts("https://a.example/x", "https://b.example/x")
+    ok(second - first < lyrics_providers._MIN_GAP / 2,
+       f"script 13: two DIFFERENT hosts start without queueing "
+       f"({second - first:.3f}s apart)")
+    first, second = gate_starts("https://a.example/x", "https://a.example/x")
+    ok(second - first >= lyrics_providers._MIN_GAP - 0.02,
+       f"script 13: the SAME host still stays {lyrics_providers._MIN_GAP}s apart "
+       f"({second - first:.3f}s)")
 
 
 def check_lyrics_fetch_never_replaces(tmp):
@@ -906,6 +969,69 @@ def check_images_converted_png_optimized(tmp):
         rename_to_cover=False))
     ok(os.path.getsize(out) == first and stats["modified_count"] == 0,
        "script 5: a second run skips the optimized PNG (idempotent)")
+
+
+def check_images_oxipng_thread_cap(tmp):
+    """oxipng runs as one lane of the pool, not on every core.
+
+    Oxipng's documented default is every logical CPU, so a 2-lane image pass
+    ran 2 x cores threads while cjxl and flac already had their own
+    --num_threads/-threads share. The oxipng argv must now carry this lane's
+    share of the thread budget, and a 0/unknown share must leave the flag off
+    so the tool keeps its own default.
+    """
+    if not HAS_PIL:
+        return skip("script 5: oxipng thread cap (Pillow missing)")
+    from mlo import stats as stats_mod
+    from mlo.tools import detect_all_tools
+    ox = detect_all_tools().get("oxipng") or {}
+    if not ox.get("oxipng_exe"):
+        return skip("script 5: oxipng thread cap (oxipng not installed)")
+
+    lib = os.path.join(tmp, "oxipng_threads_lib")
+    os.makedirs(lib)
+    files = [make_image(os.path.join(lib, f"{i:02d} - Art.png"), (400, 400),
+                        fmt="PNG") for i in (1, 2)]
+
+    real_run = images.run_tool
+    seen = []
+
+    def counting_run(args, *a, **kw):
+        if str(args[0]).lower().endswith("oxipng.exe"):
+            seen.append([str(x) for x in args])
+        return real_run(args, *a, **kw)
+
+    images.run_tool = counting_run
+    try:
+        # 2 files under Worker threads = 8: the pool holds 2 lanes, so each
+        # lane's share of the 8-thread budget is 4 — the value the flag carries.
+        images.run_process_images(cfg(
+            music_folder=lib, targets=list(files), reencode_images=True,
+            images_convert_to_jpeg=False, images_convert_lossless_to_png=False,
+            rename_to_cover=False, worker_limit=8))
+    finally:
+        images.run_tool = real_run
+
+    share = stats_mod.tool_threads(cfg(worker_limit=8), 2)
+    ok(len(seen) == len(files),
+       f"script 5: every PNG still went through oxipng "
+       f"({len(seen)} of {len(files)})")
+    ok(all("--threads" in argv and argv[argv.index("--threads") + 1] == str(share)
+           for argv in seen),
+       f"script 5: oxipng argv carries the lane share (--threads {share}), "
+       f"not the default every-core claim (measured {seen[:1]})")
+
+    # A 0/unknown share (an older caller that passed none) must add no flag.
+    seen.clear()
+    images.run_tool = counting_run
+    try:
+        images._process_png_in_place((
+            ox["oxipng_exe"], ox.get("version"), files[0], True, False,
+            False, 6, {}, None, 0))
+    finally:
+        images.run_tool = real_run
+    ok(len(seen) == 1 and "--threads" not in seen[0],
+       f"script 5: a 0/unknown share adds no thread flag (measured {seen[:1]})")
 
 
 def check_images_artist_art_kept(tmp):
@@ -1607,6 +1733,7 @@ def main():
         ("script 5  Process images (progressive)", check_images_progressive_honoured),
         ("script 5  Process images (artist art)", check_images_artist_art_kept),
         ("script 5  Process images (converted PNG)", check_images_converted_png_optimized),
+        ("script 5  Process images (oxipng lanes)", check_images_oxipng_thread_cap),
         ("script 11 Remux videos", check_remux_single_probe),
         ("script 13 Fetch lyrics (lanes)", check_lyrics_fetch_concurrency),
         ("script 13 Fetch lyrics (fills only)", check_lyrics_fetch_never_replaces),

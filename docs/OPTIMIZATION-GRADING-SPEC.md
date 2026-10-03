@@ -6169,6 +6169,53 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   with and without the overlap) and `tools/test_accurip_roundtrip.py` (the
   transport argv).
 
+- **R365 — an encoder's thread count is the lane's share, not the machine's.**
+  Every external tool that can thread itself takes `mlo.stats.tool_threads`
+  (`cjxl --num_threads`, ffmpeg `-threads`, flac's `-threads`), and `oxipng` is
+  the one that did not: its default is one thread per logical CPU, so script 5's
+  `worker_count` lanes each started a full-machine encoder — 8 lanes x 16 cores
+  on a 16-core box. All three oxipng spawns now take `--threads <n>` under the
+  same "only when the share is > 0" guard the other tools use. The flag is NOT
+  an encoding parameter: the produced bytes are identical at any width (proved
+  end to end for the convert path, and `--threads 2` / `--threads 8` / default
+  produce the same file). Pinned by
+  `tools/test_script_optimizations.py`'s script-5 lane check.
+
+- **R366 — politeness is per HOST, so providers stop queueing behind each
+  other.** Script 13 walks several lyrics providers per track, each costing 1-2
+  requests, and the 0.4 s spacing was one process-global timestamp: a
+  MusicBrainz or Wayback wait queued behind NetEase/Kugou/QQ/Kuwo, and a miss
+  cost ten-odd serialised starts. The timestamp is now keyed by the request's
+  hostname (`mlo/lyrics_providers._request`), so every host keeps exactly the
+  spacing it had while two hosts never wait on each other; the request COUNT,
+  the provider order, the retries and every answer are unchanged. Pinned by
+  `tools/test_script_optimizations.py` and `tools/test_lyrics_providers.py`
+  (different hosts start together, the same host stays 0.4 s apart).
+
+- **R367 — a fill-only pass does not fetch what it cannot write.** Script 24
+  asks the network only while the answer could be written: a row that already
+  carries `WEBRATING` gets no track ask, and the album answer is fetched only
+  while some row still lacks `ALBUMWEBRATING` — `_existing` is the test, the
+  writer's own, so a fetch skip can never disagree with the write skip and lose
+  a value. `force_web_ratings` bypasses both, exactly as it bypasses the
+  writes. A re-run over an already-rated album therefore costs zero requests
+  (and its stats read like any run no source answered). Pinned by
+  `tools/test_web_ratings.py` (zero fetches on the second run, fetches again
+  when forced).
+
+- **R368 — a probe reads what it needs, not the whole album.** Three passes
+  stopped paying for work whose answer was already in hand: beets' pre-import
+  snapshot takes the audio basenames from the directory listing and reads
+  containers only until both MusicBrainz ids are seen (capped at 5 files, the
+  bound `server.script_runners._TRACKLIST_PROBE_FILES` already keeps for the
+  same question); the layout scan answers "does this album hold audio" from the
+  listing it already has instead of walking the folder again (the walk remains
+  the fallback for audio that lives only in a subfolder); and the grade pass
+  detects the decoder tools ONCE per album instead of once per file that needs
+  an MD5 (the detection is cached, but it was still a per-file call). Pinned by
+  `tools/test_script_optimizations.py`, `tools/test_import_pipeline.py`,
+  `tools/test_grading_paths.py` and `tools/smoke_organize_grade.py`.
+
 ## 8. Recommended runbook
 
 Nothing here is a substitute for the app's own Dependencies page: run it first

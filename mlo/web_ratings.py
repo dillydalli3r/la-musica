@@ -727,6 +727,10 @@ def run_web_ratings(config, fetch=None):
     Nothing is invented: a track whose recording has no rating keeps no
     WEBRATING, an album no source answered for keeps no ALBUMWEBRATING, and
     every run says which sources answered and which were skipped and why.
+    The FETCHES obey the writer's fill-only rule too: a file that already
+    carries WEBRATING is not asked about, and the album is asked about only
+    while some row still lacks ALBUMWEBRATING, so re-running the chain over a
+    rated library costs no network — unless ``force_web_ratings`` is set.
     *fetch* is the injected network callable; without one the app's own
     fetchers are imported lazily from ``server.integrations`` (mlo must not
     import server at module scope — see the module docstring).
@@ -821,6 +825,14 @@ def run_web_ratings(config, fetch=None):
                     "album": str(af.get_tag("ALBUM") or "").strip(),
                     "rg_mbid": str(af.get_tag("MUSICBRAINZ_RELEASEGROUPID") or "").strip(),
                     "rec_mbid": str(af.get_tag("MUSICBRAINZ_TRACKID") or "").strip(),
+                    # What the file ALREADY holds for the two VALUE tags,
+                    # read with `write_ratings`' own `_existing` so the fetch
+                    # skips below and the writer can never disagree about what
+                    # "already set" means. (The SOURCE tags are not tested
+                    # separately: the writer keys the whole pair off the value
+                    # tag alone.)
+                    "web_rating": _existing(af, "WEBRATING"),
+                    "album_web_rating": _existing(af, "ALBUMWEBRATING"),
                 })
             except Exception as e:
                 out["errors"].append(f"{os.path.basename(path)}: {e}")
@@ -828,14 +840,38 @@ def run_web_ratings(config, fetch=None):
             return out
         artist, album, rg = _album_identity(rows)
 
+        # THE FETCHES FOLLOW THE WRITES' OWN FILL-ONLY RULE. A request is
+        # worth making only while its answer could still be written:
+        # `write_ratings` skips a value already on the file, so a track whose
+        # WEBRATING is set can never take a track answer, and the album answer
+        # is asked for only while at least one row still lacks
+        # ALBUMWEBRATING. *force* bypasses both skips, exactly as it bypasses
+        # the writes (R362/R11). The test is `_existing` — the writer's own —
+        # so a skip here can never disagree with it and lose a value it would
+        # have accepted.
+        need_album = force or any(not row["album_web_rating"] for row in rows)
+
         def _track_answer(row):
-            """One track's own rating — its OWN row, nothing shared."""
+            """One track's own rating — its OWN row, nothing shared.
+
+            A row that already carries a WEBRATING makes no request: the
+            writer would skip the answer, so no answer is what it is.
+            """
+            if not force and row["web_rating"]:
+                return None
             return track_rating(row["artist"] or row["albumartist"],
                                 row["title"], row["rec_mbid"],
                                 config, fetch)
 
+        def _album_answer():
+            """The album's own ask, once for the folder — or no request at all
+            when every row already carries ALBUMWEBRATING (unless forced)."""
+            if not need_album:
+                return None
+            return album_rating(artist, album, rg, config, fetch)
+
         if track_width == 1:
-            album_answer = album_rating(artist, album, rg, config, fetch)
+            album_answer = _album_answer()
             answers = [_track_answer(row) for row in rows]
         else:
             from concurrent.futures import ThreadPoolExecutor
@@ -843,8 +879,7 @@ def run_web_ratings(config, fetch=None):
                 # The album's own ask goes first and on its own lane, while the
                 # track asks are already in flight; the answer is awaited once
                 # for the whole folder.
-                album_fut = ex.submit(album_rating, artist, album, rg,
-                                      config, fetch)
+                album_fut = ex.submit(_album_answer)
                 track_futs = [ex.submit(_track_answer, row) for row in rows]
                 album_answer = album_fut.result()
                 answers = [fut.result() for fut in track_futs]

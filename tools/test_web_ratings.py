@@ -703,6 +703,42 @@ else:
     ok(not any(src == "rateyourmusic" for src, _k, _i in calls),
        "a run without rateyourmusic in web_ratings_sources asks it ZERO times")
 
+    # THE FETCHES OBEY THE WRITES' OWN FILL-ONLY RULE. A second run over an
+    # album whose tags are already on disk costs ZERO requests and still books
+    # the album and its tracks; a forced run asks again.
+    print("== a second run costs no requests (fill-only fetches) ==")
+    fill_base = tempfile.mkdtemp(prefix="mlo_web_ratings_fill_")
+    folder_name = "Rated Album"
+    rg = "99999999-8888-7777-6666-555555555555"
+    fill_dir = make_album(os.path.join(fill_base, "Artist", folder_name),
+                          [("One", "rec-one"), ("Two", "rec-two")])
+    fetch_log = []
+
+    def tracking_fetch(source, kind, ident, cfg):
+        fetch_log.append((source, kind))
+        if source != "musicbrainz" or not ident.get("mbid"):
+            return None
+        return MB_ALBUM if kind == "album" else MB_TRACK_OWN
+
+    fill_cfg = {"targets": [fill_dir], "web_ratings_sources": ["musicbrainz"],
+                "worker_limit": 2}
+    first = wr.run_web_ratings(fill_cfg, fetch=tracking_fetch)
+    eq(first["modified_count"], 2, "the first run writes both tracks")
+    ok(len(fetch_log) > 0, "…and asks the network")
+    fetch_log.clear()
+    second = wr.run_web_ratings(fill_cfg, fetch=tracking_fetch)
+    eq(len(fetch_log), 0, "a second run makes ZERO fetch calls")
+    eq(second["modified_count"], 0, "…writes nothing")
+    eq(second["track_count"], 2, "…and still accounts for both tracks")
+    eq(second["total_scanned"], 1, "…and for the album")
+    eq(second["skipped_count"], 2, "…and books both tracks as skipped")
+    fetch_log.clear()
+    forced = wr.run_web_ratings(dict(fill_cfg, force_web_ratings=True),
+                                fetch=tracking_fetch)
+    ok(len(fetch_log) > 0, "a forced run fetches again")
+    eq(forced["modified_count"], 2, "…and rewrites both tracks")
+    shutil.rmtree(fill_base, ignore_errors=True)
+
     # The feature switch stops the run before a single request is made.
     asked = len(calls)
 

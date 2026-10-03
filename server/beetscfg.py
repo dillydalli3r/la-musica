@@ -266,9 +266,21 @@ def run_beets_import(paths, cfg=None, timeout=7200, on_line=None):
     return True, output
 
 
+# How many of an album's files the identity probe opens at most. Album
+# identity is uniform across its files, so the probe stops as soon as both ids
+# are seen; the cap only bounds a folder whose files state none (the same
+# bound the tracklist probe keeps, server.script_runners._TRACKLIST_PROBE_FILES).
+_ALBUM_ID_PROBE_FILES = 5
+
+
 def _album_audio_state(album_dir):
     """(audio basenames, MusicBrainz release-group-ish identity set) for a
-    directory — the identity used to re-unite sidecars with moved audio."""
+    directory — the identity used to re-unite sidecars with moved audio.
+
+    The basenames come from the listing, so every audio file counts. The
+    container probe that reads the MusicBrainz ids stops as soon as BOTH are
+    stated (at most `_ALBUM_ID_PROBE_FILES` files): a file that states no id
+    leaves the answer exactly as before."""
     from mlo.audio import AudioFile
     from mlo.paths import AUDIO_EXTS
     from mlo.stats import is_audio_file
@@ -278,18 +290,24 @@ def _album_audio_state(album_dir):
         names = os.listdir(album_dir)
     except OSError:
         return basenames, mbids
-    for name in names:
-        if not is_audio_file(name):
-            continue
-        basenames.add(name.lower())
+    audio = [name for name in names if is_audio_file(name)]
+    basenames.update(name.lower() for name in audio)
+    album_seen = release_seen = False
+    for name in audio[:_ALBUM_ID_PROBE_FILES]:
         try:
             af = AudioFile(os.path.join(album_dir, name))
             for key in ("MUSICBRAINZ_ALBUMID", "MUSICBRAINZ_RELEASEGROUPID"):
                 val = af.get_tag(key)
                 if val:
                     mbids.add(str(val).strip().lower())
+                    if key == "MUSICBRAINZ_ALBUMID":
+                        album_seen = True
+                    else:
+                        release_seen = True
         except Exception:
             pass
+        if album_seen and release_seen:
+            break
     return basenames, mbids
 
 

@@ -1672,7 +1672,7 @@ _MD5_MEMO = {}
 _MD5_MEMO_MAX = 20000
 
 
-def _flac_md5_state(ap, cfg, af=None):
+def _flac_md5_state(ap, cfg, af=None, flac_exe=None, ffmpeg_exe=None):
     """(state, detail) for one file's stream MD5: mlo.flac's vocabulary.
 
     "" for a file this question does not apply to (no container here states
@@ -1688,6 +1688,11 @@ def _flac_md5_state(ap, cfg, af=None):
     about the audio, not a reading of a tag about it; what it establishes is
     filed back (mlo.audit.note_integrity) so the next reader does not repeat
     the decode. *af* is the AudioFile the caller already has open.
+
+    *flac_exe* / *ffmpeg_exe* are the tool paths the grade pass detected once
+    for the whole folder (`_grade_album`); omitted, they are detected here —
+    the standalone-call behaviour. A pass that has them passes them down so
+    the detection does not run per file.
     """
     if os.path.splitext(str(ap))[1].lower() != ".flac":
         return "", ""
@@ -1706,9 +1711,10 @@ def _flac_md5_state(ap, cfg, af=None):
         return hit
     state, detail = recorded_integrity(ap, cfg, stated=stated)
     if not state:
-        tools = detect_all_tools()
-        flac_exe = (tools.get("flac") or {}).get("flac_exe")
-        ffmpeg_exe = (tools.get("ffmpeg") or {}).get("ffmpeg_exe")
+        if flac_exe is None and ffmpeg_exe is None:
+            tools = detect_all_tools()
+            flac_exe = (tools.get("flac") or {}).get("flac_exe")
+            ffmpeg_exe = (tools.get("ffmpeg") or {}).get("ffmpeg_exe")
         if not flac_exe and not ffmpeg_exe:
             # Nothing to test the audio with: an honest "not established",
             # never a pass (the same rule mlo.audit's integrity pass keeps).
@@ -1920,6 +1926,16 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
     # CD tracks whose AUDIT requirement is decided after the .log/.accurip
     # verification runs (see the deferred resolution further down).
     deferred_audit = {}
+    # flac/ffmpeg are the same tools for every file in the folder, and the
+    # stream-MD5 check needs them on the files that carry no recorded
+    # integrity — so detect them ONCE for this pass and hand the paths to
+    # every `_flac_md5_state` call below, instead of once per FLAC.
+    if cfg.get("grade_check_flac_md5", True):
+        _md5_tools = detect_all_tools()
+        md5_flac_exe = (_md5_tools.get("flac") or {}).get("flac_exe")
+        md5_ffmpeg_exe = (_md5_tools.get("ffmpeg") or {}).get("ffmpeg_exe")
+    else:
+        md5_flac_exe = md5_ffmpeg_exe = None
 
     for index, ap in enumerate(audio_paths):
         # The first file was already opened for the podcast probe — reuse that
@@ -2638,7 +2654,8 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
         # the loop already has open, so a good file costs one header read.
         if cfg.get("grade_check_flac_md5", True) and not is_video_track:
             try:
-                md5_state, md5_detail = _flac_md5_state(ap, cfg, af)
+                md5_state, md5_detail = _flac_md5_state(
+                    ap, cfg, af, md5_flac_exe, md5_ffmpeg_exe)
             except Exception as e:
                 md5_state, md5_detail = "", str(e)
             if md5_state == MD5_MISMATCH:

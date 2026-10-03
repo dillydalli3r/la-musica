@@ -1288,7 +1288,20 @@ def _process_jpeg_in_place(args):
 
 
 def _process_png_in_place(args):
-    if isinstance(args, (list, tuple)) and len(args) == 9:
+    if isinstance(args, (list, tuple)) and len(args) == 10:
+        (
+            oxipng_exe,
+            oxipng_version,
+            filepath,
+            force,
+            rename_to_cover,
+            remove_alpha,
+            optimization_level,
+            enc,
+            config,
+            threads,
+        ) = args
+    elif isinstance(args, (list, tuple)) and len(args) == 9:
         (
             oxipng_exe,
             oxipng_version,
@@ -1300,6 +1313,7 @@ def _process_png_in_place(args):
             enc,
             config,
         ) = args
+        threads = None
     else:
         (
             oxipng_exe,
@@ -1312,6 +1326,7 @@ def _process_png_in_place(args):
             enc,
         ) = args
         config = None
+        threads = None
     enabled = enc.get("png") or {}
 
     filename = os.path.basename(filepath)
@@ -1465,6 +1480,14 @@ def _process_png_in_place(args):
         "-o", str(optimization_level),
         "--strip", "safe",
         "--force",
+    ]
+    # oxipng's documented default is every logical CPU, so N lanes x cores
+    # threads thrash. Cap it to this lane's share of the thread budget, the
+    # same way cjxl gets --num_threads and flac gets -threads. Only when the
+    # caller supplied a positive share (0/unknown keeps the tool's default).
+    if threads and int(threads) > 0:
+        cmd += ["--threads", str(int(threads))]
+    cmd += [
         "--out", temp_path,
         _input_for_oxipng,
     ]
@@ -1837,7 +1860,25 @@ def _twin_present(src_path, out_path):
 
 
 def _process_jxl_back_to_original(args):
-    if isinstance(args, (list, tuple)) and len(args) == 14:
+    if isinstance(args, (list, tuple)) and len(args) == 15:
+        (
+            djxl_path,
+            jpegtran_exe,
+            ljt_version,
+            oxipng_exe,
+            oxipng_version,
+            src_path,
+            rename_to_cover,
+            remove_alpha,
+            remove_alpha_pil,
+            force,
+            progressive,
+            optimization_level,
+            enc,
+            config,
+            threads,
+        ) = args
+    elif isinstance(args, (list, tuple)) and len(args) == 14:
         (
             djxl_path,
             jpegtran_exe,
@@ -1854,6 +1895,7 @@ def _process_jxl_back_to_original(args):
             enc,
             config,
         ) = args
+        threads = None
     else:
         (
             djxl_path,
@@ -1871,6 +1913,7 @@ def _process_jxl_back_to_original(args):
             enc,
         ) = args
         config = None
+        threads = None
 
     temp_files = []
 
@@ -2109,15 +2152,22 @@ def _process_jxl_back_to_original(args):
             temp_files.append(optimized)
 
             try:
+                oxipng_cmd = [
+                    oxipng_exe,
+                    "-o", str(optimization_level),
+                    "--strip", "safe",
+                    "--force",
+                ]
+                # Same lane-share cap as the in-place PNG pass: oxipng's
+                # default claims every core, and this runs inside the pool.
+                if threads and int(threads) > 0:
+                    oxipng_cmd += ["--threads", str(int(threads))]
+                oxipng_cmd += [
+                    "--out", optimized,
+                    input_file,
+                ]
                 result = run_tool(
-                    [
-                        oxipng_exe,
-                        "-o", str(optimization_level),
-                        "--strip", "safe",
-                        "--force",
-                        "--out", optimized,
-                        input_file,
-                    ],
+                    oxipng_cmd,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.PIPE,
                     text=True,
@@ -2188,10 +2238,13 @@ def _process_jxl_back_to_original(args):
 def _process_convert_image(args):
     """Convert any image to JPEG (lossy) or PNG (lossless) via Pillow.
 
-    Args: (src_path, target_ext, rename_to_cover, config)
+    Args: (src_path, target_ext, rename_to_cover, config
+           [, oxipng_exe, oxipng_version, optimization_level, threads]).
     target_ext is ".jpg" or ".png" (lowercase).
     Uses images_jpeg_quality for JPEG, handles cover crop/resize via _prepare_image_streamlined,
     and writes encoder tags. Removes source after successful conversion.
+    A converted PNG is handed to the optional oxipng tool, which is capped to
+    *threads* (the lane's share of the thread budget; 0/None keeps its default).
     """
     if len(args) == 4:
         src_path, target_ext, rename_to_cover, config = args
@@ -2202,6 +2255,9 @@ def _process_convert_image(args):
     # converted PNG is handed to (see the .png branch below). All None when
     # the caller passed none.
     png_tool = (tuple(args[4:7]) + (None, None, None))[:3]
+    # The lane's share of the thread budget, threaded through for that same
+    # oxipng hand-off (None when an older caller passed no share).
+    threads = args[7] if len(args) > 7 else None
     target_ext = target_ext.lower()
     if target_ext == ".jpeg":
         target_ext = ".jpg"
@@ -2296,7 +2352,7 @@ def _process_convert_image(args):
                 try:
                     _n, status, _br, _ba, _info = _process_png_in_place((
                         png_tool[0], png_tool[1], temp_out, False, False,
-                        False, png_tool[2], enc, None))
+                        False, png_tool[2], enc, None, threads))
                     stamped = status in ("modified", "unchanged")
                 except Exception as e:
                     log(f"[convert png warn] {src_path}: {e}")
@@ -2532,6 +2588,7 @@ def run_process_images(config):
                     optimization_level,
                     enc,
                     config,
+                    threads_per_file,
                 ),
                 f,
             ))
@@ -2571,7 +2628,8 @@ def run_process_images(config):
                         (f, ".jpg", _renames(f), config,
                          (ox or {}).get("oxipng_exe"),
                          (ox or {}).get("version"),
-                         optimization_level),
+                         optimization_level,
+                         threads_per_file),
                         f,
                     ))
                     continue
@@ -2608,6 +2666,7 @@ def run_process_images(config):
                             optimization_level,
                             enc,
                             config,
+                            threads_per_file,
                         ),
                         f,
                     ))
@@ -2718,7 +2777,8 @@ def run_process_images(config):
                         (f, target_ext, _renames(f), config,
                          (ox or {}).get("oxipng_exe"),
                          (ox or {}).get("version"),
-                         optimization_level),
+                         optimization_level,
+                         threads_per_file),
                         f,
                     ))
                 else:

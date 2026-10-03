@@ -34,10 +34,12 @@ Hikari` — or the other way round — is a source the stored names cannot reach
 
 Every source is free — no key, no paid tier anywhere — and stdlib urllib is all
 they need; the captions one additionally needs yt-dlp and a video id the file
-already carries. Every request is throttled to one per ``_MIN_GAP`` seconds and
-retried on 429/5xx (these hosts throttle IPs), and each provider swallows its
-own failures, so the chain always falls through to the next source:
-``fetch_lyrics`` returns None — never raises — when nothing answers.
+already carries. Every request is throttled to one per ``_MIN_GAP`` seconds
+PER HOST — the gap is politeness toward one server, so two providers on
+different hosts never queue behind each other — and retried on 429/5xx (these
+hosts throttle IPs), and each provider swallows its own failures, so the chain
+always falls through to the next source: ``fetch_lyrics`` returns None — never
+raises — when nothing answers.
 
 Request shapes below were verified live (2026-09, non-CN IP) so the payload
 keys stayed pinned instead of guessed:
@@ -136,7 +138,12 @@ _KUGOU_HEADERS = {"User-Agent": _DESKTOP_UA, "Referer": "https://www.kugou.com/"
 
 _MIN_GAP = 0.4
 _throttle_lock = threading.Lock()
-_last_request = 0.0
+# Last request time PER HOST: the gap is politeness toward one server, and the
+# providers sit on different hosts (lrclib.net, music.163.com, c.y.qq.com,
+# kuwo.cn, kugou.com), so a MusicBrainz or Wayback wait must not queue an
+# unrelated lookup behind it. Only two requests to the SAME host are spaced;
+# the lock still guards the timestamp bookkeeping alone, never the request.
+_last_request = {}
 # Last failed request status ("403", 0 for a network error) — diagnostics for
 # `probe_source` only, which is what turns "nothing came back" into "the host
 # refused us". Whoever wrote it last wins: it labels one probe, nothing else.
@@ -210,20 +217,24 @@ def _log_once(pid, message):
 def _request(url, headers=None, data=None, timeout=15, retries=3):
     """Rate-throttled request with retry on 429/5xx. Returns (status, body).
 
-    The throttle lock only guards the timestamp bookkeeping: the request and
-    the retry backoff happen OUTSIDE it, so one slow provider cannot block
-    every other lyrics worker in the process (script 13, an import chain and a
-    manual lookup all share this module). `data` turns the request into a POST
-    — used by the LRCLIB submission, which needs its 201 and its error body.
+    The throttle is PER HOST — the URL's hostname keys the last-request time —
+    so the politeness gap spaces requests to the same server without making a
+    NetEase/Kugou/QQ/Kuwo probe wait behind an unrelated MusicBrainz or Wayback
+    one (script 13, an import chain and a manual lookup all share this module).
+    The lock only guards the timestamp bookkeeping: the request and the retry
+    backoff happen OUTSIDE it, so one slow provider cannot block every other
+    lyrics worker in the process. `data` turns the request into a POST — used
+    by the LRCLIB submission, which needs its 201 and its error body.
     """
     global _last_request, last_http_error
+    host = urllib.parse.urlparse(url).hostname or ""
     for attempt in range(retries):
         with _throttle_lock:
-            elapsed = time.time() - _last_request
+            elapsed = time.time() - _last_request.get(host, 0.0)
             wait = _MIN_GAP - elapsed
             if wait > 0:
                 time.sleep(wait)
-            _last_request = time.time()
+            _last_request[host] = time.time()
         status, body = 0, b""
         try:
             req = urllib.request.Request(

@@ -187,10 +187,24 @@ def _new_sink():
             "error_count": 0, "errors": [], "albums": 0, "audio_files": 0}
 
 
-def _has_audio(d):
+def _has_audio(d, names=None):
     """Whether any audio sits directly in *d* or one/two levels down (the only
-    nesting the layout uses: disc folders inside an album)."""
+    nesting the layout uses: disc folders inside an album).
+
+    *names* is *d*'s own directory listing when the caller already has it
+    (:func:`scan_library` lists each album folder once for its readers): a
+    folder whose DIRECT entries include audio is answered without the
+    recursive walk. The walk only ever turns False into True, so the fallback
+    below keeps the answer for a folder holding audio only in a subfolder."""
     from .paths import SKIP_DIRS
+    if names is None:
+        try:
+            names = os.listdir(d)
+        except OSError:
+            names = []
+    if any(_is_audio(f) and not os.path.isdir(os.path.join(d, f))
+           for f in names):
+        return True
     for root, dirs, names in os.walk(d):
         dirs[:] = [x for x in dirs if x not in SKIP_DIRS]
         if root.count(os.sep) - d.count(os.sep) > 2:
@@ -670,7 +684,7 @@ def scan_library(cfg=None, stats=None):
             # itself (`_list(album_dir)`), which made every album two directory
             # scans on top of this one.
             album_entries = entries(ap, sink)
-            if not _has_audio(ap):
+            if not _has_audio(ap, album_entries):
                 rows.append(_issue(
                     "empty_album", ap, folder,
                     "album folder \u201c%s / %s\u201d holds no audio" % (name, an),
