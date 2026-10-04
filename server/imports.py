@@ -463,6 +463,98 @@ def _invalidate_caches(*paths):
         pass
 
 
+def _album_states_identity(path):
+    """Whether an album's own tags can NAME it: ARTIST/ALBUMARTIST and ALBUM.
+
+    The naming script is evaluated from the tracks' tags, so a folder that
+    states neither has nothing to be named by — running the organizer over it
+    would move it under whatever the empty script evaluates to (the library
+    root), which is worse than leaving it where it was dropped. One readable
+    track that names its artist and album is the whole test.
+
+    Read through ``server.tagcache`` — the SAME reader ``server.main``'s
+    organizer uses for the script's variables, so the guard and the organizer
+    can never disagree about what a file says.
+    """
+    from server import tagcache
+    try:
+        names = sorted(os.listdir(path))
+    except OSError:
+        return False
+    for name in names:
+        if os.path.splitext(name)[1].lower() not in LIB_AUDIO_EXTS:
+            continue
+        try:
+            tags, _tech = tagcache.read_track(os.path.join(path, name), None)
+            artist = str(tags.get("ARTIST") or tags.get("ALBUMARTIST") or "").strip()
+            album = str(tags.get("ALBUM") or "").strip()
+        except Exception:
+            continue
+        if artist and album:
+            return True
+    return False
+
+
+def _organize_import(path, cfg=None):
+    """Name an album with the naming script, and report the folder it is in now.
+
+    The ORIGINAL one-click import (``server.main._import_one_album``) ran the
+    organizer before the chain; the bulk queue that replaced that path dropped
+    the step, so an auto-imported album kept the folder it was dropped in and
+    the grade then reported every file as ``PATH: expected '…' (run organize)``.
+    The wizard's own Finish calls the same route, so manual and auto imports are
+    named by one rule. The organizer also carries the album's sidecars and
+    prunes the folders it emptied — the "useless / empty directories" an import
+    leaves.
+
+    Best effort: an album that states no artist/album, one outside the music
+    folder, or a failed run is left where it is and said out loud, never fatal.
+    """
+    if not _album_states_identity(path):
+        return path
+    try:
+        from server.main import OrganizeRequest, organize_albums
+        res = organize_albums(OrganizeRequest(paths=[path], dry_run=False), cfg)
+    except Exception as e:            # noqa: BLE001 — reported, never fatal
+        print(f"[mlo] import: organize skipped for "
+              f"{os.path.basename(path)}: {e}")
+        return path
+    for row in (res.get("results") or []):
+        if not isinstance(row, dict):
+            continue
+        if row.get("error"):
+            print(f"[mlo] import: organize reported {row['error']} — "
+                  f"{os.path.basename(path)}")
+            return path
+        moved = row.get("album_root") or row.get("path")
+        if moved:
+            return os.path.normpath(str(moved))
+        break
+    return path
+
+
+def _prune_import_dirs(cfg):
+    """Sweep the empty folders an import left behind, inside the library.
+
+    ``mlo.paths.prune_empty_dirs`` removes only a directory that holds NOTHING,
+    never the root it is handed, and skips the app's own state and dot dirs — so
+    the artist / album / disc shells a mover emptied go, while a folder holding
+    any file at all (a pending album's marker included) stays. The layout
+    report's "Empty folders" finding is what this saves a hand-run cleanup for
+    after every import. Best effort: housekeeping after the work must never
+    fail the import that triggered it.
+    """
+    try:
+        from mlo.paths import library_root, prune_empty_dirs
+        root = library_root(str((cfg or {}).get("music_folder") or ""))
+        removed = prune_empty_dirs(root)
+        if removed:
+            print(f"[mlo] import: removed {len(removed)} empty folder(s) "
+                  f"left behind")
+    except Exception:
+        traceback.print_exc()
+
+
 def _phase(text):
     """One line saying what the import is doing BEFORE its chain starts.
 
@@ -4709,6 +4801,17 @@ def _bulk_one(item, cfg):
             traceback.print_exc()
             stamp_error = f"release stamping failed: {e}"
 
+    # The naming script names the album BEFORE the chain reads it. The grade
+    # inside the chain checks every path against the script, and beets (script
+    # 14) is not the only namer — a library whose chain is off, without 14, or
+    # whose beets run matched nothing would otherwise import the album under
+    # the folder it arrived in and report file by file a PATH mismatch. This is
+    # the step the original one-click import (`server.main._import_one_album`)
+    # ran before its chain, restored on the queue that replaced it; the wizard
+    # reaches the same route from its Finish. An album that states no
+    # artist/album is left where it is — there is nothing to name it by.
+    album = _organize_import(album, cfg)
+
     try:
         # The release this row carries goes on to `finish_album` too. Its
         # genres step is the one that stamps GENRE, and the import's own pass
@@ -4825,6 +4928,12 @@ def bulk_import(items, cfg=None, progress=None, job_id=None):
                     progress(done, total, label, row)
                 except Exception:
                     traceback.print_exc()
+
+    # The emptied shells the batch left behind (the staging parents the mover
+    # vacated, a disc folder the chain emptied) are swept ONCE here, not per
+    # album: the same rule the organizer applies to the album it names, now
+    # covering the whole library after an auto-import.
+    _prune_import_dirs(cfg)
 
     rows = [r for r in rows if r is not None]
     return {

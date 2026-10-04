@@ -3118,7 +3118,38 @@ const finish = async () => {
     // chain (the ticked boxes, which ARE the chain until changed), so Finish
     // runs what a bulk import would have run on this album —
     // nothing wider, and nothing narrower.
-    const targets = albumTargets();
+    // The naming-script organizer runs FIRST, exactly as it does on the
+    // autonomous import path (server/imports._bulk_one): beets (script 14) is
+    // not the only namer, and a library without it — or whose beets run
+    // matched nothing — would otherwise finish with every file graded as a
+    // PATH mismatch. It renames the album, so the scripts below run on the
+    // folder organize reports. Best effort: a busy or failed organize must
+    // not stop the import (the album is already in the library).
+    //
+    // Only an album whose tracks NAME it (artist + album) is organized: the
+    // naming script is evaluated from those tags, so a tagless folder would be
+    // moved under whatever the empty script evaluates to — the library root —
+    // which is worse than leaving it where it was dropped.
+    let targets = albumTargets();
+    const nameable = stepTracks.length === 0 || stepTracks.some((t) => {
+      const tg = t.tags;
+      return !!tg && !!(tg.ARTIST && tg.ALBUM);
+    });
+    if (targets.length && nameable) {
+      setFinishMsg("Organizing the album (naming script)…");
+      try {
+        const org = await api.organize(targets);
+        const roots = (org.results || [])
+          .filter((r) => r && !r.error && (r.album_root || r.path))
+          .map((r) => r.album_root || r.path);
+        if (roots.length) {
+          targets = roots;
+          if (uploaded.length <= 1) setAlbumPath(roots[0]);
+        }
+      } catch (e) {
+        setFinishMsg(`Organize failed — ${e}`);
+      }
+    }
     const force = forceRun ? forceDict(forceSel) : undefined;
     if (runAfterImportIds.length && targets.length) {
       forced = !!force;

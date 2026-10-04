@@ -6342,6 +6342,22 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   `tools/test_script_optimizations.py`, `tools/test_import_pipeline.py`,
   `tools/test_grading_paths.py` and `tools/smoke_organize_grade.py`.
 
+- **R369 — an import names the album before its chain.** Every import path runs
+  the naming-script organizer over the album before the configured chain, so the
+  Grade step checks the paths the script produces instead of reporting each file
+  as a PATH mismatch. The bulk/auto queue does it in
+  `server.imports._bulk_one` (the step the original one-click import ran before
+  the queue replaced it), and the wizard's own Finish calls `POST /api/organize`
+  and runs the ticked scripts on the folder the organizer reports
+  (`web/src/pages/ImportWizard.tsx`). An album whose tracks state no
+  artist/album is left where it is — the script is evaluated from those tags, so
+  there is nothing to name it by — and an organize failure is reported, never
+  fatal. The organizer also prunes the folders it emptied, and a bulk batch
+  sweeps the library's emptied shells once at the end
+  (`server.imports._prune_import_dirs`), so an import never leaves the layout
+  report's "Empty folders" finding behind. Pinned by
+  `tools/test_import_pipeline.py`.
+
 ## 8. Recommended runbook
 
 Nothing here is a substitute for the app's own Dependencies page: run it first

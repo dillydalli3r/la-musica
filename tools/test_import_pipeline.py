@@ -2009,3 +2009,50 @@ assert _idle["items"][0].get("chained") is True, _idle["items"][0]
 shutil.rmtree(DOUBLE_MF, ignore_errors=True)
 print("one chain per album: all assertions passed")
 
+
+
+# --------------------------------------------------------------------------- #
+# R369: an import names the album before its chain
+# --------------------------------------------------------------------------- #
+# A tagged album dropped into the queue lands on the NAMING SCRIPT's path, not
+# under the folder it arrived in — the organizer the original one-click import
+# ran before its chain, restored on the queue that replaced it — and the
+# staging shell the move emptied is swept. An album whose tracks state no
+# artist/album is left where it is: the script is evaluated from those tags, so
+# there is nothing to name it by.
+def _tagged_staging_album(name, artist, album):
+    d = os.path.join(STAGING, name)
+    os.makedirs(d, exist_ok=True)
+    p = os.path.join(d, "01 - One.wav")
+    make_wav(p)
+    af = _AudioFile(p)
+    af.set_tag("ARTIST", artist)
+    af.set_tag("ALBUM", album)
+    af.set_tag("TITLE", "One")
+    af.set_tag("TRACKNUMBER", "1")
+    af.flush()
+    return d
+
+
+_named_src = _tagged_staging_album("queued raw name", "Queue Artist", "Queue Album")
+# An emptied shell already inside the library: the post-batch sweep removes it.
+_ghost = os.path.join(LIB, "Ghost Artist", "Ghost Album")
+os.makedirs(_ghost, exist_ok=True)
+_named_out = imports.bulk_import([{"path": _named_src}], dict(CFG))
+_named_row = _named_out["items"][0]
+assert _named_row["status"] == "imported", _named_row
+_named_expect = os.path.join(LIB, "Queue Artist", "Queue Album").replace("\\", "/")
+assert _named_row["album_path"] == _named_expect, _named_row
+assert os.path.isfile(os.path.join(LIB, "Queue Artist", "Queue Album", "1-01 One.wav")), \
+    os.listdir(os.path.join(LIB, "Queue Artist", "Queue Album"))
+assert not os.path.exists(_named_src), "the staging folder must be moved, not copied"
+assert not os.path.exists(os.path.join(LIB, "Ghost Artist")), \
+    "the emptied shell must be swept after the batch"
+# …and a tagless album is NOT moved under the library root by an empty script.
+_bare_src = staging_album("untagged raw drop")
+_bare_out = imports.bulk_import([{"path": _bare_src}], dict(CFG))
+_bare_row = _bare_out["items"][0]
+assert _bare_row["status"] == "imported", _bare_row
+assert _bare_row["album_path"] == os.path.join(LIB, "untagged raw drop").replace("\\", "/"), \
+    _bare_row
+print("import names the album before its chain: all assertions passed")

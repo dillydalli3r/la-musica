@@ -3518,8 +3518,6 @@ def _rewrite_track_covers(old_root, new_root, renames):
 
 
 @app.post("/api/organize")
-@job_locks.holds(lambda req: [] if req.dry_run else req.paths,
-                 kind="organize", label="Organize")
 def organize(req: OrganizeRequest):
     """Rename/move albums according to the configured naming script.
 
@@ -3527,10 +3525,28 @@ def organize(req: OrganizeRequest):
     move same-stem sidecars (.lrc/.cue/...) next to their track, move
     leftover album files (cover art etc.) to the new album root, and prune
     emptied folders. Nothing leaves the music folder.
+
+    The saved config is what names them; the import paths call
+    :func:`organize_albums` directly with the config they are already running
+    with (`server.imports._bulk_one`), so an organizer cannot disagree with the
+    import that asked for it about the music folder or the script.
+    """
+    return organize_albums(req, load_config())
+
+
+@job_locks.holds(lambda req, cfg=None: [] if req.dry_run else req.paths,
+                 kind="organize", label="Organize")
+def organize_albums(req: OrganizeRequest, cfg: Optional[dict] = None):
+    """The organizer itself — see :func:`organize` for what it does.
+
+    Split out so a non-route caller can hand over the config it is running
+    with instead of the saved one, and so the hold is on THIS function: an
+    import that already holds the album calls it under its own job, which
+    `job_locks` treats as a reference rather than a second claim.
     """
     from server.naming import DEFAULT_NAMING_SCRIPT, eval_script, track_variables
 
-    cfg = load_config()
+    cfg = cfg or load_config()
     folder = cfg.get("music_folder") or ""
     if not folder or not os.path.isdir(folder):
         raise HTTPException(400, "music_folder not set or not found")
