@@ -483,6 +483,38 @@ def check_rust_parity(tmp, exe):
        f"({got and got.reason!r})")
 
 
+def check_album_rg_skip_existing(tmp, exe):
+    """A track-tagged album still gets its ALBUM ReplayGain.
+
+    rsgain's ``-S`` skips a file that carries ANY ReplayGain tag, track only
+    included — so an album whose tracks arrived with track gain/peak but no
+    album values was skipped wholesale, its album tags never written, and
+    grading reported "Missing REPLAYGAIN_ALBUM_GAIN" on every file forever
+    (the owner's report). The skip is a per-ALBUM decision now: the run must
+    land the album values, not trust rsgain's per-file skip rule.
+    """
+    if not detect_all_tools().get("rsgain"):
+        skip("rsgain not installed: the album ReplayGain skip rule is untested")
+        return
+    lib = os.path.join(tmp, "rgskip")
+    album, paths = _album_fixture(tmp, exe, lib, "Album",
+                                  [("One", {}), ("Two", {"loud": 0.2812})])
+    for p in paths:
+        af = AudioFile(p)
+        af.set_tag("REPLAYGAIN_TRACK_GAIN", "-5.00 dB")
+        af.set_tag("REPLAYGAIN_TRACK_PEAK", "0.900000")
+        af.flush()
+    stats = run_calc_dr_replaygain(_cfg(
+        lib, worker_limit=1, targets=[album],
+        write_replaygain_tags=True, write_dynamic_range_tags=False))
+    got = [(str(AudioFile(p).get_tag("REPLAYGAIN_ALBUM_GAIN") or ""),
+            str(AudioFile(p).get_tag("REPLAYGAIN_ALBUM_PEAK") or ""))
+           for p in paths]
+    ok(all(g and pk for g, pk in got) and stats["error_count"] == 0,
+       f"an album whose tracks already carry track gain still gets its album "
+       f"values (got {got}, errors={stats['errors']})")
+
+
 def main():
     print("Dynamic range (in-process) — formulas, edge cases and the album loop")
 
@@ -505,6 +537,7 @@ def main():
         checks.append(("without numpy", lambda: check_without_numpy(tmp, exe)))
         checks.append(("unreadable track", lambda: check_undecodable_track(tmp, exe)))
         checks.append(("album loop", lambda: check_album_loop(tmp, exe)))
+        checks.append(("album RG skip", lambda: check_album_rg_skip_existing(tmp, exe)))
     else:
         skip("no ffmpeg: the decode-backed checks need it")
 

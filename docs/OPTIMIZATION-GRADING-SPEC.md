@@ -892,8 +892,13 @@ rating.
   player measure on the fly instead).
 - **R43** — script 7 writes the album gain/peak and the track gain/peak for FLAC
   and MP4 alike, using the ReplayGain 2.0 reference of **−18 LUFS**;
-  `replaygain_skip_existing` (ON) leaves already-tagged files alone unless
-  `force_dr_replaygain` is set. **rsgain measures; the app writes.** The scan is
+  `replaygain_skip_existing` (ON) skips an album only when ALL FOUR tags are
+  already on every track (`mlo.loudness._album_rg_complete`), unless
+  `force_dr_replaygain` is set — never rsgain's own `-S`, which skips a track
+  carrying ANY ReplayGain tag: an album whose tracks had track gain/peak but no
+  album ones made the scan print no rows at all, so its album tags were never
+  written and every re-run re-skipped it forever (pinned by
+  `tools/test_dynamic_range.py`). **rsgain measures; the app writes.** The scan is
   `rsgain custom -s s -a -O` — one album per call, because `custom -a` averages
   everything it is handed into ONE album row — and the four tags are stored
   through the app's atomic writer, with the text rsgain prints (gain as
@@ -3215,16 +3220,20 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   default), like `notify_download_done`, `notify_import_ready` and the add-time
   `album_pending`; a kind with no key in
   `events._notify_configured` is unconditional by design (an outcome the user
-  must be able to see). Notifications go to the persisted tray for every kind,
+  Notifications go to the persisted tray for every kind,
   and an OS notification for the kinds in `notifications.ts`'s `OS_KINDS`.
   The tray ALSO carries the grade findings the Home and Library strips write
   out — the one case where a warning is DERIVED from a payload rather than
-  announced (`notifications.ts`'s `ingestDerived`): one entry per finding, kind
-  `grade_warning`, drawn with the strip's own amber and triangle, idempotent by
-  a key built from the subject and the finding's own words so re-reading the
-  same summary never logs it twice while a finding that changes is a new entry.
-  It is deliberately outside `OS_KINDS`/`PUSH_KINDS`: a datapoint re-read from
-  a page must never pop a banner on a phone. Pinned by `tools/test_notifications.cjs`.
+  announced — and it renders them as ONE live panel: the very strip
+  (`GradeWarning` in notice mode) mounted inside the bell, reading the shared
+  `[gradesSummary]` query, so it is always current, STAYS while anything fails
+  (clearing only when the library is fixed) and is not a dismissible row —
+  it is a state, not an event. An older build logged one row PER finding
+  (`ingestDerived`, kind `grade_warning`); those rows are dropped on load
+  (`lib/notifications.ts`'s `load`) because the panel would only be doubled by
+  them. Deliberately outside `OS_KINDS`/`PUSH_KINDS`: a datapoint re-read from
+  a page must never pop a banner on a phone. Pinned by
+  `tools/test_notifications.cjs`.
 - **R91 — selecting a track silences the outgoing one at once.** The player's
   load effect (`web/src/components/PlayerBar.tsx`) pauses the ACTIVE element the
   moment the index changes, before the new source is fetched and decoded — a

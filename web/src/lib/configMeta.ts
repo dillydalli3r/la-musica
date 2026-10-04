@@ -456,7 +456,7 @@ export const CONFIG_GROUPS: CfgGroup[] = [
     },
     {
       title: "Import pipeline",
-      blurb: "What happens after an album lands in the library (Drag & drop, Finish import). The script chain below runs in order; leaving it blank runs the built-in chain: dedupe → sort → tag → covers → lyrics → audit → ReplayGain → AccurateRip. AcoustID fingerprints the audio to identify the exact release — it needs a free application key from acoustid.org; without one, matching falls back to title/artist/genre against MusicBrainz.",
+      blurb: "What happens after an album lands in the library (Drag & drop, Finish import). The script chain below runs in order; leaving it blank runs the built-in chain: dedupe → sort → tag → covers → lyrics → audit → ReplayGain → AccurateRip. A fingerprint never picks a release by itself: AcoustID is consulted only when you press Match from fingerprint (wizard) or Detect (import dialog), and it needs a free application key from acoustid.org.",
       fields: [
         { k: "auto_acquisition_enabled", label: "Automatic acquisition (searching and downloading on their own)", type: "bool", help: "Off, nothing the app starts by itself searches or downloads. What you asked for is still recorded, and the wizard and every import path still work, because those are you acting, not the app." },
         { k: "manual_import_enabled", label: "Manual importing (the wizard and POST /api/import/*)", type: "bool", help: "Off, the import wizard and every importing /api/import/* route refuse with a sentence naming this setting instead of importing — the wizard shows that sentence where its steps would be. The automatic pipeline still imports what it downloads; only the paths you drive by hand are turned off." },
@@ -466,7 +466,6 @@ export const CONFIG_GROUPS: CfgGroup[] = [
         { k: "import_auto_scripts", label: "Run the script chain after import", type: "bool" },
         { k: "import_scripts", label: "Import script ids (e.g. 1, 3, 5, 7 — blank = built-in chain)", type: "text", pattern: "^(\\s*\\d+\\s*[,;]?)*$", patternHelp: "comma-separated script ids, e.g. 1, 3, 5, 7" },
         { k: "import_bulk_concurrency", label: "Bulk import concurrency (albums imported at once; the rest wait in the queue)", type: "number", min: 1, max: 16 },
-        { k: "import_acoustid", label: "Fingerprint with AcoustID", type: "bool" },
         { k: "acoustid_enabled", label: "AcoustID enabled", type: "bool" },
         {
           k: "acoustid_api_key", label: "AcoustID application key (free at acoustid.org; every lookup sends it)", type: "password",

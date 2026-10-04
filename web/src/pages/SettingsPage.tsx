@@ -1107,7 +1107,7 @@ export default function SettingsPage() {
     {
       title: "Import pipeline",
       blurb:
-        "What happens after an album lands in the library (Drag & drop, Finish import). The script chain below runs in order; leaving it blank runs the built-in chain: dedupe → sort → tag → covers → lyrics → audit → ReplayGain → AccurateRip. AcoustID fingerprints the audio to identify the exact release — it needs a free application key from acoustid.org; without one, matching falls back to title/artist/genre against MusicBrainz.",
+        "What happens after an album lands in the library (Drag & drop, Finish import). The script chain below runs in order; leaving it blank runs the built-in chain: dedupe → sort → tag → covers → lyrics → audit → ReplayGain → AccurateRip. A fingerprint never picks a release by itself: AcoustID is consulted only when you press Match from fingerprint (wizard) or Detect (import dialog), and it needs a free application key from acoustid.org.",
       fields: [
         {
           k: "auto_acquisition_enabled", label: "Automatic acquisition (searching and downloading on their own)", type: "bool",
@@ -1139,7 +1139,6 @@ export default function SettingsPage() {
           k: "import_scripts", label: "Import script ids (e.g. 1, 3, 5, 7 — blank = built-in chain)", type: "text",
         },
         { k: "import_bulk_concurrency", label: "Bulk import concurrency (albums imported at once; the rest wait in the queue)", type: "number", min: 1, max: 16 },
-        { k: "import_acoustid", label: "Fingerprint with AcoustID", type: "bool" },
         { k: "acoustid_enabled", label: "AcoustID enabled", type: "bool" },
         {
           k: "acoustid_api_key", label: "AcoustID application key (free at acoustid.org; every lookup sends it)", type: "password",

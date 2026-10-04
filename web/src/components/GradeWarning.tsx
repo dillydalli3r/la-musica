@@ -4,7 +4,6 @@ import { AlertTriangle, CheckCircle2, ChevronDown, ChevronUp } from "lucide-reac
 import { Link } from "react-router-dom";
 import { api } from "../api";
 import { albumRef, trackRef } from "../lib/refs";
-import { GRADE_WARNING_KIND, ingestDerived } from "../lib/notifications";
 import { useLocks } from "../lib/locks";
 import type { GradeWarning as GradeSummary, GradeWarningItem } from "../types";
 
@@ -151,49 +150,13 @@ export function useGradesSummary(initial?: GradeSummary): GradeSummary | undefin
     staleTime: 5 * 60_000,
     initialData: initial,
   });
-  // The tray's own copy of the strip (owner's ask: "any warnings like this
-  // shown in the home / library page [are] shown in the notification tray as
-  // warning text"). Home and the Library page are the two surfaces that answer
-  // for the whole library, and their strip is the only place a grade finding is
-  // written out — a reader who has scrolled past it, or who is on any other
-  // page, would not see it at all. One entry per finding, idempotent by a key
-  // built from the finding itself (subject + what it says), so re-reading the
-  // same summary cannot log it twice while a finding that CHANGES is new words
-  // and a new entry.
-  useEffect(() => {
-    if (!data || data.ok) return;
-    for (const item of data.items) {
-      // The tray entry says the same thing the strip's row says: WHAT is wrong
-      // and HOW MUCH, not every check by name. The names still key the entry
-      // (`key`) so a finding that changes is new words and a new entry.
-      const words = item.codes.map((c) => CODE_WORDS[c] ?? c.toLowerCase().replace(/_/g, " "));
-      const key = [...words, item.reason].filter(Boolean).join(" — ");
-      const n = words.length;
-      const body = [
-        n > 0 ? `${n} check${n === 1 ? "" : "s"} failing` : "",
-        item.reason ?? "",
-      ].filter(Boolean).join(" — ") || "falls short of the library's grading checks";
-      ingestDerived({
-        id: `grade:${item.kind}:${item.album_path}:${item.track_path ?? ""}:${key}`,
-        kind: GRADE_WARNING_KIND,
-        title: `${item.artist ? `${item.artist} — ` : ""}${item.album}`
-          + (item.kind === "track" && item.title ? `: ${item.title}` : ""),
-        body,
-        link: item.kind === "track"
-          ? trackRef({ path: item.track_path ?? "" })
-          : albumRef({ path: item.album_path }),
-      });
-    }
-  }, [data]);
   return data;
 }
 
-/** The tray's copy of the strip, mounted ONCE in the app shell so a grade
- *  finding reaches the bell whether or not the reader ever opens Home or the
- *  Library — the owner's ask: the warnings belong in the tray "regardless of if
- *  they just happened". It reads the same query the strip reads, so the two
- *  share one cache entry and the library is walked once; the ingest effect lives
- *  in `useGradesSummary` above, and this component is just a mount for it. */
+/** Warms the grade summary ONCE in the app shell so the tray's panel (and any
+ *  page's strip) paints from the same cache entry without a second walk of the
+ *  library. The findings themselves are rendered live by `GradeWarning` — the
+ *  tray mounts one in notice mode — rather than logged as tray rows. */
 export function GradeTraySync() {
   useGradesSummary();
   return null;

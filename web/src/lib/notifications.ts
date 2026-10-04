@@ -128,7 +128,12 @@ function load(): NotificationRecord[] {
     if (!raw) return [];
     const parsed = JSON.parse(raw) as unknown;
     if (!Array.isArray(parsed)) return [];
-    return parsed.filter((r): r is NotificationRecord => !!r && typeof r === "object" && !!str((r as NotificationRecord).id));
+    return parsed.filter((r): r is NotificationRecord =>
+      !!r && typeof r === "object" && !!str((r as NotificationRecord).id)
+      // An older build logged one row PER grade finding; the tray draws them
+      // as ONE live panel now (the same strip Home and the Library read), so
+      // the old rows would only double it. Dropped on load.
+      && (r as NotificationRecord).kind !== "grade_warning");
   } catch {
     return []; // storage disabled or a log written by an older shape: start empty
   }

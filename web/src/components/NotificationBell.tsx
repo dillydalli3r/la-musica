@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { AlertTriangle, Bell, BellOff, BellRing, Send, X } from "lucide-react";
+import { Bell, BellOff, BellRing, Send, X } from "lucide-react";
 import {
   disablePush,
   enablePush,
@@ -20,7 +20,6 @@ import {
 import {
   clearAll,
   dismiss,
-  GRADE_WARNING_KIND,
   IMPORT_UNFINISHED_KIND,
   importSessionNotificationId,
   ingestDerived,
@@ -32,6 +31,7 @@ import {
 import { api } from "../api";
 import { useI18n } from "../lib/i18n";
 import Popover from "./Popover";
+import GradeWarning from "./GradeWarning";
 import { toast } from "../store";
 
 /** The top bar's notification control: the tray, and the lifetime of the event
@@ -276,6 +276,14 @@ export default function NotificationBell() {
             <span className="flex-1">{state === "denied" ? t("notify.blocked") : t("notify.enable")}</span>
           </button>
         )}
+        {/* The library's grade findings as ONE live panel — the very strip Home
+            and the Library draw — rather than one log row per finding. It reads
+            the shared [gradesSummary] query, so it is always current and STAYS
+            while anything fails (clearing only when the library is fixed); it
+            is not a dismissible row because it is a state, not an event. */}
+        <div className="px-1 pb-1.5">
+          <GradeWarning mode="notice" />
+        </div>
         {items.length === 0 ? (
           <div className="px-2.5 py-5 text-center text-xs text-zinc-500">{t("notify.tray_empty")}</div>
         ) : (
@@ -293,14 +301,8 @@ export default function NotificationBell() {
                   openNotification(n);
                 }}
               >
-                <div className={`text-xs truncate flex items-center gap-1.5 ${n.kind === GRADE_WARNING_KIND ? "text-amber-200" : "text-zinc-200"}`}>
-                  {/* A grade warning reads as a WARNING (the strip's own amber
-                      and triangle), not as another outcome: it is derived from
-                      a page's payload rather than announced, and the reader
-                      should be able to tell the two apart at a glance. */}
-                  {n.kind === GRADE_WARNING_KIND
-                    ? <AlertTriangle className="h-3 w-3 shrink-0 text-amber-400" />
-                    : !n.read && <span className="h-1.5 w-1.5 rounded-full bg-accent shrink-0" />}
+                <div className="text-xs truncate flex items-center gap-1.5 text-zinc-200">
+                  {!n.read && <span className="h-1.5 w-1.5 rounded-full bg-accent shrink-0" />}
                   <span className="truncate">{n.title}</span>
                 </div>
                 {n.body && <div className="text-[11px] text-zinc-500 leading-snug">{n.body}</div>}

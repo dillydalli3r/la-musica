@@ -125,6 +125,28 @@ def _scan_replaygain(rsgain_exe, files, skip_existing):
     return per_file, album, ""
 
 
+def _album_rg_complete(files):
+    """True when EVERY track already carries all four ReplayGain tags.
+
+    rsgain's ``-S`` skips a file that carries ANY ReplayGain tag — track only
+    included — so an album whose tracks have track gain/peak but no ALBUM ones
+    printed no rows at all and its album tags were never written (the owner's
+    "Missing REPLAYGAIN_ALBUM_GAIN" on an album every file of which already
+    carried track values). Skipping is therefore a per-ALBUM decision: only
+    when all four tags are already on every file is there nothing to compute.
+    """
+    for path in files:
+        try:
+            af = AudioFile(path)
+            for tag in ("REPLAYGAIN_TRACK_GAIN", "REPLAYGAIN_TRACK_PEAK",
+                        "REPLAYGAIN_ALBUM_GAIN", "REPLAYGAIN_ALBUM_PEAK"):
+                if not str(af.get_tag(tag) or "").strip():
+                    return False
+        except Exception:
+            return False
+    return True
+
+
 def _rg_pending(row, album):
     """The REPLAYGAIN_* tags one file should carry, as {tag: value}.
 
@@ -443,8 +465,15 @@ def run_calc_dr_replaygain(config):
             files = [os.path.join(album_path, f)
                      for f in sorted(os.listdir(album_path))
                      if is_audio_file(f)]
-            per_file, album_rg, err = _scan_replaygain(
-                rsgain["rsgain_exe"], files, skip_existing)
+            # Skip the album only when ALL FOUR tags are already on every file:
+            # rsgain's own -S skips a track that carries any ReplayGain tag, so
+            # handing it an album that has track values but no album ones made
+            # it print nothing and the album tags were never written.
+            if skip_existing and _album_rg_complete(files):
+                per_file, album_rg, err = {}, {}, ""
+            else:
+                per_file, album_rg, err = _scan_replaygain(
+                    rsgain["rsgain_exe"], files, False)
             if err:
                 afail = f"rsgain: {err}"
             else:

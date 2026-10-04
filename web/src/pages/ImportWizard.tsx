@@ -3871,16 +3871,14 @@ const finish = async () => {
                   <span className="chip bg-amber-900/50 text-amber-300 border border-amber-900 shrink-0">No MusicBrainz ID found</span>
                 ) : null}
                 {/* The fingerprint, one press at a time: it fills this field
-                    ONLY when pressed (or when Settings → Import's opt-in asks
-                    for it), because a fingerprint is evidence about the AUDIO
-                    and never about which EDITION the user wants. */}
+                    ONLY when pressed, because a fingerprint is evidence about
+                    the AUDIO and never about which EDITION the user wants. */}
                 <button
                   className="btn-ghost tap shrink-0"
                   onClick={matchReleaseFromFingerprint}
                   disabled={acoustidBusy || !albumPath}
                   title={"Fingerprint the album with AcoustID and use the release it matches — "
-                         + "nothing is chosen from the fingerprint unless this is pressed "
-                         + "(Settings → Import can run it automatically)"}
+                         + "nothing is chosen from the fingerprint unless this is pressed"}
                 >
                   {acoustidBusy
                     ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
