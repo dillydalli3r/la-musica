@@ -2538,10 +2538,17 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   an OS notification — a tag write must not fill the panel. Credentials,
   config, dependencies, export/EQ and the per-user stores (ratings, favourites,
   likes, playlists, plays) are excluded: they invalidate their own client
-  queries and must not cost a library refetch per click. Pinned by
-  `tools/test_notifications.py` (the coalesced burst, the middleware over HTTP,
-  and a GET announcing nothing) and `tools/test_notifications.cjs` (the kind
-  refreshes the derived queries, and is silent).
+  queries and must not cost a library refetch per click. A rebuild that STARTED
+  before a change must not END on the pre-write rows either: two generation
+  counters (`tagcache._lib_write_gen` / `_lib_drop_gen`) let
+  `_refresh_library` tell, so a WRITE landing mid-build keeps the tree dirty
+  (the next request rebuilds again, and the rebuild's own frame brings a
+  client back) and a DROP landing mid-build (a settings change, Refresh)
+  discards the in-flight payload instead of resurrecting a tree built with the
+  old config. Pinned by `tools/test_notifications.py` (the coalesced burst, the
+  middleware over HTTP, a GET announcing nothing, and all three rebuild/mid-flight
+  cases) and `tools/test_notifications.cjs` (the kind refreshes the derived
+  queries, and is silent).
 
 - **R164 — a script that moves an album reports the folder the album is in
   WHEN THE SCRIPT RETURNS, and the chain follows it.** A script that takes an

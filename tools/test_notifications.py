@@ -29,6 +29,7 @@ import os
 import struct
 import sys
 import tempfile
+import threading
 import time
 from urllib.parse import quote
 
@@ -715,6 +716,105 @@ else:
     finally:
         _auth.cached_state, _auth.current_state = _cached, _current
         main_mod.load_config = _real_load_cfg
+
+# ── A rebuild must END on the tree that includes the last write (R348) ───────
+#
+# `invalidate_album`/`invalidate_path` serve the tree stale-while-revalidate, so
+# a script writing for minutes can have a background rebuild FINISH mid-write.
+# That rebuild must not store its pre-write rows and clear the dirty flag: the
+# write that landed after it started would never be rebuilt, and the page would
+# sit on the stale tree until the next visit — the "the library does not refresh
+# after a script runs" report.
+print("== a rebuild ends on the tree that includes the last write ==")
+from server import tagcache as tc  # noqa: E402
+
+_KEY = "test-library-key"
+
+
+def _fresh_cache():
+    with tc._lock:
+        tc._lib_cache.clear()
+        tc._lib_body.clear()
+        tc._lib_dirty.clear()
+        tc._lib_refreshing.clear()
+        tc._lib_building.clear()
+        tc._lib_write_gen = 0
+        tc._lib_drop_gen = 0
+
+
+def _await_refresh():
+    for _ in range(400):
+        with tc._lock:
+            if _KEY not in tc._lib_refreshing:
+                return
+        time.sleep(0.02)
+
+
+# Control: nothing changes while the rebuild runs -> stored AND dirty cleared.
+_fresh_cache()
+with tc._lock:
+    tc._lib_cache[_KEY] = (time.time(), {"v": 0})
+tc.invalidate_album("/music/Artist/Album")
+tc._refresh_library(_KEY, lambda: {"v": 1}, notify=True)
+_await_refresh()
+with tc._lock:
+    _stored = tc._lib_cache.get(_KEY, (0.0, None))[1]
+    _dirty = _KEY in tc._lib_dirty
+check("a rebuild with nothing in flight stores its tree and clears the dirty flag",
+      _stored == {"v": 1} and not _dirty, json.dumps({"stored": _stored, "dirty": _dirty}))
+
+# A WRITE lands while the rebuild runs: the flag must stay set so the next
+# request rebuilds again (and the rebuild's own frame brings a client back).
+_fresh_cache()
+with tc._lock:
+    tc._lib_cache[_KEY] = (time.time(), {"v": 0})
+tc.invalidate_album("/music/Artist/Album")
+_go, _release = threading.Event(), threading.Event()
+
+
+def _slow_builder():
+    _go.set()
+    _release.wait(5)
+    return {"v": 1}
+
+
+tc._refresh_library(_KEY, _slow_builder, notify=True)
+_go.wait(5)
+tc.invalidate_album("/music/Artist/Album")   # the write that lands mid-build
+_release.set()
+_await_refresh()
+with tc._lock:
+    _dirty2 = _KEY in tc._lib_dirty
+check("a write during the rebuild keeps the tree dirty (the next request rebuilds it)",
+      _dirty2, json.dumps({"dirty": _dirty2}))
+
+# A DROP lands while the rebuild runs (a settings change, the Refresh button):
+# the payload came from a library the caller threw away, so it must NOT be
+# stored — resurrecting it would serve a tree built with the OLD config.
+_fresh_cache()
+with tc._lock:
+    tc._lib_cache[_KEY] = (time.time(), {"v": 0})
+tc.invalidate_album("/music/Artist/Album")
+_go2, _release2 = threading.Event(), threading.Event()
+
+
+def _slow_builder2():
+    _go2.set()
+    _release2.wait(5)
+    return {"v": 9}
+
+
+tc._refresh_library(_KEY, _slow_builder2, notify=True)
+_go2.wait(5)
+tc.invalidate_all()          # the drop
+_release2.set()
+_await_refresh()
+with tc._lock:
+    _present = _KEY in tc._lib_cache
+check("a drop during the rebuild discards the in-flight tree (it must not resurrect)",
+      not _present, json.dumps({"present": _present}))
+
+_fresh_cache()
 
 print(f"\n{len(FAILED)} failure(s)")
 sys.exit(1 if FAILED else 0)

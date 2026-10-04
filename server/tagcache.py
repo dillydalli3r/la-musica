@@ -43,6 +43,16 @@ _lib_building = set()  # keys a thread is currently building
 # thread is rebuilding right now. See `_refresh_library`.
 _lib_dirty = set()
 _lib_refreshing = set()
+# Generation counters for the two ways the tree goes stale, so a background
+# rebuild that STARTED before a change can tell whether its result still
+# describes the library (see `_refresh_library`). `_lib_write_gen` is bumped by
+# every mark-dirty (a write to a file); `_lib_drop_gen` by every outright drop
+# (a settings change, the Refresh button). Without them a rebuild that finished
+# while a script was still writing stored its PRE-write rows and cleared the
+# dirty flag, so nothing rebuilt again and the page sat on the stale tree —
+# the write that landed mid-build was never the one the page ended on.
+_lib_write_gen = 0
+_lib_drop_gen = 0
 _payload_cache = {}  # (kind, path, config key) -> (built_at, payload)
 _cover_cache = OrderedDict()
 _color_cache = OrderedDict()  # cover stat key -> "#rrggbb"
@@ -145,12 +155,14 @@ def invalidate_path(path):
     and re-derived behind the next request (see `get_library`), because a tag
     write to one file made the next page load rebuild every row in it.
     """
+    global _lib_write_gen
     with _lock:
         norm = os.path.normcase(path)
         keys = [k for k in _tag_cache if k[0] == norm]
         for k in keys:
             del _tag_cache[k]
         _lib_dirty.update(_lib_cache)
+        _lib_write_gen += 1
         _payload_cache.clear()
     _drop_index([path])
 
@@ -172,12 +184,15 @@ def _drop_index(paths):
 
 
 def invalidate_all():
+    global _lib_drop_gen
     with _lock:
         _tag_cache.clear()
         _cover_cache.clear()
         _color_cache.clear()
         _lib_cache.clear()
         _lib_body.clear()
+        _lib_dirty.clear()
+        _lib_drop_gen += 1
         _payload_cache.clear()
         _build_done.notify_all()
     try:
@@ -210,10 +225,12 @@ def invalidate_library_payloads():
     `invalidate_all` stays for what really invalidates everything: a settings
     change (the config rides every key) and a cold sweep.
     """
+    global _lib_drop_gen
     with _lock:
         _lib_cache.clear()
         _lib_dirty.clear()
         _lib_body.clear()
+        _lib_drop_gen += 1
         _payload_cache.clear()
         _build_done.notify_all()
 
@@ -245,6 +262,7 @@ def invalidate_album(*folders):
     roots = [str(f or "") for f in folders if str(f or "")]
     if not roots:
         return
+    global _lib_write_gen
     with _lock:
         for key in [k for k in _tag_cache if any(_inside(k[0], r) for r in roots)]:
             del _tag_cache[key]
@@ -253,6 +271,7 @@ def invalidate_album(*folders):
         for key in [k for k in _color_cache if any(_inside(k[0], r) for r in roots)]:
             del _color_cache[key]
         _lib_dirty.update(_lib_cache)
+        _lib_write_gen += 1
         _payload_cache.clear()
         _build_done.notify_all()
     _drop_index(roots)
@@ -296,6 +315,8 @@ def _refresh_library(key, builder, notify=False):
         if key in _lib_refreshing or key in _lib_building:
             return
         _lib_refreshing.add(key)
+        write_gen = _lib_write_gen
+        drop_gen = _lib_drop_gen
 
     def run():
         payload = None
@@ -307,10 +328,17 @@ def _refresh_library(key, builder, notify=False):
         if payload is not None:
             document = (payload, *_json_document(payload))
         with _lock:
-            if payload is not None:
+            # Store only when nothing invalidated the tree while we built. A
+            # DROP (a settings change, Refresh) means this payload was derived
+            # from a library the caller has already thrown away; a WRITE means
+            # it may predate that write — whose own frame brings a client back,
+            # so `_lib_dirty` stays set and the next request rebuilds again
+            # rather than clearing the flag on a tree that does not include it.
+            if payload is not None and drop_gen == _lib_drop_gen:
                 _lib_cache[key] = (time.time(), payload)
                 _lib_body[key] = document
-                _lib_dirty.discard(key)
+                if write_gen == _lib_write_gen:
+                    _lib_dirty.discard(key)
             _lib_refreshing.discard(key)
             _build_done.notify_all()
         if payload is not None and notify:
