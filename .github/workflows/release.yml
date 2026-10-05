@@ -207,6 +207,12 @@ jobs:
         # is a failed release rather than a warning: without this the publish
         # would quietly leave the PREVIOUS release's asset in place under the
         # same name and the run would look green.
+        #
+        # The Windows-portable check stays under clients/nsis: the macOS leg
+        # uploads the whole `.app`, and a PyInstaller bundle carries pip's
+        # distlib launcher `.exe` files inside it — a bare `-name '*.exe'` over
+        # all of clients/ finds THOSE and calls a release with no NSIS
+        # installer complete.
         run: |
           find clients -type f | sort
           missing=0
@@ -219,7 +225,12 @@ jobs:
             fi
           }
           check Windows '*.msi'
-          check Windows-portable '*.exe'
+          if find clients/nsis -type f -name '*.exe' -print -quit 2>/dev/null | grep -q .; then
+            echo "ok: Windows-portable (clients/nsis/*.exe)"
+          else
+            echo "::error::no Windows-portable installer in this release — see the Windows desktop job for why"
+            missing=1
+          fi
           check macOS '*.dmg'
           check Linux-deb '*.deb'
           check Linux-appimage '*.AppImage'
@@ -265,11 +276,15 @@ jobs:
           # Installers only, by extension: the bundles' own trees carry
           # internals (Info.plist, icon.icns, the bare mlo-desktop binary) and
           # a release that lists those beside the installers reads as clutter
-          # and invites the wrong download.
+          # and invites the wrong download. The NSIS installer is named by ITS
+          # directory rather than `**/*.exe`, because the macOS leg uploads the
+          # whole `.app` and a PyInstaller bundle carries pip's distlib
+          # launcher `.exe` files inside it — `**/*.exe` published six of those
+          # beside the installers in 5.1.2.
           files: |
             la-musica-*-windows-x64.zip
             clients/**/*.msi
-            clients/**/*.exe
+            clients/nsis/*.exe
             clients/**/*.dmg
             clients/**/*.deb
             clients/**/*.AppImage
