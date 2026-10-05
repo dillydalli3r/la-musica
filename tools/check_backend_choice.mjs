@@ -60,10 +60,12 @@ Object.defineProperty(globalThis, "isSecureContext", { value: true, configurable
 
 /** What the shell's IPC answers. Each case replaces `invokeImpl`. */
 let currentMode = "unset";
+let currentStatus = "remote";
 const calls = [];
 let invokeImpl = async (cmd, args) => {
   calls.push({ cmd, args });
-  if (cmd === "shell_backend_choice") return { mode: currentMode, music_folder: "/music" };
+  if (cmd === "shell_backend_choice")
+    return { mode: currentMode, music_folder: "/music", status: currentStatus };
   if (cmd === "choose_backend") return null;
   throw new Error(`unexpected command: ${cmd}`);
 };
@@ -99,6 +101,25 @@ try {
   }
 
   console.log("== what the shell says (a desktop shell with the command) ==");
+  // `status` is the live backend state on the SAME ask, and it is the reason a
+  // page that entered local mode (which reloads it) does not fall through to
+  // asking for a server ADDRESS while its own backend is still booting: the
+  // events have already been emitted by then, so the answer must carry it.
+  currentMode = "local";
+  currentStatus = "starting";
+  const starting = await shell.shellBackendChoice();
+  check("a starting local backend reads as starting", shell.backendStartingUp() === true, JSON.stringify(starting));
+  check("...and not as a failure", shell.backendUnavailable() === false, String(shell.backendUnavailable()));
+  currentStatus = "stopped";
+  await shell.shellBackendChoice();
+  check("a local backend that is not there reads as unavailable", shell.backendUnavailable() === true);
+  currentStatus = "running";
+  await shell.shellBackendChoice();
+  check("a running local backend clears both flags",
+    shell.backendUnavailable() === false && shell.backendStartingUp() === false);
+  currentMode = "unset";
+  currentStatus = "remote";
+
   for (const mode of ["local", "remote", "unset"]) {
     currentMode = mode;
     const choice = await shell.shellBackendChoice();
@@ -113,6 +134,57 @@ try {
     const call = calls.find((c) => c.cmd === "choose_backend");
     check(`chooseBackend("${mode}") reaches the shell`, ok === true, JSON.stringify(calls));
     check(`...with mode "${mode}"`, call?.args?.mode === mode, JSON.stringify(call?.args ?? null));
+  }
+
+  console.log("== a local backend that did not come up, then did ==");
+  // The shell reports a failed start as `stopped` with no origin; the chooser
+  // renders that as the reason plus two ways out. Driving it needs no new
+  // machinery: `listen()` is `transformCallback(handler)` (the host stores the
+  // function under an id) followed by `plugin:event|listen`, so the stub keeps
+  // the callback table and the module's own handler is called with the same
+  // payload the shell emits (`backend_handle::emit_unavailable`).
+  {
+    const callbacks = new Map();
+    let nextId = 1;
+    const ipcInvoke = globalThis.__TAURI_INTERNALS__.invoke;
+    globalThis.__TAURI_INTERNALS__.transformCallback = (cb) => {
+      const id = nextId++;
+      callbacks.set(id, cb);
+      return id;
+    };
+    globalThis.__TAURI_INTERNALS__.invoke = async (cmd, args) => {
+      if (cmd === "plugin:event|listen") return args.handler;
+      if (cmd === "plugin:event|unlisten") return null;
+      return ipcInvoke(cmd, args);
+    };
+
+    let fired = 0;
+    shell.subscribeBackendFailure(() => { fired += 1; });
+    const unlisten = await shell.attachBackendShell();
+    check("attachBackendShell returns an undo function", typeof unlisten === "function", String(unlisten));
+
+    const handler = callbacks.get(1);
+    check("the module registered exactly one mlo-backend listener",
+      callbacks.size === 1 && typeof handler === "function",
+      `callbacks=${callbacks.size} handler=${typeof handler}`);
+
+    if (typeof handler === "function") {
+      check("no failure is reported before the shell says anything",
+        shell.backendUnavailable() === false, String(shell.backendUnavailable()));
+      handler({ event: "mlo-backend", id: 1, payload: { status: "stopped", origin: "", port: 0, mode: "local", needs_choice: false, local: true } });
+      check("a stopped local backend reads as unavailable",
+        shell.backendUnavailable() === true, String(shell.backendUnavailable()));
+      check("...and notifies the watcher", fired === 1, String(fired));
+      handler({ event: "mlo-backend", id: 2, payload: { status: "running", origin: "http://127.0.0.1:8011", port: 8011, mode: "local", needs_choice: false, local: true } });
+      check("a running backend clears it again",
+        shell.backendUnavailable() === false, String(shell.backendUnavailable()));
+      // A second attach must NOT register again: two listeners would handle
+      // every state twice and the first would leak.
+      await shell.attachBackendShell();
+      check("attaching twice registers nothing extra", callbacks.size === 1, `callbacks=${callbacks.size}`);
+      unlisten();
+      check("the undo function unregisters", callbacks.size === 1, String(callbacks.size));
+    }
   }
 
   console.log("== a shell with no chooser (mobile, or an older desktop) ==");

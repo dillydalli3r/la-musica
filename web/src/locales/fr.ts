@@ -382,7 +382,6 @@ export default {
   // —— Backend choice (a desktop shell's very first run) ——————————————————
   "backend.title": "Comment cette app doit-elle obtenir son serveur ?",
   "backend.subtitle": "Choisissez une fois. Vous pourrez le changer plus tard depuis l’icône de la barre d’état.",
-  "backend.step_choice": "Backend",
   "backend.local_title": "Utiliser le backend intégré",
   "backend.local_hint": "la musica lance son propre serveur sur cette machine. Recommandé — pas de Docker, rien d'autre à installer.",
   "backend.remote_title": "Se connecter à un serveur que je gère",
@@ -391,6 +390,10 @@ export default {
   "backend.starting_title": "Démarrage du serveur intégré…",
   "backend.starting_hint": "Cela peut prendre quelques secondes. Cette fenêtre ouvre l'app toute seule dès que le serveur répond.",
   "backend.error": "Ce choix n’a pas pris effet. Réessayez.",
+  "backend.failed_title": "Le serveur intégré n'a pas démarré",
+  "backend.failed_hint": "Cette installation embarque son propre serveur, et il n'a pas démarré — le plus souvent des fichiers manquants dans le paquet ou la plage de ports occupée. Vous pouvez réessayer, ou vous connecter à un serveur la musica que vous hébergez ailleurs.",
+  "backend.failed_retry": "Réessayer",
+  "backend.failed_remote": "Se connecter à un serveur",
 
   // —— MusicBrainz artist page: add / download one release TYPE ——————————
   "mb.actions_title": "Ajouter ou télécharger par type",

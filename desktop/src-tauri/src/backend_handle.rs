@@ -118,15 +118,66 @@ pub fn attach_local(window: &WebviewWindow, backend: &Arc<LocalBackend>, setting
     });
 }
 
+/// Point the window at the app's own build — away from the boot splash.
+///
+/// The splash (`/splash.html`) is a page about a server starting; it has no
+/// navigation of its own. So every path that will NOT end in a running server
+/// has to leave it explicitly: remote mode (the wizard asks for an address),
+/// the first-run question (the chooser needs the page), and a local start that
+/// failed (the page renders the reason). `index.html` is served by the shell's
+/// own asset protocol — an app origin, never loopback — which is exactly what
+/// makes the page treat itself as a CLIENT shell with setup still to do
+/// (`web/src/lib/clientSetup.ts::isClientShell`).
+pub fn show_app_page(window: &WebviewWindow) {
+    // `on_page_load` is a one-shot hook registered on the window builder, so it
+    // cannot be attached here — the window already exists. What CAN be done at
+    // any time is a navigation guarded by the load event: this call installs an
+    // initialization script that runs in the splash document and moves it to
+    // `index.html` on the spot. `window.navigate` from JS keeps the Tauri
+    // context (an `<a>` click would not), and an absolute path is used so a
+    // future splash at a nested path cannot resolve it relative to itself.
+    let _ = window.eval(
+        "if (!window.__mloLeavingSplash) { window.__mloLeavingSplash = 1; window.location.replace('index.html'); }",
+    );
+}
+
+/// Tell a page that the local backend this shell was asked for is NOT running.
+///
+/// `status: "stopped"` with no origin is the one state the page cannot
+/// misread: a shell in local mode with no server. It is emitted on the failure
+/// path of `enter_backend_mode`, after the window has been sent to the app's
+/// own build, so the user sees that sentence instead of an endless
+/// "Starting the local server…".
+pub fn emit_unavailable(window: &WebviewWindow, settings: &ShellSettings) {
+    let state = BackendState {
+        status: BackendStatus::Stopped.as_str(),
+        origin: "",
+        port: 0,
+        mode: settings.mode_str(),
+        needs_choice: settings.needs_choice(),
+        local: true,
+    };
+    let _ = window.emit(BACKEND_EVENT, state);
+}
+
 /// The window is pointed at a REMOTE server (the classic mode): emit the
 /// state once so the page knows this shell did not spawn the backend.
 pub fn attach_remote(window: &WebviewWindow, settings: &ShellSettings, port_hint: Option<u16>) {
     // The window starts on `/splash.html` (tauri.conf.json). In remote mode
     // there is no backend to wait for — the SPA's own wizard asks for the
     // server address — so leave the splash for the app straight away.
-    if let Ok(url) = "index.html".parse() {
-        let _ = window.navigate(url);
-    }
+    //
+    // "Straight away" has to mean AT FIRST PAINT, not from this call: the
+    // window's configured `url` is applied by the runtime AFTER `setup()`
+    // returns, so a navigate() from here is simply overwritten by the splash.
+    // The redirect is therefore armed now and fires on the splash's own load
+    // event, which is the earliest moment the runtime will not undo it.
+    //
+    // Skipping the splash at the config level was the other option and it is
+    // worse: the local path must keep the splash (a cold backend takes seconds
+    // to answer, and navigating at it too early is the WebView2 error page),
+    // and the mode is not known until `settings::load` has run.
+    show_app_page(window);
     let state = BackendState {
         status: BackendStatus::Running.as_str(),
         origin: "",

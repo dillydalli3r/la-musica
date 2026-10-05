@@ -381,7 +381,6 @@ export default {
   // —— Backend choice (a desktop shell's very first run) ——————————————————
   "backend.title": "このアプリはどうサーバーを用意しますか？",
   "backend.subtitle": "一度選ぶだけ。あとからトレイアイコンで変更できます。",
-  "backend.step_choice": "バックエンド",
   "backend.local_title": "内蔵バックエンドを使う",
   "backend.local_hint": "la musica がこのマシン上で自分のサーバーを起動します。おすすめです — Docker は不要で、ほかに何もインストールしません。",
   "backend.remote_title": "自分で運用するサーバーに接続",
@@ -390,6 +389,10 @@ export default {
   "backend.starting_title": "内蔵サーバーを起動しています…",
   "backend.starting_hint": "数秒かかることがあります。サーバーが応答すると、このウィンドウが自動でアプリを開きます。",
   "backend.error": "この選択は反映されませんでした。もう一度お試しください。",
+  "backend.failed_title": "内蔵サーバーが起動しませんでした",
+  "backend.failed_hint": "このインストールには専用のサーバーが同梱されていますが、起動しませんでした — 多くは同梱ファイルの欠落か、ポート範囲が塞がっているためです。再試行するか、別の場所で動かしている la musica サーバーに接続してください。",
+  "backend.failed_retry": "再試行",
+  "backend.failed_remote": "代わりにサーバーへ接続",
 
   // —— MusicBrainz artist page: add / download one release TYPE ——————————
   "mb.actions_title": "種類ごとに追加・ダウンロード",

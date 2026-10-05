@@ -12,11 +12,14 @@ import {
   KeyRound,
   Loader2,
   RotateCcw,
+  Settings,
   ShieldCheck,
   Sparkles,
 } from "lucide-react";
 import { api, deviceUnavailable, installSummary, setToken, unavailableFeatures } from "../api";
 import FolderPicker from "../components/FolderPicker";
+import PageHeader from "../components/PageHeader";
+import SetupRail from "../components/SetupRail";
 import SourcesPanel from "../components/SourcesPanel";
 import { toast } from "../store";
 import {
@@ -35,6 +38,13 @@ import {
  *  save sends only the keys THAT step changed (see cfgChanges), and the closing
  *  screen can say how far from the shipped defaults the answers land. */
 const ALL_FIELDS = SETUP_STEPS.flatMap(stepFields);
+/** The wizard's steps as rail ids: `panel` is the discriminator, `label` the
+ *  word on the chip. Both come from the same list, so a step cannot be added
+ *  without appearing in the rail. */
+const STEP_PANELS = SETUP_STEPS.map((s) => s.panel).filter((p) => p !== undefined);
+const STEP_LABELS: Record<string, string> = Object.fromEntries(
+  SETUP_STEPS.flatMap((s) => (s.panel === undefined ? [] : [[s.panel, s.label] as const])),
+);
 
 export default function SetupPage() {
   const navigate = useNavigate();
@@ -369,60 +379,39 @@ export default function SetupPage() {
   const isLast = index === SETUP_STEPS.length - 1;
 
   return (
-    <div className="min-h-dvh bg-bg text-zinc-100 flex flex-col items-center justify-center p-6">
-      <div className="w-full max-w-2xl">
-        <div className="flex items-center gap-2 mb-6">
-          <img
-            src="/icon.png"
-            alt="la musica"
-            className="h-9 w-9 rounded-md object-cover ring-1 ring-border shadow-sm"
-          />
-          <div className="flex-1">
-            <div className="font-bold tracking-wide">la musica</div>
-            <div className="text-xs text-zinc-500">{config?.first_run_done ? "Setup" : "First-run setup"}</div>
-          </div>
-          {/* The way out that is not a step: the wizard is re-runnable from
-              Settings, and a first run with no library to point at yet should
-              not have to walk the whole wizard to leave. */}
-          {!isLast && (
-            <button className="btn-ghost !py-1 text-xs tap" disabled={busy} onClick={() => exit("/")}>
-              Skip setup
-            </button>
-          )}
-        </div>
+    <div className="safe-shell min-h-dvh bg-bg text-zinc-100 flex flex-col items-center justify-center">
+      <div className="w-full max-w-2xl space-y-4 p-6">
+        {/* The same frame and header the shell's own wizards use — a user who
+            answered "use the built-in backend" is walked straight into this
+            screen, and it must read as the next step of that flow, not as a
+            differently built page. */}
+        <PageHeader
+          icon={Settings}
+          title="la musica"
+          subtitle={config?.first_run_done ? "Setup" : "First-run setup"}
+          actions={
+            /* The way out that is not a step: the wizard is re-runnable from
+               Settings, and a first run with no library to point at yet should
+               not have to walk the whole wizard to leave. */
+            !isLast ? (
+              <button className="btn-ghost !py-1 text-xs tap" disabled={busy} onClick={() => exit("/")}>
+                Skip setup
+              </button>
+            ) : undefined
+          }
+        />
 
-        {/* The rail — the same idiom as the client wizard's. Six labelled steps
-            still wrap on a phone, so the labels are single words and every chip
-            jumps to its step. */}
-        <div className="flex flex-wrap items-center gap-2 text-[11px] text-zinc-500 mb-4">
-          {SETUP_STEPS.map((s, i) => (
-            <button
-              key={s.label}
-              type="button"
-              className="flex items-center gap-2 tap disabled:opacity-50"
-              // The account step is the one the wizard will not let a first
-              // run past, so it is the one the gate must leave OPEN: locking
-              // by position would lock the password step itself as soon as a
-              // step precedes it.
-              disabled={busy || (accountMissing && s.panel !== "password")}
-              title={accountMissing && s.panel !== "password" ? "Set the password on the Account step first" : undefined}
-              onClick={() => setIndex(i)}
-            >
-              <span
-                className={`h-5 w-5 rounded-sm flex items-center justify-center text-[10px] border ${
-                  i === index
-                    ? "bg-accent text-[var(--accent-fg)] border-accent"
-                    : i < index
-                      ? "bg-emerald-900/60 text-emerald-300 border-emerald-800"
-                      : "bg-panel border-border text-zinc-500"
-                }`}
-              >
-                {i < index ? <Check className="h-3 w-3" /> : i + 1}
-              </span>
-              <span className={i === index ? "text-zinc-200" : "text-zinc-600"}>{s.label}</span>
-            </button>
-          ))}
-        </div>
+        {/* The rail — the shared SetupRail, every chip jumping to its step. */}
+        <SetupRail
+          steps={STEP_PANELS}
+          current={step.panel ?? STEP_PANELS[0]!}
+          labels={STEP_LABELS}
+          onSelect={(panel) => {
+            const i = SETUP_STEPS.findIndex((s) => s.panel === panel);
+            if (i >= 0) setIndex(i);
+          }}
+          isLocked={(panel) => busy || (accountMissing && panel !== "password")}
+        />
 
         <div className="panel p-6 space-y-4">
           <div>

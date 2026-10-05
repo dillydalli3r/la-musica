@@ -45,6 +45,27 @@ what happens when you launch the shell twice.
   be started (no resource tree, no free loopback port), the screen returns to
   its two options with a message instead of leaving a user watching
   "Starting the built-in server…" at a server that is not coming.
+- **The question is actually reached.** `shell.json` records the answer, but
+  the flag that says "this device has been through setup" lives in the
+  webview's own localStorage — and WebView2 keys that profile by the app
+  identifier, so two shells of la musica SHARE it. A flag written by another
+  install, or by an earlier build, used to hide the built-in-vs-server question
+  from a shell that had never been asked it, and the window could sit on the
+  boot splash ("Starting the local server…") forever with no backend running,
+  no process to find and a silent tray row. The shell's own mode now decides:
+  `unset` shows the question whatever the page remembers, and every path that
+  will not end in a running server leaves the splash at first paint — the
+  splash is a page about a server, and it has nowhere to go on its own.
+- **Local mode never asks for an address, not even for a second.** The backend
+  takes seconds to boot, and that window used to fall through to the client
+  wizard's "Server address" step — the wrong question, in a mode that already
+  knows the answer. The screen now stays on the chooser's "starting the
+  built-in server" state until the backend answers.
+- **One wizard, one rail.** The backend question, the shell's setup wizard and
+  the app's own first-run wizard all draw the same header, frame and step rail
+  (`components/SetupRail.tsx`): answering the question reads as step 1 of the
+  flow that follows instead of a screen with a two-chip menu of its own, and
+  "use the built-in backend" no longer lands on a differently built page.
 
 ## One shell per machine
 

@@ -430,6 +430,19 @@ fn enter_backend_mode(app: &tauri::AppHandle, settings: &settings::ShellSettings
     let Some(slot) = app.try_state::<BackendSlot>() else {
         return false;
     };
+    // OFF THE SPLASH FIRST, and this is the line that matters on a cold start.
+    // The splash is a page about a server; when there IS no server (no bundled
+    // backend, no free port) nothing in the shell can leave it — the window
+    // used to sit on "Starting the local server…" forever with an empty tray
+    // row and no process anywhere, which is exactly what it looked like. The
+    // app's own build renders the reason from the state `attach_local` (or the
+    // failure branch below) emits, and "no backend" is a state the page can
+    // show. `enter_backend_mode` runs from `setup()`, before the webview has
+    // finished loading the splash, so this navigation wins the race.
+    let window = app.get_webview_window("main");
+    if let Some(w) = &window {
+        let _ = backend_handle::show_app_page(w);
+    }
     // A backend this shell already owns is REUSED, not spawned again: the
     // question can be answered twice while the first answer's server is up,
     // and two servers over one library is the thing to avoid.
@@ -441,16 +454,20 @@ fn enter_backend_mode(app: &tauri::AppHandle, settings: &settings::ShellSettings
     match backend {
         Some(backend) => {
             *slot.0.lock() = Some(backend.clone());
-            if let Some(window) = app.get_webview_window("main") {
+            if let Some(window) = window {
                 backend_handle::attach_local(&window, &backend, settings);
             }
             true
         }
         None => {
-            // No bundled backend, or no free loopback port. The tray says so;
-            // the caller (the first-run screen) says so where the user is
-            // looking.
+            // No bundled backend, or no free loopback port. The tray says so,
+            // and so does the page — the window is already on the app's own
+            // build by now, and a state with no origin is what it renders as
+            // "the local server did not start".
             set_tray_backend(app, "Backend: unavailable");
+            if let Some(w) = &window {
+                backend_handle::emit_unavailable(w, settings);
+            }
             false
         }
     }
@@ -460,20 +477,56 @@ fn enter_backend_mode(app: &tauri::AppHandle, settings: &settings::ShellSettings
 /// "local" (spawn the app's own server), "remote" (a server the user runs) or
 /// "unset" — a shell that has never been asked, which is what makes that
 /// screen ask instead of assuming.
+///
+/// `status` carries the LIVE state of a local backend ("starting" while it is
+/// booting, "running" once /api/health answers, "stopped" when there is none),
+/// because an event cannot be the only source of it: the shell reloads the page
+/// as it enters local mode, and a fresh document has missed every `mlo-backend`
+/// event the shell emitted before it. Without this, that document fell through
+/// to the client wizard and asked a locally-hosted install for a server
+/// ADDRESS while its own server was still booting.
 #[cfg(desktop)]
 #[derive(serde::Serialize)]
 struct ShellChoice {
     mode: &'static str,
     music_folder: String,
+    status: &'static str,
 }
 
 #[cfg(desktop)]
 #[tauri::command]
-fn shell_backend_choice() -> ShellChoice {
+fn shell_backend_choice(app: tauri::AppHandle) -> ShellChoice {
     let settings = settings::load(&backend::default_app_data_dir());
     ShellChoice {
         mode: settings.mode_str(),
         music_folder: settings.music_folder.clone(),
+        status: local_status(&app, &settings),
+    }
+}
+
+/// The live state of the backend this shell owns, as one word:
+///
+/// * `running` — a local backend is up and /api/health answers (the probe is
+///   short: this runs on a page's first render, and a hung probe would hang the
+///   screen it is feeding);
+/// * `starting` — a local backend exists but has not answered yet, which is the
+///   window the first-run screen shows its spinner for;
+/// * `stopped` — local mode with no backend at all: the start failed, and the
+///   screen says so and offers the ways out;
+/// * `remote` — not this shell's backend to describe.
+#[cfg(desktop)]
+fn local_status(app: &tauri::AppHandle, settings: &settings::ShellSettings) -> &'static str {
+    if !settings.is_local() {
+        return "remote";
+    }
+    let Some(slot) = app.try_state::<BackendSlot>() else {
+        return "stopped";
+    };
+    let port = slot.0.lock().as_ref().and_then(|b| backend::port_of(b));
+    match port {
+        Some(port) if backend::probe_health(port, std::time::Duration::from_millis(800)) => "running",
+        Some(_) => "starting",
+        None => "stopped",
     }
 }
 

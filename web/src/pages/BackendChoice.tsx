@@ -1,8 +1,15 @@
-import { useState } from "react";
-import { Cloud, HardDrive, Loader2, Server } from "lucide-react";
+import { useEffect, useState } from "react";
+import { AlertTriangle, Cloud, HardDrive, Loader2, Server } from "lucide-react";
 import PageHeader from "../components/PageHeader";
 import { useI18n } from "../lib/i18n";
-import { chooseBackend } from "../lib/backendShell";
+import {
+  attachBackendShell,
+  chooseBackend,
+  subscribeBackendFailure,
+  subscribeBackendStarting,
+} from "../lib/backendShell";
+import { STEP_IDS } from "../lib/clientSetup";
+import SetupRail from "../components/SetupRail";
 
 /** The shell's very first question: where does this install get a backend?
  *
@@ -17,11 +24,33 @@ import { chooseBackend } from "../lib/backendShell";
  *  page must never navigate or reload itself: it just shows that starting is
  *  under way. The remote path hands off to the existing wizard via `onDone`.
  */
-export default function BackendChoice({ onDone }: { onDone: () => void }) {
+export default function BackendChoice({ onDone, starting: startingProp = false }: { onDone: () => void; starting?: boolean }) {
   const { t } = useI18n();
   const [busy, setBusy] = useState<"local" | "remote" | null>(null);
-  const [starting, setStarting] = useState(false);
+  const [starting, setStarting] = useState(startingProp);
+  const [failed, setFailed] = useState(false);
   const [error, setError] = useState("");
+
+  // The shell's own answer arrives as an event, and this page may be the one
+  // waiting for it: `choose_backend` returns as soon as the choice is
+  // recorded, so the only way to learn that the spawn failed is to listen.
+  // (Also covers a backend that dies while the spinner is up: the shell
+  // reports `stopped` within a few seconds.) The same event says when a start
+  // is UNDER WAY — which is also how a choice made from the TRAY reaches this
+  // screen: no click happened here, so the state has to come from the shell.
+  useEffect(() => {
+    const off = attachBackendShell();
+    const offFailure = subscribeBackendFailure(() => setFailed(true));
+    const offStarting = subscribeBackendStarting(() => {
+      setFailed(false);
+      setStarting(true);
+    });
+    return () => {
+      offStarting();
+      offFailure();
+      off?.();
+    };
+  }, []);
 
   const pick = async (mode: "local" | "remote") => {
     if (busy) return;
@@ -47,27 +76,58 @@ export default function BackendChoice({ onDone }: { onDone: () => void }) {
       <div className="w-full max-w-2xl space-y-4 p-6">
         <PageHeader icon={Server} title={t("backend.title")} subtitle={t("backend.subtitle")} />
 
-        {/* The same rail idiom as the wizard that follows: the question at
-            hand is the accent chip, the sign-in that comes next is pending.
-            The built-in path never reaches it, but the rail is about the
-            install's shape, not one branch. */}
-        <div className="flex flex-wrap items-center gap-2 text-[11px] text-zinc-500">
-          <div className="flex items-center gap-2">
-            <span className="h-5 w-5 rounded-sm flex items-center justify-center text-[10px] border bg-accent text-[var(--accent-fg)] border-accent">
-              1
-            </span>
-            <span className="text-zinc-200">{t("backend.step_choice")}</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <span className="h-5 w-5 rounded-sm flex items-center justify-center text-[10px] border bg-panel border-border text-zinc-500">
-              2
-            </span>
-            <span className="text-zinc-600">{t("client.step_account")}</span>
-          </div>
-        </div>
+        {/* The SAME rail as the wizard this leads into, so answering the
+            question reads as step 1 of one flow rather than as a screen with
+            its own menu: "a server I run" continues on step 2, and the
+            built-in path leaves the shell for the app's own first run, whose
+            rail is drawn by the same component. */}
+        <SetupRail
+          steps={STEP_IDS}
+          current="server"
+          labels={{
+            server: t("client.step_server"),
+            account: t("client.step_account"),
+            notifications: t("client.step_notifications"),
+            done: t("client.step_done"),
+          }}
+        />
 
         <div className="panel p-6 space-y-4">
-          {starting ? (
+          {failed ? (
+            /* The shell was in local mode and its backend did not come up (no
+               bundled server, no free loopback port) — or it died while this
+               screen was waiting. Staying on the spinner forever was the old
+               behaviour, and it told the user nothing: no process, no message,
+               no way out. The way out matters most, so it comes first. */
+            <div className="space-y-3">
+              <div className="flex items-start gap-2">
+                <AlertTriangle className="h-4 w-4 text-amber-300 mt-0.5 shrink-0" />
+                <div className="space-y-1">
+                  <p className="text-sm font-semibold">{t("backend.failed_title")}</p>
+                  <p className="text-xs text-zinc-400 leading-relaxed">{t("backend.failed_hint")}</p>
+                </div>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  className="rounded-md border border-border bg-panel hover:border-accent px-3 py-1.5 text-xs font-medium transition-colors"
+                  onClick={() => window.location.reload()}
+                  disabled={busy !== null}
+                >
+                  {t("backend.failed_retry")}
+                </button>
+                <button
+                  type="button"
+                  className="rounded-md border border-border bg-panel hover:border-accent px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-60"
+                  onClick={() => void pick("remote")}
+                  disabled={busy !== null}
+                >
+                  {busy === "remote" ? <Loader2 className="h-3.5 w-3.5 animate-spin inline" /> : t("backend.failed_remote")}
+                </button>
+              </div>
+              {error && <p className="text-xs text-amber-300 break-words">{error}</p>}
+            </div>
+          ) : starting ? (
             <div className="flex flex-col items-center gap-3 py-6 text-center">
               <Loader2 className="h-6 w-6 animate-spin text-accent" />
               <p className="text-sm font-semibold">{t("backend.starting_title")}</p>

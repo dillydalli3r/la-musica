@@ -73,7 +73,15 @@ import ClientSetup from "./pages/ClientSetup";
 // its mode is still "unset".
 import BackendChoice from "./pages/BackendChoice";
 import { isClientSetupDone, isClientShell } from "./lib/clientSetup";
-import { backendNeedsChoice, shellBackendChoice, subscribeBackendChoice } from "./lib/backendShell";
+import {
+  backendNeedsChoice,
+  backendStartingUp,
+  backendUnavailable,
+  shellBackendChoice,
+  subscribeBackendChoice,
+  subscribeBackendFailure,
+  subscribeBackendStarting,
+} from "./lib/backendShell";
 import { isOffline, onOfflineFallback } from "./api";
 import type { OfflineInfo } from "./api";
 // The app event stream's own outcome kinds, and the ONE invalidation a write
@@ -830,33 +838,69 @@ export default function App() {
   const inClientShell = isClientShell();
   const clientSetupDone = isClientSetupDone();
   const [backendChoiceNeeded, setBackendChoiceNeeded] = useState<boolean | null>(null);
+  // True from the moment the shell says it is bringing up the local backend
+  // until it answers. The chooser owns the screen for that window: without it
+  // the page falls through to the client wizard and asks for a SERVER ADDRESS
+  // in local mode — the wrong question, shown for as long as the backend takes
+  // to boot (seconds, on a cold start with a frozen Python server).
+  const [backendStarting, setBackendStarting] = useState(backendStartingUp());
   useEffect(() => {
-    if (!inClientShell || clientSetupDone) return;
+    if (!inClientShell) return;
     let alive = true;
     // The shell may also announce it on the event; the command below is the
     // authoritative one-shot ask. A mobile/browser shell has neither and the
     // command resolves null, which leaves the classic wizard in charge.
+    //
+    // This runs even when THIS DEVICE's own flag says setup is done, and that
+    // is the whole point: `mlo.clientSetup` lives in the webview's
+    // localStorage, which two shells of the same app SHARE (WebView2 keys its
+    // profile by the app identifier), so a flag written by a different install
+    // — or an earlier build, or the same install before the shell learned to
+    // ask — used to hide the question the SHELL has never been told the answer
+    // to. The shell is the authority on whether it was asked; the flag is a
+    // convenience for everything after that.
     const off = subscribeBackendChoice(() => {
       if (alive && backendNeedsChoice()) setBackendChoiceNeeded(true);
     });
+    // The failure signal is its own channel (it is true for a local shell that
+    // already answered the question), so it gets its own subscription.
+    const offFailure = subscribeBackendFailure(() => {
+      if (alive) setBackendChoiceNeeded(true);
+    });
+    const offStarting = subscribeBackendStarting(() => {
+      if (alive) setBackendStarting(backendStartingUp());
+    });
     void shellBackendChoice().then((choice) => {
-      if (alive) setBackendChoiceNeeded(choice?.mode === "unset");
+      if (!alive) return;
+      // A shell in LOCAL mode whose backend is not up (it never started, or it
+      // died) is shown the chooser as well — that screen is where the reason
+      // and the two ways out live. Anything else would walk a user into the
+      // address wizard while the shell still believes it runs its own server.
+      setBackendChoiceNeeded(choice?.mode === "unset" || (!!choice && backendUnavailable()));
     });
     return () => {
       alive = false;
       off();
+      offFailure();
+      offStarting();
     };
-  }, [inClientShell, clientSetupDone]);
+  }, [inClientShell]);
+
+  // The shell's own first-run question — run the built-in backend, or connect
+  // to one the user runs — comes FIRST, before the device's own bookkeeping
+  // and before the address wizard. A shell that reports `mode: "unset"` has
+  // never been given an answer, whatever this webview's localStorage says.
+  if (inClientShell && (backendChoiceNeeded || backendStarting)) {
+    return <BackendChoice onDone={() => window.location.reload()} starting={backendStarting} />;
+  }
 
   // The shell's own first-run wizard, before every other gate: it needs no
   // server and no token, and it is what asks which server this device talks
   // to. Re-runnable from Settings → Security (which clears the flag).
   if (inClientShell && !clientSetupDone) {
-    // A shell that has never chosen waits one ask for its answer; the web
-    // build never reaches this gate.
+    // A shell that has answered the question above still waits one ask for its
+    // mode (`unset` renders the chooser instead).
     if (backendChoiceNeeded === null) return <PageLoading />;
-    // "unset" is the new first run: local backend or a server the user runs.
-    if (backendChoiceNeeded) return <BackendChoice onDone={() => window.location.reload()} />;
     // A reload rather than an in-place re-render: finishing the wizard changes
     // the API base URL and the token, and module-level state (the event
     // socket, the media-cache keys, every cached query) was built against the

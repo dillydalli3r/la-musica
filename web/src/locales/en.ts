@@ -420,7 +420,6 @@ export default {
   // —— Backend choice (a desktop shell's very first run) ——————————————————
   "backend.title": "How should this app get its server?",
   "backend.subtitle": "Choose once. You can change it later from the tray icon.",
-  "backend.step_choice": "Backend",
   "backend.local_title": "Use the built-in backend",
   "backend.local_hint": "la musica runs its own server on this machine. Recommended — no Docker, nothing else to install.",
   "backend.remote_title": "Connect to a server I run",
@@ -429,6 +428,10 @@ export default {
   "backend.starting_title": "Starting the built-in server…",
   "backend.starting_hint": "This can take a few seconds. This window opens the app by itself once the server answers.",
   "backend.error": "That choice did not take effect. Try again.",
+"backend.failed_title": "The built-in server did not start",
+"backend.failed_hint": "This install bundles its own server, and it did not come up — most often the packaged files are missing or the port range is taken. You can retry, or connect to a la musica server you run elsewhere.",
+"backend.failed_retry": "Try again",
+"backend.failed_remote": "Connect to a server instead",
 
   // —— MusicBrainz artist page: add / download one release TYPE ——————————
   "mb.actions_title": "Add or download by release type",

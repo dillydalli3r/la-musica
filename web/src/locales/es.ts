@@ -382,7 +382,6 @@ export default {
   // —— Backend choice (a desktop shell's very first run) ——————————————————
   "backend.title": "¿Cómo debería obtener su servidor esta app?",
   "backend.subtitle": "Elige una vez. Puedes cambiarlo más tarde desde el icono de la bandeja.",
-  "backend.step_choice": "Backend",
   "backend.local_title": "Usar el backend integrado",
   "backend.local_hint": "la musica ejecuta su propio servidor en esta máquina. Recomendado: sin Docker y nada más que instalar.",
   "backend.remote_title": "Conectar con un servidor propio",
@@ -391,6 +390,10 @@ export default {
   "backend.starting_title": "Iniciando el servidor integrado…",
   "backend.starting_hint": "Esto puede tardar unos segundos. Esta ventana abrirá la app sola en cuanto el servidor responda.",
   "backend.error": "Esa elección no ha surtido efecto. Inténtalo de nuevo.",
+  "backend.failed_title": "El servidor integrado no se inició",
+  "backend.failed_hint": "Esta instalación incluye su propio servidor y no ha arrancado — lo más habitual es que falten los archivos empaquetados o que el rango de puertos esté ocupado. Puedes reintentarlo o conectarte a un servidor de la musica que ejecutes en otro sitio.",
+  "backend.failed_retry": "Reintentar",
+  "backend.failed_remote": "Conectar con un servidor",
 
   // —— MusicBrainz artist page: add / download one release TYPE ——————————
   "mb.actions_title": "Añadir o descargar por tipo",

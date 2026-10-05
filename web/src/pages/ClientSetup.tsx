@@ -2,13 +2,13 @@ import { useState } from "react";
 import { ArrowLeft, ArrowRight, Bell, Check, KeyRound, Loader2, Server } from "lucide-react";
 import { api, normalizeServerUrl, serverUrl, setToken } from "../api";
 import PageHeader from "../components/PageHeader";
+import SetupRail from "../components/SetupRail";
 import ServerVersionNotice from "../components/ServerVersionNotice";
 import { toast } from "../store";
 import { useI18n } from "../lib/i18n";
 import { notificationState, requestNotifications, type NotifyState } from "../lib/notify";
 import {
   STEP_IDS,
-  STEP_LABELS,
   markClientSetupDone,
   probeServer,
   saveServer,
@@ -29,7 +29,6 @@ import {
 export default function ClientSetup({ onDone }: { onDone: () => void }) {
   const { t } = useI18n();
   const [step, setStep] = useState<StepId>("server");
-  const index = STEP_IDS.indexOf(step);
 
   const [address, setAddress] = useState(serverUrl());
   const [probe, setProbe] = useState<ProbeResult | null>(null);
@@ -99,26 +98,18 @@ export default function ClientSetup({ onDone }: { onDone: () => void }) {
       <div className="w-full max-w-2xl space-y-4 p-6">
         <PageHeader icon={Server} title={t("client.title")} subtitle={t("client.subtitle")} />
 
-        {/* The rail is the house idiom (see pages/SetupPage.tsx): the steps
-            behind us are ticked, the current one is the accent chip. */}
-        <div className="flex flex-wrap items-center gap-2 text-[11px] text-zinc-500">
-          {STEP_IDS.map((id, i) => (
-            <div key={id} className="flex items-center gap-2">
-              <span
-                className={`h-5 w-5 rounded-sm flex items-center justify-center text-[10px] border ${
-                  id === step
-                    ? "bg-accent text-[var(--accent-fg)] border-accent"
-                    : i < index
-                    ? "bg-emerald-900/60 text-emerald-300 border-emerald-800"
-                    : "bg-panel border-border text-zinc-500"
-                }`}
-              >
-                {i < index ? <Check className="h-3 w-3" /> : i + 1}
-              </span>
-              <span className={id === step ? "text-zinc-200" : "text-zinc-600"}>{t(STEP_LABELS[id])}</span>
-            </div>
-          ))}
-        </div>
+        {/* The rail is the house idiom (see components/SetupRail.tsx): the
+            steps behind us are ticked, the current one is the accent chip. */}
+        <SetupRail
+          steps={STEP_IDS}
+          current={step}
+          labels={{
+            server: t("client.step_server"),
+            account: t("client.step_account"),
+            notifications: t("client.step_notifications"),
+            done: t("client.step_done"),
+          }}
+        />
 
         <div className="panel p-6 space-y-4">
           {step === "server" && (
