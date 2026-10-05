@@ -62,9 +62,29 @@ def _install_script_dir() -> Path:
 _USER = "desktop-shell"  # a stable import marker for test harnesses
 
 
+def _ensure_std_streams(log_path: str) -> None:
+    """A WINDOWED PyInstaller build has no console: `sys.stdout` and
+    `sys.stderr` are None. uvicorn's default logging config calls
+    `sys.stdout.isatty()` while building its formatters — an AttributeError on
+    None, raised from `dictConfig` as "Unable to configure formatter 'default'"
+    — which killed the backend at boot and left the tray showing a server that
+    never came up. Give both streams a real file instead: the backend's own
+    log, in the per-user data dir beside config.json, so a failing start can be
+    read afterwards rather than guessed at.
+    """
+    if sys.stdout is not None and sys.stderr is not None:
+        return
+    handle = open(log_path, "a", encoding="utf-8", errors="replace", buffering=1)
+    if sys.stdout is None:
+        sys.stdout = handle
+    if sys.stderr is None:
+        sys.stderr = handle
+
+
 def main() -> int:
     """Boot the app the way the shell expects, then run uvicorn forever."""
     os.makedirs(_DATA_DIR, exist_ok=True)
+    _ensure_std_streams(os.path.join(_DATA_DIR, "mlo-server.log"))
 
     # The engine's own home, BEFORE anything imports mlo: config.json, the
     # legacy .dependencies fallback and the app's writable scratch all live in
@@ -96,6 +116,15 @@ def main() -> int:
     spa_dir = Path(os.environ.get("MLO_WEB_DIST") or os.path.join(str(root), "web", "dist"))
     if spa_dir.is_dir():
         os.environ["MLO_WEB_DIST"] = str(spa_dir)
+
+    # The native dynamic-range helper, packed beside these sources by
+    # pyinstaller/mlo-server.spec. mlo.dr probes MLO_AUDIO_BIN first (before
+    # its repo-relative dev paths and PATH), so naming it here is what makes
+    # the shipped helper the one that runs. Absent, mlo.dr falls back to the
+    # numpy block math — the same numbers, slower.
+    helper = installed / ("mlo-audio.exe" if os.name == "nt" else "mlo-audio")
+    if helper.is_file():
+        os.environ.setdefault("MLO_AUDIO_BIN", str(helper))
 
     import server.main as app_mod
     import uvicorn

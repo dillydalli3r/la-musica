@@ -175,6 +175,40 @@ jobs:
             [ "$found" = 1 ] || { echo "::error::$DEB installs no icon files"; exit 1; }
           fi
 
+          # Each install must CARRY the backend the shell spawns. Nothing in
+          # the source tree shows this: the shell looks for
+          # <resource_dir>/mlo-server at runtime, and a bundle that ships
+          # without it opens the setup wizard with no server behind it — the
+          # exact shape the first 5.1.0 installers had (a 4 MB MSI holding a
+          # 300 MB backend's address). So it is looked for in the artifact.
+          if [ -n "$APP" ]; then
+            test -f "$APP/Contents/Resources/mlo-server/mlo-server" \
+              || { echo "::error::$APP carries no Resources/mlo-server/mlo-server"; exit 1; }
+            test -f "$APP/Contents/Resources/mlo-server/_internal/web/dist/index.html" \
+              || { echo "::error::$APP's backend carries no web/dist (the UI would 404)"; exit 1; }
+            echo "ok: $APP carries the backend and its SPA"
+          fi
+
+          if [ -n "$DEB" ]; then
+            # Located by name, not by path: the deb's resource directory is
+            # Tauri's business, what matters is that the payload is in the
+            # package at all.
+            find /tmp/debicons -type f -name mlo-server | grep -q . \
+              || { echo "::error::$DEB installs no mlo-server"; exit 1; }
+            find /tmp/debicons -type f -path '*web/dist/index.html' | grep -q . \
+              || { echo "::error::$DEB's backend carries no web/dist"; exit 1; }
+            echo "ok: $DEB carries the backend and its SPA"
+          fi
+
+          SEVENZ="$(command -v 7z || command -v 7za || true)"
+          if [ -n "$NSIS" ] && [ -n "$SEVENZ" ]; then
+            "$SEVENZ" l "$NSIS" 2>/dev/null | grep -qE 'mlo-server[\\/]mlo-server\.exe' \
+              || { echo "::error::$NSIS carries no mlo-server"; exit 1; }
+            "$SEVENZ" l "$NSIS" 2>/dev/null | grep -qE 'mlo-server[\\/]_internal[\\/]web[\\/]dist[\\/]index\.html' \
+              || { echo "::error::$NSIS's backend carries no web/dist"; exit 1; }
+            echo "ok: $NSIS carries the backend and its SPA"
+          fi
+
       - name: Upload the bundles
         uses: actions/upload-artifact@v4
         with:

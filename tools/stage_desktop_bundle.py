@@ -1,24 +1,25 @@
 #!/usr/bin/env python3
 """Stage the desktop shell's local backend into desktop/bundle.
 
-The desktop build (`npm run build` in desktop/) serves the SAME React app and
-spawns the app's own backend (`mlo-server`) from the frozen PyInstaller build
-produced by pyinstaller/mlo-server.spec. `tauri build` bundles `desktop/bundle`
-next to the shell binary; this script is what fills it before a build:
+The desktop build (`npm run build` in desktop/) spawns the app's own backend
+from the frozen PyInstaller build produced by pyinstaller/mlo-server.spec, and
+`tauri build` packs `desktop/bundle` into the installer as Tauri RESOURCES —
+which is how the installed app finds `<resource_dir>/mlo-server`. This script
+is what fills that folder before a build:
 
     python -m PyInstaller pyinstaller/mlo-server.spec   # -> dist/mlo-server
     python tools/stage_desktop_bundle.py                # -> desktop/bundle
 
-It copies:
-  * dist/mlo-server/            — the frozen backend (onedir)
-  * web/dist/                   — the built SPA (served same-origin by the
-                                   backend; NOT read from desktop/ at runtime)
-  * rust/target/release/mlo-audio(.exe) — the native analysis helper, found
-                                   via MLO_AUDIO_BIN next to the backend
+It copies exactly one tree: `dist/mlo-server/`, the onedir backend. The SPA
+the webview loads (`_internal/web/dist`) and the native analysis helper
+(`_internal/mlo-audio`) travel INSIDE that backend — the spec packs both, the
+launcher names both from `_MEIPASS` — so there is nothing else to stage and no
+second copy to drift.
 
-Source roots are the repo defaults; override with MLO_SERVER_DIST, WEB_DIST,
-MLO_AUDIO_BIN. Exit 2 (the suite convention) when a required source is missing,
-so a build cannot silently ship a desktop install with no backend.
+Source root is the repo default; override with MLO_SERVER_DIST. Exit 2 (the
+suite convention) when the frozen backend is missing what the install needs, so
+a desktop build cannot silently ship a shell with no backend (or a backend with
+no UI).
 """
 import os
 import shutil
@@ -46,35 +47,40 @@ def tree_bytes(path: Path) -> int:
 
 def main() -> int:
     server = Path(os.environ.get("MLO_SERVER_DIST") or (ROOT / "dist" / "mlo-server"))
-    web = Path(os.environ.get("WEB_DIST") or (ROOT / "web" / "dist"))
-    audio = Path(os.environ.get("MLO_AUDIO_BIN") or (
-        ROOT / "rust" / "target" / "release" / ("mlo-audio.exe" if os.name == "nt" else "mlo-audio")))
 
-    missing = [p for p, label in ((server, "dist/mlo-server (run pyinstaller/mlo-server.spec first)"),
-                                  (web, "web/dist (run `cd web && npm run build`)"),
-                                  (audio, "rust/target/release/mlo-audio (run `cargo build --release --manifest-path rust/Cargo.toml`)")) if not p.exists()]
-    if missing:
+    def missing(why: str) -> int:
         # Exit 2 (the suite convention): a desktop build must not silently ship
-        # an install with no backend. This used to print and then crash inside
-        # copytree, which read as a traceback rather than as the one missing
-        # file — and it ran on with a half-staged bundle.
-        for m in missing:
-            print(f"stage-desktop-bundle: missing {m}")
+        # a shell with no backend, or a backend with no UI. This used to print
+        # and then crash inside copytree, which read as a traceback rather than
+        # as the one missing file — and it ran on with a half-staged bundle.
+        print(f"stage-desktop-bundle: {why}")
         return 2
 
-    for name, src in (("mlo-server", server), ("web-dist", web), ("mlo-audio", audio)):
-        dest = BUNDLE / name
-        if dest.is_dir():
-            shutil.rmtree(dest)
-        elif dest.exists():
-            dest.unlink()
-        if src.is_dir():
-            shutil.copytree(src, dest)
-        else:
-            shutil.copy2(src, dest)
+    if not server.is_dir():
+        return missing("missing dist/mlo-server (run `python -m PyInstaller pyinstaller/mlo-server.spec` first)")
+    exe = next((server / n for n in ("mlo-server.exe", "mlo-server") if (server / n).is_file()), None)
+    if exe is None:
+        return missing(f"missing {server.name}/mlo-server(.exe) — that folder is not a frozen backend")
+    # The SPA and the helper ride INSIDE the frozen backend (the spec packs
+    # them, the launcher names them from _MEIPASS). A backend built before
+    # `web/dist` existed would install a shell that serves no UI at all, which
+    # is invisible until someone opens the app.
+    spa = next((p for p in (server / "_internal" / "web" / "dist" / "index.html",
+                            server / "web" / "dist" / "index.html") if p.is_file()), None)
+    if spa is None:
+        return missing(f"{server.name} carries no web/dist — rebuild it after `cd web && npm run build`")
 
-    print(f"staged: desktop/bundle (mlo-server {tree_bytes(server) >> 20} MiB, "
-          f"web-dist {tree_bytes(web) >> 20} MiB, mlo-audio {tree_bytes(audio) >> 10} KiB)")
+    # The bundle folder is OURS: wipe it and lay down the one tree. A leftover
+    # from an earlier layout (the separate web-dist/mlo-audio this script used
+    # to stage) would otherwise sit there for ever, unreferenced and unpacked.
+    if BUNDLE.exists():
+        shutil.rmtree(BUNDLE)
+    shutil.copytree(server, BUNDLE / "mlo-server")
+
+    helper = next((p for base in (server / "_internal", server)
+                   for p in base.glob("mlo-audio*") if p.is_file()), None)
+    print(f"staged: desktop/bundle/mlo-server ({tree_bytes(server) >> 20} MiB, "
+          f"helper {'included' if helper else 'ABSENT — dynamic range falls back to numpy'})")
     return 0
 
 

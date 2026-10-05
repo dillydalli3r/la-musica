@@ -23,18 +23,22 @@ stories:
 | Android 7.0+ (API 24) | `npx tauri android build --apk --debug` | `.apk` (debug-signed, installable) |
 | iOS 14+ | `npx tauri ios build --target aarch64 --no-sign` | unsigned `.app` → `.ipa` |
 
-All five share one crate. The desktop builds additionally bundle the local
-backend and its SPA under `desktop/bundle` — staged from `dist/mlo-server`
-(PyInstaller) + `web/dist` + `rust/target/release/mlo-audio` by
-`tools/stage_desktop_bundle.py`, which `npm run build` runs before `tauri
-build` (and CI runs as its own step, per-OS, before the bundler). The mobile
-builds have no Python and no backend — a phone points at the same server
-every other client uses. Everything that only makes sense in a desktop shell
-— the tray icon, the autostart registry, the folder picker, hide-on-close,
-the local backend — sits behind `#[cfg(desktop)]` in `src/lib.rs`, so the
-mobile builds compile without it instead of carrying dead desktop code.
-Tauri's own build script defines `desktop`/`mobile`, so the split follows the
-target.
+All five share one crate. The three desktop builds additionally ship the local
+backend: `tools/stage_desktop_bundle.py` stages the frozen PyInstaller tree
+(`dist/mlo-server`, which itself carries the built SPA at `_internal/web/dist`
+and the `mlo-audio` helper at `_internal/`) into `desktop/bundle/mlo-server`,
+and each desktop platform's `tauri.<platform>.conf.json` declares that tree as
+a Tauri RESOURCE — so the installer places it at `<resource_dir>/mlo-server`,
+which is where the shell spawns it from. `npm run build` in `desktop/` stages
+before `tauri build`; CI runs the staging as its own per-OS step. The mobile
+builds have no Python and no backend — a phone points at the same server every
+other client uses, and the platform configs are desktop-only, so a mobile
+bundle carries no resources at all. Everything that only makes sense in a
+desktop shell — the tray icon, the autostart registry, the folder picker,
+hide-on-close, the local backend — sits behind `#[cfg(desktop)]` in
+`src/lib.rs`, so the mobile builds compile without it instead of carrying dead
+desktop code. Tauri's own build script defines `desktop`/`mobile`, so the split
+follows the target.
 
 ## How it works (desktop)
 
@@ -391,12 +395,20 @@ the top-level `identifier` (`com.musiclibraryoptimizer.lamusica` — the old
 build, because an identifier ending in `.app` reads as the bundle extension;
 nothing rejects it, it is just the default-shaped mistake).
 
-The bundle carries **no resources and no native frameworks** any more:
-`bundle.resources` and `bundle.iOS.frameworks` named the staged Python tree and
-its `Python.xcframework`, and both went away with the embedded backend. A
-mobile build is the webview and the React app, nothing else — a phone with no
-reachable server shows the wizard's address screen, and once it has one it is
-the same client the desktop build is.
+The desktop bundles carry **one resource**, declared not in `tauri.conf.json`
+but in each desktop platform's config — `tauri.windows.conf.json`,
+`tauri.macos.conf.json`, `tauri.linux.conf.json`: `bundle.resources` maps the
+staged `desktop/bundle/mlo-server` tree to `<resource_dir>/mlo-server`, which is
+where `backend.rs` looks for the backend it spawns. It is deliberately absent
+from the shared config: `npx tauri android build` and `tauri ios build` read
+`tauri.conf.json` too, and a phone has neither a backend to ship nor a checkout
+that built one — a resource path that exists only on a desktop machine would
+fail (or bloat) every mobile build.
+
+The mobile bundle carries no resources and no native frameworks: this is the
+webview and the React app, nothing else. A phone with no reachable server shows
+the wizard's address screen, and once it has one it is the same client the
+desktop build is.
 
 The iOS `Info.plist` is `src-tauri/Info.plist`, named by `bundle.iOS.infoPlist`
 so the merge is a repo decision rather than the CLI's auto-detection. Tauri

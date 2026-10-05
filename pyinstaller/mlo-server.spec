@@ -34,10 +34,19 @@ web_dist = os.environ.get("MLO_WEB_DIST") or str(ROOT / "web" / "dist")
 if os.path.isdir(web_dist):
     extra_datasets.append((str(web_dist), os.path.join("web", "dist")))
 
+# The native analysis helper (rust/, `mlo-audio`) travels INSIDE this backend,
+# so the desktop install keeps one resource directory instead of three and the
+# launcher can name it from `_MEIPASS` (see backend_launcher/__main__.py). A
+# build with no helper still packages: mlo.dr falls back to the numpy block
+# math, so a missing helper is slower, not broken.
+helper = os.environ.get("MLO_AUDIO_BIN") or str(
+    ROOT / "rust" / "target" / "release" / ("mlo-audio.exe" if os.name == "nt" else "mlo-audio"))
+helper_binaries = [(helper, ".")] if os.path.isfile(helper) else []
+
 a = Analysis(
     [str(ROOT / "backend_launcher" / "__main__.py")],
     pathex=[str(ROOT), str(ROOT / "server")],
-    binaries=[],
+    binaries=helper_binaries,
     datas=extra_datasets,
     hiddenimports=hiddenimports,
     hookspath=[],
