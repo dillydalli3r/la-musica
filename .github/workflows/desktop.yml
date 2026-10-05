@@ -332,11 +332,14 @@ jobs:
           APP_DATA="$HOME/.local/share/la musica"
 
           # The ports a shell this build owns would answer on (8011 up, the
-          # range `backend::FIRST_PORT` scans).
+          # range `backend::FIRST_PORT` scans). Always exits 0 — "nothing
+          # answers" is a normal answer here, and `set -e` would otherwise
+          # abort on the caller's assignment.
           health_port() {
             for p in $(seq 8011 8020); do
-              curl -sf "http://127.0.0.1:$p/api/health" >/dev/null 2>&1 && { echo "$p"; return; }
+              curl -sf "http://127.0.0.1:$p/api/health" >/dev/null 2>&1 && { echo "$p"; return 0; }
             done
+            return 0
           }
 
           # Launch the app the way a desktop session does: its own process
