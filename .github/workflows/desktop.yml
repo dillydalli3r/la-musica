@@ -348,7 +348,7 @@ jobs:
           # in the runner, not a fact about the install). Sets $pid; call
           # `stop_app` when done.
           start_app() {
-            setsid dbus-run-session -- xvfb-run -a "$1" >/tmp/app.out 2>&1 &
+            setsid dbus-run-session -- xvfb-run -a "$@" >/tmp/app.out 2>&1 &
             pid=$!
           }
           stop_app() {
@@ -412,23 +412,16 @@ jobs:
           echo "ok: $APP_BIN started its own backend on 127.0.0.1:$port once it was told to"
 
           if [ -n "$APPIMAGE" ]; then
-            rm -rf /tmp/appimg && mkdir -p /tmp/appimg
+            # Run it as an AppImage — `--appimage-extract-and-run` needs no
+            # FUSE, which a runner has not got. Running the extracted binary
+            # directly does NOT work, and the failure is informative: WebKitGTK
+            # finds its helper processes through the environment AppRun sets up
+            # (the bundled `webkit2gtk-4.1/WebKitNetworkProcess`), so a bare
+            # exec dies with "Unable to spawn a new child process".
             abs="$(cd "$(dirname "$APPIMAGE")" && pwd)/$(basename "$APPIMAGE")"
-            ( cd /tmp/appimg && "$abs" --appimage-extract >/dev/null )
-            APPIMAGE_BIN="$(app_bin /tmp/appimg/squashfs-root/usr/bin)"
-            if [ -z "$APPIMAGE_BIN" ]; then
-              echo "::error::no app binary in the AppImage's AppDir"
-              ls -la /tmp/appimg/squashfs-root/usr/bin /tmp/appimg/squashfs-root 2>/dev/null || true
-              exit 1
-            fi
-            # The AppImage runtime sets APPDIR to the mounted AppDir, and that
-            # is the branch resource_dir() takes there
-            # (`${APPDIR}/usr/lib/<name>`), so it is set here too rather than
-            # leaning on the exe-relative fallback.
-            export APPDIR=/tmp/appimg/squashfs-root
-            start_app "$APPIMAGE_BIN"
+            start_app "$abs" --appimage-extract-and-run
             port=""; tries=0
-            while [ "$tries" -lt 90 ]; do
+            while [ "$tries" -lt 120 ]; do
               tries=$((tries + 1)); sleep 1
               port="$(health_port)"
               [ -n "$port" ] && break
@@ -437,7 +430,6 @@ jobs:
             stop_app
             [ -n "$port" ] || {
               echo "::error::the AppImage came up with no backend of its own"
-              ls -la "$(dirname "$APPIMAGE_BIN")" || true
               tail -30 /tmp/app.out || true
               exit 1
             }
