@@ -390,7 +390,7 @@ export default {
   "backend.recommended": "Recomendado",
   "backend.starting_title": "Iniciando o servidor integrado…",
   "backend.starting_hint": "Isso pode levar alguns segundos. Esta janela abre o app sozinha assim que o servidor responder.",
-  "backend.error": "O shell não conseguiu salvar essa escolha. Tente de novo.",
+  "backend.error": "Essa escolha não teve efeito. Tente de novo.",
 
   // —— MusicBrainz artist page: add / download one release TYPE ——————————
   "mb.actions_title": "Adicionar ou baixar por tipo",

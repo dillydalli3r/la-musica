@@ -288,7 +288,7 @@ fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
                     .try_state::<BuiltinBackendItem>()
                     .map(|s| s.0.is_checked().unwrap_or(false))
                     .unwrap_or(false);
-                set_backend_mode(
+                let _ = set_backend_mode(
                     app,
                     if on {
                         settings::BackendMode::Local
@@ -389,9 +389,12 @@ pub fn set_tray_backend(app: &tauri::AppHandle, text: &str) {
 
 /// Point the shell's window at the backend its settings ask for — called once
 /// at startup, and again whenever the answer changes (the first-run screen's
-/// two buttons, the tray's "Use the built-in backend").
+/// two buttons, the tray's "Use the built-in backend"). Answers whether the
+/// local backend it was asked for came up: the first-run screen has to be able
+/// to say so, rather than leave a user watching "starting…" at a server that
+/// never arrived.
 #[cfg(desktop)]
-fn enter_backend_mode(app: &tauri::AppHandle, settings: &settings::ShellSettings) {
+fn enter_backend_mode(app: &tauri::AppHandle, settings: &settings::ShellSettings) -> bool {
     if !settings.is_local() {
         // Remote — and not-yet-asked — shells both show the app's own build:
         // the page asks for an address in the first case, and which of the two
@@ -409,7 +412,7 @@ fn enter_backend_mode(app: &tauri::AppHandle, settings: &settings::ShellSettings
                 "Backend: a server you run"
             },
         );
-        return;
+        return true;
     }
     let bundle = backend::BackendBundle {
         server_dir: app
@@ -425,7 +428,7 @@ fn enter_backend_mode(app: &tauri::AppHandle, settings: &settings::ShellSettings
         },
     };
     let Some(slot) = app.try_state::<BackendSlot>() else {
-        return;
+        return false;
     };
     // A backend this shell already owns is REUSED, not spawned again: the
     // question can be answered twice while the first answer's server is up,
@@ -441,8 +444,15 @@ fn enter_backend_mode(app: &tauri::AppHandle, settings: &settings::ShellSettings
             if let Some(window) = app.get_webview_window("main") {
                 backend_handle::attach_local(&window, &backend, settings);
             }
+            true
         }
-        None => set_tray_backend(app, "Backend: unavailable"),
+        None => {
+            // No bundled backend, or no free loopback port. The tray says so;
+            // the caller (the first-run screen) says so where the user is
+            // looking.
+            set_tray_backend(app, "Backend: unavailable");
+            false
+        }
     }
 }
 
@@ -468,9 +478,10 @@ fn shell_backend_choice() -> ShellChoice {
 }
 
 /// Record an answer and act on it. The recording comes first, so a crash
-/// between the two leaves the shell asking again rather than guessing.
+/// between the two leaves the shell asking again rather than guessing. Answers
+/// whether the choice took effect (the local backend came up).
 #[cfg(desktop)]
-fn set_backend_mode(app: &tauri::AppHandle, mode: settings::BackendMode) {
+fn set_backend_mode(app: &tauri::AppHandle, mode: settings::BackendMode) -> bool {
     let dir = backend::default_app_data_dir();
     let mut settings = settings::load(&dir);
     if settings.backend_mode != mode {
@@ -480,11 +491,13 @@ fn set_backend_mode(app: &tauri::AppHandle, mode: settings::BackendMode) {
     if let Some(item) = app.try_state::<BuiltinBackendItem>() {
         let _ = item.0.set_checked(mode == settings::BackendMode::Local);
     }
-    enter_backend_mode(app, &settings);
+    enter_backend_mode(app, &settings)
 }
 
 /// The first-run screen's answer (and the tray checkbox's, which asks the same
-/// question in one click).
+/// question in one click). A local answer fails when the bundled backend
+/// cannot be started — no resource tree, no free loopback port — and the
+/// screen is told, rather than left waiting for a server that is not coming.
 #[cfg(desktop)]
 #[tauri::command]
 fn choose_backend(app: tauri::AppHandle, mode: String) -> Result<(), String> {
@@ -493,8 +506,11 @@ fn choose_backend(app: tauri::AppHandle, mode: String) -> Result<(), String> {
         "remote" => settings::BackendMode::Remote,
         other => return Err(format!("unknown backend mode: {other}")),
     };
-    set_backend_mode(&app, mode);
-    Ok(())
+    if set_backend_mode(&app, mode) {
+        Ok(())
+    } else {
+        Err("the bundled backend did not start".to_string())
+    }
 }
 
 /// Tauri entry point.
@@ -569,7 +585,9 @@ pub fn run() {
             // remote vs not asked yet) lives in per-user shell.json so it
             // exists before the webview does.
             let settings = settings::load(&backend::default_app_data_dir());
-            enter_backend_mode(app.handle(), &settings);
+            // The tray carries the outcome at startup ("Backend: unavailable");
+            // there is no screen to answer to yet.
+            let _ = enter_backend_mode(app.handle(), &settings);
             Ok(())
         });
 

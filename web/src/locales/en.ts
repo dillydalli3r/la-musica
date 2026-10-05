@@ -428,7 +428,7 @@ export default {
   "backend.recommended": "Recommended",
   "backend.starting_title": "Starting the built-in server…",
   "backend.starting_hint": "This can take a few seconds. This window opens the app by itself once the server answers.",
-  "backend.error": "The shell could not save that choice. Try again.",
+  "backend.error": "That choice did not take effect. Try again.",
 
   // —— MusicBrainz artist page: add / download one release TYPE ——————————
   "mb.actions_title": "Add or download by release type",

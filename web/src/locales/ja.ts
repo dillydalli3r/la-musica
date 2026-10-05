@@ -389,7 +389,7 @@ export default {
   "backend.recommended": "おすすめ",
   "backend.starting_title": "内蔵サーバーを起動しています…",
   "backend.starting_hint": "数秒かかることがあります。サーバーが応答すると、このウィンドウが自動でアプリを開きます。",
-  "backend.error": "シェルが選択を保存できませんでした。もう一度お試しください。",
+  "backend.error": "この選択は反映されませんでした。もう一度お試しください。",
 
   // —— MusicBrainz artist page: add / download one release TYPE ——————————
   "mb.actions_title": "種類ごとに追加・ダウンロード",
