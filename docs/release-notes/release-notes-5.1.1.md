@@ -15,11 +15,13 @@ what happens when you launch the shell twice.
   died before it bound a port: a frozen PyInstaller build has no console, so
   uvicorn was configuring a formatter for a stream that does not exist.
 - **The installed Linux app is launched for real.** Under Xvfb and a session
-  bus, the built app is started and the assertion is its OWN backend answering
-  on 8011+. On Linux the backend's location is *derived* rather than stored —
-  `/usr/lib/la musica/...` for a deb, `${APPDIR}/usr/lib/...` for an AppImage,
-  both carrying the space in the product name — and nothing short of running the
-  shell proves that resolution.
+  bus, both halves of the first run are checked: a fresh profile starts
+  *nothing* and stays up (it is showing the question, not crashing), and a
+  profile that answered "built-in" brings the backend up and answers
+  `/api/health` on 8011+. On Linux the backend's location is *derived* rather
+  than stored — `/usr/lib/la musica/...` for a deb, `${APPDIR}/usr/lib/...` for
+  an AppImage, both carrying the space in the product name — and nothing short
+  of running the shell proves that resolution.
 - **Windows** is covered by the payload check in CI and, on the machine these
   builds come from, by installing the NSIS build, launching it with no console
   and reading a 200 from `/api/health`.
@@ -39,6 +41,10 @@ what happens when you launch the shell twice.
   wizard that asks which server to talk to. That matters because a page served
   by a *remote* server cannot call the shell at all: the tray is the only way
   back to the built-in backend without editing a JSON file.
+- **A choice that does not take effect says so.** If the bundled backend cannot
+  be started (no resource tree, no free loopback port), the screen returns to
+  its two options with a message instead of leaving a user watching
+  "Starting the built-in server…" at a server that is not coming.
 
 ## One shell per machine
 
