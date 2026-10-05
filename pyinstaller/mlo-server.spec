@@ -13,6 +13,8 @@ import os
 from pathlib import Path
 ROOT = Path(SPECPATH).resolve().parent
 
+from PyInstaller.utils.hooks import collect_all
+
 
 block_cipher = None
 
@@ -29,7 +31,26 @@ hiddenimports = [
     "websockets.legacy.server",
 ]
 
-extra_datasets = []
+# pip travels INSIDE this backend. The desktop install has no separate Python,
+# so the packages the Dependencies page installs are fetched by THIS build
+# acting as its own interpreter (`mlo-server --mlo-python -m pip …`, see
+# backend_launcher/__main__.py and mlo/fetchdeps._pip_python). collect_all also
+# carries pip's data files — the distlib launcher executables pip writes
+# console scripts with — which a hidden-import list alone would drop.
+pip_datas, pip_binaries, pip_hiddenimports = collect_all("pip")
+hiddenimports += pip_hiddenimports
+
+extra_datasets = list(pip_datas)
+
+# The beets plugin (`mloplugin`) is loaded by NAME from a beets `pluginpath`,
+# never imported by this server, so PyInstaller's analysis cannot see it. Pack
+# it beside the sources: server/beetscfg.PLUGIN_DIR resolves to
+# <_MEIPASS>/server/beets in a frozen build, and beets imports mloplugin from
+# there. Without it a desktop beets import starts and dies on a missing plugin.
+beets_plugin = ROOT / "server" / "beets"
+if beets_plugin.is_dir():
+    extra_datasets.append((str(beets_plugin), os.path.join("server", "beets")))
+
 web_dist = os.environ.get("MLO_WEB_DIST") or str(ROOT / "web" / "dist")
 if os.path.isdir(web_dist):
     extra_datasets.append((str(web_dist), os.path.join("web", "dist")))
@@ -42,6 +63,7 @@ if os.path.isdir(web_dist):
 helper = os.environ.get("MLO_AUDIO_BIN") or str(
     ROOT / "rust" / "target" / "release" / ("mlo-audio.exe" if os.name == "nt" else "mlo-audio"))
 helper_binaries = [(helper, ".")] if os.path.isfile(helper) else []
+helper_binaries += pip_binaries
 
 a = Analysis(
     [str(ROOT / "backend_launcher" / "__main__.py")],

@@ -45,6 +45,14 @@ exactly that).
   art support. **BSD-3-Clause** (parts Apache-2.0).
 - **libjpeg-turbo** — <https://github.com/libjpeg-turbo/libjpeg-turbo> —
   JPEG image processing. **BSD-3-Clause / IJG / zlib**.
+- **7-Zip** — <https://www.7-zip.org> — unpacks release assets whose only
+  published form is an NSIS installer (the Windows libjpeg-turbo SDK) and the
+  `.7z`/`.rar` archives a user imports. The Windows desktop install carries a
+  copy (`desktop/bundle/mlo-server/_internal`, staged by
+  `tools/stage_desktop_bundle.py`), because most Windows machines have no
+  7-Zip of their own and an NSIS installer cannot be read without it.
+  **LGPL-2.1-or-later with the unRAR restriction** (the unRAR code is not
+  used; the bundled `License.txt` travels with the copy).
 - **oxipng** — <https://github.com/oxipng/oxipng> — lossless PNG
   optimization. **MIT**.
 - **librosa** — <https://librosa.org> — BPM / key analysis and mood

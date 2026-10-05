@@ -160,16 +160,19 @@ def beets_available():
 
 
 def _python():
-    """A real interpreter for the beets subprocess; sys.executable points at
-    the frozen server exe in PyInstaller builds."""
-    if not getattr(sys, "frozen", False):
-        return sys.executable
-    import shutil
-    for cand in ("python", "python3", "py"):
-        found = shutil.which(cand)
-        if found:
-            return found
-    return sys.executable
+    """Command prefix for the beets subprocess.
+
+    Same rule as mlo.fetchdeps._pip_python: in a frozen (desktop) build
+    `sys.executable` is the backend exe, and the interpreter that can import
+    the vendored beets is the one bundled INSIDE it — so the exe is asked to
+    behave like python (see backend_launcher/__main__.py `--mlo-python`)
+    rather than a PATH python being used, which may not exist at all on a
+    packaged install and would not be the interpreter the wheels were written
+    for.
+    """
+    if getattr(sys, "frozen", False):
+        return [sys.executable, "--mlo-python"]
+    return [sys.executable]
 
 
 def _env():
@@ -179,7 +182,12 @@ def _env():
     parts = [REPO_ROOT]
     if pkg:
         parts.insert(0, pkg)
-    env["PYTHONPATH"] = os.pathsep.join(parts) + os.pathsep + env.get("PYTHONPATH", "")
+    joined = os.pathsep.join(parts)
+    # PYTHONPATH is what a real interpreter honours; MLO_PYTHONPATH is what the
+    # frozen backend's own `--mlo-python` entry point reads, because the
+    # PyInstaller bootloader owns sys.path and need not pass PYTHONPATH through.
+    env["PYTHONPATH"] = joined + os.pathsep + env.get("PYTHONPATH", "")
+    env["MLO_PYTHONPATH"] = joined
     env["PYTHONIOENCODING"] = "utf-8"
     return env
 
@@ -206,7 +214,7 @@ def run_beets_import(paths, cfg=None, timeout=7200, on_line=None):
     cfg = cfg or load_config()
     conf = write_config(cfg)
     cmd = [
-        _python(), "-u", "-m", "beets",
+        *_python(), "-u", "-m", "beets",
         "--config", conf,
         "import", "--group-albums",
         *paths,

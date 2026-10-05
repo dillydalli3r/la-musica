@@ -29,6 +29,7 @@ What changes vs. the web build, and why:
 """
 import json
 import os
+import runpy
 import sys
 
 from pathlib import Path
@@ -105,6 +106,79 @@ def _augment_gui_path() -> None:
         os.environ["PATH"] = os.pathsep.join(extra + parts)
 
 
+def _register_frozen_resource_finders() -> None:
+    """Teach pip's vendored distlib about PyInstaller's module loader.
+
+    distlib maps a package's loader TYPE to a resource finder, and it knows
+    only CPython's own loaders. A frozen module's loader is PyInstaller's, so
+    `pip install` aborts at import — `pip._vendor.distlib.scripts` calls
+    `finder(DISTLIB_PACKAGE)` at module scope and gets "Unable to locate finder
+    for 'pip._vendor.distlib'". The plain file-system finder is the right one:
+    the package directories are real files under `sys._MEIPASS` (collect_all
+    puts them there), which is all `ResourceFinder` reads. Registering it for
+    the loader the import system actually used is what makes the bundled pip
+    usable without a second interpreter.
+    """
+    try:
+        from pip._vendor.distlib import resources
+    except Exception:
+        return
+    registry = getattr(resources, "_finder_registry", None)
+    register = getattr(resources, "register_finder", None)
+    if registry is None or register is None:      # distlib internals changed
+        return
+    for name in ("pip._vendor.distlib", "pip"):
+        module = sys.modules.get(name)
+        loader = getattr(module, "__loader__", None) if module is not None else None
+        if loader is not None and type(loader) not in registry:
+            register(loader, resources.ResourceFinder)
+
+
+def _run_python(argv) -> int:
+    """Run *argv* the way a CPython executable would (see `--mlo-python`).
+
+    A packaged desktop install has no separate interpreter, and the Python
+    packages the Dependencies page installs (`pip install --target`, see
+    mlo.fetchdeps) and the tools that run as a script (beets, see
+    server.beetscfg) need one that is the SAME interpreter this frozen server
+    imports with — a downloaded python would pick wheels whose C extensions
+    this build cannot load. So the frozen runtime is the interpreter, and this
+    is the entry point that behaves like `python`: `-m module`, `-c code` or a
+    script path, with `-u` accepted and ignored (there is no buffering to
+    change in a console-less build).
+
+    `MLO_PYTHONPATH` names the vendored tools folders to import from. The
+    PyInstaller bootloader owns `sys.path` and need not honour `PYTHONPATH`,
+    so those entries are spliced in here explicitly rather than trusted to the
+    environment.
+    """
+    for part in reversed([p for p in os.environ.get("MLO_PYTHONPATH", "").split(os.pathsep) if p]):
+        if os.path.isdir(part):
+            sys.path.insert(0, part)
+    if getattr(sys, "frozen", False):
+        _register_frozen_resource_finders()
+    args = list(argv)
+    while args and args[0] == "-u":
+        args.pop(0)
+    if not args:
+        return 2
+    if args[0] == "-m":
+        if len(args) < 2:
+            return 2
+        sys.argv = args[1:]
+        runpy.run_module(args[1], run_name="__main__", alter_sys=True)
+        return 0
+    if args[0] == "-c":
+        if len(args) < 2:
+            return 2
+        sys.argv = ["-c", *args[2:]]
+        exec(compile(args[1], "<string>", "exec"), {"__name__": "__main__"})
+        return 0
+    sys.argv = args
+    runpy.run_path(args[0], run_name="__main__")
+    return 0
+
+
 def main() -> int:
     """Boot the app the way the shell expects, then run uvicorn forever."""
     _augment_gui_path()
@@ -158,4 +232,9 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    # `mlo-server --mlo-python …` is the frozen build acting as its own
+    # interpreter (see _run_python), and it must NOT touch the server: the
+    # state dir, the std-stream log and uvicorn all belong to the server run.
+    if len(sys.argv) > 1 and sys.argv[1] == "--mlo-python":
+        raise SystemExit(_run_python(sys.argv[2:]))
     raise SystemExit(main())

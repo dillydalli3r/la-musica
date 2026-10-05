@@ -27,6 +27,7 @@ import re
 import shutil
 import stat
 import subprocess
+import sys
 import tarfile
 import tempfile
 import zipfile
@@ -169,16 +170,60 @@ def _verify_tree(dest_dir: str, label: str) -> None:
 # ----------------------------------------------------------------------
 # 7-Zip: the shared locator, lister and runner
 # ----------------------------------------------------------------------
+def _app_7z_dirs():
+    """Folders the app itself ships 7-Zip in, best first.
+
+    A packaged desktop install bundles 7-Zip (see tools/stage_desktop_bundle.py)
+    because the formats it alone reads include the Windows libjpeg-turbo asset,
+    an NSIS installer that upstream ships no zip of, and a user's `.7z`/`.rar`.
+    A box with no 7-Zip on PATH and none under Program Files — which is most
+    Windows machines — otherwise cannot install that tool at all. The frozen
+    backend keeps it in its own tree (`sys._MEIPASS`), beside the executable.
+    """
+    dirs = []
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        dirs.append(meipass)
+    exe_dir = os.path.dirname(os.path.abspath(sys.executable)) if getattr(sys, "executable", None) else ""
+    if exe_dir:
+        dirs.append(exe_dir)
+    return dirs
+
+
+def _usable_7z(path: str) -> bool:
+    """Whether *path* is a real 7-Zip binary we can run.
+
+    Windows installs 0-byte execution-alias stubs (the Microsoft Store's `7z`)
+    on PATH ahead of the real thing; the stub is a file that cannot be read or
+    executed, so the size floor is what keeps `find_7z` from returning one and
+    every extraction then failing on a path that "exists".
+    """
+    try:
+        return os.path.isfile(path) and os.path.getsize(path) > 1
+    except OSError:
+        return False
+
+
 def find_7z() -> str | None:
     """7-Zip (or a compatible build) on this host, or None."""
-    path = shutil.which("7z") or shutil.which("7za") or shutil.which("7zz")
-    if path:
-        return path
+    # The app's OWN copy comes FIRST: it is the full 7-Zip, and the one thing
+    # that matters is that it reads NSIS installers — a `7za` that merely
+    # happens to be on PATH does not, and preferring PATH would silently
+    # downgrade a machine whose bundled copy is the only one that works.
+    for d in _app_7z_dirs():
+        for name in ("7z.exe", "7za.exe", "7zz.exe", "7zz"):
+            cand = os.path.join(d, name)
+            if _usable_7z(cand):
+                return cand
+    for name in ("7z", "7za", "7zz"):
+        found = shutil.which(name)
+        if found and _usable_7z(found):
+            return found
     for candidate in (
         r"C:\Program Files\7-Zip\7z.exe",
         r"C:\Program Files (x86)\7-Zip\7z.exe",
     ):
-        if os.path.isfile(candidate):
+        if _usable_7z(candidate):
             return candidate
     return None
 

@@ -4,6 +4,7 @@ import { KeyRound, Loader2, Lock, Server, ShieldCheck } from "lucide-react";
 import { api, normalizeServerUrl, setServerUrl, setToken, serverUrl, IN_MOBILE_SHELL, IN_TAURI } from "../api";
 import { toast } from "../store";
 import { useI18n } from "../lib/i18n";
+import PageHeader from "../components/PageHeader";
 
 /** The sign-in screen, and the first-run screen behind it.
  *
@@ -85,25 +86,21 @@ export default function LoginPage({ onSignedIn }: { onSignedIn: () => void }) {
   };
 
   return (
-    <div className="safe-shell min-h-dvh bg-bg text-zinc-100 flex items-center justify-center">
-      <div className="w-full max-w-md p-6">
-        <div className="flex items-center gap-3 mb-6">
-          <div className="h-11 w-11 rounded-xl bg-accent/15 border border-accent/30 flex items-center justify-center">
-            {needsSetup ? (
-              <ShieldCheck className="h-5 w-5 text-accent-soft" />
-            ) : (
-              <Lock className="h-5 w-5 text-accent-soft" />
-            )}
-          </div>
-          <div>
-            <h1 className="text-lg font-semibold">la musica</h1>
-            <p className="text-xs text-zinc-500">
-              {needsSetup
-                ? t("auth.setup_intro")
-                : `${t("auth.sign_in")} — ${status.data?.public_url || serverUrl() || t("auth.server")}`}
-            </p>
-          </div>
-        </div>
+    <div className="safe-shell min-h-dvh bg-bg text-zinc-100 flex flex-col items-center justify-center">
+      <div className="w-full max-w-2xl space-y-4 p-6">
+        {/* The house header, the same one the setup wizard and the backend
+            chooser draw: the auth screen used to hand-roll a narrower title
+            block, so the first screen of the flow did not match the ones after
+            it. */}
+        <PageHeader
+          icon={needsSetup ? ShieldCheck : Lock}
+          title="la musica"
+          subtitle={
+            needsSetup
+              ? t("auth.setup_intro")
+              : `${t("auth.sign_in")} — ${status.data?.public_url || serverUrl() || t("auth.server")}`
+          }
+        />
 
         <form onSubmit={submit} className="panel space-y-4">
           {(IN_TAURI || !status.data) && (

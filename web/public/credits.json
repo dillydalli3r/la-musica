@@ -40,6 +40,7 @@
         { "name": "rsgain", "license": "BSD-2-Clause", "url": "https://github.com/complexlogic/rsgain", "use": "ReplayGain 2.0 tagging" },
         { "name": "libjxl", "license": "BSD-3-Clause", "url": "https://github.com/libjxl/libjxl", "use": "JPEG XL cover art" },
         { "name": "libjpeg-turbo", "license": "BSD-3 / IJG / zlib", "url": "https://github.com/libjpeg-turbo/libjpeg-turbo", "use": "JPEG processing" },
+        { "name": "7-Zip", "license": "LGPL-2.1-or-later (unRAR restriction)", "url": "https://www.7-zip.org", "use": "unpacks NSIS installers and .7z/.rar archives (carried by the Windows desktop install)" },
         { "name": "oxipng", "license": "MIT", "url": "https://github.com/oxipng/oxipng", "use": "lossless PNG optimization" },
         { "name": "librosa", "license": "ISC", "url": "https://librosa.org", "use": "BPM / key analysis" }
       ]

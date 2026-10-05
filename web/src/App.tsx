@@ -4,7 +4,7 @@ import { Link, Navigate, NavLink, Route, Routes, useLocation, useNavigate } from
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Activity, ArrowUpRight, BarChart3, ChevronLeft, ChevronRight, ClipboardCheck, Compass, Disc3, Download, Gauge, HardDriveDownload, Heart, HeartHandshake, Home, Import,
-  Keyboard, Library, ListChecks, ListMusic, Menu, Music2, Music4, PanelLeftClose, Search, Sliders, SlidersHorizontal, Sparkles, Tags, Trash2, User, WifiOff, X,
+  Keyboard, Library, ListChecks, ListMusic, Loader2, Menu, Music2, Music4, PanelLeftClose, Search, Sliders, SlidersHorizontal, Sparkles, Tags, Trash2, User, WifiOff, X,
   Settings as SettingsIcon, Wrench,
 } from "lucide-react";
 import { api, AuthError, getToken, IN_TAURI, onAuthLost, serverUrl } from "./api";
@@ -369,6 +369,59 @@ function PageLoading() {
   );
 }
 
+/** The toast stack. Rendered by EVERY screen the app can show — the shell AND
+ *  the setup wizard — so a message the wizard raises ("Saved", a dependency
+ *  install finishing with failures) is actually seen. It used to live only in
+ *  the shell's return, so a first-run wizard stored toasts nobody could see
+ *  and then popped them over the library the moment setup finished. */
+function Toasts() {
+  const toasts = useStore((s) => s.toasts);
+  const dismissToast = useStore((s) => s.dismissToast);
+  const { t } = useI18n();
+  return (
+    <div
+      className="fixed bottom-20 left-1/2 -translate-x-1/2 z-50 flex flex-col items-center gap-2 w-[min(92vw,30rem)] pointer-events-none"
+      aria-live="polite"
+    >
+      {toasts.map((item) => (
+        <div
+          key={item.id}
+          role={item.severity === "error" ? "alert" : "status"}
+          className={`toast-in pointer-events-auto flex items-start gap-2 w-full rounded-lg border px-3.5 py-2 text-sm shadow-xl backdrop-blur ${
+            item.severity === "error"
+              ? "border-red-900/70 bg-red-950/85 text-red-100"
+              : item.severity === "success"
+              ? "border-emerald-900/70 bg-emerald-950/85 text-emerald-100"
+              : "border-accent/40 bg-panel/95 text-zinc-200"
+          }`}
+        >
+          <span className="flex-1 min-w-0 break-words">{item.message}</span>
+          <button
+            className="shrink-0 -mr-1 p-0.5 rounded opacity-70 hover:opacity-100"
+            onClick={() => dismissToast(item.id)}
+            title={t("toast.dismiss")}
+            aria-label={t("toast.dismiss")}
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** Held until the config answers, in the SETUP frame rather than the shell's
+ *  skeleton: on a first run the next thing on screen is the wizard, and the
+ *  shell (sidebar, player, library) painting for a beat first is the library
+ *  UI flashing through setup. */
+function SetupLoading() {
+  return (
+    <div className="safe-shell min-h-dvh bg-bg text-zinc-100 flex flex-col items-center justify-center">
+      <Loader2 className="h-5 w-5 animate-spin text-zinc-500" />
+    </div>
+  );
+}
+
 /** One typed row in the top-bar search dropdown: a direct in-app link to the
  *  entity, with its kind on the right. A MusicBrainz hit is a link into the
  *  app's own browser (`/mb/…`) exactly like a local hit is a link into the
@@ -426,8 +479,6 @@ export default function App() {
   // app refreshing under the user's finger, and it is what kills momentum
   // scrolling. The progress readout keeps a subscription of its own, in
   // LiveProgress, so a frame repaints a 40px bar and nothing else.
-  const toasts = useStore((s) => s.toasts);
-  const dismissToast = useStore((s) => s.dismissToast);
   const query = useStore((s) => s.query);
   const setQuery = useStore((s) => s.setQuery);
   const qc = useQueryClient();
@@ -554,7 +605,8 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  const { data: config } = useQuery({ queryKey: ["config"], queryFn: api.config });
+  const configQuery = useQuery({ queryKey: ["config"], queryFn: api.config });
+  const config = configQuery.data;
 
   // The server's `ui_locale` is the app-wide language; this browser's own pick
   // (if any) wins, and i18n.ts owns that precedence — this only hands it the
@@ -886,12 +938,23 @@ export default function App() {
     };
   }, [inClientShell]);
 
+  // Every gate below can raise a toast (a failed backend choice, a refused
+  // sign-in, a config save). Render through this so the stack is on screen —
+  // the toasts used to live only in the shell's return, so a message from any
+  // screen before it was stored and shown to nobody.
+  const withToasts = (node: ReactNode) => (
+    <>
+      <Toasts />
+      {node}
+    </>
+  );
+
   // The shell's own first-run question — run the built-in backend, or connect
   // to one the user runs — comes FIRST, before the device's own bookkeeping
   // and before the address wizard. A shell that reports `mode: "unset"` has
   // never been given an answer, whatever this webview's localStorage says.
   if (inClientShell && (backendChoiceNeeded || backendStarting)) {
-    return <BackendChoice onDone={() => window.location.reload()} starting={backendStarting} />;
+    return withToasts(<BackendChoice onDone={() => window.location.reload()} starting={backendStarting} />);
   }
 
   // The shell's own first-run wizard, before every other gate: it needs no
@@ -906,13 +969,13 @@ export default function App() {
     // socket, the media-cache keys, every cached query) was built against the
     // OLD server. This is a one-time, user-triggered reload on the client
     // shells only — never a timer.
-    return <ClientSetup onDone={() => window.location.reload()} />;
+    return withToasts(<ClientSetup onDone={() => window.location.reload()} />);
   }
 
   // The gate comes before the first-run wizard: an unclaimed remote server has
   // no config to show anyone yet, and every route below would answer 428.
   if (needsLogin) {
-    return (
+    return withToasts(
       <LoginPage
         onSignedIn={() => {
           setSignedOut(false);
@@ -923,17 +986,37 @@ export default function App() {
     );
   }
 
-  // First-run gate: setup not completed → setup wizard. Only first_run_done
-  // is checked — an empty music folder is a normal unconfigured state, so the
-  // setup page's "Skip for now" leaves Settings (and the app) reachable.
-  if (config && !config.first_run_done) {
-    return (
+  // The setup wizard's own screen — rendered BARE, never inside the library
+  // shell. Two places reach it (a first run, and Settings → Run the setup
+  // wizard again) and both must look the same: wrapped in the shell, a re-run
+  // kept the sidebar, player bar and the live event socket, so a script or
+  // import finishing painted library toasts and progress over the wizard.
+  const setupScreen = (
+    <>
+      <Toasts />
       <Routes>
         <Route path="/setup" element={<SetupPage />} />
         <Route path="*" element={<Navigate to="/setup" replace />} />
       </Routes>
-    );
-  }
+    </>
+  );
+
+  // First-run gate: setup not completed → setup wizard. Only first_run_done
+  // is checked — an empty music folder is a normal unconfigured state, so the
+  // setup page's "Skip for now" leaves Settings (and the app) reachable.
+  if (config && !config.first_run_done) return setupScreen;
+
+  // A re-run navigated to /setup is the SAME screen, not the wizard inside the
+  // shell (the first-run check above no longer matches once the flag is true).
+  if (location.pathname === "/setup") return setupScreen;
+
+  // Held until the config answers. The first-run check needs the flag, and
+  // while `config` is still undefined that check is false — so without this
+  // the shell painted on the first frame and was torn down for the wizard a
+  // beat later, which is the library UI flashing through setup. An ERRORED
+  // query is not held: a server that did not answer must still leave the shell
+  // (and its error surfaces) reachable.
+  if (configQuery.isPending) return <SetupLoading />;
 
   return (
     // The sidebar owns the entire left edge, top to bottom (brand header, nav,
@@ -1382,10 +1465,8 @@ export default function App() {
             <Route path="/mb/rg/:id" element={<MBReleaseGroupPage />} />
             <Route path="/mb/release/:id" element={<MBReleasePage />} />
             <Route path="/mb/recording/:id" element={<MBRecordingPage />} />
-            {/* Re-runnable: the wizard is the app's setup surface, not a
-                one-shot gate — Settings → General opens it again. Every step
-                is skippable and it only writes what is entered there. */}
-            <Route path="/setup" element={<SetupPage />} />
+            {/* /setup is handled ABOVE the shell (it must render bare, see
+                setupScreen) — it is deliberately not a route in here. */}
             <Route path="/donations" element={<DonationsPage />} />
             <Route
               path="*"
@@ -1415,36 +1496,7 @@ export default function App() {
 
       {shortcutsOpen && <ShortcutsOverlay onClose={() => setShortcutsOpen(false)} />}
 
-      {/* Toasts stack instead of overwriting each other; errors are red and
-          announce as alerts, confirmations are green and polite. */}
-      <div
-        className="fixed bottom-20 left-1/2 -translate-x-1/2 z-50 flex flex-col items-center gap-2 w-[min(92vw,30rem)] pointer-events-none"
-        aria-live="polite"
-      >
-        {toasts.map((item) => (
-          <div
-            key={item.id}
-            role={item.severity === "error" ? "alert" : "status"}
-            className={`toast-in pointer-events-auto flex items-start gap-2 w-full rounded-lg border px-3.5 py-2 text-sm shadow-xl backdrop-blur ${
-              item.severity === "error"
-                ? "border-red-900/70 bg-red-950/85 text-red-100"
-                : item.severity === "success"
-                ? "border-emerald-900/70 bg-emerald-950/85 text-emerald-100"
-                : "border-accent/40 bg-panel/95 text-zinc-200"
-            }`}
-          >
-            <span className="flex-1 min-w-0 break-words">{item.message}</span>
-            <button
-              className="shrink-0 -mr-1 p-0.5 rounded opacity-70 hover:opacity-100"
-              onClick={() => dismissToast(item.id)}
-              title={t("toast.dismiss")}
-              aria-label={t("toast.dismiss")}
-            >
-              <X className="h-3.5 w-3.5" />
-            </button>
-          </div>
-        ))}
-      </div>
+      <Toasts />
     </div>
   );
 }

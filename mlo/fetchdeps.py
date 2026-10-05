@@ -1721,15 +1721,21 @@ def _remove_older_versions(prefix, keep_dir):
 
 
 def _pip_python():
-    """Interpreter for `pip install --target`; sys.executable is the frozen
-    exe (not a python) in PyInstaller builds."""
-    if not getattr(sys, "frozen", False):
-        return sys.executable
-    for cand in ("python", "python3", "py"):
-        found = shutil.which(cand)
-        if found:
-            return found
-    raise RuntimeError("vendored Python packages need a Python interpreter on PATH")
+    """Command prefix that runs pip on the interpreter this app imports with.
+
+    NOT `sys.executable` blindly: in a PyInstaller build that is the frozen
+    server exe (not a python), and a PATH interpreter is worse than wrong —
+    `pip install --target` records the wheels for THAT interpreter's platform
+    and CPython, and the app then imports them with its own. A `cp312-…-win_amd64`
+    numpy installed by a PATH python 3.12 cannot be loaded by a frozen 3.13
+    server, so the folder lands and detection refuses it for both. The frozen
+    build therefore runs pip through its own `--mlo-python` entry point (see
+    backend_launcher/__main__.py), which IS this interpreter — the one thing
+    that can both write and later import the folder.
+    """
+    if getattr(sys, "frozen", False):
+        return [sys.executable, "--mlo-python"]
+    return [sys.executable]
 
 
 def _pip_install_dir(key, target):
@@ -1783,7 +1789,7 @@ def _install_pip_package(key, log=print, progress=None):
     dest_dir = _pip_install_dir(key, target)
     log(f"Downloading {display} v{target} (pip) …")
     cmd = [
-        _pip_python(), "-m", "pip", "install",
+        *_pip_python(), "-m", "pip", "install",
         # --upgrade, deliberately: without it pip answers "Requirement already
         # satisfied" for a version it finds ANYWHERE it looks — the running
         # interpreter's site-packages, or a folder from an interrupted install

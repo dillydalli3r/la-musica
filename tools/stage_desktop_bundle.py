@@ -45,6 +45,69 @@ def tree_bytes(path: Path) -> int:
     return total
 
 
+def _real_7zip_dir(base) -> str | None:
+    """*base* when it holds a usable 7z.exe, else None.
+
+    "Usable" is a size floor: a `7z.exe` that is a WindowsApps execution alias
+    (a 0-byte reparse point the Store installs) is on PATH ahead of the real
+    one, opens as a file yet cannot be read, and would otherwise be picked as
+    the source and fail the copy with EINVAL.
+    """
+    if not base:
+        return None
+    exe = os.path.join(base, "7z.exe")
+    try:
+        if os.path.isfile(exe) and os.path.getsize(exe) > 1:
+            return base
+    except OSError:
+        return None
+    return None
+
+
+def stage_7zip(bundle: Path) -> str:
+    """Copy 7-Zip's console exe + dll beside the frozen backend.
+
+    The Windows installer's libjpeg-turbo asset is an NSIS executable upstream
+    ships no zip of, and NSIS is read by 7-Zip alone; the app also reads a
+    user's `.7z`/`.rar` through it. A machine with no 7-Zip on PATH and none
+    under Program Files — most Windows boxes — otherwise cannot install that
+    tool at all, or open those archives, so the app carries its own copy.
+    `mlo.archives.find_7z` looks in the frozen tree (`sys._MEIPASS`, here) and
+    prefers it over PATH.
+
+    Windows only: macOS installs libjpeg-turbo via Homebrew and Linux via its
+    `.deb`, and neither needs 7-Zip at install time. Source: MLO_7Z_DIR, then a
+    `7z` on PATH, then the usual install directory. Returns what happened, for
+    the one caller to print — never raises, because a bundle without it still
+    works for every tool except this one.
+    """
+    if os.name != "nt":
+        return "not needed off Windows"
+    which = shutil.which("7z")
+    src = (_real_7zip_dir(os.environ.get("MLO_7Z_DIR"))
+           or _real_7zip_dir(os.path.dirname(which) if which else None)
+           or _real_7zip_dir(r"C:\Program Files\7-Zip")
+           or _real_7zip_dir(r"C:\Program Files (x86)\7-Zip"))
+    if src is None:
+        return "ABSENT — Windows libjpeg-turbo installs will refuse (install 7-Zip or set MLO_7Z_DIR)"
+    dest = bundle / "_internal"
+    if not dest.is_dir():
+        dest = bundle
+    copied = []
+    for name in ("7z.exe", "7z.dll", "License.txt"):
+        here = os.path.join(src, name)
+        if os.path.isfile(here):
+            # Read/write rather than shutil.copy: CopyFile2 (what copy2 uses on
+            # Windows) refuses some Program Files sources with WinError 1920,
+            # and there is no metadata worth preserving in these two files.
+            with open(here, "rb") as fh:
+                data = fh.read()
+            with open(dest / name, "wb") as fh:
+                fh.write(data)
+            copied.append(name)
+    return f"copied {', '.join(copied)} (from {src})"
+
+
 def main() -> int:
     server = Path(os.environ.get("MLO_SERVER_DIST") or (ROOT / "dist" / "mlo-server"))
 
@@ -79,8 +142,10 @@ def main() -> int:
 
     helper = next((p for base in (server / "_internal", server)
                    for p in base.glob("mlo-audio*") if p.is_file()), None)
+    sevenzip = stage_7zip(BUNDLE / "mlo-server")
     print(f"staged: desktop/bundle/mlo-server ({tree_bytes(server) >> 20} MiB, "
-          f"helper {'included' if helper else 'ABSENT — dynamic range falls back to numpy'})")
+          f"helper {'included' if helper else 'ABSENT — dynamic range falls back to numpy'}, "
+          f"7-Zip {sevenzip})")
     return 0
 
 

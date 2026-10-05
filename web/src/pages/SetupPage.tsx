@@ -375,7 +375,7 @@ export default function SetupPage() {
     // Held until the config answers: the draft is the saved config, and a form
     // rendered from nothing would read every untouched switch as a change.
     return (
-      <div className="min-h-dvh bg-bg text-zinc-100 flex items-center justify-center">
+      <div className="safe-shell min-h-dvh bg-bg text-zinc-100 flex flex-col items-center justify-center">
         <Loader2 className="h-5 w-5 animate-spin text-zinc-500" />
       </div>
     );
@@ -390,7 +390,7 @@ export default function SetupPage() {
 
   return (
     <div className="safe-shell min-h-dvh bg-bg text-zinc-100 flex flex-col items-center justify-center">
-      <div className="w-full max-w-2xl space-y-4 p-6">
+      <div className={`w-full ${step.panel === "dependencies" ? "max-w-4xl" : "max-w-2xl"} space-y-4 p-6`}>
         {/* The same frame and header the shell's own wizards use — a user who
             answered "use the built-in backend" is walked straight into this
             screen, and it must read as the next step of that flow, not as a
@@ -405,7 +405,7 @@ export default function SetupPage() {
                not have to walk the whole wizard to leave. */
             !isLast ? (
               <button className="btn-ghost !py-1 text-xs tap" disabled={busy} onClick={() => exit("/")}>
-                Skip setup
+                {config?.first_run_done ? "Close" : "Skip setup"}
               </button>
             ) : undefined
           }
@@ -495,7 +495,10 @@ export default function SetupPage() {
                   another program need a server instead.
                 </div>
               )}
-              <div className="rounded-md border border-border overflow-hidden">
+              {/* The same wrapper the Dependencies page uses: `table-scroll`
+                  (not `overflow-hidden`, which clipped the five-column table)
+                  and the page's radius, so the two surfaces do not diverge. */}
+              <div className="rounded-lg border border-border table-scroll">
                 <table className="w-full text-sm">
                   <thead className="bg-panel/60">
                     <tr>

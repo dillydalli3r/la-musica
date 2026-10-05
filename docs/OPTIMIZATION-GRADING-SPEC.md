@@ -1785,6 +1785,23 @@ table and the auto-update worker cannot disagree.
   versions an update replaced is housekeeping and never fails a landed install
   either (a tools folder the process could not list is logged, and the stale
   folder is pruned by the next install).
+- **R69b — a packaged desktop install installs with its OWN interpreter and
+  reads NSIS with its own 7-Zip.** The frozen backend has no separate Python,
+  so `pip install --target` runs through the backend itself
+  (`mlo-server --mlo-python -m pip …`, `mlo/fetchdeps._pip_python`): the
+  interpreter that WRITES the wheels is the one that will IMPORT them, which a
+  PATH python cannot be — a `cp312-…-win_amd64` numpy a PATH python 3.12 writes
+  cannot be loaded by a frozen 3.13 server, so the folder would land and
+  detection would refuse it for both hosts. `pip` rides inside the PyInstaller
+  build for that reason. The Windows installer's libjpeg-turbo asset is an NSIS
+  executable upstream ships no zip of, and upstream's installer REFUSES to run
+  a second time ("an existing version … is already installed", rc 2), so the
+  bundle carries the full 7-Zip console (`tools/stage_desktop_bundle.py` copies
+  `7z.exe`/`7z.dll` into the frozen tree) and `mlo.archives.find_7z` prefers it
+  over PATH — a bare `7za` on PATH cannot read NSIS. Both are what turn the
+  three failures on a Windows box with no Python and no 7-Zip — libjpeg-turbo
+  ("silent install failed"), librosa and beets ("vendored Python packages need
+  a Python interpreter on PATH") — into installs.
 
 ---
 
@@ -3499,6 +3516,21 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   renders still has all of its keys named by a rendered Settings control (with
   one documented exemption, the export defaults the Export page's own form
   writes). A key may never lose its only editor to a shorter wizard.
+- **R107a — setup is one surface, and it never wears the library.** The wizard
+  renders BARE: while `first_run_done` is false, and when it is re-run from
+  Settings, `/setup` is rendered OUTSIDE the shell — no sidebar, top bar,
+  player bar or live event socket — and while the config query is still
+  pending the app holds a setup frame instead of painting the shell first (the
+  shell used to mount on the first frame and be torn down for the wizard a
+  beat later, which is library UI flashing through first run). The pre-shell
+  screens — the backend chooser, the client wizard, the login/claim screen and
+  this wizard — draw the same centered frame, the same `PageHeader` idiom and
+  the same `SetupRail`, and every one of them renders the toast stack, so a
+  message raised during setup ("Install finished with N failure(s)", a refused
+  sign-in) is seen where it was raised instead of being stored on a screen
+  with no stack to show it. The Tools step draws the Dependencies table with
+  the page's own wrapper (`table-scroll`, the page's radius) at a width that
+  fits its five columns.
 
 ### 7.18 An import that needs a hand is an outcome, and it reaches the user
 
