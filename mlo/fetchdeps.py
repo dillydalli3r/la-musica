@@ -292,6 +292,29 @@ LINUX_PACKAGES = {
     "php": "php-cli",
 }
 
+# What macOS gets instead of downloads: the formula that provides each tool.
+#
+# macOS is where "every tool has a Windows build" stops. Upstream ships no
+# macOS release this app can pin for the tools that matter most (ffmpeg has no
+# official macOS build at all, and a pinned third-party one is a supply-chain
+# decision, not a convenience), and a Homebrew install is what a macOS user
+# does anyway — so the rows name the formula and the app FINDS the result. That
+# last half is not free on a GUI launch: see backend_launcher/_augment_gui_path,
+# without which /opt/homebrew/bin is not on a packaged app's PATH.
+#
+# keys absent here (cuetools, audioauditor) have no formula and no macOS build:
+# they are `unsupported` with a reason, exactly as on Linux.
+BREW_PACKAGES = {
+    "flac": "flac",
+    "libjxl": "jpeg-xl",
+    "libjpeg_turbo": "jpeg-turbo",
+    "ffmpeg": "ffmpeg",
+    "oxipng": "oxipng",
+    "rsgain": "rsgain",
+    "chromaprint": "chromaprint",
+    "php": "php",
+}
+
 # Vendored pure-Python tools: installed with `pip install --target` into a
 # versioned tools folder instead of shipping binaries. They are
 # imported by prepending the folder to sys.path (see tools.python_pkg_path).
@@ -333,18 +356,23 @@ PIP_ON_LINUX = {"yt-dlp"}
 # at all - so the refusal message, the `latest_version` column and the row's
 # Install button can never disagree about a tool.
 def host_platform():
-    """`windows` | `linux` | `other` for this host.
+    """`windows` | `linux` | `macos` | `other` for this host.
 
-    Linux is the only non-Windows platform with downloads of its own
-    (LINUX_BINARIES); everywhere else a tool is a pip package or one the user
-    installs with the system package manager. The server runs in Docker or from
-    a checkout on a desktop OS — no phone hosts a backend any more — so this is
-    simply what the interpreter reports.
+    Linux is the only non-Windows platform with DOWNLOADS of its own
+    (LINUX_BINARIES); macOS has none this app can pin with confidence, so a
+    tool there is one the user installed with Homebrew — the same shape as the
+    distro packages on Linux (BREW_PACKAGES, below) — and the rows say exactly
+    which command to run. `other` is everything else (a BSD, a phone's shell):
+    no package manager this app knows, so nothing is offered. The server runs
+    in Docker or from a checkout or a desktop bundle — no phone hosts a backend
+    any more — so this is simply what the interpreter reports.
     """
     if os.name == "nt":
         return "windows"
     if sys.platform.startswith("linux"):
         return "linux"
+    if sys.platform == "darwin":
+        return "macos"
     return "other"
 
 
@@ -457,6 +485,10 @@ def install_kind(key, platform=None, machine=None):
         return "unsupported" if runner_missing(key, platform=platform) else "deps"
     if plat == "linux" and key in LINUX_PACKAGES:
         return "system" if LINUX_PACKAGES[key] else "unsupported"
+    # macOS: the formula that provides it, or nothing. The runner check is the
+    # same one Linux gets (Logchecker needs PHP wherever it is installed).
+    if plat == "macos" and BREW_PACKAGES.get(key):
+        return "unsupported" if runner_missing(key, platform=platform) else "system"
     return "unsupported"
 
 
@@ -477,28 +509,51 @@ def install_problem(key, platform=None, machine=None):
     The Dependencies row shows this next to a missing tool that has no Install
     button, and install_dependency() raises it when one is asked for anyway -
     the same sentence from one place.
+
+    The platform decides the sentence, and it has to decide it FIRST: this used
+    to build the Debian one whenever the tool was a system package anywhere, so
+    a macOS user read "apt-get install flac" for tools Homebrew provides.
     """
     kind = install_kind(key, platform=platform, machine=machine)
     if kind == "deps":
         return None
     display = DISPLAY_NAMES.get(key, key)
     plat = _platform_of(platform)
-    pkg = LINUX_PACKAGES.get(key)
     missing_runner = runner_missing(key, platform=platform)
     if missing_runner:
+        # The runtime the tool needs (PHP for Logchecker, mono for CUETools) is
+        # itself a package: name it the platform's own way.
+        formula = BREW_PACKAGES.get(missing_runner) if plat == "macos" else None
+        if formula:
+            return (f"{display} needs the {missing_runner} runtime on this "
+                    f"platform - install it with Homebrew: brew install {formula}")
+        if plat == "macos":
+            return (f"{display} needs the {missing_runner} runtime on this "
+                    f"platform - install it with Homebrew (brew.sh) or your "
+                    f"package manager")
         return (f"{display} needs the {LINUX_RUNNERS[key][0]} runtime on this "
                 f"platform - install it with your package manager "
-                f"(Debian/Ubuntu: apt-get install {missing_runner})")
-    if kind == "system" and pkg:
-        return (f"{display} is a system package on this platform - install it "
-                f"with your package manager (Debian/Ubuntu: apt-get install "
-                f"{pkg}); the Docker image already ships it.")
-    if plat == "linux" and key in LINUX_BINARIES:
-        return (f"{display} publishes no Linux build for this machine's "
-                f"architecture - install it with your package manager.")
-    if plat == "linux" and key in LINUX_PACKAGES:
-        return (f"{display} is a Windows binary only and has no Linux build - "
-                f"it is unsupported on this platform.")
+                f"(Debian/Ubuntu: apt-get install {LINUX_RUNNERS[key][1]})")
+    if plat == "macos":
+        formula = BREW_PACKAGES.get(key)
+        if formula:
+            return (f"{display} installs with Homebrew on this platform - "
+                    f"run: brew install {formula}")
+        return (f"{display} has no build this app can install on macOS and no "
+                f"Homebrew formula provides it - it is unsupported on this "
+                f"platform.")
+    if plat == "linux":
+        pkg = LINUX_PACKAGES.get(key)
+        if kind == "system" and pkg:
+            return (f"{display} is a system package on this platform - install "
+                    f"it with your package manager (Debian/Ubuntu: apt-get "
+                    f"install {pkg}); the Docker image already ships it.")
+        if key in LINUX_BINARIES:
+            return (f"{display} publishes no Linux build for this machine's "
+                    f"architecture - install it with your package manager.")
+        if key in LINUX_PACKAGES:
+            return (f"{display} is a Windows binary only and has no Linux build "
+                    f"- it is unsupported on this platform.")
     return (f"{display} has no build this app can install on this platform - "
             f"install it with your system package manager.")
 
@@ -513,10 +568,15 @@ def system_upgrade_command(key, platform=None):
 
     LINUX_PACKAGES names Debian packages, so the command is apt's, and it is the
     --only-upgrade form of the plain install install_problem() names — a row
-    that already has the tool must not read as "install it". Never executed:
-    this app does not run package managers, and certainly not unattended.
+    that already has the tool must not read as "install it". macOS gets the
+    Homebrew form of the same sentence. Never executed: this app does not run
+    package managers, and certainly not unattended.
     """
-    if _platform_of(platform) != "linux":
+    plat = _platform_of(platform)
+    if plat == "macos":
+        formula = BREW_PACKAGES.get(key)
+        return f"brew upgrade {formula}" if formula else None
+    if plat != "linux":
         return None
     pkg = LINUX_PACKAGES.get(key)
     if not pkg:

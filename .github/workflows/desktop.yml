@@ -436,6 +436,33 @@ jobs:
             echo "ok: the AppImage started its own backend on 127.0.0.1:$port"
           fi
 
+      - name: Dependencies install in the backend each install carries
+        # The Dependencies step is a button in the desktop app, and the thing it
+        # presses is this frozen backend — no suite presses it, because every
+        # suite calls `fetchdeps` in-process from a checkout. This runs the
+        # unpacked backend the way the shell runs it (loopback, a scratch music
+        # folder and data dir) and drives the real endpoints:
+        #
+        #   * Windows and Linux install `oxipng` for real and prove the binary
+        #     LANDS under <music>/.mlo/tools/<tool> v<version>/ and reads `ok`
+        #     afterwards — the write path a packaged, read-only app folder makes
+        #     interesting (mlo.paths.tools_dir, backend_launcher's DEPS_DIR);
+        #   * Linux also proves the distro rows read `system` with the package
+        #     named, never a missing row with a dead Install button;
+        #   * macOS downloads nothing by design — its rows are Homebrew
+        #     formulas — so it proves the rows SAY so, and that no macOS row
+        #     names an apt package (they did, before install_problem() read the
+        #     platform first).
+        #
+        # Unix only: a native `.exe` under git-bash wants its paths translated
+        # first (the payload check above keeps the same split), and the Windows
+        # case is exercised by hand on the machine these binaries are built on.
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -e
+          python tools/check_desktop_deps.py --bundle desktop/bundle/mlo-server
+
       - name: Upload the bundles
         uses: actions/upload-artifact@v4
         with:

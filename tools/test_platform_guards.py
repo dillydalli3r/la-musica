@@ -90,7 +90,9 @@ class simulated_platform:
 
     host_platform() reads os.name and sys.platform, so both are set — the Linux
     branch has to be enterable on a Windows dev box and the Windows branch on
-    Linux CI — and both are restored in __exit__, i.e. unconditionally.
+    Linux CI — and both are restored in __exit__, i.e. unconditionally. "posix"
+    is Linux; "darwin" is macOS, whose whole story is Homebrew formulas plus
+    PATH discovery rather than downloads.
     """
 
     def __init__(self, name):
@@ -100,6 +102,8 @@ class simulated_platform:
         self.real = (os.name, sys.platform)
         if self.name == "nt":
             os.name, sys.platform = "nt", "win32"
+        elif self.name == "darwin":
+            os.name, sys.platform = "posix", "darwin"
         else:
             os.name, sys.platform = "posix", "linux"
         return self
@@ -615,6 +619,104 @@ for key in fetchdeps.SINGLE_EXE_TOOLS:
     asset = (fetchdeps.PINNED.get(key) or {}).get("asset", "")
     check(f"{key} is pinned to a bare binary, never an archive ({asset})",
           asset.endswith((".exe", ".phar")))
+
+
+# --------------------------------------------------------------------------- #
+# macOS: the desktop app there installs NOTHING itself — every tool is a
+# Homebrew formula (or unsupported), and the row says the exact command. This
+# is the platform whose absence was silent: host_platform() answered "other",
+# so a macOS user got "install it with your system package manager" with no
+# package manager named, for every tool, including the ones brew provides.
+# --------------------------------------------------------------------------- #
+with simulated_platform("darwin"):
+    check("macOS is a platform of its own",
+          fetchdeps.host_platform() == "macos")
+    for key, formula in sorted(fetchdeps.BREW_PACKAGES.items()):
+        note = fetchdeps.install_problem(key, platform="macos")
+        check(f"{key}: {formula} is named on macOS (got {note!r})",
+              note is not None and f"brew install {formula}" in note)
+        check(f"{key}: not offered as a download on macOS (got "
+              f"{fetchdeps.install_kind(key, platform='macos')})",
+              fetchdeps.install_kind(key, platform="macos") in ("system", "unsupported"))
+    # The tools no formula provides stay unsupported on macOS, each with the
+    # sentence that fits it: no build at all (AudioAuditor), or a runtime the
+    # user has to provide (CUETools needs mono).
+    for key in ("cuetools", "audioauditor"):
+        note = str(fetchdeps.install_problem(key, platform="macos"))
+        check(f"{key}: unsupported on macOS (got {note!r})",
+              fetchdeps.install_kind(key, platform="macos") == "unsupported")
+        check(f"{key}: the macOS row says what to do (got {note!r})",
+              "macOS" in note or "mono" in note)
+    check("the macOS rows never name a Debian package",
+          "apt-get" not in str(fetchdeps.install_problem("flac", platform="macos"))
+          and "apt-get" not in str(fetchdeps.install_problem("ffmpeg", platform="macos")))
+    # The pip-routed tools are platform-independent and still installable.
+    for key in ("librosa", "beets", "yt-dlp"):
+        check(f"{key}: still fetchable on macOS",
+              fetchdeps.install_kind(key, platform="macos") == "deps")
+    check("a present-but-behind brew tool offers the brew command",
+          fetchdeps.system_upgrade_command("flac", platform="macos") == "brew upgrade flac"
+          and fetchdeps.system_upgrade_command("cuetools", platform="macos") is None)
+    check("Linux keeps the apt command",
+          fetchdeps.system_upgrade_command("flac", platform="linux")
+          == "apt-get install --only-upgrade flac")
+    check("Windows has no package-manager command at all",
+          fetchdeps.system_upgrade_command("flac", platform="windows") is None)
+
+
+# --------------------------------------------------------------------------- #
+# macOS PATH discovery: the packaged app must find a Homebrew tool at all
+# --------------------------------------------------------------------------- #
+# A GUI-launched app inherits launchd's PATH (/usr/bin:/bin:/usr/sbin:/sbin), so
+# a tool the user installed with Homebrew is invisible to detection AND cannot
+# be spawned by name — the whole "install it with brew" story is dead without
+# this. The dirs are stubbed (nothing here has /opt/homebrew), so what is
+# checked is the rule: existing dirs are prepended once, missing ones are not,
+# and nothing happens off macOS.
+import contextlib  # noqa: E402
+
+from backend_launcher.__main__ import _augment_gui_path  # noqa: E402
+
+
+class stubbed_isdir:
+    """Answer True for the names in *present*, False for everything else."""
+
+    def __init__(self, present):
+        self.present = set(present)
+
+    def __enter__(self):
+        self.real = os.path.isdir
+        os.path.isdir = lambda p: p in self.present
+        return self
+
+    def __exit__(self, *exc):
+        os.path.isdir = self.real
+        return False
+
+
+real_path = os.environ.get("PATH", "")
+try:
+    with simulated_platform("darwin"), stubbed_isdir({"/opt/homebrew/bin"}):
+        # Built with os.pathsep: the function joins with the HOST's separator,
+        # so a literal ":" here would split differently on Windows.
+        os.environ["PATH"] = os.pathsep.join(["/usr/bin", "/bin"])
+        _augment_gui_path()
+        parts = os.environ["PATH"].split(os.pathsep)
+        check("macOS prepends the dirs that exist (homebrew)", parts[0] == "/opt/homebrew/bin")
+        check("...and keeps the original PATH intact", parts[1:] == ["/usr/bin", "/bin"])
+        _augment_gui_path()
+        check("...once, not twice", parts == os.environ["PATH"].split(os.pathsep))
+    with simulated_platform("darwin"), stubbed_isdir(set()):
+        os.environ["PATH"] = "/usr/bin"
+        _augment_gui_path()
+        check("macOS with no brew at all leaves PATH alone", os.environ["PATH"] == "/usr/bin")
+    with simulated_platform("posix"), stubbed_isdir({"/opt/homebrew/bin"}):
+        os.environ["PATH"] = "/usr/bin"
+        _augment_gui_path()
+        check("Linux is not touched (its PATH already has the distro bins)",
+              os.environ["PATH"] == "/usr/bin")
+finally:
+    os.environ["PATH"] = real_path
 
 
 # --------------------------------------------------------------------------- #

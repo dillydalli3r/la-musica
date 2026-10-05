@@ -81,8 +81,33 @@ def _ensure_std_streams(log_path: str) -> None:
         sys.stderr = handle
 
 
+def _augment_gui_path() -> None:
+    """Put the package managers' bins on PATH — macOS only, and it is the
+    difference between "install it with Homebrew" working and not working.
+
+    A GUI-launched app inherits the launchd environment, where PATH is
+    `/usr/bin:/bin:/usr/sbin:/sbin` — NOT the PATH a login shell builds from
+    `path_helper` and the shell profiles. Homebrew lives outside all four
+    (`/opt/homebrew/bin` on Apple Silicon, `/usr/local/bin` on Intel,
+    `/opt/local/bin` for MacPorts), so without this the app cannot SEE a tool
+    the user installed there — detection reads PATH — and even a tool it did
+    see could not be SPAWNED by name, because the child inherits this same
+    PATH. Same set the user's own shell search uses; only directories that
+    exist are added, and only ones not already there.
+    """
+    if sys.platform != "darwin":
+        return
+    path = os.environ.get("PATH", "")
+    parts = path.split(os.pathsep) if path else []
+    extra = [d for d in ("/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin")
+             if os.path.isdir(d) and d not in parts]
+    if extra:
+        os.environ["PATH"] = os.pathsep.join(extra + parts)
+
+
 def main() -> int:
     """Boot the app the way the shell expects, then run uvicorn forever."""
+    _augment_gui_path()
     os.makedirs(_DATA_DIR, exist_ok=True)
     _ensure_std_streams(os.path.join(_DATA_DIR, "mlo-server.log"))
 

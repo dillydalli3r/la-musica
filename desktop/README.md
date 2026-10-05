@@ -39,6 +39,31 @@ local backend — sits behind `#[cfg(desktop)]` in `src/lib.rs`, so the mobile
 builds compile without it instead of carrying dead desktop code. Tauri's own
 build script defines `desktop`/`mobile`, so the split follows the target.
 
+### The external toolchain (flac, ffmpeg, oxipng, …)
+
+The installers ship the *app*, not the tools: the Dependencies step installs
+them into `<music>/.mlo/tools` (falling back to the per-user data dir while no
+music folder is configured yet — a packaged app folder is read-only on macOS
+and under `/usr/lib` on Linux, which is why the launcher redirects both it and
+`mlo.paths.DEPS_DIR` before anything imports the engine). What each platform
+can install there is decided in one place, `mlo/fetchdeps.py`:
+
+| Platform | How a tool arrives |
+|---|---|
+| Windows | downloaded: every tool has a pinned Windows build |
+| Linux (`LINUX_BINARIES` / `LINUX_PACKAGES`) | downloaded where upstream ships a Linux build (oxipng, fpcalc, rsgain, libjxl, libjpeg-turbo, AudioAuditor), otherwise the distro package, named in the row |
+| macOS (`BREW_PACKAGES`) | nothing is downloaded: the row names the Homebrew formula (`brew install flac`) and the app then FINDS the result |
+
+That last half is not free: a GUI-launched macOS app inherits launchd's
+`PATH` (`/usr/bin:/bin:/usr/sbin:/sbin`), where Homebrew does not live — not
+for detection, and not for spawning a tool by name either.
+`backend_launcher/_augment_gui_path` prepends `/opt/homebrew/bin`,
+`/usr/local/bin` and `/opt/local/bin` (only ones that exist) so the app sees
+what the user's own shell sees. `tools/check_desktop_deps.py` runs the packed
+backend on each OS in CI and presses the real button: Windows and Linux prove
+`oxipng` lands on disk and reads `ok`, macOS proves every brew-backed row says
+`brew install <formula>` and that no row names an apt package.
+
 ## How it works (desktop)
 
 - **Window** shows the built React app. In local mode it is served by the
@@ -58,6 +83,31 @@ build script defines `desktop`/`mobile`, so the split follows the target.
   built-in backend" checkbox is the same question, reachable later: a page
   served by a REMOTE server cannot call the shell at all, so that item is the
   way back without editing `shell.json` by hand.
+
+  Three rules keep that screen from becoming a trap, each one a bug that
+  shipped:
+
+  * the SHELL decides whether to ask, not the page. `mlo.clientSetup` lives in
+    the webview's localStorage, and WebView2 keys that profile by the app
+    IDENTIFIER — two shells of la musica share it — so a flag written by
+    another install cannot hide the question from a shell that was never asked
+    it (`App.tsx` reads `mode === "unset"` first);
+  * the boot splash (`web/public/splash.html`) has no navigation of its own, so
+    every path that will not end in a running server leaves it explicitly
+    (`backend_handle::show_app_page`, by moving the document — the window's
+    configured `url` is applied after `setup()` returns, so a `navigate()` from
+    there is overwritten), and a failed local start emits `stopped` with no
+    origin so the screen can say so;
+  * `shell_backend_choice` carries the live `status`
+    (`running`/`starting`/`stopped`) beside the mode, because entering local
+    mode reloads the page: the fresh document has missed the `mlo-backend`
+    events, and without the status it fell through to the client wizard's
+    server-ADDRESS step for as long as the backend took to boot.
+- **One rail across the setup screens.** The backend question, the shell's
+  client wizard (`ClientSetup.tsx`) and the app's own first run
+  (`SetupPage.tsx`) draw the same header, frame and step rail
+  (`components/SetupRail.tsx`), so answering the question reads as step 1 of
+  the flow that follows rather than as a differently built page.
 - **Server**: either the shell's child (`mlo-server`, local mode) or the
   address the user configured (remote mode). In local mode the shell finds a
   free loopback port from 8011 up (never 8000 — that is the live install),

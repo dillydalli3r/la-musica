@@ -124,7 +124,17 @@ export default function SetupPage() {
   // A first run has no password: everything past the account step is off
   // limits until one is set. Read from the server's own status, so a re-run of
   // the wizard (or a second client) sees the same answer.
-  const accountMissing = !!auth && !auth.has_password;
+  //
+  // UNLESS the server will never ask anyone for one. `gate: false` is exactly
+  // "this bind cannot be reached from another device" (`auth.gate_required`
+  // follows the bind address), and that is the desktop app's built-in backend:
+  // it listens on 127.0.0.1 for its own window, so demanding a password there
+  // would be asking the user to lock a door that opens onto nothing. A server
+  // bound to a network address keeps the requirement — the email/rym/hash
+  // rules below are unchanged — because there the password is the only thing
+  // deciding who can read the library.
+  const localOnly = auth?.gate === false;
+  const accountMissing = !!auth && !auth.has_password && !localOnly;
 
   // Seeded — and RE-seeded — from the saved config: the Sources panel on the
   // step before this one writes keys of its own (the RYM cookie, the provider
@@ -421,7 +431,11 @@ export default function SetupPage() {
               {step.panel === "done" ? <Check className="h-4 w-4 text-emerald-400" /> : null}
               {step.title}
             </div>
-            <p className="text-xs text-zinc-400 mt-1 leading-relaxed">{step.blurb}</p>
+            <p className="text-xs text-zinc-400 mt-1 leading-relaxed">
+              {step.panel === "password" && localOnly && !auth?.has_password
+                ? "Nothing is required here. This server answers only on this machine, so no password is needed — leave it empty, or set one now if you plan to reach this library from other devices."
+                : step.blurb}
+            </p>
           </div>
 
           {step.panel === "folder" && (
