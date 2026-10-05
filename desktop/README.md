@@ -39,6 +39,34 @@ local backend — sits behind `#[cfg(desktop)]` in `src/lib.rs`, so the mobile
 builds compile without it instead of carrying dead desktop code. Tauri's own
 build script defines `desktop`/`mobile`, so the split follows the target.
 
+### Windows install, uninstall and AppData
+
+The NSIS installer is a **per-user** install: the shell and the staged backend
+land in `%LOCALAPPDATA%\la musica` (`<install>\mlo-server` is the resource tree
+the shell spawns). The shell's own per-user state lives in that same folder —
+`config.json`, `shell.json`, `mlo-server.log`, and, until a music folder is
+chosen, `server/data/{auth.db,playlists.db}` — because `backend_launcher`
+redirects `mlo.paths.SCRIPT_DIR` **and `LEGACY_DATA_DIR`** there before the
+engine is imported (the legacy dir is derived from `SCRIPT_DIR` at import time,
+so naming only `SCRIPT_DIR` left fresh-install state inside the installed
+backend tree). None of that state is in the installer's file list, and the NSIS
+uninstaller deletes only the files it installed (its final `RMDir "$INSTDIR"`
+is non-recursive), so **uninstalling removes the app and leaves the user's data
+in AppData**; a reinstall reads it back.
+
+The backend is a *child* of the shell, Windows does not end a child with its
+parent, and Tauri's installer only looks for `mlo-desktop.exe`. So
+`src-tauri/installer-hooks.nsh` (wired through `bundle.windows.nsis.
+installerHooks`) runs before every install and uninstall: it stops the shell
+first — a live supervisor respawns a killed backend within seconds — then the
+backend, and polls until both are gone. Without that wait the uninstaller met
+locked `python312.dll`/`*.pyd` files and left the backend tree, a running
+server, behind in AppData. The uninstall hook then removes
+`<install>\mlo-server` recursively: the template's per-file list only knows the
+files the *current* build installed, so a bundle whose hashed assets or Python
+version changed left the previous build's copies behind and the final,
+non-recursive `RMDir` could not empty the folder.
+
 ### The external toolchain (flac, ffmpeg, oxipng, …)
 
 The installers ship the *app*, not the tools: the Dependencies step installs

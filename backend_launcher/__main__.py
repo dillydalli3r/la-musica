@@ -179,20 +179,32 @@ def _run_python(argv) -> int:
     return 0
 
 
+def _redirect_engine_home(data_dir: str) -> None:
+    """Point the engine's module-level locations at the per-user data dir.
+
+    Run BEFORE anything imports ``mlo``: config.json, the legacy
+    ``.dependencies`` fallback and the app's writable scratch all live in the
+    per-user dir, never next to a read-only bundle. ``LEGACY_DATA_DIR`` is in
+    the list because ``mlo.paths`` derives it from ``SCRIPT_DIR`` at import
+    time, and it is where ``app_data_dir()`` falls back to while no music
+    folder is configured (auth.db, playlists.db, the beets library on a fresh
+    install) — naming only ``SCRIPT_DIR`` wrote that state into the INSTALLED
+    tree, which uninstall deletes."""
+    mlo = __import__("mlo.paths", fromlist=["SCRIPT_DIR"])
+    mlo.SCRIPT_DIR = data_dir
+    mlo.CONFIG_FILE = os.path.join(data_dir, "config.json")
+    mlo.REPO_CONFIG_FILE = mlo.CONFIG_FILE
+    mlo.DEPS_DIR = os.path.join(data_dir, ".dependencies")
+    mlo.LEGACY_DATA_DIR = os.path.join(data_dir, "server", "data")
+
+
 def main() -> int:
     """Boot the app the way the shell expects, then run uvicorn forever."""
     _augment_gui_path()
     os.makedirs(_DATA_DIR, exist_ok=True)
     _ensure_std_streams(os.path.join(_DATA_DIR, "mlo-server.log"))
 
-    # The engine's own home, BEFORE anything imports mlo: config.json, the
-    # legacy .dependencies fallback and the app's writable scratch all live in
-    # the per-user dir, never next to a read-only bundle.
-    mlo = __import__("mlo.paths", fromlist=["SCRIPT_DIR"])
-    mlo.SCRIPT_DIR = _DATA_DIR
-    mlo.CONFIG_FILE = os.path.join(_DATA_DIR, "config.json")
-    mlo.REPO_CONFIG_FILE = mlo.CONFIG_FILE
-    mlo.DEPS_DIR = os.path.join(_DATA_DIR, ".dependencies")
+    _redirect_engine_home(_DATA_DIR)
 
     # Resolve the tree the bundled sources need. server.main computes ROOT
     # from its own file and inserts it into sys.path, and the static SPA lives

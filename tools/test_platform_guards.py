@@ -749,6 +749,40 @@ with tempfile.TemporaryDirectory() as tmp:
     check("nothing else copied", sorted(copied) == ["COPYING", "LICENSE.txt", "README.md"])
 
 
+# --------------------------------------------------------------------------- #
+# The frozen launcher's engine home is the per-user data dir, not the install
+# --------------------------------------------------------------------------- #
+# backend_launcher redirects mlo.paths BEFORE the engine is imported, so a
+# packaged install keeps config.json, .dependencies and the no-music-folder
+# fallback state (server/data: auth.db, playlists.db) in AppData. The
+# LEGACY_DATA_DIR redirect is the regression this guards: mlo.paths derives it
+# from SCRIPT_DIR at import time, so naming only SCRIPT_DIR put auth.db and
+# playlists.db inside <install>/mlo-server/server/data — which the Windows
+# uninstaller deletes with the rest of the backend tree.
+import mlo.paths  # noqa: E402
+from backend_launcher.__main__ import _redirect_engine_home  # noqa: E402
+
+_NAMES = ("SCRIPT_DIR", "CONFIG_FILE", "REPO_CONFIG_FILE", "DEPS_DIR", "LEGACY_DATA_DIR")
+_saved = {n: getattr(mlo.paths, n) for n in _NAMES}
+_env_mf = os.environ.pop("MLO_MUSIC_FOLDER", None)
+try:
+    with tempfile.TemporaryDirectory() as tmp:
+        data_dir = os.path.join(tmp, "la musica")
+        _redirect_engine_home(data_dir)
+        fallback = mlo.paths.app_data_dir()
+        check("the engine home follows the per-user data dir",
+              os.path.commonpath([os.path.abspath(fallback), os.path.abspath(tmp)])
+              == os.path.abspath(tmp))
+        check("no-music-folder state is server/data under it, not the install tree",
+              fallback == os.path.join(data_dir, "server", "data")
+              and mlo.paths.LEGACY_DATA_DIR == fallback)
+finally:
+    for _n, _v in _saved.items():
+        setattr(mlo.paths, _n, _v)
+    if _env_mf is not None:
+        os.environ["MLO_MUSIC_FOLDER"] = _env_mf
+
+
 if FAILURES:
     print(f"{len(FAILURES)} failure(s)")
     sys.exit(1)
