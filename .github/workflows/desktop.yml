@@ -97,13 +97,27 @@ jobs:
           workspaces: desktop/src-tauri -> target
           key: ${{ matrix.os }}
 
+      - name: Build the frozen local backend (PyInstaller)
+        # The desktop install bundles the app's own backend (`mlo-server`), a
+        # frozen Python service built per-OS from pyinstaller/mlo-server.spec.
+        # The spec packs web/dist (which this run already has) at
+        # _internal/web/dist; stage_desktop_bundle.py then copies the whole
+        # tree into desktop/bundle for tauri. The toolchain comes from
+        # server/requirements.txt, installed into the runner's python.
+        run: |
+          python -m pip install -r server/requirements.txt
+          python -m pip install pyinstaller
+          python -m PyInstaller pyinstaller/mlo-server.spec
+          python tools/stage_desktop_bundle.py
+
       - name: Build the bundles
         working-directory: desktop
-        # beforeBuildCommand (`npm run build --prefix ../web`) would rebuild the
-        # frontend this leg just downloaded — and needs web/node_modules back to
-        # do it — so the hook is cleared from the merged config. shell: bash,
-        # because the Windows runner's PowerShell cannot be trusted to pass that
-        # JSON argument through intact.
+        # beforeBuildCommand (`npm run build --prefix ../web ...`) would rebuild
+        # the frontend this leg just downloaded — and needs web/node_modules back
+        # to do it — so the hook is cleared from the merged config.
+        # stage_desktop_bundle.py already ran above. shell: bash, because the
+        # Windows runner's PowerShell cannot be trusted to pass that JSON
+        # argument through intact.
         shell: bash
         run: npx tauri build --bundles ${{ matrix.bundles }} --config '{"build":{"beforeBuildCommand":null}}'
 

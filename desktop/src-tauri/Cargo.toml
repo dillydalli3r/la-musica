@@ -20,7 +20,11 @@ tauri-plugin-autostart = "2"
 # The only plugin that ships on all five targets, so it is registered outside
 # the desktop-only block in lib.rs.
 tauri-plugin-notification = "2"
-# A parking_lot Mutex for the tray checkbox state (see lib.rs).
+# The shell's per-user data dir (settings.json, the bundled backend's own
+# config): the standard OS answer on all three desktop platforms.
+dirs = "6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 parking_lot = "0.12"
 
 # The iOS Now Playing star only (src/ios_like.rs): MediaPlayer's

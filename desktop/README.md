@@ -1,9 +1,17 @@
 # la musica — Desktop shell
 
-Tauri v2 (Rust) client for the React UI: the same app the browser gets, pointed
-at a la musica server you run yourself — the Docker container (see the [main
-README](../README.md#docker-recommended)), on this machine, on the LAN or
-behind a Tailscale name.
+Tauri v2 (Rust) client for the React UI. The desktop install has TWO server
+stories:
+
+* **Local (default).** The shell bundles the app's own backend (`mlo-server`,
+  a frozen Python service built from `pyinstaller/mlo-server.spec` on each OS
+  at release time), spawns it on a free loopback port from 8011 up, serves the
+  same React UI from THAT origin, and supervises the child. No Docker, no
+  remote host: a la musica install runs entirely on this machine.
+* **Remote (the classic mode).** The shell serves the built web app from the
+  webview and talks HTTP to a server you point it at — the Docker container
+  (see the [main README](../README.md#docker-recommended)), another machine on
+  the LAN, or a Tailscale name. It never starts, adopts or stops that server.
 
 ## Targets
 
@@ -15,37 +23,57 @@ behind a Tailscale name.
 | Android 7.0+ (API 24) | `npx tauri android build --apk --debug` | `.apk` (debug-signed, installable) |
 | iOS 14+ | `npx tauri ios build --target aarch64 --no-sign` | unsigned `.app` → `.ipa` |
 
-All five share one crate, and all five are clients: none of them starts, adopts
-or stops a backend. Everything that only makes sense in a desktop shell — the
-tray icon, the autostart registry, the folder picker, hide-on-close — sits
-behind `#[cfg(desktop)]` in `src/lib.rs`, so the mobile builds compile without
-it instead of carrying dead desktop code. Tauri's own build script defines
+All five share one crate. The desktop builds additionally bundle the local
+backend and its SPA under `desktop/bundle` — staged from
+`dist/mlo-server` (PyInstaller) + `web/dist` + the rust helper by
+`tools/stage_desktop_bundle.py`, which `tauri build` runs automatically via
+`beforeBuildCommand`; CI (`desktop.yml`) builds the frozen backend per-OS
+first, then `tauri build`. The mobile builds have no Python and no backend —
+a phone points at the same server every other client uses. Everything that
+only makes sense in a desktop shell — the tray icon, the autostart registry,
+the folder picker, hide-on-close, the local backend — sits behind
+`#[cfg(desktop)]` in `src/lib.rs`, so the mobile builds compile without it
+instead of carrying dead desktop code. Tauri's own build script defines
 `desktop`/`mobile`, so the split follows the target.
 
 ## How it works (desktop)
 
-- **Window** shows the built React app (`../web/dist`, built by
-  `beforeBuildCommand`), and opens *visible*: its first run is the setup
-  wizard's server-address screen, which is no use behind a tray icon nobody has
-  been told about.
-- **Server**: the address this client was set up with, and nothing else. The
-  shell carries no backend, no Python and no port of its own. The wizard
-  (`web/src/pages/ClientSetup.tsx`: server address → sign-in → notifications)
-  probes `${address}/api/health` with a 3 s deadline and refuses to continue
-  until a real la musica server answered, so "start your container" is a
-  message in the wizard instead of an app full of failed requests; the address
-  is saved per device (`localStorage: mlo.server`) and changeable later from
-  Settings → Security. A configured client whose server stops answering lands on
-  the sign-in screen with that address field.
+- **Window** shows the built React app. In local mode it is served by the
+  shell's own backend at `http://127.0.0.1:<port>` — the SAME origin the API
+  answers on, which is what makes the HttpOnly session cookie work in the
+  webview (a cross-origin cookie is dropped by browser rules, which is why the
+  remote-mode shell has to ride everything on the `token` query instead). The
+  window opens *visible*: its first run is the app's own setup screen, which
+  is no use behind a tray icon nobody has been told about.
+- **Server**: either the shell's child (`mlo-server`, local mode) or the
+  address the user configured (remote mode). In local mode the shell finds a
+  free loopback port from 8011 up (never 8000 — that is the live install),
+  spawns the bundled backend with `MLO_SERVER_HOST/PORT` and the shell's
+  per-user data dir set, waits for `/api/health`, then points the webview at
+  it and tells the page (`mlo-backend` event) the backend is the shell's own.
+  The per-user data dir (`%LOCALAPPDATA%/la musica` on Windows,
+  `~/Library/Application Support/la musica` on macOS, `~/.local/share/la
+  musica` on Linux) holds the server's own config before a music folder is
+  chosen; after the setup wizard, app state lives in
+  `<music>/.mlo/data/config.json` exactly as in every other install, so a
+  music folder can move between the container and the desktop app without
+  losing the RYM cookie, playlists or caches. In remote mode the client setup
+  wizard (`web/src/pages/ClientSetup.tsx`) probes `${address}/api/health` with
+  a 3 s deadline as before; the address is saved per device
+  (`localStorage: mlo.server`) and changeable from Settings → Security.
 - **Tray icon**: the window lives in the tray while it is closed ("Open la
-  musica", "Auto-start on login", "Exit la musica"); closing the window hides
-  it again, and Quit ends the shell. Nothing else happens on the way out — the
-  server belongs to whoever runs its container, so quitting a client never
-  stops anyone's server, and this shell has no child process to kill.
+  musica", "Auto-start on login", "Keep backend running after quit",
+  "Backend: running…", "Exit la musica"); closing the window hides it again,
+  and Quit ends the shell. Quitting the shell normally stops the local backend
+  it spawned — the backend is that shell's child — unless "Keep backend
+  running after quit" is checked, which leaves it up for phones and browsers.
+  A remote server is never stopped: it belongs to whoever runs it.
 - **Native folder picker**: `pick_folder` Tauri command, used by the import
   wizard via `invoke` to pick a source folder. The music folder itself is
   decided at startup (`MLO_MUSIC_FOLDER`, or `music_folder` in
-  `config.json`) and is read-only in Settings — Settings has no picker.
+  `config.json`) and stays read-only in Settings — Settings has no picker.
+  The setup wizard's folder step calls the shell's `set_music_folder` command
+  so the next launch spawns the backend already knowing the library.
 - **Notifications**: `tauri-plugin-notification`, registered on every target,
   used by the web UI for "wish found", "download done" and "import ready".
 

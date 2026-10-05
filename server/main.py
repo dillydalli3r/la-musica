@@ -4956,7 +4956,11 @@ def library_layout_apply(request: Request = None):
 # --------------------------------------------------------------------------- #
 
 
-WEB_DIST = ROOT / "web" / "dist"
+# `MLO_WEB_DIST` lets a packaged build (and a test harness) name the built SPA
+# without placing it beside the sources: the desktop shell's bundled backend
+# serves the same React tree from the same origin as its API, which is what
+# makes the session cookie work in the webview (see backend_launcher).
+WEB_DIST = pathlib.Path(os.environ.get("MLO_WEB_DIST") or (ROOT / "web" / "dist"))
 if WEB_DIST.is_dir():
     @app.get("/{full_path:path}", include_in_schema=False)
     def spa(full_path: str):

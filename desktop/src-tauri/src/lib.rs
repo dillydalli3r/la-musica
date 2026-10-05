@@ -1,24 +1,29 @@
 //! la musica — Tauri shell.
 //!
-//! The shell is a CLIENT and nothing else. It serves the React UI (web/dist)
-//! out of the webview and talks HTTP to a la musica server the user points it
-//! at: the Docker container on this machine (`127.0.0.1:8000`), another machine
-//! on the LAN, or a Tailscale name. It never starts a backend, never adopts one
-//! and never stops one — the server's lifecycle belongs to whoever runs the
-//! container, and a client that could kill it would break every other client
-//! talking to the same server.
+//! The shell is a CLIENT of a la musica server. Two server stories exist:
 //!
-//! Which server that is, is a per-device setting the UI owns
-//! (`localStorage: mlo.server`): a shell that has never been configured opens
-//! the setup wizard instead of the app (`web/src/pages/ClientSetup.tsx`), and
-//! one whose saved address does not answer lands on the sign-in screen with the
-//! address field rather than rendering a shell full of failed requests.
+//!   * **Local (the default for a packaged install).** The shell bundles the
+//!     app's own backend (`mlo-server`, a frozen Python service built by
+//!     `pyinstaller/mlo-server.spec`) next to its binary, spawns it on a free
+//!     loopback port and supervises it (see `backend`). The webview is
+//!     pointed at THAT origin, which is the one where the session cookie
+//!     works — same origin, same HttpOnly cookie, no cross-site drop.
+//!   * **Remote (the classic mode).** The shell serves the React UI from
+//!     `tauri://localhost` and talks HTTP to a server the user points it at:
+//!     the Docker container on this machine (`127.0.0.1:8000`), another
+//!     machine on the LAN, or a Tailscale name. It never starts a backend,
+//!     never adopts one and never stops one — the server's lifecycle belongs
+//!     to whoever runs it.
+//!
+//! Which mode a shell is in lives in the shell's own settings (`settings.rs`,
+//! per-user `shell.json`), separate from the page's `localStorage: mlo.server`
+//! so the choice exists before the webview does.
 //!
 //! What is left here is the desktop-only shell furniture: the tray icon, the
-//! autostart registry and the native folder picker. Android and iOS compile
-//! this same crate without those — a phone has no tray and the OS owns the
-//! window — and carry no Python at all: every client, desktop and mobile
-//! alike, is a client of the same Docker server.
+//! autostart registry, the native folder picker and the local backend. Android
+//! and iOS compile this same crate without those — a phone has no tray and no
+//! backend to own — and carry no Python at all: every mobile client is a
+//! client of the same server every other client uses.
 
 // A parking_lot Mutex for the tray checkbox state: it is locked on every tray
 // menu click and never needs the poisoning dance.
@@ -56,6 +61,16 @@ mod ios_like;
 #[cfg(target_os = "ios")]
 mod ios_audio;
 
+// The desktop-only shell furniture: the bundled local backend (spawn,
+// supervise, stop), the window-attach logic that points the webview at it,
+// and the shell's own per-user settings.
+#[cfg(desktop)]
+mod backend;
+#[cfg(desktop)]
+mod backend_handle;
+#[cfg(desktop)]
+mod settings;
+
 /// The tray's "Start on Login" checkbox, kept in managed state so the
 /// click handler can re-sync its visual with the registry after toggling.
 #[cfg(desktop)]
@@ -75,6 +90,18 @@ fn pick_folder(app: tauri::AppHandle) -> Option<String> {
         .blocking_pick_folder()
         .and_then(|p| p.into_path().ok())
         .map(|p| p.to_string_lossy().to_string())
+}
+/// The webview tells the shell which music folder the local backend runs with
+/// (Settings → the first-run wizard's folder step), so the next launch can
+/// spawn the backend already knowing it. The server's own config remains the
+/// authority; this is the shell's copy for the spawn env.
+#[cfg(desktop)]
+#[tauri::command]
+fn set_music_folder(_app: tauri::AppHandle, folder: String) {
+    let data = backend::default_app_data_dir();
+    let mut settings = settings::load(&data);
+    settings.music_folder = folder;
+    settings::save(&data, &settings);
 }
 
 /// Tell the shell whether the track playing right now is favourited.
@@ -178,22 +205,57 @@ fn toggle_autostart(app: &tauri::AppHandle) {
     sync_autostart_item(app);
 }
 
-#[cfg(desktop)]
 fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     let open_i = MenuItem::with_id(app, "open", "Open la musica", true, None::<&str>)?;
     let autostart_on = app.autolaunch().is_enabled().unwrap_or(false);
     let autostart_i = CheckMenuItem::with_id(
-        app, "autostart", "Auto-start on login", true, autostart_on, None::<&str>,
+        app,
+        "autostart",
+        "Auto-start on login",
+        true,
+        autostart_on,
+        None::<&str>,
+    )?;
+    // "Keep backend running" — quitting the app leaves the local backend up
+    // (so a phone or a browser can still talk to it), instead of taking it
+    // down with the shell. Off by default: the backend is this shell's child,
+    // and a background service the user did not ask to keep is a surprise.
+    let keep_i = CheckMenuItem::with_id(
+        app,
+        "keep-backend",
+        "Keep backend running after quit",
+        true,
+        false,
+        None::<&str>,
+    )?;
+    // The local-backend row: disabled, its label is the live status. Only
+    // shown while the shell owns a backend (local mode).
+    let backend_status_i = MenuItem::with_id(
+        app,
+        "backend-status",
+        "Backend: starting…",
+        false,
+        None::<&str>,
     )?;
     let quit_i = MenuItem::with_id(app, "quit", "Exit la musica", true, None::<&str>)?;
     let menu = Menu::with_items(
         app,
-        &[&open_i, &autostart_i, &PredefinedMenuItem::separator(app)?, &quit_i],
+        &[
+            &open_i,
+            &autostart_i,
+            &keep_i,
+            &backend_status_i,
+            &PredefinedMenuItem::separator(app)?,
+            &quit_i,
+        ],
     )?;
+    // The keep-backend checkbox must be reachable from the exit path.
+    app.manage(KeepBackendItem(keep_i));
 
     if let Some(state) = app.try_state::<AutostartItem>() {
         *state.0.lock() = Some(autostart_i);
     }
+    store_tray_backend_item(app, backend_status_i);
 
     let mut builder = TrayIconBuilder::with_id("main-tray")
         .menu(&menu)
@@ -201,7 +263,28 @@ fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
         .on_menu_event(|app, event| match event.id.as_ref() {
             "open" => show_main_window(app),
             "autostart" => toggle_autostart(app),
-            "quit" => app.exit(0),
+            "quit" => {
+                // Quitting the shell is quitting the app; the local backend
+                // is a child of the shell and must go with it, unless the
+                // user checked "Keep backend running after quit".
+                let keep = app
+                    .try_state::<KeepBackendItem>()
+                    .map(|s| s.0.is_checked().unwrap_or(false))
+                    .unwrap_or(false);
+                if let Some(b) = app.try_state::<BackendSlot>() {
+                    if let Some(backend) = b.0.lock().as_ref() {
+                        if backend
+                            .keep_running
+                            .load(std::sync::atomic::Ordering::Relaxed)
+                        {
+                            // already asked to keep it; nothing to do
+                        } else if !keep {
+                            backend_handle::stop_backend(&backend);
+                        }
+                    }
+                }
+                app.exit(0);
+            }
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
@@ -233,13 +316,43 @@ fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
+/// The tray's backend row: the disabled menu item whose text is the live
+/// status, kept in managed state so the startup code and the event poll can
+/// update it. The backend itself lives in `BackendSlot` beside it.
+#[cfg(desktop)]
+struct TrayBackendState {
+    status_item: MenuItem<tauri::Wry>,
+}
+
+/// Managed state holding the running local backend, if any.
+#[cfg(desktop)]
+struct BackendSlot(parking_lot::Mutex<Option<std::sync::Arc<backend::LocalBackend>>>);
+
+/// The tray's "Keep backend running after quit" checkbox, read from the exit
+/// path: when checked, quitting the shell leaves the local backend up.
+#[cfg(desktop)]
+struct KeepBackendItem(CheckMenuItem<tauri::Wry>);
+
+/// Store the status menu item for later updates.
+#[cfg(desktop)]
+fn store_tray_backend_item(app: &tauri::AppHandle, item: MenuItem<tauri::Wry>) {
+    app.manage(TrayBackendState { status_item: item });
+}
+
+/// Update the tray's backend row text.
+pub fn set_tray_backend(app: &tauri::AppHandle, text: &str) {
+    if let Some(state) = app.try_state::<TrayBackendState>() {
+        let _ = state.status_item.set_text(text.to_string());
+    }
+}
+
+/// The one backend the shell owns, for the tray and the exit path.
+pub fn backend_slot(app: &tauri::AppHandle) -> Option<std::sync::Arc<backend::LocalBackend>> {
+    app.try_state::<BackendSlot>()
+        .and_then(|slot| slot.0.lock().clone())
+}
+
 /// Tauri entry point.
-///
-/// On mobile this is called by the generated Android/iOS project: the
-/// `mobile_entry_point` macro emits the JNI / Objective-C glue that boots the
-/// Tauri runtime and then calls this function, so it must stay public under
-/// exactly this name.
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Plugins every target has: native notifications, which the web UI sends
     // for "wish found", "download done" and "import ready" on desktop and
@@ -248,10 +361,8 @@ pub fn run() {
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init());
-
     // Desktop additionally owns the tray icon, the autostart registry and the
     // folder picker — all things with no mobile counterpart
-    // (tauri-plugin-autostart does not even compile for Android or iOS, its
     // lib.rs is `#![cfg(not(any(target_os = "android", target_os = "ios")))]`).
     // The one command BOTH shells register is `set_now_playing_liked`: it is
     // how the web UI tells the shell what the current track's favourite state
@@ -265,18 +376,58 @@ pub fn run() {
         ))
         .invoke_handler(tauri::generate_handler![
             pick_folder,
+            set_music_folder,
             set_now_playing_liked,
             set_playback_active,
-            ios_audio_state
+            ios_audio_state,
         ])
         .manage(AutostartItem(Mutex::new(None)))
+        .manage(BackendSlot(parking_lot::Mutex::new(None)))
         .setup(|app| {
             // The window opens visible (tauri.conf.json `visible: true`): its
-            // first run is the wizard's server-address screen, which a
-            // tray-only launch would put behind an icon the user has not been
-            // told about. Closing it hides it to the tray, as before.
+            // first run is the setup screen, which a tray-only launch would
+            // put behind an icon the user has not been told about. Closing it
+            // hides it to the tray, as before.
             if let Err(e) = setup_tray(app.handle()) {
                 eprintln!("[mlo-desktop] tray setup failed: {e}");
+            }
+
+            // The local backend, when this shell owns one. The server's own
+            // settings live in <music>/.mlo/data; the SHELL's mode (local vs
+            // remote) lives in per-user shell.json so it exists before the
+            // webview does.
+            let settings = settings::load(&backend::default_app_data_dir());
+            if settings.is_local() {
+                let bundle = backend::BackendBundle {
+                    server_dir: app
+                        .path()
+                        .resource_dir()
+                        .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                        .join("mlo-server"),
+                    app_data_dir: backend::default_app_data_dir(),
+                    music_dir: if settings.music_folder.is_empty() {
+                        None
+                    } else {
+                        Some(std::path::PathBuf::from(&settings.music_folder))
+                    },
+                };
+                if let Some(slot) = app.try_state::<BackendSlot>() {
+                    if let Some(backend) = backend::LocalBackend::start(&bundle) {
+                        *slot.0.lock() = Some(backend.clone());
+                        if let Some(window) = app.get_webview_window("main") {
+                            backend_handle::attach_local(&window, &backend, &settings);
+                        }
+                    } else {
+                        set_tray_backend(app.handle(), "Backend: unavailable");
+                    }
+                }
+            } else {
+                // Remote mode: the webview keeps its own SPA and the page
+                // talks to the server the user configured. Tell the page this
+                // shell did not spawn the backend.
+                if let Some(window) = app.get_webview_window("main") {
+                    backend_handle::attach_remote(&window, &settings, None);
+                }
             }
             Ok(())
         });
@@ -348,15 +499,35 @@ pub fn run() {
         })
         .build(tauri::generate_context!())
         .expect("error while building la musica")
-        .run(|_app, _event| {
+        .run(|app, event| {
             // Desktop stays alive in the tray when the last window goes away;
             // only an explicit exit (Quit menu / process kill) ends the app.
-            // Nothing happens on the way out: the server is the user's own
-            // container, not a child of this shell, so there is nothing here to
-            // stop — and nothing of the user's to kill.
+            // The local backend is a CHILD of this shell, so the shell's own
+            // exit stops it — unless the user asked to keep it running. A
+            // remote server is never touched: it belongs to whoever runs it.
             #[cfg(desktop)]
-            if let RunEvent::ExitRequested { code: None, api, .. } = _event {
+            if let RunEvent::ExitRequested {
+                code: None, api, ..
+            } = event
+            {
+                let keep = app
+                    .try_state::<KeepBackendItem>()
+                    .map(|s| s.0.is_checked().unwrap_or(false))
+                    .unwrap_or(false);
+                if let Some(slot) = app.try_state::<BackendSlot>() {
+                    if let Some(backend) = slot.0.lock().as_ref() {
+                        if !backend
+                            .keep_running
+                            .load(std::sync::atomic::Ordering::Relaxed)
+                            && !keep
+                        {
+                            backend_handle::stop_backend(&backend);
+                        }
+                    }
+                }
                 api.prevent_exit();
             }
+            #[cfg(not(desktop))]
+            let _ = (app, event);
         });
 }

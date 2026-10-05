@@ -45,8 +45,14 @@ are there for the rest.
 - **Discover & export** — genre browse and recommendations from the library's own tags and from online providers; export as MP3/AAC/Opus/Vorbis/FLAC-copy in `zip` or server-side; offline downloads; notifications (including Web Push) in six languages.
 
 ## Clients
-The same React build runs in every target, and **every one is a client of a server you run**:
-browser (served by the server) · Windows/macOS/Linux installers (`npx tauri build`) · an unsigned Android APK · an unsigned iOS IPA, published as a SideStore/AltStore source: `https://github.com/dillydalli3r/la-musica/releases/latest/download/source.json`.
+The same React build runs in every target. The desktop install (Windows,
+macOS, Linux) either runs its OWN backend — a frozen Python service bundled
+with the app, spawned on a free loopback port from 8011 up, serving the UI
+and the API from the same origin so the session cookie works — or, pointed at
+a server you run yourself (Settings → Security), behaves like the mobile
+clients: browser (served by the server) · the desktop shell · an unsigned
+Android APK · an unsigned iOS IPA, published as a SideStore/AltStore source:
+`https://github.com/dillydalli3r/la-musica/releases/latest/download/source.json`.
 
 ## Security
 Everything the API can do is one password away from anyone who can reach the port. `auth_mode: auto` (default) turns the login gate ON for any non-loopback bind; one password (PBKDF2-HMAC-SHA256, 600 000 rounds), sessions as `Authorization: Bearer` / HttpOnly cookie tokens stored hashed in `<music>/.mlo/data/auth.db`; five failed logins make an address wait. The app does **not** terminate TLS — put it behind a reverse proxy or a mesh VPN off-LAN.

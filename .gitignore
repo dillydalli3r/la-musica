@@ -88,3 +88,9 @@ tools/shots/
 
 # Subagent/local scratch output (never shipped)
 local/
+
+# The staged local-backend bundle: desktop/bundle holds the frozen backend and
+# the built SPA that `tauri build` packages next to the shell binary. It is
+# reproducible from dist/mlo-server + web/dist + rust/target by
+# tools/stage_desktop_bundle.py, never committed (300 MB of generated files).
+desktop/bundle/

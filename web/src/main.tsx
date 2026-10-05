@@ -96,6 +96,15 @@ const queryClient = new QueryClient({
   },
 });
 
+// The desktop shell's LOCAL-backend story: listen for its state event and,
+// when it spawns the backend itself, adopt that same-origin server (which
+// also skips the "which server?" wizard). Must be attached before the first
+// render, so the wizard gate never flashes for a shell that already has a
+// backend. Safe to attach here and easy to reason about: in any other shell
+// (remote mode, a browser) the module is inert.
+import { attachBackendShell } from "./lib/backendShell";
+attachBackendShell();
+
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>

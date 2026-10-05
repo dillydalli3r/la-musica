@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>la musica</title>
+    <style>
+      html, body {
+        margin: 0; height: 100%;
+        background: #0b0b0d;
+        color: #d4d4d8;
+        font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        display: grid; place-items: center;
+      }
+      .brand { font-size: 22px; font-weight: 700; letter-spacing: 0.02em; color: #fafafa; }
+      .row { display: flex; align-items: center; gap: 14px; }
+      .spinner {
+        width: 16px; height: 16px; border-radius: 50%;
+        border: 2px solid rgba(255,255,255,0.22);
+        border-top-color: #fff;
+        animation: spin 0.9s linear infinite;
+      }
+      @keyframes spin { to { transform: rotate(360deg); } }
+      .msg { margin-top: 12px; font-size: 13px; color: #a1a1aa; }
+    </style>
+  </head>
+  <body>
+    <div>
+      <div class="row"><span class="spinner"></span><span class="brand">la musica</span></div>
+      <div class="msg">Starting the local server…</div>
+    </div>
+    <!-- This page is shown for the brief first paint while the shell boots its
+         bundled backend (mlo-server). It is replaced by the app the moment
+         /api/health answers; if the server cannot start, the app's own error
+         UI takes over. The page is static on purpose — no app code, no API
+         calls, so there is never a "can't reach this page" flash. -->
+  </body>
+</html>
