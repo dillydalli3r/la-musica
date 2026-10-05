@@ -1802,6 +1802,24 @@ table and the auto-update worker cannot disagree.
   three failures on a Windows box with no Python and no 7-Zip — libjpeg-turbo
   ("silent install failed"), librosa and beets ("vendored Python packages need
   a Python interpreter on PATH") — into installs.
+- **R69c — a packaged desktop install keeps its state beside it in AppData, and
+  its uninstall removes the app and nothing else.** The Windows shell's backend
+  is a CHILD of `mlo-desktop.exe`, and Windows does not end a child with its
+  parent: uninstalling while the local backend ran left
+  `%LOCALAPPDATA%\la musica\mlo-server` — a live server whose `python3XX.dll`
+  and `*.pyd` files were mapped and could not be deleted — behind. The NSIS
+  hook (`desktop/src-tauri/installer-hooks.nsh`, wired through
+  `bundle.windows.nsis.installerHooks`) runs before install and uninstall: it
+  stops the shell FIRST (a live supervisor respawns a killed backend within
+  seconds), then the backend, and polls until both are gone before the delete
+  list runs; the uninstall hook then removes the backend tree recursively,
+  which also clears files an earlier build left under names this one does not
+  use. The install's own state — `config.json`, `shell.json`, `mlo-server.log`,
+  `server/data` (auth.db, playlists.db, the beets library) and
+  `.dependencies` — lives BESIDE that tree and survives the uninstall, because
+  `backend_launcher._redirect_engine_home` redirects `mlo.paths`
+  (`SCRIPT_DIR`, `CONFIG_FILE`, `DEPS_DIR`, `LEGACY_DATA_DIR`) before the engine
+  is imported; a reinstall reads it back.
 
 ---
 
