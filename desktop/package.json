@@ -6,7 +6,7 @@
   "scripts": {
     "tauri": "tauri",
     "dev": "tauri dev",
-    "build": "npm run build --prefix ../web && python ../tools/stage_desktop_bundle.py && tauri build",
+    "build": "python ../tools/stage_desktop_bundle.py && tauri build",
     "icon": "tauri icon icon-source.png"
   },
   "devDependencies": {

@@ -24,17 +24,17 @@ stories:
 | iOS 14+ | `npx tauri ios build --target aarch64 --no-sign` | unsigned `.app` → `.ipa` |
 
 All five share one crate. The desktop builds additionally bundle the local
-backend and its SPA under `desktop/bundle` — staged from
-`dist/mlo-server` (PyInstaller) + `web/dist` + the rust helper by
-`tools/stage_desktop_bundle.py`, which `tauri build` runs automatically via
-`beforeBuildCommand`; CI (`desktop.yml`) builds the frozen backend per-OS
-first, then `tauri build`. The mobile builds have no Python and no backend —
-a phone points at the same server every other client uses. Everything that
-only makes sense in a desktop shell — the tray icon, the autostart registry,
-the folder picker, hide-on-close, the local backend — sits behind
-`#[cfg(desktop)]` in `src/lib.rs`, so the mobile builds compile without it
-instead of carrying dead desktop code. Tauri's own build script defines
-`desktop`/`mobile`, so the split follows the target.
+backend and its SPA under `desktop/bundle` — staged from `dist/mlo-server`
+(PyInstaller) + `web/dist` + `rust/target/release/mlo-audio` by
+`tools/stage_desktop_bundle.py`, which `npm run build` runs before `tauri
+build` (and CI runs as its own step, per-OS, before the bundler). The mobile
+builds have no Python and no backend — a phone points at the same server
+every other client uses. Everything that only makes sense in a desktop shell
+— the tray icon, the autostart registry, the folder picker, hide-on-close,
+the local backend — sits behind `#[cfg(desktop)]` in `src/lib.rs`, so the
+mobile builds compile without it instead of carrying dead desktop code.
+Tauri's own build script defines `desktop`/`mobile`, so the split follows the
+target.
 
 ## How it works (desktop)
 

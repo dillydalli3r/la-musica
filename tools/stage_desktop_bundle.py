@@ -29,6 +29,21 @@ ROOT = Path(__file__).resolve().parents[1]
 BUNDLE = ROOT / "desktop" / "bundle"
 
 
+def tree_bytes(path: Path) -> int:
+    """The bytes a source actually carries — `Path.stat()` on a directory is
+    its own entry, not its contents."""
+    if path.is_file():
+        return path.stat().st_size
+    total = 0
+    for base, _dirs, files in os.walk(path):
+        for name in files:
+            try:
+                total += os.path.getsize(os.path.join(base, name))
+            except OSError:
+                pass
+    return total
+
+
 def main() -> int:
     server = Path(os.environ.get("MLO_SERVER_DIST") or (ROOT / "dist" / "mlo-server"))
     web = Path(os.environ.get("WEB_DIST") or (ROOT / "web" / "dist"))
@@ -37,10 +52,16 @@ def main() -> int:
 
     missing = [p for p, label in ((server, "dist/mlo-server (run pyinstaller/mlo-server.spec first)"),
                                   (web, "web/dist (run `cd web && npm run build`)"),
-                                  (audio, "rust/target/release/mlo-audio (run the rust build)")) if not p.exists()]
+                                  (audio, "rust/target/release/mlo-audio (run `cargo build --release --manifest-path rust/Cargo.toml`)")) if not p.exists()]
     if missing:
+        # Exit 2 (the suite convention): a desktop build must not silently ship
+        # an install with no backend. This used to print and then crash inside
+        # copytree, which read as a traceback rather than as the one missing
+        # file — and it ran on with a half-staged bundle.
         for m in missing:
             print(f"stage-desktop-bundle: missing {m}")
+        return 2
+
     for name, src in (("mlo-server", server), ("web-dist", web), ("mlo-audio", audio)):
         dest = BUNDLE / name
         if dest.is_dir():
@@ -52,8 +73,8 @@ def main() -> int:
         else:
             shutil.copy2(src, dest)
 
-    print(f"staged: desktop/bundle (mlo-server {server.stat().st_size >> 20} MiB, "
-          f"web-dist {web.stat().st_size >> 20} MiB, mlo-audio)")
+    print(f"staged: desktop/bundle (mlo-server {tree_bytes(server) >> 20} MiB, "
+          f"web-dist {tree_bytes(web) >> 20} MiB, mlo-audio {tree_bytes(audio) >> 10} KiB)")
     return 0
 
 

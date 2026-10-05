@@ -53,7 +53,6 @@ pub struct LocalBackend {
 struct State {
     child: Option<Child>,
     port: Option<u16>,
-    last_error: String,
     last_started: Option<Instant>,
 }
 
@@ -72,7 +71,6 @@ impl LocalBackend {
             state: Arc::new(Mutex::new(State {
                 child: Some(child),
                 port: Some(port),
-                last_error: String::new(),
                 last_started: Some(Instant::now()),
             })),
             keep_running: Arc::new(AtomicBool::new(false)),
@@ -93,11 +91,6 @@ impl LocalBackend {
         self.state.lock().port
     }
 
-    /// Best-effort text of the LAST failure (for the tray / a log row).
-    pub fn last_error(&self) -> String {
-        self.state.lock().last_error.clone()
-    }
-
     /// The supervisor loop. Runs until the shell process exits; the child is
     /// restarted in place while the shell runs, because a local app without
     /// its backend is a dead app and the user asked for a local install.
@@ -116,7 +109,6 @@ impl LocalBackend {
 
             let child = {
                 let mut s = self.state.lock();
-                s.last_error.clear();
                 s.child.take()
             };
             let Some(mut child) = child else {
@@ -172,7 +164,11 @@ impl LocalBackend {
                     s.last_started = Some(Instant::now());
                 }
                 Err(e) => {
-                    self.state.lock().last_error = e;
+                    // Nothing else records this: the supervisor ends here and
+                    // the shell is left with no backend (the tray says so).
+                    // The reason goes to the log, which is where a user
+                    // looking at "Backend: unavailable" can find why.
+                    eprintln!("[mlo-desktop] local backend respawn failed: {e}");
                     return;
                 }
             }

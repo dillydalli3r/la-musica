@@ -7,7 +7,7 @@
     "frontendDist": "../../web/dist",
     "devUrl": "http://localhost:5173",
     "beforeDevCommand": "npm run dev --prefix ../web",
-    "beforeBuildCommand": "npm run build --prefix ../web && python tools/stage_desktop_bundle.py"
+    "beforeBuildCommand": "npm run build --prefix ../web"
   },
   "app": {
     "windows": [

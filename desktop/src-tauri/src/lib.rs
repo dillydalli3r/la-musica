@@ -205,6 +205,7 @@ fn toggle_autostart(app: &tauri::AppHandle) {
     sync_autostart_item(app);
 }
 
+#[cfg(desktop)]
 fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     let open_i = MenuItem::with_id(app, "open", "Open la musica", true, None::<&str>)?;
     let autostart_on = app.autolaunch().is_enabled().unwrap_or(false);
@@ -340,19 +341,20 @@ fn store_tray_backend_item(app: &tauri::AppHandle, item: MenuItem<tauri::Wry>) {
 }
 
 /// Update the tray's backend row text.
+#[cfg(desktop)]
 pub fn set_tray_backend(app: &tauri::AppHandle, text: &str) {
     if let Some(state) = app.try_state::<TrayBackendState>() {
         let _ = state.status_item.set_text(text.to_string());
     }
 }
 
-/// The one backend the shell owns, for the tray and the exit path.
-pub fn backend_slot(app: &tauri::AppHandle) -> Option<std::sync::Arc<backend::LocalBackend>> {
-    app.try_state::<BackendSlot>()
-        .and_then(|slot| slot.0.lock().clone())
-}
-
 /// Tauri entry point.
+///
+/// On mobile this is called by the generated Android/iOS project: the
+/// `mobile_entry_point` macro emits the JNI / Objective-C glue that boots the
+/// Tauri runtime and then calls this function, so it must stay public under
+/// exactly this name.
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Plugins every target has: native notifications, which the web UI sends
     // for "wish found", "download done" and "import ready" on desktop and
@@ -363,6 +365,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init());
     // Desktop additionally owns the tray icon, the autostart registry and the
     // folder picker — all things with no mobile counterpart
+    // (tauri-plugin-autostart does not even compile for Android or iOS, its
     // lib.rs is `#![cfg(not(any(target_os = "android", target_os = "ios")))]`).
     // The one command BOTH shells register is `set_now_playing_liked`: it is
     // how the web UI tells the shell what the current track's favourite state

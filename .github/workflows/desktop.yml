@@ -102,9 +102,12 @@ jobs:
         # frozen Python service built per-OS from pyinstaller/mlo-server.spec.
         # The spec packs web/dist (which this run already has) at
         # _internal/web/dist; stage_desktop_bundle.py then copies the whole
-        # tree into desktop/bundle for tauri. The toolchain comes from
+        # tree into desktop/bundle for tauri, together with the native
+        # `mlo-audio` helper (rust/, zero crate deps, so it builds in seconds
+        # and needs no crates.io). The toolchain comes from
         # server/requirements.txt, installed into the runner's python.
         run: |
+          cargo build --release --manifest-path rust/Cargo.toml
           python -m pip install -r server/requirements.txt
           python -m pip install pyinstaller
           python -m PyInstaller pyinstaller/mlo-server.spec
