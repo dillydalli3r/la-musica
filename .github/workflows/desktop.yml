@@ -222,6 +222,141 @@ jobs:
             echo "ok: $NSIS carries the backend and its SPA"
           fi
 
+      - name: Run the backend each install carries
+        # The step above proves the payload is IN the install; this proves it
+        # RUNS, which is the half a file listing cannot see. A frozen
+        # PyInstaller build has NO console, so `sys.stdout` and `sys.stderr`
+        # are None and uvicorn's logging config raises while formatting the
+        # formatter it was given — that killed the backend of the first 5.1.0
+        # installers before it ever bound a port, and installers carrying a
+        # dead backend passed every check there was. So the backend is started
+        # the way the shell starts it (loopback, a scratch data dir) and asked
+        # for /api/health and for the SPA it is supposed to serve.
+        #
+        # Linux and macOS only. The Windows install is exercised by hand on the
+        # machine these binaries are built on (the NSIS payload extracted,
+        # launched with no console, /api/health 200), and a native `.exe` under
+        # git-bash wants its paths translated first — a check of the harness
+        # more than of the install.
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -e
+          B=desktop/src-tauri/target/release/bundle
+          run_backend() {
+            bin="$1"; port="$2"
+            dir="$(mktemp -d)"
+            MLO_SERVER_HOST=127.0.0.1 MLO_SERVER_PORT="$port" MLO_APP_DATA_DIR="$dir" \
+              "$bin" >"$dir/server.out" 2>&1 &
+            pid=$!
+            ok=0; tries=0
+            while [ "$tries" -lt 60 ]; do
+              tries=$((tries + 1)); sleep 1
+              curl -sf "http://127.0.0.1:$port/api/health" >/dev/null 2>&1 && { ok=1; break; }
+              kill -0 "$pid" 2>/dev/null || break
+            done
+            if [ "$ok" = 1 ]; then
+              curl -sf "http://127.0.0.1:$port/" | grep -qi '<!doctype html' \
+                || { echo "::error::$bin answers /api/health but serves no SPA (the UI would 404)"; kill "$pid" 2>/dev/null || true; exit 1; }
+              echo "ok: $bin runs - $(curl -s "http://127.0.0.1:$port/api/health" | head -c 56)"
+            else
+              echo "::error::$bin did not answer on 127.0.0.1:$port"
+              tail -30 "$dir/server.out" || true
+              exit 1
+            fi
+            kill "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+          }
+
+          APP="$(find "$B" -maxdepth 2 -name '*.app' 2>/dev/null | head -1)"
+          if [ -n "$APP" ]; then
+            run_backend "$APP/Contents/Resources/mlo-server/mlo-server" 8123
+          fi
+
+          DEB="$(find "$B/deb" -maxdepth 1 -name '*.deb' 2>/dev/null | head -1)"
+          if [ -n "$DEB" ]; then
+            rm -rf /tmp/debrun && mkdir -p /tmp/debrun
+            dpkg-deb -x "$DEB" /tmp/debrun
+            run_backend "$(find /tmp/debrun -type f -name mlo-server | head -1)" 8124
+          fi
+
+          APPIMAGE="$(find "$B/appimage" -maxdepth 1 -name '*.AppImage' 2>/dev/null | head -1)"
+          if [ -n "$APPIMAGE" ]; then
+            rm -rf /tmp/appimg && mkdir -p /tmp/appimg
+            abs="$(cd "$(dirname "$APPIMAGE")" && pwd)/$(basename "$APPIMAGE")"
+            ( cd /tmp/appimg && "$abs" --appimage-extract >/dev/null )
+            run_backend "$(find /tmp/appimg -type f -name mlo-server | head -1)" 8125
+          fi
+
+      - name: The installed Linux app starts its own backend
+        # The step above proves the backend RUNS; this proves the app FINDS it.
+        # `<resource_dir>/mlo-server` is where the shell looks, and on Linux
+        # resource_dir() is derived rather than stored: `${exe_dir}/../lib/<name>`
+        # for a deb, `${APPDIR}/usr/lib/<name>` for an AppImage — where `<name>`
+        # is the product name, which here contains a SPACE. Nothing short of
+        # running the shell can prove that resolution, so the real app is
+        # launched under Xvfb and asked, through its own backend, for
+        # /api/health. A shell that cannot find its backend says "Backend:
+        # unavailable" in the tray and answers nothing — which is what a user
+        # with a broken install sees as the setup wizard with no server behind
+        # it.
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -e
+          B=desktop/src-tauri/target/release/bundle
+          DEB="$(find "$B/deb" -maxdepth 1 -name '*.deb' 2>/dev/null | head -1)"
+          APPIMAGE="$(find "$B/appimage" -maxdepth 1 -name '*.AppImage' 2>/dev/null | head -1)"
+          [ -n "$DEB" ] || { echo "::error::no deb to launch"; exit 1; }
+
+          sudo apt-get install -y xvfb dbus >/dev/null
+          export XDG_RUNTIME_DIR=/tmp/xdgrun; mkdir -p "$XDG_RUNTIME_DIR"; chmod 700 "$XDG_RUNTIME_DIR"
+          # A runner has no GPU; WebKitGTK needs to be told, or it exits
+          # before the shell's setup ever runs.
+          export WEBKIT_DISABLE_COMPOSITING_MODE=1 WEBKIT_DISABLE_DMABUF_RENDERER=1 LIBGL_ALWAYS_SOFTWARE=1
+
+          # $1 = the app binary to launch. The launch runs inside
+          # `dbus-run-session`: a Linux desktop always has a session bus, the
+          # runner has none, and on that bus the shell registers both its tray
+          # (appindicator) and its single-instance lock — a missing bus is a
+          # panic there, which is a fact about the runner rather than about the
+          # install.
+          launched() {
+            setsid dbus-run-session -- xvfb-run -a "$1" >/tmp/app.out 2>&1 &
+            pid=$!
+            port=""; tries=0
+            while [ "$tries" -lt 90 ]; do
+              tries=$((tries + 1)); sleep 1
+              for p in $(seq 8011 8020); do
+                curl -sf "http://127.0.0.1:$p/api/health" >/dev/null 2>&1 && { port="$p"; break; }
+              done
+              [ -n "$port" ] && break
+              kill -0 "$pid" 2>/dev/null || break
+            done
+            # The app, its Xvfb and its backend child are this session's group
+            # (setsid), so one kill takes all of them and the next launch gets
+            # a free port back.
+            kill -TERM -- "-$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+            [ -n "$port" ] || {
+              echo "::error::$1 came up with no backend of its own"
+              tail -30 /tmp/app.out || true
+              exit 1
+            }
+            echo "ok: $1 started its own backend on 127.0.0.1:$port"
+          }
+
+          rm -rf /tmp/debrun && mkdir -p /tmp/debrun
+          dpkg-deb -x "$DEB" /tmp/debrun
+          launched "$(find /tmp/debrun/usr/bin -maxdepth 1 -type f | head -1)"
+
+          if [ -n "$APPIMAGE" ]; then
+            rm -rf /tmp/appimg && mkdir -p /tmp/appimg
+            abs="$(cd "$(dirname "$APPIMAGE")" && pwd)/$(basename "$APPIMAGE")"
+            ( cd /tmp/appimg && "$abs" --appimage-extract >/dev/null )
+            launched "$(find /tmp/appimg/usr/bin -maxdepth 1 -type f | head -1)"
+          fi
+
       - name: Upload the bundles
         uses: actions/upload-artifact@v4
         with:
