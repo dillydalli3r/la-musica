@@ -885,7 +885,17 @@ def latest_versions():
         if kind == "deps":
             out[key] = PINNED.get(key, {}).get("version")
         elif kind == "system":
-            out[key] = f"apt: {LINUX_PACKAGES[key]}"
+            # "system" means the OS package manager owns it, and WHICH manager
+            # is the platform's answer: apt on Linux, Homebrew on macOS. Naming
+            # the Debian table here unconditionally raised KeyError on macOS —
+            # a 500 from /api/dependencies, i.e. no Dependencies page at all —
+            # because a brew-backed tool is not in LINUX_PACKAGES.
+            if host_platform() == "macos":
+                out[key] = f"brew: {BREW_PACKAGES[key]}"
+            elif key in LINUX_PACKAGES:
+                out[key] = f"apt: {LINUX_PACKAGES[key]}"
+            else:
+                out[key] = None
         else:
             out[key] = None
     return out

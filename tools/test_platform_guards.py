@@ -657,6 +657,18 @@ with simulated_platform("darwin"):
     check("a present-but-behind brew tool offers the brew command",
           fetchdeps.system_upgrade_command("flac", platform="macos") == "brew upgrade flac"
           and fetchdeps.system_upgrade_command("cuetools", platform="macos") is None)
+    # The whole ROW has to survive macOS: it names the package manager it will
+    # tell the user about, and assuming Debian there raised KeyError - a 500
+    # from /api/dependencies, i.e. no Dependencies page at all on a Mac.
+    rows = {r["key"]: r for r in fetchdeps.dependency_rows()}
+    check(f"every row builds on macOS ({len(rows)})", len(rows) == len(fetchdeps.DISPLAY_NAMES))
+    check(f"a brew-backed row names brew, not apt (got "
+          f"{rows['flac']['latest_version']!r})",
+          rows["flac"]["latest_version"] == "brew: flac")
+    check("...and offers nothing to press (no download on macOS)",
+          rows["flac"]["install_kind"] == "system" and rows["flac"]["action"] == "none")
+    check("the health payload builds on macOS too",
+          isinstance(fetchdeps.dependencies_payload().get("tools"), list))
     check("Linux keeps the apt command",
           fetchdeps.system_upgrade_command("flac", platform="linux")
           == "apt-get install --only-upgrade flac")
