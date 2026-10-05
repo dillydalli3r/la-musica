@@ -357,8 +357,16 @@ if crypto:
         events_mod._push_queue.join()
 
     stub_push_service()
-    mine = Device(kinds=["import_done", "grade_done"])
+    # Every script-run section above published its own frame, and Web Push
+    # delivery is asynchronous: a frame queued there is fanned out to whatever
+    # device is subscribed WHEN THE WORKER RUNS, not when it was published.
+    # Let that backlog empty BEFORE the first device subscribes — otherwise an
+    # older frame lands in this section's `posts` and every count here is one
+    # too high (the CI failure this prevents: posts[0] was the `grade_done`
+    # "Grade finished" the /api/run section above published).
+    settle()
     posts.clear()
+    mine = Device(kinds=["import_done", "grade_done"])
     # An import whose summary grew an error list is the realistic way a frame
     # gets big: the record declares `rs` 4096, and a payload past it is a frame
     # a push service may refuse outright (RFC 8030 §7.2).
