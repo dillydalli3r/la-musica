@@ -360,7 +360,18 @@ jobs:
 
           rm -rf /tmp/debrun && mkdir -p /tmp/debrun
           dpkg-deb -x "$DEB" /tmp/debrun
-          APP_BIN="$(find /tmp/debrun/usr/bin -maxdepth 1 -type f | head -1)"
+          # By name, and following symlinks: an AppDir may ship the shell as a
+          # link, and `-type f` alone then finds nothing — which is what made
+          # the AppImage leg fail in a second (an empty binary to launch).
+          app_bin() {
+            find "$1" -maxdepth 1 \( -type f -o -type l \) -name 'mlo-desktop' 2>/dev/null | head -1
+          }
+          APP_BIN="$(app_bin /tmp/debrun/usr/bin)"
+          [ -n "$APP_BIN" ] || {
+            echo "::error::no app binary in the deb's /usr/bin"
+            ls -la /tmp/debrun/usr/bin
+            exit 1
+          }
 
           # Phase 1 — never asked: no backend, and the app stays up (it is
           # showing the question, not crashing).
@@ -404,7 +415,18 @@ jobs:
             rm -rf /tmp/appimg && mkdir -p /tmp/appimg
             abs="$(cd "$(dirname "$APPIMAGE")" && pwd)/$(basename "$APPIMAGE")"
             ( cd /tmp/appimg && "$abs" --appimage-extract >/dev/null )
-            start_app "$(find /tmp/appimg/usr/bin -maxdepth 1 -type f | head -1)"
+            APPIMAGE_BIN="$(app_bin /tmp/appimg/squashfs-root/usr/bin)"
+            if [ -z "$APPIMAGE_BIN" ]; then
+              echo "::error::no app binary in the AppImage's AppDir"
+              ls -la /tmp/appimg/squashfs-root/usr/bin /tmp/appimg/squashfs-root 2>/dev/null || true
+              exit 1
+            fi
+            # The AppImage runtime sets APPDIR to the mounted AppDir, and that
+            # is the branch resource_dir() takes there
+            # (`${APPDIR}/usr/lib/<name>`), so it is set here too rather than
+            # leaning on the exe-relative fallback.
+            export APPDIR=/tmp/appimg/squashfs-root
+            start_app "$APPIMAGE_BIN"
             port=""; tries=0
             while [ "$tries" -lt 90 ]; do
               tries=$((tries + 1)); sleep 1
@@ -415,6 +437,7 @@ jobs:
             stop_app
             [ -n "$port" ] || {
               echo "::error::the AppImage came up with no backend of its own"
+              ls -la "$(dirname "$APPIMAGE_BIN")" || true
               tail -30 /tmp/app.out || true
               exit 1
             }
