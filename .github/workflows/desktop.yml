@@ -174,8 +174,14 @@ jobs:
           if [ -n "$DEB" ]; then
             rm -rf /tmp/debicons && mkdir -p /tmp/debicons
             dpkg-deb -x "$DEB" /tmp/debicons
+            # The icons the package INSTALLS, not every PNG inside it: the
+            # bundled backend brings the SPA's own images, and the deb places
+            # the whole app under `/usr/lib/la musica/` — a path with a space,
+            # which this word-splitting loop cannot survive, and not a desktop
+            # icon to art-check anyway.
             found=0
-            for icon in $(find /tmp/debicons -name '*.png' -path '*icons*'); do
+            for icon in $(find /tmp/debicons/usr/share/icons /tmp/debicons/usr/share/pixmaps \
+                          -name '*.png' 2>/dev/null); do
               found=1
               "$PY" tools/bundle_icons.py --png "$icon"
             done
