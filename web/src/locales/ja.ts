@@ -378,6 +378,19 @@ export default {
   "client.done_note": "このウィザードは設定ページからいつでも開き直せます。",
   "client.rerun": "セットアップを再実行",
 
+  // —— Backend choice (a desktop shell's very first run) ——————————————————
+  "backend.title": "このアプリはどうサーバーを用意しますか？",
+  "backend.subtitle": "一度選ぶだけ。あとからトレイアイコンで変更できます。",
+  "backend.step_choice": "バックエンド",
+  "backend.local_title": "内蔵バックエンドを使う",
+  "backend.local_hint": "la musica がこのマシン上で自分のサーバーを起動します。おすすめです — Docker は不要で、ほかに何もインストールしません。",
+  "backend.remote_title": "自分で運用するサーバーに接続",
+  "backend.remote_hint": "自分で動かしている la musica サーバーを指定します — Docker、ノート PC、自宅サーバーなど。",
+  "backend.recommended": "おすすめ",
+  "backend.starting_title": "内蔵サーバーを起動しています…",
+  "backend.starting_hint": "数秒かかることがあります。サーバーが応答すると、このウィンドウが自動でアプリを開きます。",
+  "backend.error": "シェルが選択を保存できませんでした。もう一度お試しください。",
+
   // —— MusicBrainz artist page: add / download one release TYPE ——————————
   "mb.actions_title": "種類ごとに追加・ダウンロード",
   "mb.actions_groups": "リリースグループ {n} 件",

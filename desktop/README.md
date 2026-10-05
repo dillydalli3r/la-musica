@@ -48,6 +48,16 @@ build script defines `desktop`/`mobile`, so the split follows the target.
   remote-mode shell has to ride everything on the `token` query instead). The
   window opens *visible*: its first run is the app's own setup screen, which
   is no use behind a tray icon nobody has been told about.
+- **The first run asks.** A shell that has never been told which backend to
+  use shows the app's own build with two options: **use the built-in backend**
+  (this app runs its own server — nothing to install) or **connect to a server
+  you run** (the Docker container, a laptop, a home server). The answer is
+  written to `shell.json` before anything is spawned or navigated, so a shell
+  that already answered is never asked again
+  (`web/src/pages/BackendChoice.tsx` → `choose_backend`). The tray's "Use the
+  built-in backend" checkbox is the same question, reachable later: a page
+  served by a REMOTE server cannot call the shell at all, so that item is the
+  way back without editing `shell.json` by hand.
 - **Server**: either the shell's child (`mlo-server`, local mode) or the
   address the user configured (remote mode). In local mode the shell finds a
   free loopback port from 8011 up (never 8000 — that is the live install),
@@ -64,6 +74,12 @@ build script defines `desktop`/`mobile`, so the split follows the target.
   wizard (`web/src/pages/ClientSetup.tsx`) probes `${address}/api/health` with
   a 3 s deadline as before; the address is saved per device
   (`localStorage: mlo.server`) and changeable from Settings → Security.
+- **One shell per machine**: a second launch — the login auto-start plus a
+  click on the icon is the ordinary way to get two — brings the running window
+  forward instead of starting anything. Two shells in local mode would mean
+  two backends writing the same `<music>/.mlo/data`, two servers on
+  8011/8012 and two tray icons (`tauri-plugin-single-instance`, keyed on the
+  bundle identifier; desktop only, a phone app gets one process from its OS).
 - **Tray icon**: the window lives in the tray while it is closed ("Open la
   musica", "Auto-start on login", "Keep backend running after quit",
   "Backend: running…", "Exit la musica"); closing the window hides it again,
@@ -386,7 +402,7 @@ place, because every report about iOS playback lands on the seam:
 
 ## Bundle config
 
-`bundle.iOS.minimumSystemVersion` 14.0, `bundle.iOS.bundleVersion` 5.1.0,
+`bundle.iOS.minimumSystemVersion` 14.0, `bundle.iOS.bundleVersion` 5.1.1,
 `bundle.iOS.infoPlist` and `bundle.android.minSdkVersion` 24 in
 `tauri.conf.json`. The Android package name and the iOS bundle id both come from
 the top-level `identifier` (`com.musiclibraryoptimizer.lamusica` — the old

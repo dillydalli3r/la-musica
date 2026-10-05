@@ -266,6 +266,15 @@ impl BackendBundle {
 /// settings read from another. `data_local_dir()` is LocalAppData on Windows
 /// and the platform's data dir elsewhere, exactly what the launcher does.
 pub fn default_app_data_dir() -> PathBuf {
+    // The same env override the backend launcher honours, so a scratch shell
+    // run (`MLO_APP_DATA_DIR=… npm run dev`) reads and writes a throwaway
+    // profile instead of the real install's — the shell's own `shell.json`
+    // included.
+    if let Some(dir) = env::var_os("MLO_APP_DATA_DIR") {
+        if !dir.is_empty() {
+            return PathBuf::from(dir);
+        }
+    }
     if let Some(d) = dirs::data_local_dir() {
         return d.join("la musica");
     }

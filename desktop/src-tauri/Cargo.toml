@@ -1,6 +1,6 @@
 [package]
 name = "mlo-desktop"
-version = "5.1.0"
+version = "5.1.1"
 description = "la musica desktop shell (Tauri v2)"
 authors = ["dillydalli3r"]
 edition = "2021"
@@ -26,6 +26,14 @@ dirs = "6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 parking_lot = "0.12"
+
+# ONE shell per machine. A second launch — the login auto-start plus a click
+# on the icon is the ordinary way to get two — would otherwise start a second
+# local backend over the same library: two writers on <music>/.mlo/data, two
+# servers on 8011/8012, two tray icons. Desktop only: a phone app gets one
+# process from its OS, and the crate has no mobile backend anyway.
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-single-instance = "2"
 
 # The iOS Now Playing star only (src/ios_like.rs): MediaPlayer's
 # `MPRemoteCommandCenter.likeCommand` is Objective-C, and the Media Session API

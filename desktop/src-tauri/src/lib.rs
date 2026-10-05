@@ -238,6 +238,21 @@ fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
         false,
         None::<&str>,
     )?;
+    // "Use the built-in backend" — the first-run screen's question, asked
+    // again from the tray. A page served by a REMOTE server cannot call the
+    // shell at all (its origin is not the app's own), so this is the way back
+    // to the bundled backend without editing shell.json by hand. Unchecking
+    // it hands the window back to the app's own build, where the wizard asks
+    // which server to talk to.
+    let builtin_on = settings::load(&backend::default_app_data_dir()).is_local();
+    let builtin_i = CheckMenuItem::with_id(
+        app,
+        "use-builtin",
+        "Use the built-in backend",
+        true,
+        builtin_on,
+        None::<&str>,
+    )?;
     let quit_i = MenuItem::with_id(app, "quit", "Exit la musica", true, None::<&str>)?;
     let menu = Menu::with_items(
         app,
@@ -245,6 +260,7 @@ fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
             &open_i,
             &autostart_i,
             &keep_i,
+            &builtin_i,
             &backend_status_i,
             &PredefinedMenuItem::separator(app)?,
             &quit_i,
@@ -252,6 +268,9 @@ fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     )?;
     // The keep-backend checkbox must be reachable from the exit path.
     app.manage(KeepBackendItem(keep_i));
+    // …and the mode checkbox from the tray handler, so the first-run screen
+    // and the tray never disagree about what this shell is doing.
+    app.manage(BuiltinBackendItem(builtin_i));
 
     if let Some(state) = app.try_state::<AutostartItem>() {
         *state.0.lock() = Some(autostart_i);
@@ -264,6 +283,20 @@ fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
         .on_menu_event(|app, event| match event.id.as_ref() {
             "open" => show_main_window(app),
             "autostart" => toggle_autostart(app),
+            "use-builtin" => {
+                let on = app
+                    .try_state::<BuiltinBackendItem>()
+                    .map(|s| s.0.is_checked().unwrap_or(false))
+                    .unwrap_or(false);
+                set_backend_mode(
+                    app,
+                    if on {
+                        settings::BackendMode::Local
+                    } else {
+                        settings::BackendMode::Remote
+                    },
+                );
+            }
             "quit" => {
                 // Quitting the shell is quitting the app; the local backend
                 // is a child of the shell and must go with it, unless the
@@ -334,6 +367,12 @@ struct BackendSlot(parking_lot::Mutex<Option<std::sync::Arc<backend::LocalBacken
 #[cfg(desktop)]
 struct KeepBackendItem(CheckMenuItem<tauri::Wry>);
 
+/// The tray's "Use the built-in backend" checkbox: the same question the
+/// first-run screen asks, kept in managed state so the screen, the tray and
+/// `shell.json` never disagree.
+#[cfg(desktop)]
+struct BuiltinBackendItem(CheckMenuItem<tauri::Wry>);
+
 /// Store the status menu item for later updates.
 #[cfg(desktop)]
 fn store_tray_backend_item(app: &tauri::AppHandle, item: MenuItem<tauri::Wry>) {
@@ -348,6 +387,116 @@ pub fn set_tray_backend(app: &tauri::AppHandle, text: &str) {
     }
 }
 
+/// Point the shell's window at the backend its settings ask for — called once
+/// at startup, and again whenever the answer changes (the first-run screen's
+/// two buttons, the tray's "Use the built-in backend").
+#[cfg(desktop)]
+fn enter_backend_mode(app: &tauri::AppHandle, settings: &settings::ShellSettings) {
+    if !settings.is_local() {
+        // Remote — and not-yet-asked — shells both show the app's own build:
+        // the page asks for an address in the first case, and which of the two
+        // this install is in the second (`web/src/lib/backendShell.ts` reads
+        // the mode through `shell_backend_choice`). Nothing is spawned, and
+        // nothing is navigated to a server that has not been named.
+        if let Some(window) = app.get_webview_window("main") {
+            backend_handle::attach_remote(&window, settings, None);
+        }
+        set_tray_backend(
+            app,
+            if settings.needs_choice() {
+                "Backend: not chosen yet"
+            } else {
+                "Backend: a server you run"
+            },
+        );
+        return;
+    }
+    let bundle = backend::BackendBundle {
+        server_dir: app
+            .path()
+            .resource_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+            .join("mlo-server"),
+        app_data_dir: backend::default_app_data_dir(),
+        music_dir: if settings.music_folder.is_empty() {
+            None
+        } else {
+            Some(std::path::PathBuf::from(&settings.music_folder))
+        },
+    };
+    let Some(slot) = app.try_state::<BackendSlot>() else {
+        return;
+    };
+    // A backend this shell already owns is REUSED, not spawned again: the
+    // question can be answered twice while the first answer's server is up,
+    // and two servers over one library is the thing to avoid.
+    let existing = slot.0.lock().clone();
+    let backend = match existing {
+        Some(b) if backend::port_of(&b).is_some() => Some(b),
+        _ => backend::LocalBackend::start(&bundle),
+    };
+    match backend {
+        Some(backend) => {
+            *slot.0.lock() = Some(backend.clone());
+            if let Some(window) = app.get_webview_window("main") {
+                backend_handle::attach_local(&window, &backend, settings);
+            }
+        }
+        None => set_tray_backend(app, "Backend: unavailable"),
+    }
+}
+
+/// What this shell has been told about its backend, for the first-run screen:
+/// "local" (spawn the app's own server), "remote" (a server the user runs) or
+/// "unset" — a shell that has never been asked, which is what makes that
+/// screen ask instead of assuming.
+#[cfg(desktop)]
+#[derive(serde::Serialize)]
+struct ShellChoice {
+    mode: &'static str,
+    music_folder: String,
+}
+
+#[cfg(desktop)]
+#[tauri::command]
+fn shell_backend_choice() -> ShellChoice {
+    let settings = settings::load(&backend::default_app_data_dir());
+    ShellChoice {
+        mode: settings.mode_str(),
+        music_folder: settings.music_folder.clone(),
+    }
+}
+
+/// Record an answer and act on it. The recording comes first, so a crash
+/// between the two leaves the shell asking again rather than guessing.
+#[cfg(desktop)]
+fn set_backend_mode(app: &tauri::AppHandle, mode: settings::BackendMode) {
+    let dir = backend::default_app_data_dir();
+    let mut settings = settings::load(&dir);
+    if settings.backend_mode != mode {
+        settings.backend_mode = mode;
+        settings::save(&dir, &settings);
+    }
+    if let Some(item) = app.try_state::<BuiltinBackendItem>() {
+        let _ = item.0.set_checked(mode == settings::BackendMode::Local);
+    }
+    enter_backend_mode(app, &settings);
+}
+
+/// The first-run screen's answer (and the tray checkbox's, which asks the same
+/// question in one click).
+#[cfg(desktop)]
+#[tauri::command]
+fn choose_backend(app: tauri::AppHandle, mode: String) -> Result<(), String> {
+    let mode = match mode.as_str() {
+        "local" => settings::BackendMode::Local,
+        "remote" => settings::BackendMode::Remote,
+        other => return Err(format!("unknown backend mode: {other}")),
+    };
+    set_backend_mode(&app, mode);
+    Ok(())
+}
+
 /// Tauri entry point.
 ///
 /// On mobile this is called by the generated Android/iOS project: the
@@ -356,11 +505,29 @@ pub fn set_tray_backend(app: &tauri::AppHandle, text: &str) {
 /// exactly this name.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // ONE shell per machine, and it is the very first thing registered: a
+    // second launch must reach nothing that touches state. The login
+    // auto-start plus a click on the icon is the ordinary way to get two
+    // shells, and two shells in local mode mean two backends writing the same
+    // `<music>/.mlo/data` over each other, two servers on 8011/8012 and two
+    // tray icons. The second launch instead brings the running window
+    // forward — which is what a double-click on the icon was asking for.
+    // Desktop only: a phone app gets one process from its OS, and the crate
+    // has no mobile backend at all.
+    let builder = tauri::Builder::default();
+    #[cfg(desktop)]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.unminimize();
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+    }));
     // Plugins every target has: native notifications, which the web UI sends
     // for "wish found", "download done" and "import ready" on desktop and
     // mobile alike, and the dialog plugin (its `pick_folder` command below is
     // desktop-only, but the plugin itself builds everywhere).
-    let builder = tauri::Builder::default()
+    let builder = builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init());
     // Desktop additionally owns the tray icon, the autostart registry and the
@@ -383,6 +550,8 @@ pub fn run() {
             set_now_playing_liked,
             set_playback_active,
             ios_audio_state,
+            shell_backend_choice,
+            choose_backend,
         ])
         .manage(AutostartItem(Mutex::new(None)))
         .manage(BackendSlot(parking_lot::Mutex::new(None)))
@@ -397,41 +566,10 @@ pub fn run() {
 
             // The local backend, when this shell owns one. The server's own
             // settings live in <music>/.mlo/data; the SHELL's mode (local vs
-            // remote) lives in per-user shell.json so it exists before the
-            // webview does.
+            // remote vs not asked yet) lives in per-user shell.json so it
+            // exists before the webview does.
             let settings = settings::load(&backend::default_app_data_dir());
-            if settings.is_local() {
-                let bundle = backend::BackendBundle {
-                    server_dir: app
-                        .path()
-                        .resource_dir()
-                        .unwrap_or_else(|_| std::path::PathBuf::from("."))
-                        .join("mlo-server"),
-                    app_data_dir: backend::default_app_data_dir(),
-                    music_dir: if settings.music_folder.is_empty() {
-                        None
-                    } else {
-                        Some(std::path::PathBuf::from(&settings.music_folder))
-                    },
-                };
-                if let Some(slot) = app.try_state::<BackendSlot>() {
-                    if let Some(backend) = backend::LocalBackend::start(&bundle) {
-                        *slot.0.lock() = Some(backend.clone());
-                        if let Some(window) = app.get_webview_window("main") {
-                            backend_handle::attach_local(&window, &backend, &settings);
-                        }
-                    } else {
-                        set_tray_backend(app.handle(), "Backend: unavailable");
-                    }
-                }
-            } else {
-                // Remote mode: the webview keeps its own SPA and the page
-                // talks to the server the user configured. Tell the page this
-                // shell did not spawn the backend.
-                if let Some(window) = app.get_webview_window("main") {
-                    backend_handle::attach_remote(&window, &settings, None);
-                }
-            }
+            enter_backend_mode(app.handle(), &settings);
             Ok(())
         });
 

@@ -29,9 +29,20 @@ function writeStore(key: string, value: string | null) {
 
 /** True inside the Tauri shells (desktop, iOS, Android) — the builds that
  *  bundle this SPA and must be told where a backend runs. The web app and
- *  Docker are served BY their backend and never need this wizard. */
+ *  Docker are served BY their backend and never need this wizard.
+ *
+ *  …and neither does the desktop shell's LOCAL mode, where the window is
+ *  pointed at the shell's own `mlo-server`: that page is served by a backend,
+ *  so its origin IS its server. Asking "which server?" there would be asking
+ *  the page to name itself — and the shell's first-run screen (built-in
+ *  backend or one you run) must never appear on top of a server's own
+ *  first-run wizard, since the two would race for the same launch. Only a
+ *  page served from the bundled build (an app origin, not loopback) still has
+ *  the question to ask. */
 export function isClientShell(): boolean {
-  return IN_TAURI;
+  const origin = typeof window === "undefined" ? "" : window.location.origin;
+  const servedByBackend = /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/.test(origin);
+  return IN_TAURI && !servedByBackend;
 }
 
 export function isClientSetupDone(): boolean {

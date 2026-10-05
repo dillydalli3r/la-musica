@@ -68,7 +68,12 @@ import LoginPage from "./pages/LoginPage";
 // where that server is — a shell does, and it must be able to change its mind
 // later (Settings → Security re-runs this).
 import ClientSetup from "./pages/ClientSetup";
+// The desktop shell's before-the-wizard question: run the app's own backend,
+// or connect to one the user runs. App renders it only for a shell that says
+// its mode is still "unset".
+import BackendChoice from "./pages/BackendChoice";
 import { isClientSetupDone, isClientShell } from "./lib/clientSetup";
+import { backendNeedsChoice, shellBackendChoice, subscribeBackendChoice } from "./lib/backendShell";
 import { isOffline, onOfflineFallback } from "./api";
 import type { OfflineInfo } from "./api";
 // The app event stream's own outcome kinds, and the ONE invalidation a write
@@ -818,10 +823,40 @@ export default function App() {
     wasGated.current = needsLogin;
   }, [needsLogin, qc]);
 
+  // The shell's own first-run question — run the built-in backend, or connect
+  // to one the user runs — asked ONCE (no polling), before the address wizard.
+  // Outside a client shell (the web/Docker build) the effect returns at the
+  // first line, so this adds no work at all there.
+  const inClientShell = isClientShell();
+  const clientSetupDone = isClientSetupDone();
+  const [backendChoiceNeeded, setBackendChoiceNeeded] = useState<boolean | null>(null);
+  useEffect(() => {
+    if (!inClientShell || clientSetupDone) return;
+    let alive = true;
+    // The shell may also announce it on the event; the command below is the
+    // authoritative one-shot ask. A mobile/browser shell has neither and the
+    // command resolves null, which leaves the classic wizard in charge.
+    const off = subscribeBackendChoice(() => {
+      if (alive && backendNeedsChoice()) setBackendChoiceNeeded(true);
+    });
+    void shellBackendChoice().then((choice) => {
+      if (alive) setBackendChoiceNeeded(choice?.mode === "unset");
+    });
+    return () => {
+      alive = false;
+      off();
+    };
+  }, [inClientShell, clientSetupDone]);
+
   // The shell's own first-run wizard, before every other gate: it needs no
   // server and no token, and it is what asks which server this device talks
   // to. Re-runnable from Settings → Security (which clears the flag).
-  if (isClientShell() && !isClientSetupDone()) {
+  if (inClientShell && !clientSetupDone) {
+    // A shell that has never chosen waits one ask for its answer; the web
+    // build never reaches this gate.
+    if (backendChoiceNeeded === null) return <PageLoading />;
+    // "unset" is the new first run: local backend or a server the user runs.
+    if (backendChoiceNeeded) return <BackendChoice onDone={() => window.location.reload()} />;
     // A reload rather than an in-place re-render: finishing the wizard changes
     // the API base URL and the token, and module-level state (the event
     // socket, the media-cache keys, every cached query) was built against the

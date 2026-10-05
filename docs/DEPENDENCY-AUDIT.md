@@ -76,10 +76,12 @@ Lockfile drift: `web/package-lock.json` root `version` said 3.11.0 while
 ## 4. Rust (Tauri shell)
 
 tauri 2 (`tray-icon`, `image-png`), tauri-build, tauri-plugin-dialog /
--autostart / -notification, parking_lot, and iOS-only objc2 / block2 /
-objc2-foundation. ~500 transitive crates (wry, tao, gtk/webkit on Linux).
-Nothing removable — this is a Tauri v2 shell, and the iOS crates are
-`cfg`-gated so they compile only there.
+-autostart / -notification / -single-instance, parking_lot, and iOS-only
+objc2 / block2 / objc2-foundation. ~500 transitive crates (wry, tao,
+gtk/webkit on Linux). Nothing removable — this is a Tauri v2 shell, and the
+iOS crates are `cfg`-gated so they compile only there. `-single-instance` is
+the one that is not about a feature the user asks for but about a hazard: two
+shells would mean two local backends over one library.
 
 ## 5. Container (apt)
 

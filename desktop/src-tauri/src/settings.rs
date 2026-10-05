@@ -27,16 +27,25 @@ pub enum BackendMode {
     Local,
     /// The user pointed the shell at a server they run themselves.
     Remote,
+    /// Nobody has been asked yet. A shell with no recorded choice starts
+    /// nothing and shows the first-run screen, which offers the two above —
+    /// "use the built-in backend" or "connect to a server I run" — and the
+    /// answer is written here before anything is spawned or navigated.
+    Unset,
 }
 
 impl Default for BackendMode {
     fn default() -> Self {
-        BackendMode::Local
+        BackendMode::Unset
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShellSettings {
+    /// Missing in an older `shell.json` (and in a fresh one) → `Unset`, which
+    /// is what asks the question. A file that records a mode keeps it, so an
+    /// upgrade never re-asks a shell that already answered.
+    #[serde(default)]
     pub backend_mode: BackendMode,
     /// The music folder the last local backend was told about. "" = unknown
     /// (the server's own first-run wizard settles it).
@@ -47,7 +56,7 @@ pub struct ShellSettings {
 impl Default for ShellSettings {
     fn default() -> Self {
         ShellSettings {
-            backend_mode: BackendMode::Local,
+            backend_mode: BackendMode::Unset,
             music_folder: String::new(),
         }
     }
@@ -58,10 +67,17 @@ impl ShellSettings {
         self.backend_mode == BackendMode::Local
     }
 
+    /// True while the shell has not been told which backend to use, i.e. while
+    /// the first-run screen owns the window.
+    pub fn needs_choice(&self) -> bool {
+        self.backend_mode == BackendMode::Unset
+    }
+
     pub fn mode_str(&self) -> &'static str {
         match self.backend_mode {
             BackendMode::Local => "local",
             BackendMode::Remote => "remote",
+            BackendMode::Unset => "unset",
         }
     }
 }

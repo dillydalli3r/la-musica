@@ -379,6 +379,19 @@ export default {
   "client.done_note": "Você pode abrir este assistente de novo pela página de Configurações.",
   "client.rerun": "Executar a configuração novamente",
 
+  // —— Backend choice (a desktop shell's very first run) ——————————————————
+  "backend.title": "Como este app deve obter o servidor?",
+  "backend.subtitle": "Escolha uma vez. Você pode mudar depois pelo ícone da bandeja.",
+  "backend.step_choice": "Backend",
+  "backend.local_title": "Usar o backend integrado",
+  "backend.local_hint": "O la musica executa o próprio servidor nesta máquina. Recomendado — sem Docker, nada mais para instalar.",
+  "backend.remote_title": "Conectar a um servidor que eu mesmo rodo",
+  "backend.remote_hint": "Aponte o app para um servidor la musica que você mesmo roda — no Docker, num notebook ou num servidor de casa.",
+  "backend.recommended": "Recomendado",
+  "backend.starting_title": "Iniciando o servidor integrado…",
+  "backend.starting_hint": "Isso pode levar alguns segundos. Esta janela abre o app sozinha assim que o servidor responder.",
+  "backend.error": "O shell não conseguiu salvar essa escolha. Tente de novo.",
+
   // —— MusicBrainz artist page: add / download one release TYPE ——————————
   "mb.actions_title": "Adicionar ou baixar por tipo",
   "mb.actions_groups": "{n} grupo(s) de lançamentos",

@@ -55,7 +55,12 @@ pub struct BackendState<'a> {
     pub status: &'a str,
     pub origin: &'a str,
     pub port: u16,
+    /// "local" | "remote" | "unset" — how this shell was told to find a
+    /// server (`unset` = never asked).
     pub mode: &'a str,
+    /// True while the shell has not been asked yet: the first-run screen owns
+    /// the window and no backend has been spawned.
+    pub needs_choice: bool,
     /// True while the shell is in local mode and the backend it spawned is
     /// still running (as opposed to a remote server the user pointed at).
     pub local: bool,
@@ -127,6 +132,7 @@ pub fn attach_remote(window: &WebviewWindow, settings: &ShellSettings, port_hint
         origin: "",
         port: port_hint.unwrap_or(0),
         mode: settings.mode_str(),
+        needs_choice: settings.needs_choice(),
         local: false,
     };
     let _ = window.emit(BACKEND_EVENT, state);
@@ -148,6 +154,8 @@ fn emit_state(
         origin: &origin,
         port,
         mode: settings.mode_str(),
+        // A local backend exists because the question was answered.
+        needs_choice: false,
         local: true,
     };
     let _ = window.emit(BACKEND_EVENT, state);

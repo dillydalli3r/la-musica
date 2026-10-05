@@ -379,6 +379,19 @@ export default {
   "client.done_note": "Diesen Assistenten kannst du über die Einstellungen-Seite erneut öffnen.",
   "client.rerun": "Einrichtung erneut ausführen",
 
+  // —— Backend choice (a desktop shell's very first run) ——————————————————
+  "backend.title": "Wie soll diese App ihren Server bekommen?",
+  "backend.subtitle": "Einmal wählen. Ändern kannst du das später über das Tray-Symbol.",
+  "backend.step_choice": "Backend",
+  "backend.local_title": "Eingebautes Backend verwenden",
+  "backend.local_hint": "la musica startet seinen eigenen Server auf diesem Gerät. Empfohlen — kein Docker, nichts weiter zu installieren.",
+  "backend.remote_title": "Mit meinem eigenen Server verbinden",
+  "backend.remote_hint": "Diese App auf einen la musica-Server zeigen, den du selbst betreibst — in Docker, auf einem Laptop oder einem Heimserver.",
+  "backend.recommended": "Empfohlen",
+  "backend.starting_title": "Eingebauter Server startet …",
+  "backend.starting_hint": "Das kann ein paar Sekunden dauern. Dieses Fenster öffnet die App von selbst, sobald der Server antwortet.",
+  "backend.error": "Die Wahl konnte nicht gespeichert werden. Versuch es noch einmal.",
+
   // —— MusicBrainz artist page: add / download one release TYPE ——————————
   "mb.actions_title": "Nach Typ hinzufügen oder laden",
   "mb.actions_groups": "{n} Veröffentlichungsgruppe(n)",

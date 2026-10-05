@@ -1,5 +1,5 @@
 # la musica
-**v5.1.0** — a self-hosted app that manages, optimizes, audits, grades and plays your music library, from a browser, a desktop window or a phone.
+**v5.1.1** — a self-hosted app that manages, optimizes, audits, grades and plays your music library, from a browser, a desktop window or a phone.
 
 FastAPI backend + React UI over the `mlo` engine: music and music videos, playlists, favourites, artist artwork and biographies, a multi-source lyrics chain, and MusicBrainz / Discogs / AcoustID identity. All app state — config, playlists, the beets library, caches, downloads, trash, runtime-installed tools — lives in one `.mlo` folder beside your music.
 
@@ -46,10 +46,12 @@ are there for the rest.
 
 ## Clients
 The same React build runs in every target. The desktop install (Windows,
-macOS, Linux) either runs its OWN backend — a frozen Python service bundled
-with the app, spawned on a free loopback port from 8011 up, serving the UI
-and the API from the same origin so the session cookie works — or, pointed at
-a server you run yourself (Settings → Security), behaves like the mobile
+macOS, Linux) asks on its first run how it should get its server: run its OWN
+backend — a frozen Python service bundled with the app, spawned on a free
+loopback port from 8011 up, serving the UI and the API from the same origin so
+the session cookie works — or connect to a server you run yourself (Docker, a
+laptop, a home server). The tray's "Use the built-in backend" switches between
+the two afterwards. A shell pointed at a server behaves like the other mobile
 clients: browser (served by the server) · the desktop shell · an unsigned
 Android APK · an unsigned iOS IPA, published as a SideStore/AltStore source:
 `https://github.com/dillydalli3r/la-musica/releases/latest/download/source.json`.
