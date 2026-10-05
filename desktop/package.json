@@ -6,7 +6,7 @@
   "scripts": {
     "tauri": "tauri",
     "dev": "tauri dev",
-    "build": "python ../tools/stage_desktop_bundle.py && tauri build",
+    "build": "python ../tools/stage_desktop_bundle.py && tauri build --config src-tauri/tauri.bundle.conf.json",
     "icon": "tauri icon icon-source.png"
   },
   "devDependencies": {

@@ -43,8 +43,10 @@ a first-class client.
 - **No more startup flash.** The window opens on a static splash and only
   navigates once the backend answers, so a booting server no longer paints
   WebView2's "can't reach 127.0.0.1" page for a moment first.
-- The bundle is staged automatically by `tauri build`
-  (`tools/stage_desktop_bundle.py`) and built per-OS in CI; the staged output is
-  gitignored, never committed.
+- **The installers carry the backend.** `tools/stage_desktop_bundle.py` stages
+  the frozen tree and `npm run build` (as CI does, per-OS) maps it into the
+  bundle as a Tauri resource, so the installer ships `mlo-server` — which
+  carries the UI and the native analysis helper with it — beside the shell. The
+  staged output is gitignored, never committed.
 - Mobile is untouched: an Android or iOS build has no Python and no backend — a
   phone points at the server, exactly as before.

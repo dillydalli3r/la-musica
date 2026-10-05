@@ -27,18 +27,17 @@ All five share one crate. The three desktop builds additionally ship the local
 backend: `tools/stage_desktop_bundle.py` stages the frozen PyInstaller tree
 (`dist/mlo-server`, which itself carries the built SPA at `_internal/web/dist`
 and the `mlo-audio` helper at `_internal/`) into `desktop/bundle/mlo-server`,
-and each desktop platform's `tauri.<platform>.conf.json` declares that tree as
-a Tauri RESOURCE — so the installer places it at `<resource_dir>/mlo-server`,
-which is where the shell spawns it from. `npm run build` in `desktop/` stages
-before `tauri build`; CI runs the staging as its own per-OS step. The mobile
-builds have no Python and no backend — a phone points at the same server every
-other client uses, and the platform configs are desktop-only, so a mobile
-bundle carries no resources at all. Everything that only makes sense in a
-desktop shell — the tray icon, the autostart registry, the folder picker,
-hide-on-close, the local backend — sits behind `#[cfg(desktop)]` in
-`src/lib.rs`, so the mobile builds compile without it instead of carrying dead
-desktop code. Tauri's own build script defines `desktop`/`mobile`, so the split
-follows the target.
+and the build maps that tree into the bundle as a Tauri RESOURCE — so the
+installer places it at `<resource_dir>/mlo-server`, which is where the shell
+spawns it from. `npm run build` in `desktop/` stages and then builds with
+`src-tauri/tauri.bundle.conf.json`; CI stages per-OS and passes the same map
+inline (see "Bundle config" below for why it is not in a config file). The
+mobile builds have no Python and no backend — a phone points at the same server
+every other client uses. Everything that only makes sense in a desktop shell —
+the tray icon, the autostart registry, the folder picker, hide-on-close, the
+local backend — sits behind `#[cfg(desktop)]` in `src/lib.rs`, so the mobile
+builds compile without it instead of carrying dead desktop code. Tauri's own
+build script defines `desktop`/`mobile`, so the split follows the target.
 
 ## How it works (desktop)
 
@@ -395,15 +394,18 @@ the top-level `identifier` (`com.musiclibraryoptimizer.lamusica` — the old
 build, because an identifier ending in `.app` reads as the bundle extension;
 nothing rejects it, it is just the default-shaped mistake).
 
-The desktop bundles carry **one resource**, declared not in `tauri.conf.json`
-but in each desktop platform's config — `tauri.windows.conf.json`,
-`tauri.macos.conf.json`, `tauri.linux.conf.json`: `bundle.resources` maps the
-staged `desktop/bundle/mlo-server` tree to `<resource_dir>/mlo-server`, which is
-where `backend.rs` looks for the backend it spawns. It is deliberately absent
-from the shared config: `npx tauri android build` and `tauri ios build` read
-`tauri.conf.json` too, and a phone has neither a backend to ship nor a checkout
-that built one — a resource path that exists only on a desktop machine would
-fail (or bloat) every mobile build.
+The desktop bundles carry **one resource** — the staged backend tree, mapped by
+`bundle.resources` to `<resource_dir>/mlo-server`, which is where `backend.rs`
+looks for the process it spawns. It is declared where the staging happens, not
+in a config file: `desktop/package.json`'s `build` passes
+`--config src-tauri/tauri.bundle.conf.json`, and CI passes the same map inline.
+Two reasons. `tauri-build` validates resource paths on every compile, so a
+resource in `tauri.conf.json` would make a plain `cargo check` fail in a
+checkout that never staged a 300 MB backend ("resource path ... doesn't
+exist") — which is every fresh clone and the `ci/desktop` leg. And
+`npx tauri android build` / `tauri ios build` read `tauri.conf.json` too: a
+phone has neither a backend to ship nor a checkout that built one, so a
+resource there would fail or bloat every mobile build.
 
 The mobile bundle carries no resources and no native frameworks: this is the
 webview and the React app, nothing else. A phone with no reachable server shows
@@ -571,20 +573,26 @@ icon.
 ## Development
 
 ```bash
-cd web && npm install && npm run build   # web/dist, the Tauri frontendDist
+# from the repo root — the frozen backend the desktop install spawns
+cargo build --release --manifest-path rust/Cargo.toml   # mlo-audio, zero crate deps
+python -m PyInstaller pyinstaller/mlo-server.spec       # dist/mlo-server (carries web/dist + the helper)
+
+cd web && npm install && npm run build                  # web/dist, the Tauri frontendDist
 cd ../desktop
 npm install
 npm run dev        # vite dev UI + tauri window
-npm run build      # release bundle (NSIS/msi on Windows)
+npm run build      # stages desktop/bundle/mlo-server, then NSIS/msi on Windows
 ```
 
-Nothing starts a backend: run the server yourself (`docker compose up -d` in
-the repo root, or `python -m uvicorn server.main:app --host 127.0.0.1 --port
-8000` for a source checkout) and point the window at it — the wizard asks for
-the address on first run, and Settings → Security changes it afterwards. The
-web UI detects the Tauri webview (`window.__TAURI_INTERNALS__`) only to know it
-is a client that must be told where the server is; it never assumes
-`127.0.0.1:8000`.
+The shell runs that backend itself (`Local backend`, the default): it picks a
+free loopback port from 8011 up, spawns `mlo-server`, and points the window at
+it. `npm run build` refuses to bundle without a staged backend, so the freeze
+step above is not optional for a release build. Pointing the app at a server
+you run yourself (`docker compose up -d` in the repo root, or
+`python -m uvicorn server.main:app --host 127.0.0.1 --port 8000` for a source
+checkout) is the other mode — Settings → Security, and the same client the
+mobile builds are; the wizard asks for the address when a shell has no backend
+of its own.
 
 ## CI
 

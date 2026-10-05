@@ -115,14 +115,21 @@ jobs:
 
       - name: Build the bundles
         working-directory: desktop
-        # beforeBuildCommand (`npm run build --prefix ../web ...`) would rebuild
-        # the frontend this leg just downloaded — and needs web/node_modules back
-        # to do it — so the hook is cleared from the merged config.
-        # stage_desktop_bundle.py already ran above. shell: bash, because the
-        # Windows runner's PowerShell cannot be trusted to pass that JSON
-        # argument through intact.
+        # Two things are merged in here, both of them only true of this build:
+        # `beforeBuildCommand` (`npm run build --prefix ../web ...`) would
+        # rebuild the frontend this leg just downloaded — and needs
+        # web/node_modules back to do it — so the hook is cleared; and
+        # `bundle.resources` maps the tree the step above staged to
+        # `<resource_dir>/mlo-server`, which is where the shell spawns it.
+        # The resource lives here (and in desktop/package.json's `build`, via
+        # src-tauri/tauri.bundle.conf.json) rather than in a config file
+        # because `tauri-build` validates resource paths on EVERY compile: in a
+        # config, a plain `cargo check` in a checkout that never staged a
+        # 300 MB backend would fail with "resource path ... doesn't exist".
+        # shell: bash, because the Windows runner's PowerShell cannot be
+        # trusted to pass that JSON argument through intact.
         shell: bash
-        run: npx tauri build --bundles ${{ matrix.bundles }} --config '{"build":{"beforeBuildCommand":null}}'
+        run: npx tauri build --bundles ${{ matrix.bundles }} --config '{"build":{"beforeBuildCommand":null},"bundle":{"resources":{"../bundle/mlo-server":"mlo-server"}}}'
 
       - name: Verify the icons inside the built bundles
         # `bundle.icon` is what each bundler is *told* to use; what it actually
