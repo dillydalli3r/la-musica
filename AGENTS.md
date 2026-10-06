@@ -54,6 +54,40 @@ Ctrl+C stops both halves — and the TREE, not just the leader: `uvicorn --reloa
 and `npm run dev` each leave a child holding the inherited listening socket, so a
 plain kill leaves the port bound to a dead pid.
 
+## The dev bed, in a container (what an agent reaches for first)
+
+`docker-compose.dev.yml` is `dev.py` in a container: the app from this working
+tree on **8011**, vite with hot reload on **5181**, the scratch library at
+`local/dev/music`, and a project, container and port of its own — so it never
+touches the real install, the host's Python, or the host's `node_modules` (a
+named volume keeps the Linux copy out of `web/`). The two halves share a network
+namespace, so vite's proxy arrives on the app's own loopback: anything else is a
+CLIENT to the login gate (`server/auth.py`), and a dev URL that asks for a
+password nobody set is not a bed.
+
+```bash
+docker compose -f docker-compose.dev.yml up -d --build   # the first build is minutes
+docker compose -f docker-compose.dev.yml logs -f
+docker compose -f docker-compose.dev.yml down
+```
+
+UI work belongs on the vite URL (it reads `web/src` straight from the tree); the
+8011 URL is the image's own build of `web/dist`. A fresh bed comes up on the
+setup wizard, flipped the usual way — with the CONTAINER's path:
+
+```bash
+curl -X POST http://127.0.0.1:8011/api/config -H 'Content-Type: application/json' \
+     -d '{"music_folder": "/music", "first_run_done": true}'
+```
+
+`python dev.py` stays for the two things a container cannot do: a machine with no
+container runtime, and **desktop-shell work**, which is host-only by nature (the
+Tauri/Windows shell is built and driven on the host — `npx tauri build --debug
+--no-bundle`, a scratch `MLO_APP_DATA_DIR`, and `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`
+when a CDP port is wanted). A Linux container is not the Windows runtime either:
+anything about console windows, the title bar or the tray still has to be proved
+on the host.
+
 ## Commit locally; release only when the owner says so
 
 Work lands as **local commits on `main`** — explicit `git add`, a message that is
@@ -122,3 +156,13 @@ When they do ask for one:
 - **A behaviour change gets a rule.** `docs/OPTIMIZATION-GRADING-SPEC.md` is the
   contract users check the app against; `README.md` and the GitHub description
   follow it.
+- **A console child gets `CREATE_NO_WINDOW`.** The server runs windowed and owns
+  no console, so anything launched without it flashes a terminal window;
+  `mlo/deps.py`'s spawn probe did exactly that on the first Dependencies request.
+  Every console spawn in `mlo/` and `server/` passes the flag — a new one must too.
+- **The desktop shell is undecorated, and the web app draws its window.**
+  `web/src/components/TitleBar.tsx` is the only title bar, and every screen owes
+  it room. Links that leave the app go through the shell
+  (`web/src/lib/externalLinks.ts` → `open_external`): a webview drops
+  `window.open` and `target="_blank"` alike. And no window the app did not open
+  may appear.

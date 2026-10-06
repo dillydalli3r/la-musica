@@ -1,0 +1,108 @@
+# la musica - the DEV BED, in a container.
+#
+# The container twin of `python dev.py`: the same two halves (the app, and vite
+# over it with hot reload), a scratch library, and a port that is never 8000.
+# Reach for it when the work does not need the desktop shell: nothing in it runs
+# the host's Python or the host's npm - the Python here is the app's own
+# (server/requirements.txt) and the Linux tools the pipeline drives come with
+# the image (see the Dockerfile).
+#
+#   docker compose -f docker-compose.dev.yml up -d --build
+#   docker compose -f docker-compose.dev.yml logs -f
+#   docker compose -f docker-compose.dev.yml down
+#
+#   app      http://127.0.0.1:8011   the image's own build of the UI (web/dist)
+#   vite     http://127.0.0.1:5181   web/ from the working tree, hot reload,
+#                                    proxying /api and /ws to the app
+#   library  ./local/dev/music       the bed's own scratch folder
+#
+# What it deliberately does NOT share with docker-compose.yml (the real
+# install): a project name, a container name and a port. No watchtower (a bed is
+# not updated from the registry), loopback-only publishing, and a library that is
+# the scratch folder under local/dev/ rather than a real one - so starting this
+# while the real install runs on 8000 is safe, and neither can see the other's
+# state.
+#
+# A FRESH bed creates ./local/dev/music empty, so the app opens on its setup
+# wizard. Flip it the usual way, with the CONTAINER's path (see AGENTS.md):
+#
+#   curl -X POST http://127.0.0.1:8011/api/config -H 'Content-Type: application/json' \
+#        -d '{"music_folder": "/music", "first_run_done": true}'
+#
+# The first `--build` is minutes, not seconds: it builds the frontend, the Rust
+# helper and the Python toolchain (the Dockerfile's three stages). Later starts
+# reuse it, and UI work does not need it at all - the vite service reads web/
+# straight from the working tree.
+name: la-musica-dev
+
+services:
+  lamusica-dev:
+    build: .
+    image: la-musica-dev:local
+    container_name: la-musica-dev
+    ports:
+      # Both ports belong to THIS service, because the web service below shares
+      # its network namespace (see there). 8011 and 5181 on the HOST - never
+      # 8000 or 5173, which belong to the real install and to a host vite - and
+      # loopback only: a scratch bed has no reason to answer on the LAN.
+      - "127.0.0.1:8011:8000"
+      - "127.0.0.1:5181:5173"
+    environment:
+      # /music is the scratch library below; the server has to answer on the
+      # container's own interface for the published port to reach it. This is
+      # also what arms the login gate for callers that are not local (see
+      # server/auth.py) - local meaning this machine's loopback OR the default
+      # gateway, which is how a browser on the host reaches a published port.
+      - MLO_MUSIC_FOLDER=/music
+      - MLO_SERVER_HOST=0.0.0.0
+    volumes:
+      - ./local/dev/music:/music
+    # A bed is started and stopped by hand; it must not come back after a
+    # reboot the way the real install does.
+    restart: "no"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=4)"]
+      interval: 15s
+      timeout: 5s
+      start_period: 20s
+      retries: 5
+
+  # Vite over the app: the hot-reload half, and the one an agent iterating on
+  # `web/src` should be looking at.
+  #
+  # It shares the app's NETWORK NAMESPACE on purpose. The app treats its own
+  # loopback as local and everything else as a client (server/auth.py), so a
+  # second container proxying to it over the compose network would arrive from
+  # an address the gate counts as a CLIENT - a scratch bed that suddenly asks for
+  # a password on its dev URL, and for no good reason. Sharing the namespace
+  # makes the proxy's request come from 127.0.0.1, exactly as the HOST bed's
+  # proxy does (which is why dev.py binds the server to loopback). It is also
+  # why the ports above are published on the app service: with a shared
+  # namespace this service has no ports of its own to publish.
+  web:
+    image: node:22-alpine
+    container_name: la-musica-dev-web
+    network_mode: "service:lamusica-dev"
+    working_dir: /app/web
+    volumes:
+      # node_modules is a NAMED VOLUME, not the host's folder: `npm ci` inside a
+      # Linux container would otherwise overwrite the host's node_modules with
+      # Linux binaries and break the host's own `npm run dev` until it was
+      # re-installed. The volume shadows that directory inside the mount, so the
+      # host's copy is never opened - and vite's own caches land there too.
+      - ./web:/app/web
+      - la-musica-dev-node-modules:/app/web/node_modules
+    environment:
+      # The two vars dev.py sets for the host bed (web/vite.config.ts reads them:
+      # /api and /ws proxy target, and its own port).
+      - MLO_API_TARGET=http://127.0.0.1:8000
+      - MLO_WEB_PORT=5173
+    # Install once per volume, then serve on every interface so the app
+    # service's published 5181 reaches it.
+    command: sh -c "[ -d node_modules/vite ] || npm ci; exec npm run dev -- --host 0.0.0.0"
+    depends_on:
+      - lamusica-dev
+    restart: "no"
+
+volumes:
+  la-musica-dev-node-modules:
