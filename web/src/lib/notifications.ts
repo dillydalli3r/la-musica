@@ -305,6 +305,22 @@ export function registerNavigator(fn: Navigator): () => void {
   };
 }
 
+/** How an OUTSIDE page is opened — the `url` half of a record, as opposed to
+ *  the in-app `link` above. Registered by the shell for the same reason the
+ *  navigator is, and it matters more here than it looks: in a Tauri webview
+ *  `window.open` is dropped outright (no tabs, and the new-window request is
+ *  denied), so without a registered opener a click on "la musica 3.3.0 is
+ *  available" did nothing at all. */
+type Opener = (url: string) => void;
+let opener: Opener | null = null;
+
+export function registerOpener(fn: Opener): () => void {
+  opener = fn;
+  return () => {
+    if (opener === fn) opener = null;
+  };
+}
+
 /** Follow the route a record names, at record level = "" for the destinations
  *  the app itself owns. Exported for tests: the click path must be provable
  *  without a browser. */
@@ -325,7 +341,11 @@ export function openNotification(rec: NotificationRecord) {
     else window.location.assign(rec.link);
     return;
   }
-  window.open(target, "_blank", "noreferrer");
+  // An OUTSIDE page (`url`, not `link`): the shell registers its own opener for
+  // this (see `registerOpener`), because a webview drops `window.open` and this
+  // file must stay loadable with no DOM to import the shell's own.
+  if (opener) opener(target);
+  else window.open(target, "_blank", "noreferrer");
 }
 
 /** The hook the bell renders from. */

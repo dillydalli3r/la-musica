@@ -66,6 +66,45 @@ export function toUi(rule: number | undefined | null): number {
 }
 
 /* ---------------------------------------------------------------------- *
+ * The UI scale's own three rules — put a number ON the grid, write a grid
+ * value OUT, and read one BACK from what a user typed. They sit here, beside
+ * MAX_RATING and the toApi/toUi pair, because they are the same 0-5 half-star
+ * scale those two describe, and a second spelling of the grid somewhere else
+ * is exactly the bug this file exists to prevent. <StarRating> draws them.
+ * ---------------------------------------------------------------------- */
+
+/** Clamp into range and snap to the half-star grid — an album average
+ *  arrives as 3.6667 and the drawn stars have to land on halves. */
+export const snap = (v: number) => {
+  const n = Number.isFinite(v) ? Math.max(0, Math.min(MAX_RATING, v)) : 0;
+  return Math.round(n * 2) / 2;
+};
+/** The one way a grid value is written out: "4", "4.5". */
+export const half = (v: number) => (Number.isInteger(v) ? String(v) : v.toFixed(1));
+
+/** What a typed readout means: the value to write, or `undefined` when the
+ *  text is not a rating at all.
+ *
+ *  The field beside the stars edits a 0-5 rating, so `Number` is nearly the
+ *  whole parser: the comma and the refusal of everything that is not a number
+ *  are the only rules on top of it. A COMMA is the decimal point of half the
+ *  world's locales ("3,5" is three and a half; a 0-5 field has no thousands
+ *  separator for it to be confused with), and anything that would parse as
+ *  NaN ("", " ", "abc", ".", ",", "NaN", "Infinity") is REFUSED rather than
+ *  read as 0: 0 means "unrated" here, so a typo must never clear a rating. A
+ *  NEGATIVE entry is refused for that same reason — a stray sign is not a
+ *  verdict, and clamping it up to 0 would silently throw the rating away —
+ *  while anything above the top is plainly "the most" and lands on 5 via
+ *  `snap`, the grid's one rounding rule. */
+export function parseRatingText(text: string): number | undefined {
+  const s = text.trim().replace(",", ".");
+  if (s === "") return undefined;
+  const n = Number(s);
+  if (!Number.isFinite(n) || n < 0) return undefined;
+  return snap(n);
+}
+
+/* ---------------------------------------------------------------------- *
  * WEB ratings — what script 24 fetched. Picard's 0-100 scale, riding the
  * file's own tags; the web's verdict, NOT the user's, which is why every
  * surface draws these in a different tone (components/StarRating).

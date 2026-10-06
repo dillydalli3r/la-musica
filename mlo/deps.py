@@ -111,9 +111,17 @@ def _probe_spawn():
     """
     cmd = ([os.environ.get("COMSPEC", "cmd.exe"), "/c", "exit", "0"]
            if os.name == "nt" else ["/bin/sh", "-c", "true"])
+    # CREATE_NO_WINDOW, and it matters more here than anywhere else: the
+    # server runs windowed and owns no console, so a bare `cmd.exe` allocates
+    # one of its own and a terminal flashes up — on the first Dependencies
+    # request of the run, which is exactly where the owner saw it. Same flag,
+    # same reason as every other console child (mlo/subproc.py).
+    from .subproc import CREATE_NO_WINDOW
+
     try:
         proc = subprocess.run(cmd, stdout=subprocess.DEVNULL,
-                              stderr=subprocess.DEVNULL, timeout=15)
+                              stderr=subprocess.DEVNULL, timeout=15,
+                              creationflags=CREATE_NO_WINDOW)
     except Exception as e:
         return False, (f"the OS does not let an app start another program "
                        f"({e.__class__.__name__})")

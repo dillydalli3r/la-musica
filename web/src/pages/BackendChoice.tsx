@@ -72,7 +72,7 @@ export default function BackendChoice({ onDone, starting: startingProp = false }
   };
 
   return (
-    <div className="safe-shell min-h-dvh bg-bg text-zinc-100 flex flex-col items-center justify-center">
+    <div className="safe-shell min-h-full bg-bg text-zinc-100 flex flex-col items-center justify-center">
       <div className="w-full max-w-2xl space-y-4 p-6">
         <PageHeader icon={Server} title={t("backend.title")} subtitle={t("backend.subtitle")} />
 

@@ -416,7 +416,7 @@ function Toasts() {
  *  UI flashing through setup. */
 function SetupLoading() {
   return (
-    <div className="safe-shell min-h-dvh bg-bg text-zinc-100 flex flex-col items-center justify-center">
+    <div className="safe-shell min-h-full bg-bg text-zinc-100 flex flex-col items-center justify-center">
       <Loader2 className="h-5 w-5 animate-spin text-zinc-500" />
     </div>
   );
@@ -1024,9 +1024,9 @@ export default function App() {
     // its right. `.safe-shell` carries the notch / home-indicator insets for
     // everything inside it at once (index.html sets `viewport-fit=cover`, so
     // without it the chrome paints under them).
-    <div className="safe-shell h-dvh overflow-hidden bg-bg text-zinc-100 flex">
+    <div className="safe-shell h-full overflow-hidden bg-bg text-zinc-100 flex">
       <aside
-        className={`${collapsed ? "w-14" : "w-48"} hidden md:flex h-full shrink-0 border-r border-border bg-panel p-2 flex-col gap-1 overflow-y-auto transition-[width] duration-150 relative z-20`}
+        className={`${collapsed ? "w-14" : "w-48"} hidden md:flex h-full shrink-0 bg-panel p-2 flex-col gap-1 overflow-y-auto transition-[width] duration-150 relative z-20`}
       >
         {/* sidebar header: brand + collapse toggle, split from the nav by a
             hairline. Collapses to a stacked icon rail. Every metric here is

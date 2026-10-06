@@ -5,6 +5,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { CircleAlert } from "lucide-react";
 import "./index.css";
 import App from "./App";
+import TitleBar from "./components/TitleBar";
 import { applyConfigLocale } from "./lib/i18n";
 
 // The locale is fixed before the first render: the app has not fetched
@@ -68,7 +69,7 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | 
     const { error } = this.state;
     if (!error) return this.props.children;
     return (
-      <div className="min-h-dvh flex items-center justify-center bg-bg p-6 text-zinc-100">
+      <div className="min-h-full flex items-center justify-center bg-bg p-6 text-zinc-100">
         <div className="w-full max-w-lg rounded-xl border border-border bg-card p-5 space-y-3">
           <div className="flex items-center gap-2 text-sm font-semibold">
             <CircleAlert className="h-4 w-4 text-red-400" /> Something went wrong
@@ -105,12 +106,31 @@ const queryClient = new QueryClient({
 import { attachBackendShell } from "./lib/backendShell";
 attachBackendShell();
 
+// Links that leave the app go out through the OS browser instead of being
+// swallowed by the webview (see lib/externalLinks.ts). Same rule as above: it
+// must be listening before the first render, so a click can never land in the
+// window between paint and registration.
+import { attachExternalLinks } from "./lib/externalLinks";
+attachExternalLinks();
+
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
         <ErrorBoundary>
-          <App />
+          {/* The window's own chrome first, then the app: an undecorated shell
+              (see TitleBar) draws its title bar HERE so every screen — the
+              shell, the setup wizard, the address/claim pages — has one.
+              `h-dvh flex flex-col` is what makes that bar cost the app exactly
+              its height instead of painting over it; `min-h-0` on the box below
+              is what stops the app's own `h-full` from being read as "as tall
+              as the viewport" instead of "as tall as this box". */}
+          <div className="h-dvh flex flex-col bg-bg">
+            <TitleBar />
+            <div className="flex-1 min-h-0">
+              <App />
+            </div>
+          </div>
         </ErrorBoundary>
       </BrowserRouter>
     </QueryClientProvider>

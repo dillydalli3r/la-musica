@@ -528,11 +528,27 @@ const LINE_EASE = "transition-[transform,color] duration-motion-slow ease-motion
 const INACTIVE_SCALE = { sm: 0.88, md: 0.84, lg: 0.8 } as const;
 
 /** Non-current synced lines read greyed-out (a slight blur + dim grey);
- * hover or keyboard focus reveals full detail. Plain-text lyrics are never
- * styled — only synced lines get the active/inactive treatment. The dim is
- * deliberately mild (80 %, 1px): over the light additive ambience a 2px blur
- * at 60 % made the line genuinely unreadable on a white cover. */
-const LINE_BLUR = "np-line-blur blur-[1px] opacity-90 hover:blur-none hover:opacity-100 focus-within:blur-none focus-within:opacity-100 transition-[opacity,filter] duration-motion-base ease-motion";
+ * keyboard focus reveals full detail. Plain-text lyrics are never styled —
+ * only synced lines get the active/inactive treatment. The dim is
+ * deliberately mild (90 %, 1px): over the light additive ambience a 2px blur
+ * at 60 % made the line genuinely unreadable on a white cover.
+ *
+ * Deliberately NO `hover:` half — that half IS the owner's "the previous one
+ * flickers for a second after a second". The pane follows the clock, so every
+ * line change glides the words up by one row, which slides the line that just
+ * left the anchor under a pointer parked over the pane. That pointer is
+ * whatever the reader left there — the same plain hand on every row, moving
+ * only with the scroll (and by then the idle window may have hidden the arrow
+ * altogether) — so nothing the reader did changed. With a hover reveal on the
+ * row, though, the OUTGOING line had its blur cleared and its opacity
+ * restored the moment it passed the pointer: it came back to life about a
+ * second after the new line took over and only dimmed again at the NEXT line
+ * change. A line's emphasis has to be a function of the clock alone. With the
+ * reveal gone, the outgoing line's dim + blur ease in once (the same 300 ms
+ * transition) and stay put however the pointer rests. The keyboard half stays
+ * — `:focus-within` follows a deliberate action, and the reduced-motion
+ * kill-list in index.css documents it. */
+const LINE_BLUR = "np-line-blur blur-[1px] opacity-90 focus-within:blur-none focus-within:opacity-100 transition-[opacity,filter] duration-motion-base ease-motion";
 
 /** The volume cluster is its own component because dragging the slider writes
  *  `vol` once per pointer step. Subscribed here, where the value is actually

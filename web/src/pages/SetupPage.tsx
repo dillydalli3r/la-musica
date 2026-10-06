@@ -375,7 +375,7 @@ export default function SetupPage() {
     // Held until the config answers: the draft is the saved config, and a form
     // rendered from nothing would read every untouched switch as a change.
     return (
-      <div className="safe-shell min-h-dvh bg-bg text-zinc-100 flex flex-col items-center justify-center">
+      <div className="safe-shell min-h-full bg-bg text-zinc-100 flex flex-col items-center justify-center">
         <Loader2 className="h-5 w-5 animate-spin text-zinc-500" />
       </div>
     );
@@ -389,7 +389,7 @@ export default function SetupPage() {
   const isLast = index === SETUP_STEPS.length - 1;
 
   return (
-    <div className="safe-shell min-h-dvh bg-bg text-zinc-100 flex flex-col items-center justify-center">
+    <div className="safe-shell min-h-full bg-bg text-zinc-100 flex flex-col items-center justify-center">
       <div className={`w-full ${step.panel === "dependencies" ? "max-w-4xl" : "max-w-2xl"} space-y-4 p-6`}>
         {/* The same frame and header the shell's own wizards use — a user who
             answered "use the built-in backend" is walked straight into this

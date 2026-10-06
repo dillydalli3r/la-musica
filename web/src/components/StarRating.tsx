@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Star } from "lucide-react";
-import { MAX_RATING } from "../lib/ratings";
+import { half, MAX_RATING, parseRatingText, snap } from "../lib/ratings";
 import { useI18n } from "../lib/i18n";
 import { toast } from "../store";
 
@@ -38,15 +38,6 @@ const WEB_MARK = "bg-zinc-400";
  *  artwork surface. */
 const WEB_TEXT = "text-zinc-400";
 
-/** Clamp into range and snap to the half-star grid — an album average
- *  arrives as 3.6667 and the drawn stars have to land on halves. */
-const snap = (v: number) => {
-  const n = Number.isFinite(v) ? Math.max(0, Math.min(MAX_RATING, v)) : 0;
-  return Math.round(n * 2) / 2;
-};
-/** The one way a grid value is written out: "4", "4.5". */
-const half = (v: number) => (Number.isInteger(v) ? String(v) : v.toFixed(1));
-
 /** The one rating control: five stars, halves included.
  *
  *  `value` is the UI rating, 0-5 in steps of 0.5 (0 = unrated) — the same
@@ -61,13 +52,23 @@ const half = (v: number) => (Number.isInteger(v) ? String(v) : v.toFixed(1));
  *  the group is named with the current value ("Rating — 4.5 of 5").
  *
  *  `readOnly` (or simply no `onChange`) is the display-only mode used on
- *  cards: no focus stop, no click targets, one accessible name for the row.
+ *  cards: no focus stop, no click targets, no field in the readout, one
+ *  accessible name for the row.
  *
  *  `pending` is `useSetRating().pending(path)` for this element. While it is
  *  true the control refuses further changes — a second write for the same
  *  element mid-flight would race the first — and shows itself busy. The
  *  optimistic value and the rollback live in lib/ratings.ts; the value this
  *  control draws is whatever the query cache now holds.
+ *
+ *  The numeric readout beside the stars — `showValue`'s, and the row that
+ *  prints the rating it holds beside a web reading — is a FIELD, not a label:
+ *  click it or Tab into it, type, and Enter or a blur writes it; Escape puts
+ *  the old number back. It sets the same value the stars do, so it is refused
+ *  in exactly the places they are: `readOnly` draws the plain string it always
+ *  drew, a pending write keeps the field focusable but inert, and text that is
+ *  not a rating (see `parseRatingText`, which owns the whole rule) leaves the
+ *  rating alone instead of writing a zero.
  *
  *  `max` is how many stars are DRAWN, and it exists for the compact card
  *  read-out: a 3-star row shows the same 0-5 rating on a 3-star scale (a
@@ -139,7 +140,8 @@ export default function StarRating({
   label?: string;
   /** Tooltip for an editing control, in place of the built-in click hint. */
   hint?: string;
-  /** Print the numeric value beside the stars (page headers). */
+  /** Print the numeric value beside the stars (page headers) — a field on an
+   *  editing control, a plain label on a read-only one (see the doc above). */
   showValue?: boolean;
   /** The WEB rating in THIS control's units (0-5) — lib/ratings' webRatingOf /
    *  trackWebRating / albumWebRating hand it over. Absent (or 0) draws nothing:
@@ -182,6 +184,9 @@ export default function StarRating({
 }) {
   const { t } = useI18n();
   const [hover, setHover] = useState<number | null>(null);
+  // What the readout's field holds while it is being typed in, or null when
+  // nobody is editing: the field then shows the rating itself (`readout`).
+  const [draft, setDraft] = useState<string | null>(null);
   const readOnlyFinal = readOnly ?? !onChange;
   const stars = Math.max(1, Math.round(max));
   const value = snap(rawValue);
@@ -222,6 +227,11 @@ export default function StarRating({
   const ownNumber = (showValue && !webOnly) || (value > 0 && hasWeb && webReadout !== "mark");
   const webWords = hasWeb && webOnly;
   const readout = ownNumber ? (value > 0 ? half(value) : "—") : webWords ? webReadoutText : "";
+  // That number is the user's own, on a control that is not display-only —
+  // exactly when the readout is a field (see the doc above). `pending` does
+  // NOT take the field away: like the stars' halves, it stops accepting input
+  // without losing the focus the user is standing in.
+  const readoutEditable = ownNumber && !readOnlyFinal;
   // The slot's width: an invisible copy of the WIDEST string this control can
   // print reserves the box, so the words inside never move the stars. A px
   // constant would be wrong in another locale or font — "4.4 Album Web",
@@ -244,6 +254,19 @@ export default function StarRating({
   };
   /** Selecting the value already set clears the rating. */
   const pick = (drawnValue: number) => fire(drawnValue === drawn ? 0 : toValue(drawnValue));
+
+  /** The field's text, on the grid, written — or dropped. `parseRatingText`
+   *  owns what the text means (a value, or "not a rating at all"); `fire`
+   *  snaps whatever it returns and refuses while a write is in flight, so a
+   *  commit can never post off the grid or race the stars. The typed value
+   *  being the one already held writes nothing at all. Either way the field
+   *  goes back to showing the rating. */
+  const commit = () => {
+    if (draft === null) return;
+    const next = parseRatingText(draft);
+    setDraft(null);
+    if (next !== undefined && next !== value) fire(next);
+  };
 
   return (
     <span
@@ -343,15 +366,69 @@ export default function StarRating({
           reading stays on the stars' tooltip (R359). In `slot` the box is
           reserved whether or not it has words (see `readoutSizer`), so the
           stars cannot move as the row changes between the two; in `text` it
-          is only as wide as its words, which is what an inline surface wants. */}
+          is only as wide as its words, which is what an inline surface wants.
+          The user's own number is a FIELD, not a label (see the doc above):
+          click or Tab into it and type — Enter or a blur writes what the text
+          means, Escape restores. Only `readOnly` keeps the plain string, which
+          is why it is also the only case left `aria-hidden` — the group's own
+          name already carries the value there. */}
       {(readout !== "" || slot) && (
         <span
           className={`relative ml-1.5 shrink-0 tabular-nums ${READOUT[size]} ${ownNumber ? "text-zinc-400" : webTextClass}`}
           title={!ownNumber && webWords ? webTip : undefined}
-          aria-hidden="true"
+          aria-hidden={readoutEditable ? undefined : true}
         >
           {slot && <span className="invisible block whitespace-nowrap">{readoutSizer}</span>}
-          <span className={slot ? "absolute inset-0 flex items-center whitespace-nowrap" : undefined}>{readout}</span>
+          {/* The field is what paints the number, so the box needs a copy of it
+              in FLOW: an absolutely positioned input contributes no width.
+              `readout` — the CURRENT words — is that copy, not the widest
+              number the field could ever hold: `slot` is the reserved box (a
+              row cannot let its stars drift as the readout changes shape), and
+              an inline surface keeps its natural width instead, which is what
+              `tools/check_rating_alignment.mjs` pins for the album header.
+              Typing past the box scrolls inside the field; the row does not
+              move. */}
+          {readoutEditable && !slot && <span className="invisible block whitespace-nowrap">{readout}</span>}
+          {readoutEditable ? (
+            <span className="absolute inset-0 flex items-center">
+              <input
+                type="text"
+                inputMode="decimal"
+                value={draft ?? readout}
+                /* Not `disabled`: the same "focused but inert" the stars'
+                   buttons are under a pending write, so the write landing does
+                   not throw the user's focus out of the field. */
+                readOnly={pending}
+                spellCheck={false}
+                title="Type a rating from 0 to 5 — halves allowed. Enter sets it, Escape cancels."
+                aria-label={`${label} — ${text}. Type a new value and press Enter; Escape cancels.`}
+                className={`w-full min-w-0 select-text bg-transparent p-0 tabular-nums ${pending ? "cursor-default" : "cursor-text"}`}
+                /* Select the number on focus, so "click and type" REPLACES it
+                   rather than appending to it — and swallow the mouseup that
+                   would otherwise collapse the selection back to a caret. */
+                onFocus={(e) => e.currentTarget.select()}
+                onMouseUp={(e) => e.preventDefault()}
+                onClick={(e) => e.stopPropagation()}
+                onChange={(e) => setDraft(e.currentTarget.value)}
+                onKeyDown={(e) => {
+                  // The group's key handler is an ancestor's (←/→ nudge, Delete
+                  // clears): without this, a Backspace while typing would wipe
+                  // the rating instead of a character.
+                  e.stopPropagation();
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    commit();
+                  } else if (e.key === "Escape") {
+                    e.preventDefault();
+                    setDraft(null);
+                  }
+                }}
+                onBlur={commit}
+              />
+            </span>
+          ) : (
+            <span className={slot ? "absolute inset-0 flex items-center whitespace-nowrap" : undefined}>{readout}</span>
+          )}
         </span>
       )}
       {/* The web reading's `mark` form: one dot, for a cell that is a FIXED

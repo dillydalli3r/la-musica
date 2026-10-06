@@ -104,6 +104,97 @@ fn set_music_folder(_app: tauri::AppHandle, folder: String) {
     settings::save(&data, &settings);
 }
 
+/// Open a link out in the user's own browser.
+///
+/// Every "leaves the app" link in the UI is an ordinary `<a target="_blank">`
+/// anchor, and inside a Tauri webview those did nothing at all: a webview has
+/// no tabs, and wry denies a new-window request unless a handler is installed,
+/// so the click was swallowed — the report that started this. The page now
+/// hands the URL here (`web/src/lib/externalLinks.ts`) and the shell asks the
+/// OS to open it, which is also what makes the link land in the browser the
+/// user actually browses with, session and all.
+///
+/// Only http/https/mailto get through. The page is our own code, but a command
+/// that feeds an arbitrary string to the OS opener is a door worth keeping
+/// narrow: without the check a `file:` or custom-scheme URL would be a way out
+/// of the app that nothing in it asked for.
+#[cfg(desktop)]
+#[tauri::command]
+fn open_external(url: String) -> Result<(), String> {
+    let scheme = url
+        .split_once(':')
+        .map(|(s, _)| s.to_ascii_lowercase())
+        .unwrap_or_default();
+    if !matches!(scheme.as_str(), "http" | "https" | "mailto") {
+        return Err(format!("refusing to open a {scheme:?} link"));
+    }
+    platform_open(&url)
+}
+
+/// Hand a URL to the OS opener of the platform this is built for.
+///
+/// No new dependency, for the same reason `main.rs` calls
+/// `SetCurrentProcessExplicitAppUserModelID` by hand: on Windows this is one
+/// call into an already-linked library, and on the other two it is the opener
+/// every desktop already has.
+#[cfg(all(desktop, target_os = "windows"))]
+fn platform_open(url: &str) -> Result<(), String> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+
+    #[link(name = "shell32")]
+    extern "system" {
+        fn ShellExecuteW(
+            hwnd: *mut core::ffi::c_void,
+            operation: *const u16,
+            file: *const u16,
+            parameters: *const u16,
+            directory: *const u16,
+            show_cmd: i32,
+        ) -> *mut core::ffi::c_void;
+    }
+    const SW_SHOWNORMAL: i32 = 1;
+
+    let wide = |s: &str| -> Vec<u16> {
+        OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
+    };
+    let operation = wide("open");
+    let target = wide(url);
+    // ShellExecuteW answers an HINSTANCE-shaped value that is NOT a handle:
+    // anything above 32 means "started", and the value itself is never used.
+    let result = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            operation.as_ptr(),
+            target.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    if result as usize > 32 {
+        Ok(())
+    } else {
+        Err(format!("the OS could not open the link ({})", result as usize))
+    }
+}
+
+#[cfg(all(desktop, not(target_os = "windows")))]
+fn platform_open(url: &str) -> Result<(), String> {
+    let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+    // Detached on purpose: the browser outlives this call, and nothing here
+    // wants its exit status. The streams go to null so a chatty opener cannot
+    // fill a pipe nobody drains.
+    std::process::Command::new(opener)
+        .arg(url)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("could not start {opener}: {e}"))
+}
+
 /// Tell the shell whether the track playing right now is favourited.
 ///
 /// This is how the iOS Now Playing star (Control Center / lock screen) is kept
@@ -616,6 +707,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             pick_folder,
             set_music_folder,
+            open_external,
             set_now_playing_liked,
             set_playback_active,
             ios_audio_state,

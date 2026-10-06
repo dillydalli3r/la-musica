@@ -86,7 +86,7 @@ export default function LoginPage({ onSignedIn }: { onSignedIn: () => void }) {
   };
 
   return (
-    <div className="safe-shell min-h-dvh bg-bg text-zinc-100 flex flex-col items-center justify-center">
+    <div className="safe-shell min-h-full bg-bg text-zinc-100 flex flex-col items-center justify-center">
       <div className="w-full max-w-2xl space-y-4 p-6">
         {/* The house header, the same one the setup wizard and the backend
             chooser draw: the auth screen used to hand-roll a narrower title

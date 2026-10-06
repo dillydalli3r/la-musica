@@ -26,8 +26,10 @@ import {
   markAllRead,
   openNotification,
   registerNavigator,
+  registerOpener,
   useNotifications,
 } from "../lib/notifications";
+import { openExternal } from "../lib/externalLinks";
 import { api } from "../api";
 import { useI18n } from "../lib/i18n";
 import Popover from "./Popover";
@@ -105,6 +107,9 @@ export default function NotificationBell() {
   }, [sessionData]);
 
   useEffect(() => registerNavigator((to) => navigate(to)), [navigate]);
+  // Links out of the tray go through the shell, like every other link out
+  // (see lib/externalLinks.ts) — a webview drops plain `window.open`.
+  useEffect(() => registerOpener(openExternal), []);
 
   // Kept fresh on every load: a browser rotates its push endpoint and key
   // material on its own schedule, and a row the server kept would then encrypt

@@ -129,30 +129,55 @@ try {
   await page.waitForSelector("table tbody tr [role='group']", { timeout: 20000 });
   await page.waitForTimeout(400);
 
-  const all = await page.$$eval("[role='group']", (nodes) => nodes.map((el) => {
-    const box = el.getBoundingClientRect();
-    const readout = el.lastElementChild;
-    const stars = [...el.children].filter((c) => c !== readout);
-    const first = stars.length ? stars[0].getBoundingClientRect() : null;
-    const last = stars.length ? stars[stars.length - 1].getBoundingClientRect() : null;
-    // The WORDS' own width, not the reserved box's: the readout's inner span
-    // carries only what is printed (the sizer is its sibling), so a Range over
-    // it measures the text exactly as the reader sees it.
-    const content = readout ? readout.lastElementChild : null;
-    let contentW = 0;
-    if (content) {
-      const range = document.createRange();
-      range.selectNodeContents(content);
-      contentW = range.getBoundingClientRect().width;
-    }
-    return {
-      inRow: !!el.closest("table tbody tr"),
-      x: box.x, w: box.width,
-      text: content ? (content.textContent || "").trim() : "",
-      contentW,
-      starsW: first && last ? last.right - first.left : 0,
+  const all = await page.$$eval("[role='group']", (nodes) => {
+    // What the control PRINTS and how wide that print is. The readout is
+    // either a text node or — since the user's own number became a FIELD (see
+    // StarRating's readout) — an input, whose `value` no `textContent` and no
+    // Range can see. A field's value is measured against the readout's own
+    // font instead, so "the words" means the same thing in both shapes.
+    const printed = (readout) => {
+      const field = readout ? readout.querySelector("input") : null;
+      const target = field ?? (readout ? readout.lastElementChild : null);
+      if (!target) return { text: "", width: 0 };
+      if (!field) {
+        const range = document.createRange();
+        range.selectNodeContents(target);
+        return {
+          text: (target.textContent || "").trim(),
+          width: range.getBoundingClientRect().width,
+        };
+      }
+      const cs = getComputedStyle(field);
+      const probe = document.createElement("span");
+      probe.textContent = field.value;
+      probe.style.cssText =
+        `position:absolute;visibility:hidden;white-space:pre;font-family:${cs.fontFamily};` +
+        `font-size:${cs.fontSize};font-weight:${cs.fontWeight};letter-spacing:${cs.letterSpacing}`;
+      document.body.appendChild(probe);
+      const width = probe.getBoundingClientRect().width;
+      probe.remove();
+      return { text: field.value.trim(), width };
     };
-  }));
+
+    return nodes.map((el) => {
+      const box = el.getBoundingClientRect();
+      const readout = el.lastElementChild;
+      const stars = [...el.children].filter((c) => c !== readout);
+      const first = stars.length ? stars[0].getBoundingClientRect() : null;
+      const last = stars.length ? stars[stars.length - 1].getBoundingClientRect() : null;
+      // The WORDS' own width, not the reserved box's: what the readout prints
+      // is measured on its own (the sizer is its sibling, and a field's value
+      // is measured as text), so reservation can be told apart from words.
+      const words = printed(readout);
+      return {
+        inRow: !!el.closest("table tbody tr"),
+        x: box.x, w: box.width,
+        text: words.text,
+        contentW: words.width,
+        starsW: first && last ? last.right - first.left : 0,
+      };
+    });
+  });
   const rows = all.filter((r) => r.inRow);
   const inline = all.filter((r) => !r.inRow);
   check("all four rating rows render", rows.length === 4, JSON.stringify(all.map((r) => r.text)));
