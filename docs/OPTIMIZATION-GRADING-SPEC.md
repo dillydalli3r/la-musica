@@ -357,6 +357,22 @@ container open past its stop grace (measured: a 13 s chain delayed `docker stop`
 by itself, leaving the app's own 120 s wait and its journal unreachable) — it now
 names the scripts it did not run and lets the container go.
 
+**R80b — the desktop app updates itself, and only from a signed release.** The
+shell asks the release's own manifest
+(`releases/latest/download/latest.json` — `plugins.updater` in
+`desktop/src-tauri/tauri.conf.json`) whether a newer build exists, and Settings →
+Security offers to install it: the download is verified against the public key
+baked into the app, and only then does the installer run — silently on Windows,
+which then starts the new build, and in place everywhere else, where the shell
+re-execs itself. Nothing else may install an update (no unsigned download, no
+"latest" guess): this is the one path that replaces the binary a user launched,
+and the signature is what makes "install it for me" safe to offer. The version it
+compares is the SHELL's own, because a server it happens to talk to may be a
+different install at a different version whose number says nothing about the app
+on this machine. A browser client is served by whichever server it connects to
+(that image updates itself, R80) and a phone updates from whatever shipped it, so
+neither is offered this — the notice they get is a link, not an installer.
+
 ---
 
 ## 3. Grading checks

@@ -35,6 +35,13 @@ parking_lot = "0.12"
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-single-instance = "2"
 
+# The in-app updater: the shell asks the release's own manifest whether a newer
+# build exists, downloads that build, verifies its signature against the public
+# key baked into `tauri.conf.json`, installs it and starts it. Desktop only —
+# a phone gets its updates from the store that shipped it, and this plugin does
+# not build for mobile at all.
+tauri-plugin-updater = "2"
+
 # The iOS Now Playing star only (src/ios_like.rs): MediaPlayer's
 # `MPRemoteCommandCenter.likeCommand` is Objective-C, and the Media Session API
 # the webview already uses has no like action at all, so this one piece of the

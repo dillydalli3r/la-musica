@@ -111,6 +111,16 @@ When they do ask for one:
    runs `.github/workflows/release.yml` — suites, then the web/desktop/mobile/
    docker builds and the published GitHub release (~10 min). Watch it with
    `gh run watch <id>`; a red job there is the release, not the change.
+4. **The updater's signing key.** Every release signs its desktop bundles with
+   the key whose private half is the `TAURI_SIGNING_PRIVATE_KEY` secret and
+   whose copy on this machine is `~/.tauri/la-musica.key` (Tauri's own place for
+   it); the public half is in `tauri.conf.json`. **Back that file up somewhere
+   that is not this machine.** A GitHub secret cannot be read back out, and an
+   installed app verifies updates against the key it was BUILT with — so losing
+   the private key does not fail a build, it quietly ends in-app updates for
+   every copy already out there, which then has to be replaced by hand. Rotating
+   it deliberately has the same cost, so rotate only when the old one is known
+   to be compromised.
 
 ## Commands worth knowing
 
@@ -156,6 +166,19 @@ When they do ask for one:
 - **A behaviour change gets a rule.** `docs/OPTIMIZATION-GRADING-SPEC.md` is the
   contract users check the app against; `README.md` and the GitHub description
   follow it.
+- **`createUpdaterArtifacts` and the signing key live in the desktop workflow,
+  never in `tauri.conf.json`.** With them in the config, every build that is not
+  a release — a local `tauri build`, the mobile workflow's compile of the same
+  crate — would demand the key and fail without it; the workflow passes both,
+  and the release job assembles `latest.json` from the signatures the bundles
+  left behind (`tools/make_updater_manifest.py`, whose suite pins every platform
+  key Tauri's updater asks for). The app's endpoint and public key are in
+  `tauri.conf.json` (`plugins.updater`) and must agree with that key. Do NOT
+  turn on `plugins.updater.requireSignedVersion`: the pinned tauri-cli (2.11.4)
+  signs with a trusted comment carrying only a timestamp and the file name, and
+  that switch rejects any signature without a version in it — every update would
+  fail, and the failure would look like a broken endpoint rather than a config
+  mistake.
 - **A console child gets `CREATE_NO_WINDOW`.** The server runs windowed and owns
   no console, so anything launched without it flashes a terminal window;
   `mlo/deps.py`'s spawn probe did exactly that on the first Dependencies request.

@@ -28,6 +28,17 @@
       "csp": null
     }
   },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/dillydalli3r/la-musica/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEU0MUMzOTM1MTRGQ0ZEN0IKUldSNy9md1VOVGtjNUtYNzl6dWlnc3JRUm5hb1RhdDd5bk0wblJoci9tbVl0V25xdWJ5bFY2RWoK",
+      "windows": {
+        "installMode": "quiet"
+      }
+    }
+  },
   "bundle": {
     "active": true,
     "targets": "all",

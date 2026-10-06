@@ -78,7 +78,7 @@ export default function BackendChoice({ onDone, starting: startingProp = false }
 
         {/* The SAME rail as the wizard this leads into, so answering the
             question reads as step 1 of one flow rather than as a screen with
-            its own menu: "a server I run" continues on step 2, and the
+            its own menu: "a server" continues on step 2, and the
             built-in path leaves the shell for the app's own first run, whose
             rail is drawn by the same component. */}
         <SetupRail

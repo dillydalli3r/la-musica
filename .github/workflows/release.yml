@@ -236,6 +236,14 @@ jobs:
           check Linux-appimage '*.AppImage'
           check Android '*.apk'
           check iOS '*.ipa'
+          # …and every OS needs an UPDATER artifact — a signed zip/tarball the
+          # installed app downloads rather than the installer a person does.
+          # Nothing else fails when one is missing: the manifest the next
+          # release builds would simply leave that platform out, and its apps
+          # would stop being offered updates without a word.
+          check Windows-updater '*-setup.exe.zip'
+          check macOS-updater '*.app.tar.gz'
+          check Linux-updater '*.AppImage.tar.gz'
           exit "$missing"
 
       - name: The IPA users install carries the iOS pieces
@@ -268,6 +276,20 @@ jobs:
             --date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           python -c "import json;d=json.load(open('source.json'));print(d['apps'][0]['bundleIdentifier'], d['apps'][0]['versions'][0]['downloadURL'])"
 
+      - name: The updater manifest every installed app reads
+        # `releases/latest/download/latest.json` is what the shell's updater asks
+        # (`plugins.updater.endpoints` in desktop/src-tauri/tauri.conf.json) —
+        # ONE static URL, assembled here from the artifacts this release is
+        # about to publish, so the URL and the signature inside it can only
+        # describe those files. The release's own notes travel in it too, which
+        # is what the in-app "update available" card shows.
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          python tools/make_updater_manifest.py clients \
+            --version "$VERSION" --tag "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" \
+            --notes-file "docs/release-notes/release-notes-${VERSION}.md" \
+            --date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --out latest.json
+
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
@@ -290,6 +312,14 @@ jobs:
             clients/**/*.AppImage
             clients/**/*.apk
             clients/**/*.ipa
+            # The updater artifacts (a signed installer / app tarball) and the
+            # manifest that points at them. They are assets a person would not
+            # download, but an installed app downloads them by URL, so the
+            # manifest and the files it names must both be here. Windows updates
+            # from the `.exe`/`.msi` above, which is why no extra Windows pattern
+            # is needed.
+            clients/**/*.tar.gz
+            latest.json
             source.json
           draft: false
           prerelease: false

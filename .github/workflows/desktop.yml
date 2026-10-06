@@ -128,8 +128,20 @@ jobs:
         # 300 MB backend would fail with "resource path ... doesn't exist".
         # shell: bash, because the Windows runner's PowerShell cannot be
         # trusted to pass that JSON argument through intact.
+        #
+        # `createUpdaterArtifacts` and the key are what make a bundle
+        # updateable: the bundler writes the updater artifacts (on Windows the
+        # NSIS installer itself, elsewhere a tarball) and a `.sig` beside each,
+        # and the release job turns those into the `latest.json` every installed
+        # app reads. Both are passed HERE rather than put in tauri.conf.json on
+        # purpose: with them in the config, every build that is not a release —
+        # a local `tauri build`, the mobile workflow's compile of the same
+        # crate — would demand the key and fail without it.
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         shell: bash
-        run: npx tauri build --bundles ${{ matrix.bundles }} --config '{"build":{"beforeBuildCommand":null},"bundle":{"resources":{"../bundle/mlo-server":"mlo-server"}}}'
+        run: npx tauri build --bundles ${{ matrix.bundles }} --config '{"build":{"beforeBuildCommand":null},"bundle":{"resources":{"../bundle/mlo-server":"mlo-server"},"createUpdaterArtifacts":true}}'
 
       - name: Verify the icons inside the built bundles
         # `bundle.icon` is what each bundler is *told* to use; what it actually
@@ -477,3 +489,10 @@ jobs:
             desktop/src-tauri/target/release/bundle/macos/*.app
             desktop/src-tauri/target/release/bundle/deb/*.deb
             desktop/src-tauri/target/release/bundle/appimage/*.AppImage
+            # …and what an INSTALLED app updates FROM, which is not what a
+            # person downloads: the `.sig` beside each updater artifact is what
+            # becomes the manifest's signature, and the tarballs are the URLs in
+            # it (Windows updates from the installer above, which is why only
+            # its signature is listed here).
+            desktop/src-tauri/target/release/bundle/*/*.sig
+            desktop/src-tauri/target/release/bundle/*/*.tar.gz

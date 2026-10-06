@@ -113,6 +113,13 @@ attachBackendShell();
 import { attachExternalLinks } from "./lib/externalLinks";
 attachExternalLinks();
 
+// The desktop shell's own update check, a few seconds in (lib/updater.ts): a
+// newer release lands in the notification tray and is toasted once per version.
+// Inert everywhere else — a browser is served by the server it talks to, and a
+// phone updates from whatever shipped it.
+import { startUpdateWatch } from "./lib/updater";
+startUpdateWatch();
+
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>

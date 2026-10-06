@@ -35,7 +35,7 @@ use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 #[cfg(desktop)]
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 #[cfg(desktop)]
-use tauri::{Manager, RunEvent};
+use tauri::{Emitter, Manager, RunEvent};
 // The mobile path needs `Manager` too, for the one thing it does at startup:
 // look up the window from the config and show it.
 #[cfg(mobile)]
@@ -193,6 +193,158 @@ fn platform_open(url: &str) -> Result<(), String> {
         .spawn()
         .map(|_| ())
         .map_err(|e| format!("could not start {opener}: {e}"))
+}
+
+/// What the shell knows about being current: the version THIS build is, and the
+/// newer release when there is one (`None` = this is the newest).
+#[cfg(desktop)]
+#[derive(Clone, serde::Serialize)]
+struct UpdateStatus {
+    current: String,
+    offer: Option<UpdateOffer>,
+}
+
+/// A newer release this shell could install, as the page draws it. `notes` is
+/// free text from the release manifest and is drawn as text, never as markup.
+#[cfg(desktop)]
+#[derive(Clone, serde::Serialize)]
+struct UpdateOffer {
+    version: String,
+    notes: String,
+    date: String,
+}
+
+/// How far along an install is, on the `mlo-update` event. `total` is what the
+/// server said, and is None when it said nothing — the page falls back to an
+/// indeterminate bar rather than inventing a denominator. `stage` is
+/// "downloading" until the bytes are in and "installing" after that, which is
+/// the point where a bar stops meaning anything and the page says what is
+/// happening instead.
+#[cfg(desktop)]
+#[derive(Clone, serde::Serialize)]
+struct UpdateProgress {
+    stage: &'static str,
+    downloaded: u64,
+    total: Option<u64>,
+}
+
+/// Is there a newer release than this build? `offer: None` means this is the
+/// newest, and `current` is always this build's own version — the page says
+/// what it is on without a second call.
+///
+/// The SHELL answers this rather than the server, and that is the whole point:
+/// in remote mode the server is somebody else's install, whose version says
+/// nothing about this BINARY — and in local mode it is the backend this shell
+/// ships, whose version is this one's. One version to compare, and it is the
+/// one an update would replace.
+///
+/// The endpoint (`plugins.updater` in tauri.conf.json) is the release's own
+/// manifest and every download is checked against the public key baked in at
+/// build time, so an answer here is an answer about something this app could
+/// really install. A failure is returned as a sentence, never as a scary state:
+/// being offline, rate-limited or behind a proxy is normal, and the page says
+/// so rather than showing an update it cannot serve.
+#[cfg(desktop)]
+#[tauri::command]
+async fn update_check(app: tauri::AppHandle) -> Result<UpdateStatus, String> {
+    use tauri_plugin_updater::UpdaterExt;
+
+    let current = app.package_info().version.to_string();
+    let found = app
+        .updater()
+        .map_err(|e| e.to_string())?
+        .check()
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(UpdateStatus {
+        current,
+        offer: found.map(|u| UpdateOffer {
+            version: u.version.clone(),
+            notes: u.body.clone().unwrap_or_default(),
+            date: u.date.map(|d| d.to_string()).unwrap_or_default(),
+        }),
+    })
+}
+
+/// Download the newer release, install it, and come back as the new build.
+///
+/// Progress goes out on `mlo-update` while the bytes arrive: a 40 MB installer
+/// with no feedback reads as a hung app, and this one takes long enough to
+/// watch. The download is signature-checked before anything is run — the one
+/// property that makes "install it for me" safe to offer.
+///
+/// Windows does not return from the install: the plugin starts the NSIS
+/// installer (installMode `quiet`, so the app's own progress is the whole
+/// story) and exits this process, and the installer restarts the app when it
+/// is done. Everywhere else the bundle is swapped in place and the restart is
+/// this call's to make.
+///
+/// A job mid-flight is interrupted by it, exactly as a hand-run installer
+/// interrupts one; the backend's own recovery reconciles that on the next
+/// start (server/interrupt_recovery.py), which is why this needs no guard of
+/// its own.
+#[cfg(desktop)]
+#[tauri::command]
+async fn update_install(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri_plugin_updater::UpdaterExt;
+
+    let found = app
+        .updater()
+        .map_err(|e| e.to_string())?
+        .check()
+        .await
+        .map_err(|e| e.to_string())?;
+    let Some(update) = found else {
+        return Err("this build is already the newest release".into());
+    };
+
+    // `on_chunk` hands over the SIZE of each chunk, not a running total (see
+    // tauri-plugin-updater's `download`: `on_chunk(chunk.len(), content_length)`),
+    // so the total has to be accumulated here — comparing a chunk's own length
+    // against a percentage of the file is a threshold nothing ever crosses, which
+    // is exactly how this shipped once: a silent download with a bar that never
+    // moved. One event per percent (or every 256 KiB while the size is unknown),
+    // which is what keeps a 40 MB file from putting thousands of messages through
+    // the IPC.
+    let handle = app.clone();
+    let mut sent = 0u64;
+    let mut next = 0u64;
+    let progress = app.clone();
+    update
+        .download_and_install(
+            move |chunk, total| {
+                sent += chunk as u64;
+                let step = match total {
+                    Some(size) if size > 0 => (size / 100).max(1),
+                    _ => 256 * 1024,
+                };
+                if next == 0 {
+                    next = step;
+                }
+                if sent >= next {
+                    // …and the next event is due one step further on, so a fast
+                    // download reports its real end instead of racing ahead.
+                    next = sent + step;
+                    let _ = handle.emit(
+                        "mlo-update",
+                        UpdateProgress { stage: "downloading", downloaded: sent, total },
+                    );
+                }
+            },
+            // The bytes are in and the swap is about to start: one last event
+            // so the page can stop drawing a percentage it can no longer
+            // advance (on Windows the installer is the next thing to run, and
+            // this process is about to be replaced).
+            move || {
+                let _ = progress.emit(
+                    "mlo-update",
+                    UpdateProgress { stage: "installing", downloaded: 0, total: None },
+                );
+            },
+        )
+        .await
+        .map_err(|e| format!("the update could not be installed: {e}"))?;
+    app.restart()
 }
 
 /// Tell the shell whether the track playing right now is favourited.
@@ -704,10 +856,18 @@ pub fn run() {
             MacosLauncher::LaunchAgent,
             None,
         ))
+        // The in-app updater: `plugins.updater` in tauri.conf.json names the
+        // endpoint (the release's own manifest) and the public key every
+        // download is verified against, and `update_check`/`update_install`
+        // below are what the page drives. Desktop only — no phone builds this
+        // crate's updater at all, and a phone updates from its own store.
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             pick_folder,
             set_music_folder,
             open_external,
+            update_check,
+            update_install,
             set_now_playing_liked,
             set_playback_active,
             ios_audio_state,

@@ -4,6 +4,7 @@ import { KeyRound, Loader2, LogOut, Server, ShieldCheck, Trash2, UserPlus, Wand2
 import { api, IN_TAURI, normalizeServerUrl, serverUrl, setServerUrl, setToken } from "../api";
 import ConfirmButton from "./ConfirmButton";
 import ServerVersionNotice from "./ServerVersionNotice";
+import ClientUpdate from "./ClientUpdate";
 import { useI18n } from "../lib/i18n";
 import { isClientShell, probeServer, resetClientSetup, type ProbeResult } from "../lib/clientSetup";
 import { dropPush } from "../lib/notify";
@@ -210,6 +211,7 @@ export default function SecurityPanel() {
             <span className="text-[11px] text-zinc-600">{probe?.ok ? "" : t("client.need_test")}</span>
           </div>
           <ServerVersionNotice />
+          <ClientUpdate />
         </div>
       </div>
 
