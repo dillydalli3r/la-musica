@@ -160,6 +160,14 @@ When they do ask for one:
   a sweep mid-flight once committed a half-finished file.
 - **Stay album-scoped.** A script or import that walks the music folder must check
   `config.get("targets")` first; only a deliberate Run All walks the library.
+- **The shell's capabilities must cover the page the window loads.** A packaged
+  install points the window at the backend it spawned on loopback, and Tauri
+  counts any http page as remote: without the `remote` URL list in
+  `capabilities/default.json`, every `plugin:window` command (dragging,
+  minimize, maximize, close) *and* every app command is refused there — a title
+  bar whose controls do nothing. The app commands additionally need the manifest
+  in `build.rs`, which is what gives them a permission to be granted at all, so
+  its command list and `generate_handler!` must stay equal.
 - **Writers fill, they do not overwrite** — except the four families an import
   decides (lyrics, genre, advisory, embedded cover), which
   `server/imports.drop_arrived_values` clears first so the import's values land.

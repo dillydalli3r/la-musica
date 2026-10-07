@@ -177,6 +177,126 @@
       "description": "Permission identifier",
       "oneOf": [
         {
+          "description": "Enables the choose_backend command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-choose-backend",
+          "markdownDescription": "Enables the choose_backend command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the ios_audio_state command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-ios-audio-state",
+          "markdownDescription": "Enables the ios_audio_state command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the open_external command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-open-external",
+          "markdownDescription": "Enables the open_external command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the pick_folder command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-pick-folder",
+          "markdownDescription": "Enables the pick_folder command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the set_music_folder command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-set-music-folder",
+          "markdownDescription": "Enables the set_music_folder command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the set_now_playing_liked command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-set-now-playing-liked",
+          "markdownDescription": "Enables the set_now_playing_liked command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the set_playback_active command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-set-playback-active",
+          "markdownDescription": "Enables the set_playback_active command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the shell_backend_choice command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-shell-backend-choice",
+          "markdownDescription": "Enables the shell_backend_choice command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the update_check command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-update-check",
+          "markdownDescription": "Enables the update_check command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the update_install command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-update-install",
+          "markdownDescription": "Enables the update_install command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the choose_backend command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-choose-backend",
+          "markdownDescription": "Denies the choose_backend command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the ios_audio_state command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-ios-audio-state",
+          "markdownDescription": "Denies the ios_audio_state command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the open_external command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-open-external",
+          "markdownDescription": "Denies the open_external command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the pick_folder command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-pick-folder",
+          "markdownDescription": "Denies the pick_folder command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the set_music_folder command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-set-music-folder",
+          "markdownDescription": "Denies the set_music_folder command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the set_now_playing_liked command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-set-now-playing-liked",
+          "markdownDescription": "Denies the set_now_playing_liked command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the set_playback_active command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-set-playback-active",
+          "markdownDescription": "Denies the set_playback_active command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the shell_backend_choice command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-shell-backend-choice",
+          "markdownDescription": "Denies the shell_backend_choice command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the update_check command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-update-check",
+          "markdownDescription": "Denies the update_check command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the update_install command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-update-install",
+          "markdownDescription": "Denies the update_install command without any pre-configured scope."
+        },
+        {
           "description": "This permission set configures if your\napplication can enable or disable auto\nstarting the application on boot.\n\n#### Granted Permissions\n\nIt allows all to check, enable and\ndisable the automatic start on boot.\n\n\n#### This default permission set includes:\n\n- `allow-enable`\n- `allow-disable`\n- `allow-is-enabled`",
           "type": "string",
           "const": "autostart:default",

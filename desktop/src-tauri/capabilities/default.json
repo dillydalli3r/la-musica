@@ -1,9 +1,12 @@
 {
   "$schema": "gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Desktop capability for the main window (tray, folder picker, notifications). The shell talks to a server the user runs; it starts none.",
+  "description": "Desktop capability for the main window (tray, folder picker, notifications, the updater). The shell talks to a server the user runs; it starts none. The `remote` URL list is what lets the window work in LOCAL mode, where the shell points the page at the backend it spawned on loopback: a page served over http is not the app's own origin, so without it every `plugin:window` command — dragging, minimize, maximize, close — and every app command below is refused there, which is a title bar with dead controls and an updater that never asks. Only loopback is granted: a server on the LAN or over Tailscale serves its own page and gets none of this (in REMOTE mode the shell loads its own assets instead, so the page is local to begin with and needs no grant).",
   "platforms": ["linux", "macOS", "windows"],
   "windows": ["main"],
+  "remote": {
+    "urls": ["http://127.0.0.1:*", "http://localhost:*"]
+  },
   "permissions": [
     "core:default",
     "core:window:allow-start-dragging",
@@ -12,6 +15,16 @@
     "core:window:allow-close",
     "dialog:allow-open",
     "dialog:allow-save",
-    "notification:default"
+    "notification:default",
+    "allow-pick-folder",
+    "allow-set-music-folder",
+    "allow-open-external",
+    "allow-update-check",
+    "allow-update-install",
+    "allow-set-now-playing-liked",
+    "allow-set-playback-active",
+    "allow-ios-audio-state",
+    "allow-shell-backend-choice",
+    "allow-choose-backend"
   ]
 }

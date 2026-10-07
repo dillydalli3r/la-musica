@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-shell-backend-choice"
+description = "Enables the shell_backend_choice command without any pre-configured scope."
+commands.allow = ["shell_backend_choice"]
+
+[[permission]]
+identifier = "deny-shell-backend-choice"
+description = "Denies the shell_backend_choice command without any pre-configured scope."
+commands.deny = ["shell_backend_choice"]

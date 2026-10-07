@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-music-folder"
+description = "Enables the set_music_folder command without any pre-configured scope."
+commands.allow = ["set_music_folder"]
+
+[[permission]]
+identifier = "deny-set-music-folder"
+description = "Denies the set_music_folder command without any pre-configured scope."
+commands.deny = ["set_music_folder"]
