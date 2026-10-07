@@ -113,6 +113,43 @@ jobs:
           python -m PyInstaller pyinstaller/mlo-server.spec
           python tools/stage_desktop_bundle.py
 
+      - name: The updater key is the CONTENTS of the generated file
+        # The bundler's own failure for a wrong key is `failed to decode secret
+        # key: incorrect updater private key password: Missing comment in secret
+        # key` — a minisign riddle that names neither which half is wrong nor
+        # what the secret actually holds, and the run that first hit it spent
+        # three 13-minute releases on it. This says it in one line, before the
+        # build, and prints NOTHING secret: lengths, whether it decodes, and the
+        # comment line (which is the same for every key of this type).
+        #
+        # What it must be: the contents of the file `tauri signer generate`
+        # wrote, which is BASE64 — the same value a local
+        # `TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.tauri/<name>.key)" tauri build`
+        # uses, and the pipeline's own `mlo/../AGENTS.md` release note.
+        env:
+          KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          python - <<'PY'
+          import base64, os
+          raw = os.environ.get("KEY", "")
+          print(f"key secret: {len(raw)} chars, newline={'yes' if chr(10) in raw else 'no'}, "
+                f"password secret: {len(os.environ.get('PASSWORD', ''))} chars")
+          if not raw:
+              raise SystemExit("::error::TAURI_SIGNING_PRIVATE_KEY is empty — nothing can be signed")
+          try:
+              decoded = base64.b64decode(raw.strip(), validate=True).decode("utf-8", "replace")
+          except Exception as exc:
+              raise SystemExit(f"::error::the key secret is not base64 ({type(exc).__name__}) — it must be "
+                               f"the CONTENTS of ~/.tauri/<name>.key, not its path and not a decoded copy")
+          first = decoded.splitlines()[0] if decoded else ""
+          print(f"decoded: {len(decoded)} chars, first line {first[:60]!r}")
+          if not first.startswith("untrusted comment:"):
+              raise SystemExit("::error::the decoded key has no `untrusted comment:` line — it is not a "
+                               "minisign secret key (a public key, or a re-encoded copy, looks like this)")
+          PY
+
       - name: Build the bundles
         working-directory: desktop
         # Two things are merged in here, both of them only true of this build:
