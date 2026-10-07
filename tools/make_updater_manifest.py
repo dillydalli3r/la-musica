@@ -120,6 +120,18 @@ def collect(clients_dir):
     return found, unknown
 
 
+def served_name(artifact):
+    """The file name the release actually serves for an artifact.
+
+    GitHub rewrites a SPACE to a dot when a file is uploaded, so
+    `la musica_5.3.0_x64-setup.exe` is published as
+    `la.musica_5.3.0_x64-setup.exe` — measured on 5.3.0, whose first manifest
+    pointed every platform at a URL that 404'd (the verifier fetched 9 bytes of
+    "Not Found"). The manifest must name the SERVED file, not the file on disk.
+    """
+    return artifact.name.replace(" ", ".")
+
+
 def manifest(found, version, tag, repo, notes, date):
     """The `latest.json` document: one entry per platform, plus the bare keys."""
     base = f"https://github.com/{repo}/releases/download/{quote(tag)}"
@@ -127,7 +139,7 @@ def manifest(found, version, tag, repo, notes, date):
     for (os_name, installer, arch), artifact in sorted(found.items()):
         entry = {
             "signature": Path(f"{artifact}.sig").read_text(encoding="utf-8").strip(),
-            "url": f"{base}/{quote(artifact.name)}",
+            "url": f"{base}/{quote(served_name(artifact))}",
         }
         platforms[f"{os_name}-{arch}-{installer}"] = entry
     # …and the bare key each installed app falls back to, decided by
@@ -143,7 +155,7 @@ def manifest(found, version, tag, repo, notes, date):
                 f"{os_name}-{arch}",
                 {
                     "signature": Path(f"{found[(os_name, best, arch)]}.sig").read_text(encoding="utf-8").strip(),
-                    "url": f"{base}/{quote(found[(os_name, best, arch)].name)}",
+                    "url": f"{base}/{quote(served_name(found[(os_name, best, arch)]))}",
                 },
             )
     return {

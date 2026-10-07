@@ -75,9 +75,9 @@ def main():
     # real build); the zipped form the plugin also accepts is covered below.
     files = [
         "la musica_5.3.0_x64-setup.exe",
-        "la.musica_5.3.0_aarch64.app.tar.gz",
-        "la.musica_5.3.0_amd64.AppImage.tar.gz",
-        "la.musica_5.3.0_amd64.deb",
+        "la musica_5.3.0_aarch64.app.tar.gz",
+        "la musica_5.3.0_amd64.AppImage.tar.gz",
+        "la musica_5.3.0_amd64.deb",
     ]
     code, output, doc = manifest_for(files, notes="# la musica 5.3.0\n\nSome notes.\n")
 
@@ -87,9 +87,14 @@ def main():
         return 1
 
     platforms = doc.get("platforms", {})
+    # The FILES carry the product name with its space; the URLs carry what
+    # GitHub serves for them, which has that space rewritten to a dot. Both
+    # halves matter: a manifest built from the file's own name 404s on every
+    # platform (measured on the 5.3.0 release), and one built by hand-escaping
+    # it as %20 does exactly the same.
     expected = {
-        "windows-x86_64-nsis": "la%20musica_5.3.0_x64-setup.exe",
-        "windows-x86_64": "la%20musica_5.3.0_x64-setup.exe",
+        "windows-x86_64-nsis": "la.musica_5.3.0_x64-setup.exe",
+        "windows-x86_64": "la.musica_5.3.0_x64-setup.exe",
         "darwin-aarch64-app": "la.musica_5.3.0_aarch64.app.tar.gz",
         "darwin-aarch64": "la.musica_5.3.0_aarch64.app.tar.gz",
         "linux-x86_64-appimage": "la.musica_5.3.0_amd64.AppImage.tar.gz",
@@ -121,8 +126,14 @@ def main():
         json.dumps(platforms, indent=1)[:300],
     )
     check(
+        "no url escapes the product name's space",
+        all("%20" not in entry["url"] and " " not in entry["url"]
+            for entry in platforms.values()),
+        json.dumps(sorted(e["url"].rsplit("/", 1)[-1] for e in platforms.values())),
+    )
+    check(
         "each signature is the one beside its own artifact",
-        platforms.get("linux-x86_64-deb", {}).get("signature") == "sig-la.musica_5.3.0_amd64.deb"
+        platforms.get("linux-x86_64-deb", {}).get("signature") == "sig-la musica_5.3.0_amd64.deb"
         and platforms.get("windows-x86_64-nsis", {}).get("signature")
         == "sig-la musica_5.3.0_x64-setup.exe",
         json.dumps({k: v.get("signature") for k, v in platforms.items()}, indent=1)[:300],
@@ -137,7 +148,7 @@ def main():
         zipped_code == 0
         and zipped_doc is not None
         and zipped_doc["platforms"]["windows-x86_64-nsis"]["url"].endswith(
-            "la%20musica_5.3.0_x64-setup.exe.zip"
+            "la.musica_5.3.0_x64-setup.exe.zip"
         ),
         zipped_out.strip()[:200],
     )
@@ -150,7 +161,7 @@ def main():
     )
 
     # A platform with NO updater artifact: the failure the tool exists for.
-    partial = [name for name in files if not name.startswith("la.musica_5.3.0_aarch64")]
+    partial = [name for name in files if not name.startswith("la musica_5.3.0_aarch64")]
     code, output, doc = manifest_for(partial)
     check("a release with no artifact for an OS fails", code != 0, f"exit {code}")
     check("…and says which OS is missing", "darwin" in output, output.strip()[:200])
