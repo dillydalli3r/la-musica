@@ -168,8 +168,20 @@ def main():
             binary = next((n for n in listing if n.startswith(tool)), "")
             check(f"...and its binary is on disk ({binary})", bool(binary), str(listing)[:200])
             row = (entry.get("row") or {})
-            check("...and the row reads ok afterwards",
-                  row.get("state") == "ok" and bool(row.get("path")), json.dumps(row)[:200])
+            # What this check owns is that the row now SEES the tool that was
+            # just installed: detected at the version the install reported, and
+            # with a path. Whether the row also reads `ok` is upstream's
+            # business, not the install's: the pinned target is what gets
+            # installed, so the day upstream publishes anything newer every
+            # healthy host reads `update` — which is honest, and which this
+            # check pinned anyway until it failed a release (oxipng shipped one
+            # the day 5.3.0 was tagged, and the ubuntu leg went red with the row
+            # reading installed/latest/detected all 10.2.0 — the pinned pair.
+            check("...and the row sees what was installed",
+                  row.get("state") in ("ok", "update")
+                  and row.get("detected_version") == version
+                  and bool(row.get("path")),
+                  json.dumps(row)[:200])
             if platform == "linux":
                 system_rows = [r for r in rows if r.get("install_kind") == "system"]
                 check(f"distro tools read as system packages ({len(system_rows)})", bool(system_rows))
