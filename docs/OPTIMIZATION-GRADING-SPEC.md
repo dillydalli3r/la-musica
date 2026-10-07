@@ -2401,6 +2401,25 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
     name) — and the startup sweep (`server/interrupt_recovery`) removes the
     placeholder whose album IS there.
 
+- **R374 — a named add searches for the shape the row named, not just the
+  words.** "Add to library" on a row that carries no MusicBrainz id resolves
+  the release by NAME (`api_add._name_match`), and the index lists same-named
+  release groups of every type: for "All Hope Is Gone" by Slipknot it returns
+  the 1-track digital SINGLE first and the 14-track album second. The add took
+  the provider's order (or the year, when a row stated it), so an album row
+  became the single and its framework album held ONE track — the album's own
+  title (owner report: "it only has one track being the album title for some
+  reason"). The row's own kind — and a caller's `types` selection when it made
+  one — is now a PREFERENCE among the rows the search returned, ahead of the
+  year hint, matched through `mlo.release_choice.type_matches` (the one
+  vocabulary, so "Album + Live" still means exactly that). It is a preference
+  and never a filter: a search where nothing states the wanted type falls
+  through to the year and then to the provider's order, exactly as before, so
+  a match that existed cannot be lost. `tools/test_add_to_library.py` pins it
+  with the real shape — a stubbed search answering single-then-album — and
+  asserts both the release group that was matched and the whole tracklist that
+  reaches the manifest; without the preference the case matches the single.
+
 ### 7.13 Disc rips: a DVD or Blu-ray structure is one title, not a pile of parts
 
 - **R88 — a disc structure is recognized, its feature is never guessed, and
@@ -5228,6 +5247,26 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   idea) and measures the player: its root starts at the bar's height, its
   height is the viewport less that, and its own top row is on screen and
   hit-testable.
+
+- **R373 — a long description carries its own way out, pinned while it is being
+  read.** A stored description collapses to a preview and expands on demand
+  (`web/src/components/Description.tsx` — the SAME component renders the
+  album's blurb and the artist's biography), and the only control it had was
+  the "Show less" AFTER the text: a full Wikipedia blurb is many screens long,
+  so putting it away meant travelling to the end of it (the owner's ask: "make
+  descriptions easier to close when they're very long … add another close
+  button for descriptions in album + artist pages"). Expanded, a second control
+  now sits at the TOP of the block and is `sticky top-12` — the app's own line
+  for "pinned under the top bar" (`PageHeader`), the offset the main column's
+  `pt-12` reserves — so the way out is in view from the first line to the last.
+  Its row is `pointer-events-none` with the button's own `pointer-events-auto`,
+  so the words passing under it stay selectable and clickable, and the control
+  at the END of the text stays: the same action at both ends. Pinned by
+  `tools/check_description.cjs`, which expands a real description of this
+  library, scrolls into its middle and measures that the top control is still
+  on screen and still hit-testable, that a point just under it still reaches
+  the page rather than the row, and that both controls collapse the block (the
+  body shrinks back to its preview).
 
 ### 7.58 The pipeline's wall clock is measured, and what was measured
 

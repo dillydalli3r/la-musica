@@ -17,6 +17,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -623,6 +624,58 @@ else:
                             json={"album_path": albums[0]["album_path"]})
     eq(cancelled.status_code, 200, "the cancel route answers 200")
     ok(not os.path.isdir(route_folder), "the route's cancel removed the folder")
+
+    # A NAME-only add (a Discover row with no MusicBrainz id) searches for the
+    # row's title and takes the best match — and MusicBrainz's own order for
+    # "All Hope Is Gone" by Slipknot puts the 1-track digital SINGLE above the
+    # album of the same name, so the framework album that landed held one
+    # track: the album's own title, and the owner reported exactly that (a
+    # library album with one track "for some reason"). The stated kind is a
+    # PREFERENCE now: an album row takes the Album-typed group, and the whole
+    # tracklist of the release the policy picks for it reaches the manifest.
+    real_search = intg.search_mb
+    covers_before = list(cover_searches)      # section 8 reads the ledger's tail
+    nm_single = {"id": "0aa11111-0000-0000-0000-000000000001", "title": "Name Match",
+                 "artist": "Test Artist NM", "primary_type": "Single",
+                 "secondary_types": [], "first_release_date": "2008-06-23"}
+    nm_album = {"id": "0aa11111-0000-0000-0000-000000000002", "title": "Name Match",
+                "artist": "Test Artist NM", "primary_type": "Album",
+                "secondary_types": [], "first_release_date": "2008-08-26"}
+    intg.search_mb = lambda entity, query, limit=5, artist="", year="": {
+        "rows": [nm_single, nm_album]}          # the provider's order, single first
+    nm_release = release_variant(9, "Name Match Album")
+    nm_release["release_group_id"] = nm_album["id"]
+    nm_release["date"] = "2008-08-26"
+    intg.auto_import_targets = lambda mbid, kind=None, mode="best", types=None, limit=None: (
+        ([{"mbid": nm_release["id"], "title": nm_release["title"]}], [])
+        if mbid == nm_album["id"] else ([], []))
+    intg.resolve_release = lambda mbid: (nm_release, nm_release["id"])
+    named = client.post("/api/library/add", json={
+        "kind": "album", "title": "Name Match", "artist": "Test Artist NM", "year": "2008"})
+    eq(named.status_code, 200, "a name-only album row answers 200")
+    named_albums = named.json().get("albums") or []
+    eq(len(named_albums), 1, "the named row added an album")
+    ok(bool(named.json().get("matched")), "and says MusicBrainz matched it")
+    eq([a.get("release_group_id") for a in named_albums], [nm_album["id"]],
+       "the album-typed release group is the one it matched, not the single the index listed first")
+    # The reply carries the PLACEHOLDER (`create_from_request`); the release's
+    # own payload — its tracklist — is what the add's thread still owes, and it
+    # adopts the folder once it lands. Poll for it, so the section after this
+    # restores the real integrations only once nothing is still using them.
+    nm_tracks = []
+    nm_deadline = time.monotonic() + 10
+    while time.monotonic() < nm_deadline and not nm_tracks:
+        for cand in pending_albums._scan_pending(MF):
+            if "Name Match" not in cand:
+                continue
+            nm_tracks = [t["title"] for t in
+                         (pathmod.load_expected_tracks(cand) or {}).get("tracks") or []]
+        if not nm_tracks:
+            time.sleep(0.1)
+    eq(nm_tracks, ["One", "Two"],
+       "and the release's whole tracklist reaches the framework album's manifest")
+    cover_searches[:] = covers_before
+    intg.search_mb = real_search
 
     intg.auto_import_targets = real_targets
     intg.resolve_release = real_resolve

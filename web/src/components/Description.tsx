@@ -1,5 +1,5 @@
 import { type ReactNode, useId, useState } from "react";
-import { ChevronDown } from "lucide-react";
+import { ChevronDown, ChevronUp } from "lucide-react";
 
 /** Collapsed preview length, in DISPLAY characters (see `runs`: a link counts
  *  as its label, not as its target). A budget this component owns rather than
@@ -203,6 +203,32 @@ export default function Description({ text }: { text: string }) {
 
   return (
     <div className="mt-2 text-sm text-zinc-300 leading-relaxed">
+      {/* A SECOND way out, at the TOP of the block and pinned while it passes:
+          a description can be many screens long, and a reader who wants to put
+          it away should not have to travel to the end of the text to find the
+          control (the ask: "make descriptions easier to close when they're
+          very long"). The bottom "Show less" stays — both ends of the text
+          carry the same action, and this one follows the reader down the
+          block. `top-12` is the app's own line for "pinned under the top bar"
+          (`PageHeader`), the offset the main column's `pt-12` reserves for it.
+          The row itself takes no clicks (`pointer-events-none`) — only the
+          button does — so the words passing under it stay selectable and
+          clickable. */}
+      {more && expanded && (
+        <div className="sticky top-12 z-10 flex justify-end pointer-events-none -mt-1 mb-1">
+          <button
+            type="button"
+            className="btn-ghost !py-1 !px-2 text-xs pointer-events-auto shadow-lg"
+            aria-expanded={expanded}
+            aria-controls={bodyId}
+            onClick={() => setExpanded(false)}
+            title="Collapse the description"
+          >
+            <ChevronUp className="h-3.5 w-3.5" />
+            Show less
+          </button>
+        </div>
+      )}
       <div id={bodyId} title={`${text.length} characters`} className="space-y-2">
         {body.map((b, i) => {
           if (b.kind === "p") return <p key={i}>{nodes(b.runs)}</p>;

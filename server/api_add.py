@@ -488,12 +488,14 @@ def _name_match(stated, req):
     (the index's own relevance order decides otherwise) and never narrows the
     query, because a provider's date is of the release it lists — asking
     MusicBrainz to match it exactly is how a real album comes back as "no
-    match".
+    match". The type the row names is a hint for the same reason, one step
+    ahead of the year (see `wanted` below).
 
     Raises whatever the search raises: the route says the difference between
     "MusicBrainz does not have it" and "MusicBrainz did not answer".
     """
     from server import integrations as intg
+    from mlo import release_choice
 
     kind = _NAME_KINDS.get(str(stated or "").strip().lower(), "release_group")
     entity = _NAME_ENTITIES.get(kind) or "release-group"
@@ -513,14 +515,35 @@ def _name_match(stated, req):
     if not found:
         return "", ""
     year = str(req.year or "").strip()[:4]
-    if year:
-        # The provider's own year, when one of the rows states it: a
-        # same-named album by a same-named artist is otherwise a coin toss.
-        for row in found:
-            date = str(row.get("first_release_date") or row.get("date") or "")
-            if date[:4] == year:
-                return str(row.get("id") or ""), kind
-    return str(found[0].get("id") or ""), kind
+    # WHAT the row is LOOKING for, as a release-group type: the caller's own
+    # `types` selection when it made one, else the kind it stated — "album" is
+    # what a Discover row says about the album it names.
+    #
+    # A PREFERENCE among the rows MusicBrainz returned, never a filter on the
+    # query. The index lists same-named release groups of every type, and its
+    # own order for "All Hope Is Gone" by Slipknot puts the 1-track DIGITAL
+    # SINGLE above the 14-track album: an album row searched, the single
+    # answered, and the framework album that landed carried one track — the
+    # album's own title (owner report). A preference cannot lose a match the
+    # old code would have found: a row that names no type, or a search where
+    # nothing states the wanted type, falls through to the year hint and then
+    # to the provider's own order, exactly as it did.
+    wanted = _types_filter(req.types) if req.types else []
+    if not wanted:
+        try:
+            wanted = release_choice.type_names([stated])
+        except ValueError:
+            wanted = []          # this kind names no release type: no leaning
+
+    def rank(row):
+        typ = release_choice.type_matches(row.get("primary_type") or row.get("release_type") or "",
+                                          row.get("secondary_types"),
+                                          wanted)
+        date = str(row.get("first_release_date") or row.get("date") or "")
+        return (0 if typ else 1, 0 if (year and date[:4] == year) else 1)
+
+    best = min(found, key=rank)      # `min` keeps the provider's order on a tie
+    return str(best.get("id") or ""), kind
 
 
 @router.post("/api/library/add")
