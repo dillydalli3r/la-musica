@@ -111,6 +111,13 @@ When they do ask for one:
    runs `.github/workflows/release.yml` — suites, then the web/desktop/mobile/
    docker builds and the published GitHub release (~10 min). Watch it with
    `gh run watch <id>`; a red job there is the release, not the change.
+
+   Redoing a release (a fix after a failure) means moving the tag — `git tag -f`
+   locally, then delete and re-push it. Know what that does on the way: deleting
+   a tag whose release exists turns that release into a **draft**, so
+   `releases/latest/download/latest.json` 404s until the next run publishes it
+   again (the release job always creates a published one). A 404 on a release
+   that was green ten minutes ago is that draft, not a missing asset.
 4. **The updater's signing key.** Every release signs its desktop bundles with
    the key whose private half is the `TAURI_SIGNING_PRIVATE_KEY` secret and
    whose copy on this machine is `~/.tauri/la-musica.key` (Tauri's own place for
