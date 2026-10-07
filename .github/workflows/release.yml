@@ -47,6 +47,14 @@ jobs:
   desktop:
     needs: ci
     uses: ./.github/workflows/desktop.yml
+    # `secrets: inherit` — and this line is load-bearing: a reusable workflow
+    # receives NO secrets unless they are passed, and a secret that was not
+    # passed arrives as an EMPTY STRING rather than an error. The updater key
+    # the called workflow reads was therefore "", and the bundler answered with
+    # the riddle `failed to decode secret key: incorrect updater private key
+    # password: Missing comment in secret key` on all three platforms — pointing
+    # at the key instead of at this call, three release runs in a row.
+    secrets: inherit
 
   mobile:
     needs: ci
