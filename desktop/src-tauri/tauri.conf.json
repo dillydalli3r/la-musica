@@ -21,7 +21,8 @@
         "visible": true,
         "backgroundThrottling": "disabled",
         "decorations": false,
-        "url": "splash.html"
+        "url": "splash.html",
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,HardwareMediaKeyHandling"
       }
     ],
     "security": {

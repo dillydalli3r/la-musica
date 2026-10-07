@@ -101,6 +101,24 @@ backend on each OS in CI and presses the real button: Windows and Linux prove
   remote-mode shell has to ride everything on the `token` query instead). The
   window opens *visible*: its first run is the app's own setup screen, which
   is no use behind a tray icon nobody has been told about.
+- **The OS media card is the SHELL's, on Windows.** `src/win_media.rs` opens the
+  app's own System Media Transport Controls session on the main window and
+  Windows 11's media flyout (and Quick Settings, the media keys, a headset)
+  draws that one — named **"la musica"**, with the app's own icon. It has to be
+  the shell's: the session WebView2 publishes for the page's Media Session
+  belongs to the runtime's process, so Windows resolves its id to
+  `msedgewebview2.exe`, finds no app, and labels the card "Unknown app". The
+  webview's session is therefore switched off in `tauri.conf.json`
+  (`additionalBrowserArgs`, `HardwareMediaKeyHandling`), and the two halves the
+  browser used to supply for free are bridged instead: the web player pushes
+  what it is playing through the `set_now_playing` command
+  (`web/src/lib/winMedia.ts`, called from `PlayerBar.tsx`), and a press in the
+  flyout comes back as an `mlo-media-key` event that the page runs through the
+  *same* handlers it registered with `navigator.mediaSession`. `main.rs` sets
+  the process AUMID and registers that id in
+  `HKCU\Software\Classes\AppUserModelId` (the installer's Start Menu shortcut
+  carries it too, so a packaged install resolves without the key). macOS and
+  Linux are untouched: their now-playing UI is still the webview's own session.
 - **The first run asks.** A shell that has never been told which backend to
   use shows the app's own build with two options: **use the built-in backend**
   (this app runs its own server — nothing to install) or **connect to a server

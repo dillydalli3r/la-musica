@@ -34,6 +34,7 @@ fn main() {
                 "update_install",
                 "set_now_playing_liked",
                 "set_playback_active",
+                "set_now_playing",
                 "ios_audio_state",
                 "shell_backend_choice",
                 "choose_backend",

@@ -9,6 +9,7 @@
     "allow-ios-audio-state",
     "allow-set-now-playing-liked",
     "allow-set-playback-active",
+    "allow-set-now-playing",
     "allow-shell-backend-choice",
     "allow-choose-backend"
   ]

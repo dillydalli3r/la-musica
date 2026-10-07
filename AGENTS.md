@@ -194,6 +194,19 @@ When they do ask for one:
   that switch rejects any signature without a version in it — every update would
   fail, and the failure would look like a broken endpoint rather than a config
   mistake.
+- **The OS media card is the shell's, and the webview's own session stays off.**
+  Windows names a media session by its Application User Model ID, and the one
+  WebView2 publishes for the page's Media Session belongs to the RUNTIME's
+  process (`msedgewebview2.exe`), which resolves to no app — that is the
+  "Unknown app" label in Windows 11's media flyout, and it is not ours to set.
+  So the shell publishes its own session (`desktop/src-tauri/src/win_media.rs`,
+  opened on the main window in `lib.rs`'s setup hook) and the webview's is
+  switched off in `tauri.conf.json` (`additionalBrowserArgs`,
+  `HardwareMediaKeyHandling`). Those two lines plus the bridge between them —
+  the `set_now_playing` command, the `mlo-media-key` event, and the handlers
+  `PlayerBar.tsx` shares between `navigator.mediaSession` and the shell — are
+  one mechanism: turning either the session or the flag off alone leaves the
+  flyout with two cards for one song.
 - **A console child gets `CREATE_NO_WINDOW`.** The server runs windowed and owns
   no console, so anything launched without it flashes a terminal window;
   `mlo/deps.py`'s spawn probe did exactly that on the first Dependencies request.

@@ -71,6 +71,15 @@ mod backend_handle;
 #[cfg(desktop)]
 mod settings;
 
+// Windows' own media session, the card its flyout draws for the app: the
+// shell publishes it because WebView2's Media Session is published under the
+// RUNTIME's identity (`msedgewebview2.exe`), which Windows 11 labels "Unknown
+// app" — see src/win_media.rs for the measurement and the alternative that was
+// closed. Public because `main.rs` reaches in for the AUMID registration, and
+// Windows-only: no other target has System Media Transport Controls.
+#[cfg(all(desktop, target_os = "windows"))]
+pub mod win_media;
+
 /// The tray's "Start on Login" checkbox, kept in managed state so the
 /// click handler can re-sync its visual with the registry after toggling.
 #[cfg(desktop)]
@@ -226,6 +235,23 @@ struct UpdateProgress {
     stage: &'static str,
     downloaded: u64,
     total: Option<u64>,
+}
+
+/// A press the OS delivered to the app's own media session (a button in
+/// Windows 11's media flyout, a media key, a headset), on the `mlo-media-key`
+/// event — the other half of the bridge `set_now_playing` is the first half of
+/// (see src/win_media.rs). `action` is named after the Media Session action it
+/// stands for, so the page runs it through the handlers it already has, and
+/// `seconds` carries a position only for a `seekto` (a scrub on the flyout's
+/// own progress bar).
+#[cfg(all(desktop, target_os = "windows"))]
+const MEDIA_KEY_EVENT: &str = "mlo-media-key";
+
+#[cfg(all(desktop, target_os = "windows"))]
+#[derive(Clone, serde::Serialize)]
+struct MediaKey {
+    action: &'static str,
+    seconds: Option<f64>,
 }
 
 /// Is there a newer release than this build? `offer: None` means this is the
@@ -394,6 +420,38 @@ fn set_playback_active(active: bool) {
     #[cfg(not(target_os = "ios"))]
     let _ = active;
 }
+
+/// What the OS's own media card should say the app is playing.
+///
+/// This is Windows' System Media Transport Controls (see src/win_media.rs):
+/// the shell publishes the session ITSELF, because the one the webview's Media
+/// Session publishes belongs to the WebView2 runtime — Windows resolves its id
+/// to `msedgewebview2.exe`, finds no app, and draws "Unknown app" over the
+/// app's own music. The web UI calls this with the same state it hands
+/// `navigator.mediaSession` (`web/src/lib/winMedia.ts`), and the payload is
+/// that state verbatim: the current track's title/artist/album/artwork, whether
+/// the element is really producing sound, the timeline, and whether the queue
+/// can step either way.
+///
+/// Registered on EVERY target, inert off Windows, exactly like the iOS
+/// commands above: the web UI makes the call unconditionally inside a Tauri
+/// shell, and macOS/Linux draw their now-playing UI from the webview's own
+/// Media Session — the page already drives it — so there is nothing for the
+/// shell to carry there.
+///
+/// The update lands on the MAIN thread, which is where the session was created
+/// and the only thread it may be called from (see win_media.rs's "Threading").
+/// Nothing is returned and nothing needs to be: a card that failed to update
+/// is a stale title, not a broken player, and the shell's own log says so.
+#[cfg(all(desktop, target_os = "windows"))]
+#[tauri::command]
+fn set_now_playing(app: tauri::AppHandle, state: win_media::NowPlaying) {
+    let _ = app.run_on_main_thread(move || win_media::update(&state));
+}
+
+#[cfg(not(target_os = "windows"))]
+#[tauri::command]
+fn set_now_playing(_state: serde_json::Value) {}
 
 /// What the shell's iOS audio state IS — the readout behind Settings →
 /// Downloads & playback → Playback diagnostics.
@@ -870,6 +928,7 @@ pub fn run() {
             update_install,
             set_now_playing_liked,
             set_playback_active,
+            set_now_playing,
             ios_audio_state,
             shell_backend_choice,
             choose_backend,
@@ -893,6 +952,42 @@ pub fn run() {
             // The tray carries the outcome at startup ("Backend: unavailable");
             // there is no screen to answer to yet.
             let _ = enter_backend_mode(app.handle(), &settings);
+
+            // Windows' own media card, published by the SHELL: the webview's
+            // Media Session belongs to the WebView2 runtime and Windows draws
+            // it as "Unknown app" (see src/win_media.rs). The window exists by
+            // now — `app.windows` in tauri.conf.json is created before this
+            // hook runs — and its HWND is what the session is attached to, so
+            // Windows resolves the card's id through THIS process, whose AUMID
+            // `main.rs` already set. Every press the OS delivers comes back as
+            // the `mlo-media-key` event, which the page runs through the same
+            // handlers `navigator.mediaSession` used to receive.
+            //
+            // Failure is logged and survivable: a shell with no OS media card
+            // is a worse shell, not a broken one.
+            #[cfg(target_os = "windows")]
+            {
+                match app.get_webview_window("main").map(|w| w.hwnd()) {
+                    Some(Ok(hwnd)) => {
+                        let handle = app.handle().clone();
+                        if let Err(e) = win_media::attach(hwnd, move |press| {
+                            let _ = handle.emit(
+                                MEDIA_KEY_EVENT,
+                                MediaKey {
+                                    action: press.action(),
+                                    seconds: press.seconds(),
+                                },
+                            );
+                        }) {
+                            eprintln!("[mlo-desktop] media session unavailable: {e}");
+                        }
+                    }
+                    Some(Err(e)) => {
+                        eprintln!("[mlo-desktop] media session unavailable: {e}");
+                    }
+                    None => eprintln!("[mlo-desktop] media session unavailable: no window"),
+                }
+            }
             Ok(())
         });
 
@@ -921,6 +1016,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             set_now_playing_liked,
             set_playback_active,
+            set_now_playing,
             ios_audio_state
         ])
         .setup(|app| {

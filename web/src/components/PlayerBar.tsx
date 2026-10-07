@@ -15,6 +15,7 @@ import { useI18n } from "../lib/i18n";
 import { likeToasts } from "../lib/favs";
 import { useIosFavBridge } from "../lib/iosFavs";
 import { useIosPlaybackBridge } from "../lib/iosAudio";
+import { useWindowsMediaBridge, type MediaAction } from "../lib/winMedia";
 import { note, shortPath } from "../lib/pbDiag";
 import LockedChip from "./LockedChip";
 import { AdvisoryMark } from "./Badges";
@@ -920,6 +921,23 @@ export default function PlayerBar() {
     ? upNextTrack.title || upNextTrack.file.replace(/\.[^.]+$/, "")
     : "";
   const stepRef = useRef<(dir: 1 | -1) => void>(() => {});
+  // The handlers this page registers with `navigator.mediaSession`, kept where
+  // the WINDOWS SHELL's own media card can reach them: the shell publishes the
+  // session Windows draws (the webview's belongs to the WebView2 runtime and
+  // reads "Unknown app" — see lib/winMedia), so a press on that card arrives as
+  // an event and has to run the same code as the same press on the webview's
+  // own session. One set of handlers, two doors.
+  const osHandlers = useRef<Partial<Record<MediaAction, (d?: { seekOffset?: number; seekTime?: number }) => void>>>({});
+  // One stable callback for the shell's presses: it only reads the ref above,
+  // so `lib/winMedia` can hand it to its listener once and never re-register.
+  const onMediaKey = useCallback((action: MediaAction, seconds: number | null) => {
+    const handler = osHandlers.current[action];
+    if (!handler) return;
+    // The shell names its presses after the Media Session actions, but sends a
+    // bare position for a scrub and an interval (or nothing) for a skip — the
+    // two shapes these handlers already take.
+    handler(action === "seekto" ? { seekTime: seconds ?? undefined } : { seekOffset: seconds ?? undefined });
+  }, []);
 
   // OS-level media controls (lockscreen / media keys) — guarded, best effort.
   useEffect(() => {
@@ -947,44 +965,6 @@ export default function PlayerBar() {
             : [],
         });
       }
-      ms.setActionHandler("play", () => {
-        // The row that proves the OS press REACHED the page at all: if the
-        // lock screen was pressed and no `mediaSession` row appears, the
-        // problem is upstream of the app (the session was never claimed, or
-        // iOS muted the command) — which is exactly what the owner's "the
-        // controls do nothing" leaves undecided.
-        note("mediaSession", { action: "play", vis: document.visibilityState });
-        // A lock-screen / CarPlay press: the OS asked, so the request is the
-        // user's, but the element still gets the final word (a refusal clears
-        // the state instead of leaving the widget claiming sound).
-        const el = media();
-        if (el) startElement(el, current.path);
-        else setPlaying(current.path);
-      });
-      ms.setActionHandler("pause", () => {
-        note("mediaSession", { action: "pause", vis: document.visibilityState });
-        pauseApp(media(), "mediaSession");
-        setPlaying(null);
-      });
-      ms.setActionHandler("previoustrack", () => {
-        note("mediaSession", { action: "previoustrack" });
-        stepRef.current(-1);
-      });
-      ms.setActionHandler("nexttrack", () => {
-        note("mediaSession", { action: "nexttrack" });
-        stepRef.current(1);
-      });
-      // The two SKIP actions, registered for real. This reverses an earlier
-      // decision (issue #55) that declared the pair UNSUPPORTED — a `null`
-      // handler is the spec's "this action does not exist" — to keep the lock
-      // screen's ⟲10 / 10⟳ from standing in for the app's own ⏮ ⏸ ⏭ track step.
-      // The cost of that was the opposite report (issue #58): with no handler
-      // registered, iOS/Control Center/CarPlay draw NO skip buttons at all, and
-      // the driver has no way to move inside the track from the place they
-      // actually press. So the pair seeks: ±10 s, or the platform's own
-      // interval when it supplies one (`seekOffset`, seconds), clamped into the
-      // track. A track step remains what the app's own transport does, and the
-      // OS's `nexttrack`/`previoustrack` above still step the queue.
       const skipBy = (dir: 1 | -1, requested?: number) => {
         const el = media();
         if (!el) return;
@@ -1002,28 +982,81 @@ export default function PlayerBar() {
         setTime(to);
         noteJump(el, from, to);
       };
-      ms.setActionHandler("seekbackward", (d?: { seekOffset?: number }) => {
-        note("mediaSession", { action: "seekbackward", vis: document.visibilityState, offset: d?.seekOffset ?? null });
-        skipBy(-1, d?.seekOffset);
-      });
-      ms.setActionHandler("seekforward", (d?: { seekOffset?: number }) => {
-        note("mediaSession", { action: "seekforward", vis: document.visibilityState, offset: d?.seekOffset ?? null });
-        skipBy(1, d?.seekOffset);
-      });
-      // Scrubbing from the lock screen / Control Center / a car stereo. Without
-      // a handler the OS draws a scrubber that springs back to where the app
-      // thinks it is, which reads as "seeking is broken in the background".
-      ms.setActionHandler("seekto", (d: { seekTime?: number }) => {
-        const el = media();
-        if (!el || typeof d?.seekTime !== "number") return;
-        // `from` before `to`, so the row shows which way and how far — an OS
-        // scrub that lands somewhere else than it asked for is its own clue.
-        const from = el.currentTime;
-        noteSeek("mediaSession", el, d.seekTime);
-        el.currentTime = d.seekTime;
-        setTime(d.seekTime);
-        noteJump(el, from, d.seekTime);
-      });
+      // One object, two doors. These are registered with `navigator.mediaSession`
+      // right below — and also kept in `osHandlers`, because the WINDOWS SHELL's
+      // own media card sends the same presses as events (lib/winMedia): the
+      // shell owns the session Windows draws, so a button in the flyout, a media
+      // key and a headset all arrive through the shell rather than here. One
+      // definition means a press cannot mean something different depending on
+      // which surface drew the button.
+      const handlers: Partial<
+        Record<MediaAction, (d?: { seekOffset?: number; seekTime?: number }) => void>
+      > = {
+        play: () => {
+          // The row that proves the OS press REACHED the page at all: if the
+          // lock screen was pressed and no `mediaSession` row appears, the
+          // problem is upstream of the app (the session was never claimed, or
+          // iOS muted the command) — which is exactly what the owner's "the
+          // controls do nothing" leaves undecided.
+          note("mediaSession", { action: "play", vis: document.visibilityState });
+          // A lock-screen / CarPlay press: the OS asked, so the request is the
+          // user's, but the element still gets the final word (a refusal clears
+          // the state instead of leaving the widget claiming sound).
+          const el = media();
+          if (el) startElement(el, current.path);
+          else setPlaying(current.path);
+        },
+        pause: () => {
+          note("mediaSession", { action: "pause", vis: document.visibilityState });
+          pauseApp(media(), "mediaSession");
+          setPlaying(null);
+        },
+        previoustrack: () => {
+          note("mediaSession", { action: "previoustrack" });
+          stepRef.current(-1);
+        },
+        nexttrack: () => {
+          note("mediaSession", { action: "nexttrack" });
+          stepRef.current(1);
+        },
+        // The two SKIP actions, registered for real. This reverses an earlier
+        // decision (issue #55) that declared the pair UNSUPPORTED — a `null`
+        // handler is the spec's "this action does not exist" — to keep the lock
+        // screen's ⟲10 / 10⟳ from standing in for the app's own ⏮ ⏸ ⏭ track step.
+        // The cost of that was the opposite report (issue #58): with no handler
+        // registered, iOS/Control Center/CarPlay draw NO skip buttons at all, and
+        // the driver has no way to move inside the track from the place they
+        // actually press. So the pair seeks: ±10 s, or the platform's own
+        // interval when it supplies one (`seekOffset`, seconds), clamped into the
+        // track. A track step remains what the app's own transport does, and the
+        // OS's `nexttrack`/`previoustrack` above still step the queue.
+        seekbackward: (d) => {
+          note("mediaSession", { action: "seekbackward", vis: document.visibilityState, offset: d?.seekOffset ?? null });
+          skipBy(-1, d?.seekOffset);
+        },
+        seekforward: (d) => {
+          note("mediaSession", { action: "seekforward", vis: document.visibilityState, offset: d?.seekOffset ?? null });
+          skipBy(1, d?.seekOffset);
+        },
+        // Scrubbing from the lock screen / Control Center / a car stereo. Without
+        // a handler the OS draws a scrubber that springs back to where the app
+        // thinks it is, which reads as "seeking is broken in the background".
+        seekto: (d) => {
+          const el = media();
+          if (!el || typeof d?.seekTime !== "number") return;
+          // `from` before `to`, so the row shows which way and how far — an OS
+          // scrub that lands somewhere else than it asked for is its own clue.
+          const from = el.currentTime;
+          noteSeek("mediaSession", el, d.seekTime);
+          el.currentTime = d.seekTime;
+          setTime(d.seekTime);
+          noteJump(el, from, d.seekTime);
+        },
+      };
+      for (const [action, handler] of Object.entries(handlers)) {
+        ms.setActionHandler(action, handler);
+      }
+      osHandlers.current = handlers;
     } catch {
       /* media session unsupported — ignore */
     }
@@ -1108,6 +1141,26 @@ export default function PlayerBar() {
   // The iOS audio session follows the player's playing state: activated when
   // sound starts, handed back when it stops (see lib/iosAudio.ts).
   useIosPlaybackBridge(playing);
+  // Windows draws the OS's media card from a session the SHELL publishes — the
+  // one the webview publishes belongs to the WebView2 runtime and reads
+  // "Unknown app" (see lib/winMedia and desktop/src-tauri/src/win_media.rs) —
+  // so the state this bar hands `navigator.mediaSession` a few lines up is
+  // pushed to the shell in the same breath, and the shell's presses come back
+  // through those same handlers. Inert everywhere but the Tauri shell, and a
+  // no-op on the targets whose card is still the webview's own session.
+  useWindowsMediaBridge({
+    title: block?.title ?? null,
+    artist: block?.artist ?? null,
+    album: block?.album ?? null,
+    artwork: block?.coverUrl ?? null,
+    playing: playing != null,
+    position: time,
+    duration: effDuration,
+    rate: speed,
+    next: queue.length > 1,
+    previous: queue.length > 1,
+    onAction: onMediaKey,
+  });
 
   // ---- ReplayGain: decided BEFORE a track makes a sound ------------------
   // The gain has to be in the WebAudio stage by the time the first sample is
