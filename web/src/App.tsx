@@ -1137,7 +1137,7 @@ export default function App() {
             role="dialog"
             aria-modal="true"
             aria-label={t("topbar.menu_open")}
-            className="safe-drawer anim-pop fixed left-0 top-0 bottom-0 z-50 w-60 max-w-[85vw] bg-panel border-r border-border p-2 flex flex-col gap-1 overflow-y-auto overscroll-contain md:hidden shadow-2xl"
+            className="safe-drawer shell-top anim-pop fixed left-0 top-0 bottom-0 z-50 w-60 max-w-[85vw] bg-panel border-r border-border p-2 flex flex-col gap-1 overflow-y-auto overscroll-contain md:hidden shadow-2xl"
           >
             <div className="flex items-center gap-2 border-b border-border pb-2 mb-1 px-1">
               <img src="/icon.png" alt="la musica" className="h-7 w-7 rounded-md object-cover ring-1 ring-border shadow-sm" />

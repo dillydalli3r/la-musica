@@ -32,6 +32,14 @@
   --motion-base: 300ms;
   --motion-slow: 500ms;
   --ease-motion: cubic-bezier(0.22, 1, 0.36, 1);
+  /* The strip the desktop shell's own title bar covers (components/TitleBar)
+     at the TOP OF THE WINDOW. The bar is in the app's normal flow, so the app
+     box is already below it — but a `fixed` surface anchors to the window, and
+     one that starts at `top: 0` puts its own top row (the fullscreen player's
+     exit button and queue readout) under the window controls. TitleBar
+     publishes its height here while it is mounted; a browser and a phone shell
+     draw no bar and leave the 0. See `.shell-top` below. */
+  --mlo-titlebar-h: 0px;
 }
 
 /* Native checkbox tints follow the accent token (ranges are fully custom). */
@@ -260,6 +268,21 @@ body {
   padding-left: env(safe-area-inset-left);
 }
 
+/* Surfaces that anchor to the WINDOW — `fixed inset-0` — as opposed to the app
+   box. The desktop shell draws its own title bar in the app's normal flow
+   (components/TitleBar), so everything laid out inside the shell is below it
+   already; a fixed layer starts UNDER it and paints its own top row behind the
+   window controls. That is exactly how the fullscreen player's exit button and
+   queue readout came out (owner report), and the video layer under it, and the
+   nav drawer. `inset-0` still writes `top: 0`, so this rule is what has to
+   win: it is written after Tailwind's utilities and out of their layer, which
+   is also how `.safe-np-top` has always overridden the padding utilities.
+   `--mlo-titlebar-h` is 0 everywhere else — a browser, a phone — so the layer
+   is unchanged there, and the device insets keep doing their own job. */
+.shell-top {
+  top: var(--mlo-titlebar-h, 0px);
+}
+
 /* The fullscreen player is portalled to <body> and `fixed inset-0`, so like
    the nav drawer it inherits nothing from `.safe-shell` and repeats the
    insets its own chrome needs: the top bar (the exit button and the queue
@@ -329,10 +352,13 @@ body {
      The safe-area helper stays underneath as the FLOOR rather than a
      duplicate: with `--mlo-inset-*` test-hooked (or a notch on a device whose
      chrome is drawn by the OS) the inset term is what keeps the pane off the
-     notch, and the measured box already carries it on a real device. */
+     notch, and the measured box already carries it on a real device. The
+     desktop shell's title bar is part of that floor for the same reason — this
+     pane is `fixed`, so it starts under the bar unless the bar's height is
+     added, and the measured box above already contains it. */
   top: max(
     var(--mlo-chrome-bottom, 3rem),
-    calc(3rem + max(env(safe-area-inset-top, 0px), var(--mlo-inset-top, 0px)))
+    calc(var(--mlo-titlebar-h, 0px) + 3rem + max(env(safe-area-inset-top, 0px), var(--mlo-inset-top, 0px)))
   );
   bottom: calc(5.75rem + max(env(safe-area-inset-bottom, 0px), var(--mlo-inset-bottom, 0px)));
   padding-right: max(env(safe-area-inset-right, 0px), var(--mlo-inset-right, 0px));

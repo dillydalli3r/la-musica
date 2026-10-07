@@ -65,6 +65,13 @@ function WindowButton({
   );
 }
 
+/** The bar's height — and the top inset every surface that anchors to the
+ *  WINDOW instead of to the app box has to leave it (index.css's
+ *  `--mlo-titlebar-h`). One number, because the strip the bar takes in the
+ *  app's own flow and the strip it covers for those surfaces are the same
+ *  strip. */
+export const TITLEBAR_H = "2rem";
+
 /** The window's own title bar — the strip the OS used to draw.
  *
  *  The shell runs undecorated (`decorations: false` in tauri.conf.json),
@@ -88,6 +95,22 @@ function WindowButton({
  *  in the corner is the tell that it is not. */
 export default function TitleBar() {
   const [maximized, setMaximized] = useState(false);
+
+  // Publish the bar's height as that inset. The bar sits in the app's flow, so
+  // everything INSIDE the shell is below it already; a `fixed inset-0` overlay
+  // anchors to the window, and the fullscreen player's top row (the exit button
+  // and the queue readout) came out underneath the window controls on Windows
+  // (owner report). Set on <html> rather than the app box because the player is
+  // portalled to <body>. Retired with the bar, so a browser and a phone — where
+  // the host draws the chrome and this component renders nothing — keep 0. */
+  useEffect(() => {
+    if (!IN_TAURI || IN_MOBILE_SHELL) return;
+    const root = document.documentElement;
+    root.style.setProperty("--mlo-titlebar-h", TITLEBAR_H);
+    return () => {
+      root.style.removeProperty("--mlo-titlebar-h");
+    };
+  }, []);
 
   useEffect(() => {
     if (!IN_TAURI || IN_MOBILE_SHELL) return;
@@ -129,7 +152,8 @@ export default function TitleBar() {
     // which is what a stray drag over the brand looked like.
     <div
       data-tauri-drag-region="deep"
-      className="relative z-[70] shrink-0 h-8 flex items-stretch bg-bg text-zinc-500 select-none"
+      style={{ height: TITLEBAR_H }}
+      className="relative z-[70] shrink-0 flex items-stretch bg-bg text-zinc-500 select-none"
     >
       {mac && (
         <div className="flex items-stretch">

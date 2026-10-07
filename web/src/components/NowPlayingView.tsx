@@ -543,12 +543,21 @@ const INACTIVE_SCALE = { sm: 0.88, md: 0.84, lg: 0.8 } as const;
  * row, though, the OUTGOING line had its blur cleared and its opacity
  * restored the moment it passed the pointer: it came back to life about a
  * second after the new line took over and only dimmed again at the NEXT line
- * change. A line's emphasis has to be a function of the clock alone. With the
- * reveal gone, the outgoing line's dim + blur ease in once (the same 300 ms
- * transition) and stay put however the pointer rests. The keyboard half stays
- * — `:focus-within` follows a deliberate action, and the reduced-motion
- * kill-list in index.css documents it. */
-const LINE_BLUR = "np-line-blur blur-[1px] opacity-90 focus-within:blur-none focus-within:opacity-100 transition-[opacity,filter] duration-motion-base ease-motion";
+ * change. A line's emphasis has to be a function of the clock alone. The
+ * keyboard half stays — `:focus-within` follows a deliberate action, and the
+ * reduced-motion kill-list in index.css documents it.
+ *
+ * The dim + blur are a STATE, not an animation, and deliberately carry no
+ * `transition-*`: a `filter` that animates while the pane scrolls is a
+ * re-raster every frame — the filtered text has to be redrawn at each new
+ * scroll position and each step of the blur — and the outgoing line came out
+ * of it with a one-frame flash (owner report: "the previous lyric line
+ * flickers very briefly when scrolling into the next one"). The arriving line
+ * was already the symmetrical half of this: it drops the blur and the dim in
+ * the frame it becomes active. Both ends of the emphasis now land in the
+ * frame the clock changed the line, and only the size/colour ease below — the
+ * one the code chose for being compositor-only — travels. */
+const LINE_BLUR = "np-line-blur blur-[1px] opacity-90 focus-within:blur-none focus-within:opacity-100";
 
 /** The volume cluster is its own component because dragging the slider writes
  *  `vol` once per pointer step. Subscribed here, where the value is actually
@@ -2011,7 +2020,12 @@ export default function NowPlayingView(p: Props) {
        the ambience through the wash below, and the only surfaces that still
        frost anything are the floating menus, which pin their own tint
        (`np-veil-dark np-veil-panel`, index.css). */
-    <div className={`fixed inset-0 z-50 overflow-clip ${videoPath ? "bg-transparent" : "bg-zinc-950"} ${cursorHidden ? "cursor-none" : ""}`}>
+    <div className={`shell-top fixed inset-0 z-50 overflow-clip ${videoPath ? "bg-transparent" : "bg-zinc-950"} ${cursorHidden ? "cursor-none" : ""}`}>
+      {/* `shell-top`: the desktop shell's title bar is drawn in the app's flow
+          and this overlay anchors to the WINDOW, so without it the top bar
+          below (the exit button, the queue readout) sits behind the window
+          controls — owner report. 0 in a browser and on a phone, where no bar
+          is drawn (index.css). */}
       {/* overflow-clip (not hidden): a hidden box is still a scroll container,
           so wheel / scrollIntoView can silently scroll the whole overlay and
           leave the view "stuck" half-rendered. Clip can never be scrolled. */}

@@ -188,6 +188,36 @@ const check = (name, pass, detail) => results.push({ name, pass: !!pass, detail 
 }
 
 {
+  // The pane's last stretch must not CREEP (R371). The owner's report:
+  // "auto-scroll goes to the line, but a little after that you can still see
+  // the line move a couple pixels slowly". That tail is exactly what an
+  // exponential ease does — on a 12 px step at 60 Hz the old loop covered its
+  // last stretch in steps of a pixel and less for ~8 frames. The landing speed
+  // floor (`LAND_PX` per 60 Hz frame) now carries the tail, so every frame of
+  // the move but the arrival itself covers at least a pixel.
+  const pane = makePane({ n: 40 });
+  const want = TARGET(pane, 20);
+  pane.scroller._top = want - 12;             // a line's own step, near the end
+  LYR.createLyricsGlider(pane.scroller).center(pane.lines[20]);
+  const steps = [];
+  let top = pane.scroller.scrollTop;
+  for (let i = 0; i < 20; i++) {
+    frames(1, 16.667);
+    const next = pane.scroller.scrollTop;
+    steps.push(Math.abs(next - top));
+    top = next;
+    if (next === want) break;
+  }
+  // The last entry is the landing itself (the remainder, under a pixel by
+  // construction) — the creep would be the frames BEFORE it.
+  const creep = steps.slice(0, -1);
+  check("a short step lands, and every moving frame of it covers a pixel",
+    pane.scroller.scrollTop === want && creep.every((s) => s >= 1),
+    `arrived=${pane.scroller.scrollTop === want} in ${steps.length} frames; ` +
+    `steps ${steps.map((s) => s.toFixed(2)).join(", ")}`);
+}
+
+{
   globalThis.window.matchMedia = () => ({ matches: true });
   const pane = makePane({ n: 40 });
   pending.clear();                       // drop any loop left by an earlier case

@@ -2841,11 +2841,14 @@ export default function PlayerBar() {
             fullscreen player only restyles it to fill the viewport (z-40,
             just under the z-50 overlay), so there is exactly one decoder, one
             network stream, no drift and no re-parenting React could trip
-            over when the track changes while the overlay is open. */}
+            over when the track changes while the overlay is open. Filling the
+            viewport means `shell-top` too: the picture is drawn in the app's
+            own box, which starts under the desktop shell's title bar
+            (index.css). */}
         {isVideo && current && createPortal(
           <div
             className={fullscreen
-              ? "fixed inset-0 z-40 bg-black"
+              ? "shell-top fixed inset-0 z-40 bg-black"
               : "fixed right-3 bottom-[5.25rem] z-[15] w-80 max-w-[80vw] rounded-xl overflow-hidden border border-border bg-black shadow-2xl"}
           >
             {!fullscreen && (

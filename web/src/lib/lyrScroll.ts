@@ -50,6 +50,22 @@ export const LYRICS_PAD_BOTTOM = `${Math.round((1 - LYRICS_ANCHOR) * 1000) / 10}
 
 /** Fraction of the remaining distance covered per 60 Hz frame. */
 const EASE = 0.16;
+/** The speed the ease hands over to for the last stretch, in px per 60 Hz
+ *  frame.
+ *
+ *  An exponential ease never quite arrives: its final frames cover a couple of
+ *  pixels at a fraction of a pixel each, which reads as the pane still
+ *  drifting after the line has landed — the owner's "auto-scroll goes to the
+ *  line, but a little after that you can still see the line move a couple
+ *  pixels slowly". A measured 40 px line step spent its last ~9 px doing
+ *  exactly that (six frames of 1.3 → 0.5 px at 60 Hz, ~220 ms of drift).
+ *
+ *  So the ease runs only while it is faster than this and the remainder covers
+ *  the rest at a steady speed. The handover is continuous by construction —
+ *  the ease's step equals LAND_PX exactly when `|diff| === LAND_PX / EASE`
+ *  (~8.75 px) — so nothing kinks, and the move ends ON the target instead of
+ *  creeping up on it. */
+const LAND_PX = 1.4;
 const FRAME_MS = 1000 / 60;
 
 export function createLyricsGlider(c: HTMLElement, anchor: number = LYRICS_ANCHOR): LyricsGlider {
@@ -84,7 +100,18 @@ export function createLyricsGlider(c: HTMLElement, anchor: number = LYRICS_ANCHO
     }
     // dt-normalised: the same 0.16-per-frame feel on a 144 Hz display as on
     // a 60 Hz one (a fixed step glided 2.4x faster on high-refresh screens).
-    c.scrollTop += diff * (1 - Math.pow(1 - EASE, dt / FRAME_MS));
+    // Under `LAND_PX` the steady landing speed takes over, so the tail cannot
+    // decay into sub-pixel drift (see LAND_PX).
+    const elapsed = dt / FRAME_MS;
+    const eased = diff * (1 - Math.pow(1 - EASE, elapsed));
+    const landing = Math.sign(diff) * LAND_PX * elapsed;
+    const move = Math.abs(eased) > Math.abs(landing) ? eased : landing;
+    if (Math.abs(move) >= Math.abs(diff)) {
+      c.scrollTop = target;
+      active = false;
+      return;
+    }
+    c.scrollTop += move;
     raf = requestAnimationFrame(step);
   };
 

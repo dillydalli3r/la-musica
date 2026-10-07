@@ -225,6 +225,32 @@ const surface = (page) => page.evaluate(() => {
     ? [...scroller.children].filter((row) => row.firstElementChild && (row.textContent || "").trim()).length
     : 0;
 
+  // How the emphasis is PUT ON and TAKEN OFF. The inactive half is a STATE —
+  // blur + dim — and must carry no transition of its own: a `filter` (or an
+  // opacity) that eases while the pane scrolls re-rasterises the line at every
+  // new scroll position, which is what put a one-frame flash on the line the
+  // pane was leaving (R372). The size / colour ease below it is the one that
+  // travels, and it is compositor-only by design.
+  const inactiveRow = scroller
+    ? [...scroller.children].find((row) => {
+        const inner = row.firstElementChild;
+        if (!inner || !(row.textContent || "").trim()) return false;
+        const t = getComputedStyle(inner).transform;
+        return !(t === "none" || /matrix\(1,\s*0,\s*0,\s*1,/.test(t));
+      })
+    : null;
+  const emphasis = inactiveRow ? (() => {
+    const cs = getComputedStyle(inactiveRow);
+    const inner = getComputedStyle(inactiveRow.firstElementChild);
+    return {
+      filter: cs.filter,
+      opacity: Number(cs.opacity),
+      wrapperDuration: cs.transitionDuration,
+      innerProperty: inner.transitionProperty,
+      innerDuration: inner.transitionDuration,
+    };
+  })() : null;
+
   const toggles = [...root.querySelectorAll('button[aria-label="Toggle the lyrics pane"]')];
   const toggle = toggles[0] || null;
   const row = toggle ? toggle.parentElement : null;
@@ -343,6 +369,7 @@ const surface = (page) => page.evaluate(() => {
     } : null,
     activeRows,
     lyricRows,
+    emphasis,
     toggleCount: toggles.length,
     toggle: toggle ? {
       title: toggle.getAttribute("title"),
@@ -1382,6 +1409,52 @@ const stampDecimalsPass = async (page, album) => {
   check("the active line is emphasised exactly once, before and after",
     before.activeRows === 1 && shown.activeRows === 1 && before.lyricRows === shown.lyricRows,
     `active ${before.activeRows}→${shown.activeRows} of ${shown.lyricRows} rows`);
+
+  // ---- the emphasis is a state, not an animation (R372) --------------------
+  // "the previous lyric line flickers very briefly when scrolling into the
+  // next one": an inactive line's blur + dim must land in the frame the clock
+  // changed the line, so the outgoing half animates nothing the pane's scroll
+  // has to re-rasterise. The line's own size/colour ease stays.
+  check("an inactive line wears the blur and the dim",
+    !!before.emphasis && before.emphasis.filter === "blur(1px)" && Math.abs(before.emphasis.opacity - 0.9) < 0.02,
+    JSON.stringify(before.emphasis));
+  check("the emphasis is applied as a state — no opacity/filter transition on the row",
+    !!before.emphasis && before.emphasis.wrapperDuration === "0s",
+    `wrapper transition-duration ${before.emphasis?.wrapperDuration}`);
+  check("the line's own size/colour ease survives under it",
+    !!before.emphasis && /transform/.test(before.emphasis.innerProperty) &&
+      /[1-9]/.test(before.emphasis.innerDuration),
+    `inner transition ${before.emphasis?.innerProperty} ${before.emphasis?.innerDuration}`);
+
+  // ---- the shell's own title bar is left alone (R370) ----------------------
+  // The desktop shell publishes its bar's height as `--mlo-titlebar-h`
+  // (TitleBar); a browser draws no bar, so it is set here the way `--mlo-inset-*`
+  // is set for the phone pass — the same variable the shell writes, and the
+  // layer's real layout measured under it.
+  const shellClip = await page.evaluate(() => {
+    document.documentElement.style.setProperty("--mlo-titlebar-h", "32px");
+    const root = document.querySelector("div.fixed.inset-0.z-50");
+    const topBar = root.querySelector(".safe-np-top");
+    const exit = topBar && topBar.querySelector('button[aria-label="Exit fullscreen"]');
+    const rr = root.getBoundingClientRect();
+    const er = exit ? exit.getBoundingClientRect() : null;
+    let hit = false;
+    if (er) {
+      const el = document.elementFromPoint(er.left + er.width / 2, er.top + er.height / 2);
+      hit = !!el && (el === exit || exit.contains(el));
+    }
+    document.documentElement.style.removeProperty("--mlo-titlebar-h");
+    return {
+      top: Math.round(rr.top), height: Math.round(rr.height), viewportH: window.innerHeight,
+      exitTop: er ? Math.round(er.top) : null, exitBottom: er ? Math.round(er.bottom) : null, hit,
+    };
+  });
+  check("a window-anchored layer starts below the shell's title bar",
+    shellClip.top === 32 && shellClip.height === shellClip.viewportH - 32,
+    `player top ${shellClip.top}, height ${shellClip.height} of ${shellClip.viewportH}`);
+  check("and the player's own top row is on screen under it",
+    shellClip.exitTop !== null && shellClip.exitTop >= 32 && shellClip.exitBottom <= shellClip.viewportH && shellClip.hit,
+    `exit button ${shellClip.exitTop}–${shellClip.exitBottom} of ${shellClip.viewportH}, hit=${shellClip.hit}`);
   if (hadTravel) {
     check("the scroll position survives the toggle",
       Math.abs(shown.scroller.scrollTop - before.scroller.scrollTop) <= 4,

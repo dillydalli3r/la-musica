@@ -5209,6 +5209,26 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   row degrades to a label + bar on a phone (`web/src/components/ProgressBar.tsx`)
   instead of overflowing the player's chrome.
 
+- **R370 — a layer that fills the WINDOW leaves the shell's own title bar
+  alone.** The desktop shell is undecorated and draws its bar in the app's
+  normal flow (`web/src/components/TitleBar.tsx`), so everything laid out
+  INSIDE the shell starts below it — but a `fixed inset-0` surface anchors to
+  the window, and one that starts at `top: 0` paints its own top row behind the
+  window controls. That is where the fullscreen player's exit button and queue
+  readout came out on Windows (owner report: "fullscreen button controls at the
+  top of the screen are overlapped by the tobbar"), and the music-video layer
+  under it and the phone's nav drawer came out with it. The bar publishes its
+  one height as `--mlo-titlebar-h` on `:root` while it is mounted
+  (`TITLEBAR_H`, `index.css`), and every such surface carries `.shell-top`
+  (`top: var(--mlo-titlebar-h, 0px)`); the docked lyrics pane's own safe-area
+  floor adds the same term. The variable is 0 in a browser and on a phone —
+  the host draws the chrome there — so those clients lay out pixel-identically,
+  and the device insets keep their own job. `tools/check_fullscreen_player.cjs`
+  sets the variable the way the shell does (the `--mlo-inset-*` test hook, same
+  idea) and measures the player: its root starts at the bar's height, its
+  height is the viewport less that, and its own top row is on screen and
+  hit-testable.
+
 ### 7.58 The pipeline's wall clock is measured, and what was measured
 
 - **R315 — the pipeline's own cost is a number, and the cheap wins are in.**
@@ -6439,6 +6459,39 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   (`server.imports._prune_import_dirs`), so an import never leaves the layout
   report's "Empty folders" finding behind. Pinned by
   `tools/test_import_pipeline.py`.
+
+### 7.74 The lyrics pane arrives, and its emphasis is a state
+
+- **R371 — the pane ARRIVES on the line instead of creeping up on it.** The
+  shared glider's ease (`web/src/lib/lyrScroll.ts`) was purely exponential, and
+  an exponential's tail is sub-pixel: measured on a 12 px step at 60 Hz, the
+  last ~8 frames of the move covered 1.4 → 0.08 px each (over 130 ms of drift
+  after the pane had visibly arrived) — the owner's "auto-scroll goes to the
+  line, but a little after that you can still see the line move a couple pixels
+  slowly. I don't want that". The ease now runs only while it is the faster of
+  the two, and a landing speed floor (`LAND_PX` = 1.4 px per 60 Hz frame)
+  carries the rest to the target. The handover is continuous by construction —
+  the ease's own step equals the floor exactly when the remaining distance is
+  `LAND_PX / EASE` (~8.75 px) — so nothing kinks, and the retarget rule (a line
+  change mid-glide re-aims instead of restarting) is untouched. Pinned by
+  `tools/check_lyrscroll.cjs`: a 12 px step must land, and every moving frame
+  of it but the arrival itself must cover at least a pixel (the old loop
+  failed that with 20 frames and a dozen of them under a pixel).
+- **R372 — a lyric line's emphasis is a STATE, so nothing paints per frame
+  while the pane scrolls.** A synced line the clock has left reads blurred and
+  dimmed (`LINE_BLUR`, `web/src/components/NowPlayingView.tsx`) and the line
+  arriving drops both in the frame it becomes active — but the half being LEFT
+  used to ease its opacity and `filter` over 300 ms. A `filter` that animates
+  under a scroller is a re-raster at every new scroll position and every step
+  of the blur, and the outgoing line came out of it with a one-frame flash:
+  the owner's "the previous lyric line flickers very briefly when scrolling
+  into the next one". The row now wears blur and dim as plain state (no
+  transition at all), so both ends of the emphasis land in the frame the clock
+  changed the line, and the size/colour ease on the line's own block — the one
+  this code chose for being compositor-only — is what still travels. Pinned by
+  `tools/check_fullscreen_player.cjs`, read off the live pane: an inactive row
+  computes `blur(1px)` at 0.9 opacity, its wrapper has no transition duration,
+  and the block under it still transitions `transform`.
 
 ## 8. Recommended runbook
 
