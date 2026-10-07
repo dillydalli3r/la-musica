@@ -197,8 +197,8 @@ interface Props {
  *  with them: a dark halo under light ink, a light halo under dark ink, so the
  *  edge of a glyph always separates from the busier mid-tones the ambience
  *  drifts through. `dim` sits high on either ladder because an inactive line is
- *  ALSO drawn at 80 % opacity behind a 1px blur (LINE_BLUR), which pulls it
- *  back toward the backdrop.
+ *  ALSO drawn at 90 % opacity (LINE_QUIET), which pulls it back toward the
+ *  backdrop on top of the ink step.
  *
  *  The numbers — measured field patches per cover, per tier — are in
  *  tools/check_np_metadata_contrast.cjs, which renders the real component. */
@@ -517,8 +517,15 @@ const LYRIC_SIZES = {
   lg: { line: "text-2xl", active: "text-[2.1rem]", word: "text-2xl", xlit: "text-xl" },
 } as const;
 
-/** Ease for the active line's growth — slow out, no snap. */
-const LINE_EASE = "transition-[transform,color] duration-motion-slow ease-motion";
+/** Ease for the active line's growth — slow out, no snap.
+ *
+ *  TRANSFORM ONLY. A scale animation is resampled by the compositor; `color`
+ *  is not compositable, so an animated ink re-rasterises the line's text on
+ *  the main thread at every frame of the transition — and text re-rasterised
+ *  while the pane scrolls can be drawn a scroll-step behind for a frame. The
+ *  emphasis's ink lands in the frame it changes (like its dim, below) and only
+ *  its SHAPE travels. */
+const LINE_EASE = "transition-[transform] duration-motion-slow ease-motion";
 
 /** How much smaller an inactive line renders next to the active one. The
  * layout is ALWAYS the active size — inactive lines shrink via transform
@@ -527,11 +534,20 @@ const LINE_EASE = "transition-[transform,color] duration-motion-slow ease-motion
  * jumpy growth this replaced). */
 const INACTIVE_SCALE = { sm: 0.88, md: 0.84, lg: 0.8 } as const;
 
-/** Non-current synced lines read greyed-out (a slight blur + dim grey);
- * keyboard focus reveals full detail. Plain-text lyrics are never styled —
- * only synced lines get the active/inactive treatment. The dim is
- * deliberately mild (90 %, 1px): over the light additive ambience a 2px blur
- * at 60 % made the line genuinely unreadable on a white cover.
+/** Non-current synced lines read QUIET — dimmed to 90 % and drawn in the dim
+ * ink — and NOTHING about them paints per frame. Plain-text lyrics are never
+ * styled; only synced lines get the active/quiet treatment.
+ *
+ * The QUIET half is a state with no `transition-*` of its own, and the 1px
+ * blur it used to carry is gone with it. An inactive line is the one the pane
+ * is scrolling under, and a `filter` gives it a render surface of its own
+ * inside a scroller that is already masked (`.lyr-fade`) and zoomed — a
+ * surface that appears in the very frame the pane moves, which is what a very
+ * short flash on the outgoing line comes from (owner report: "the previous
+ * lyric line flickers very briefly when scrolling into the next one", still
+ * there after the blur's own 300 ms transition was dropped, so the crate went
+ * rather than the animation). The emphasis keeps its two other carriers: the
+ * dim ink and the size.
  *
  * Deliberately NO `hover:` half — that half IS the owner's "the previous one
  * flickers for a second after a second". The pane follows the clock, so every
@@ -545,19 +561,8 @@ const INACTIVE_SCALE = { sm: 0.88, md: 0.84, lg: 0.8 } as const;
  * second after the new line took over and only dimmed again at the NEXT line
  * change. A line's emphasis has to be a function of the clock alone. The
  * keyboard half stays — `:focus-within` follows a deliberate action, and the
- * reduced-motion kill-list in index.css documents it.
- *
- * The dim + blur are a STATE, not an animation, and deliberately carry no
- * `transition-*`: a `filter` that animates while the pane scrolls is a
- * re-raster every frame — the filtered text has to be redrawn at each new
- * scroll position and each step of the blur — and the outgoing line came out
- * of it with a one-frame flash (owner report: "the previous lyric line
- * flickers very briefly when scrolling into the next one"). The arriving line
- * was already the symmetrical half of this: it drops the blur and the dim in
- * the frame it becomes active. Both ends of the emphasis now land in the
- * frame the clock changed the line, and only the size/colour ease below — the
- * one the code chose for being compositor-only — travels. */
-const LINE_BLUR = "np-line-blur blur-[1px] opacity-90 focus-within:blur-none focus-within:opacity-100";
+ * reduced-motion kill-list in index.css documents it. */
+const LINE_QUIET = "np-quiet opacity-90 focus-within:opacity-100";
 
 /** The volume cluster is its own component because dragging the slider writes
  *  `vol` once per pointer step. Subscribed here, where the value is actually
@@ -1489,7 +1494,7 @@ export default function NowPlayingView(p: Props) {
       <div
         key={i}
         className={`py-2 ${seekable ? "cursor-pointer" : ""} ${
-          isActive ? "opacity-100" : synced ? LINE_BLUR : ""
+          isActive ? "opacity-100" : synced ? LINE_QUIET : ""
         }`}
         onClick={
           seekable

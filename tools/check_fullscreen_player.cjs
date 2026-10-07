@@ -250,6 +250,17 @@ const surface = (page) => page.evaluate(() => {
       innerDuration: inner.transitionDuration,
     };
   })() : null;
+  // Every `filter` inside the scroller, wherever it sits: a filtered subtree is
+  // a render surface of its own, inside a scroller that is already masked by
+  // `.lyr-fade` and zoomed, and a surface created in the frame the pane moves
+  // is what a one-frame flash on the outgoing line comes from (R372). The
+  // count must be zero.
+  const paneFilters = scroller
+    ? [...scroller.querySelectorAll("*")].filter((el) => {
+        const f = getComputedStyle(el).filter;
+        return f && f !== "none";
+      }).map((el) => `${el.tagName}.${String(el.className).slice(0, 30)}:${getComputedStyle(el).filter}`)
+    : [];
 
   const toggles = [...root.querySelectorAll('button[aria-label="Toggle the lyrics pane"]')];
   const toggle = toggles[0] || null;
@@ -370,6 +381,7 @@ const surface = (page) => page.evaluate(() => {
     activeRows,
     lyricRows,
     emphasis,
+    paneFilters,
     toggleCount: toggles.length,
     toggle: toggle ? {
       title: toggle.getAttribute("title"),
@@ -1410,20 +1422,23 @@ const stampDecimalsPass = async (page, album) => {
     before.activeRows === 1 && shown.activeRows === 1 && before.lyricRows === shown.lyricRows,
     `active ${before.activeRows}→${shown.activeRows} of ${shown.lyricRows} rows`);
 
-  // ---- the emphasis is a state, not an animation (R372) --------------------
+  // ---- the emphasis is a pure state (R372) --------------------------------
   // "the previous lyric line flickers very briefly when scrolling into the
-  // next one": an inactive line's blur + dim must land in the frame the clock
-  // changed the line, so the outgoing half animates nothing the pane's scroll
-  // has to re-rasterise. The line's own size/colour ease stays.
-  check("an inactive line wears the blur and the dim",
-    !!before.emphasis && before.emphasis.filter === "blur(1px)" && Math.abs(before.emphasis.opacity - 0.9) < 0.02,
+  // next one": a line leaving the anchor may neither carry a render surface of
+  // its own nor change any painted property over time, so the frame the clock
+  // changes the line is the only frame it changes in. Its ink and its dim are
+  // states; only the SIZE travels, and that as a composited transform.
+  check("an inactive line is dimmed, with no filter of its own",
+    !!before.emphasis && before.emphasis.filter === "none" && Math.abs(before.emphasis.opacity - 0.9) < 0.02,
     JSON.stringify(before.emphasis));
-  check("the emphasis is applied as a state — no opacity/filter transition on the row",
+  check("nothing inside the pane carries a filter",
+    (before.paneFilters || []).length === 0, `filters: ${JSON.stringify(before.paneFilters)}`);
+  check("the emphasis is applied as a state — no transition on the row at all",
     !!before.emphasis && before.emphasis.wrapperDuration === "0s",
     `wrapper transition-duration ${before.emphasis?.wrapperDuration}`);
-  check("the line's own size/colour ease survives under it",
-    !!before.emphasis && /transform/.test(before.emphasis.innerProperty) &&
-      /[1-9]/.test(before.emphasis.innerDuration),
+  check("only the SIZE of the emphasis travels, and only as a transform",
+    !!before.emphasis && /(^|,\s*)transform(\s*,|$)/.test(before.emphasis.innerProperty) &&
+      !/color/.test(before.emphasis.innerProperty) && /[1-9]/.test(before.emphasis.innerDuration),
     `inner transition ${before.emphasis?.innerProperty} ${before.emphasis?.innerDuration}`);
 
   // ---- the shell's own title bar is left alone (R370) ----------------------

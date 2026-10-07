@@ -1189,14 +1189,14 @@ table td {
     transition: none !important;
     transform: none !important;
   }
-  /* Lyric blur kill-list (NowPlayingView LINE_BLUR = .np-line-blur):
-     synced lines reveal on focus so keyboard users still read full text. */
-  .np-line-blur {
-    filter: none !important;
+  /* Lyric emphasis (NowPlayingView LINE_QUIET = .np-quiet): an inactive line
+     carries no motion and no blur — this is the marker for the one thing that
+     IS motion, the active line's growth — and a reduced-motion reader keeps
+     full-brightness text on every line. */
+  .np-quiet {
     opacity: 1 !important;
   }
-  .np-line-blur:focus-within {
-    filter: none;
+  .np-quiet:focus-within {
     opacity: 1;
   }
 }

@@ -6477,21 +6477,29 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   `tools/check_lyrscroll.cjs`: a 12 px step must land, and every moving frame
   of it but the arrival itself must cover at least a pixel (the old loop
   failed that with 20 frames and a dozen of them under a pixel).
-- **R372 — a lyric line's emphasis is a STATE, so nothing paints per frame
-  while the pane scrolls.** A synced line the clock has left reads blurred and
-  dimmed (`LINE_BLUR`, `web/src/components/NowPlayingView.tsx`) and the line
-  arriving drops both in the frame it becomes active — but the half being LEFT
-  used to ease its opacity and `filter` over 300 ms. A `filter` that animates
-  under a scroller is a re-raster at every new scroll position and every step
-  of the blur, and the outgoing line came out of it with a one-frame flash:
-  the owner's "the previous lyric line flickers very briefly when scrolling
-  into the next one". The row now wears blur and dim as plain state (no
-  transition at all), so both ends of the emphasis land in the frame the clock
-  changed the line, and the size/colour ease on the line's own block — the one
-  this code chose for being compositor-only — is what still travels. Pinned by
-  `tools/check_fullscreen_player.cjs`, read off the live pane: an inactive row
-  computes `blur(1px)` at 0.9 opacity, its wrapper has no transition duration,
-  and the block under it still transitions `transform`.
+- **R372 — a lyric line's emphasis is a STATE, and the pane filters nothing.**
+  A synced line the clock has left reads dimmed (`LINE_QUIET`,
+  `web/src/components/NowPlayingView.tsx`) and the line arriving takes the
+  active ink and the full size in the frame it becomes active. Two things were
+  still painting per frame while the pane scrolled, and both are gone:
+
+  the half being LEFT used to ease its opacity and `filter` over 300 ms — a
+  `filter` that animates under a scroller re-rasterises the line at every new
+  scroll position and every step of the blur; and the emphasis eased its
+  `color` over 500 ms, which is not compositable and so re-rasterises the text
+  every frame too. Either one can be drawn a scroll-step behind for a single
+  frame, which is the owner's "the previous lyric line flickers very briefly
+  when scrolling into the next one" — reported a second time after the blur's
+  own transition had already been dropped, so the crate went with it rather
+  than the animation: no `filter` is left anywhere inside the scroller, the
+  quiet row carries no transition at all, and the line's own block transitions
+  `transform` ONLY (a composited scale, resampled by the compositor, which
+  cannot lag a scroll the way a fresh text raster can). The emphasis keeps its
+  three carriers — the dim ink, the dim opacity and the size — and only the
+  size travels. Pinned by `tools/check_fullscreen_player.cjs`, read off the
+  live pane: an inactive row computes `filter: none` at 0.9 opacity, no
+  element inside the scroller carries a filter, the row has no transition
+  duration, and the block under it transitions `transform` and not `color`.
 
 ## 8. Recommended runbook
 
