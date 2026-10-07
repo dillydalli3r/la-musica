@@ -289,7 +289,7 @@ export default function ArtistPage() {
                  sits beside the name in every list an artist is listed in
                  (components/ArtistName), and it reads from the same payload
                  field this page holds. */
-              title={<ArtistName name={name} pass={grade?.pass} disambiguation={data.disambiguation} nameClassName="truncate" />}
+              title={<ArtistName name={name} pass={grade?.pass} issues={grade?.issues} disambiguation={data.disambiguation} nameClassName="truncate" />}
               subtitle={
                 <span className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-zinc-400">
                   <span className="whitespace-nowrap">

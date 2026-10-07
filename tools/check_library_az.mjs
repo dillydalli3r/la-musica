@@ -37,14 +37,17 @@
  *     kept by the stub and the printed count is read off the heading line.
  *   * At 390 px the name box and the letter button must still share ONE row and
  *     stay inside the screen: the phone is where a toolbar turns into a stack.
- *   * The ARTIST's own verdict is one green dot beside the name — the artist
+ *   * The ARTIST's own verdict is one GREEN DOT beside the name — the artist
  *     folder's checks (image + description, `grade_artist`) — instead of the
  *     two chips the artist hero used to spell out ("albums", "artist artwork
- *     2/2"), and the SAME dot, from the SAME payload field, is drawn wherever
+ *     2/2"), and the SAME mark, from the SAME payload field, is drawn wherever
  *     a name is listed: the hero, the Library's Artists view, Home's artist
- *     shelf and Favorites' artist table. The stub answers all four out of the
- *     two `grade` objects the payload carries (one artist passing, one
- *     failing), so the check reads both sides of the rule on every surface.
+ *     shelf and Favorites' artist table. A FAILING artist draws the amber
+ *     warning instead of nothing (its tooltip names the failing checks), so a
+ *     list can never make an artist whose artwork never arrived look like one
+ *     nobody graded. The stub answers all four surfaces out of the two `grade`
+ *     objects the payload carries (one artist passing, one failing), so the
+ *     check reads both sides of the rule on every surface.
  *     The artist hero's cover-derived backdrop is measured too — the blurred
  *     layer covers the hero's box and is extended past it, it is masked by a
  *     gradient whose transparent stop is already reached along the hero's
@@ -1025,22 +1028,32 @@ try {
     const rows = [...document.querySelectorAll("main table tbody tr")];
     const read = (name) => {
       const row = rows.find((r) => (r.querySelector("a")?.textContent || "").trim() === name);
+      const warn = row?.querySelector("a .artist-warn");
       return row
-        ? { found: true, dot: !!row.querySelector("a .artist-dot"), name: (row.querySelector("a")?.textContent || "").trim() }
-        : { found: false, dot: false, name: "" };
+        ? { found: true, dot: !!row.querySelector("a .artist-dot"), warn: !!warn,
+            warnTitle: warn?.getAttribute("title") || "",
+            name: (row.querySelector("a")?.textContent || "").trim() }
+        : { found: false, dot: false, warn: false, warnTitle: "", name: "" };
     };
     return {
       alpha: read(alpha),
       beta: read(beta),
       dots: rows.filter((r) => r.querySelector("a .artist-dot")).length,
+      warns: rows.filter((r) => r.querySelector("a .artist-warn")).length,
     };
   }, [ARTIST_ALPHA, ARTIST_BETA]);
   check("the Library's Artists view draws that dot beside the name that passes",
         artistRows.alpha.found && artistRows.alpha.dot === true, JSON.stringify(artistRows));
-  check("…and none beside the name that fails",
-        artistRows.beta.found && artistRows.beta.dot === false, JSON.stringify(artistRows));
-  check("…and a row the payload never graded grew none either",
-        artistRows.dots === 1, `${artistRows.dots} dots`);
+  // A FAILING artist is a warning, not a silence: "the artist image and the
+  // description are missing" is the claim the library owes a reader where the
+  // artist is listed, and the mark's tooltip names the failing checks.
+  check("…and the warning mark beside the name that fails",
+        artistRows.beta.found && artistRows.beta.dot === false && artistRows.beta.warn === true &&
+          /artist description/i.test(artistRows.beta.warnTitle),
+        JSON.stringify(artistRows.beta));
+  check("…and a row the payload never graded grew neither mark",
+        artistRows.dots === 1 && artistRows.warns === 1,
+        `${artistRows.dots} dots, ${artistRows.warns} warnings`);
 
   // Home's artist shelf — the third place a name is listed, and the one whose
   // rows come off the SAME library row: one dot, two surfaces.
@@ -1054,19 +1067,21 @@ try {
         ? {
             found: true,
             dot: !!card.querySelector(".artist-dot"),
+            warn: !!card.querySelector(".artist-warn"),
             // What the row NAMES, read the way tools/check_home_artists.cjs
             // reads a shelf caption (`span.text-sm` — the shared render's own
             // name span): the display name, never the folder's `[mbid]`.
             caption: card.querySelector("span.text-sm")?.textContent?.trim() || "",
           }
-        : { found: false, dot: false, caption: "" };
+        : { found: false, dot: false, warn: false, caption: "" };
     };
     return { alpha: read(alpha), beta: read(beta) };
   }, [ARTIST_ALPHA, ARTIST_BETA]);
   check("Home's artist shelf draws it too, on the same artist",
         shelfDots.alpha.found && shelfDots.alpha.dot === true, JSON.stringify(shelfDots));
-  check("…and none on the artist that fails, so the shelf and the page agree",
-        shelfDots.beta.found && shelfDots.beta.dot === false, JSON.stringify(shelfDots));
+  check("…and the warning mark on the artist that fails, so the shelf and the page agree",
+        shelfDots.beta.found && shelfDots.beta.dot === false && shelfDots.beta.warn === true,
+        JSON.stringify(shelfDots));
   check("…while the card still names the artist (the caption the shelf's own check reads)",
         shelfDots.alpha.caption === ARTIST_ALPHA && shelfDots.beta.caption === ARTIST_BETA,
         JSON.stringify([shelfDots.alpha.caption, shelfDots.beta.caption]));
@@ -1081,15 +1096,17 @@ try {
     const read = (name) => {
       const row = rows.find((r) => (r.querySelector("a")?.textContent || "").trim() === name);
       return row
-        ? { found: true, dot: !!row.querySelector("a .artist-dot") }
-        : { found: false, dot: false };
+        ? { found: true, dot: !!row.querySelector("a .artist-dot"),
+            warn: !!row.querySelector("a .artist-warn") }
+        : { found: false, dot: false, warn: false };
     };
     return { alpha: read(alpha), beta: read(beta) };
   }, [ARTIST_ALPHA, ARTIST_BETA]);
   check("Favorites' artist table draws it on the artist that passes…",
         favDots.alpha.found && favDots.alpha.dot === true, JSON.stringify(favDots));
-  check("…and none on the one that fails",
-        favDots.beta.found && favDots.beta.dot === false, JSON.stringify(favDots));
+  check("…and the warning mark on the one that fails",
+        favDots.beta.found && favDots.beta.dot === false && favDots.beta.warn === true,
+        JSON.stringify(favDots));
 
   /* The sidebar's OWN entry, pressed while its page is already open, is a
    * RESET of that page's search rather than a navigation (App.tsx's

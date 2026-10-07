@@ -4300,7 +4300,14 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   rule decides the shape of a finding: **one failing track in an album is shown
   as the track, two or more as the album** (carrying `failing_tracks` and the
   union of their codes), and a failure the grader recorded against the folder
-  itself always makes an album row carrying the grader's own sentence. Three
+  itself always makes an album row carrying the grader's own sentence — EVERY
+  such sentence, in fact: the row prints the first (`reason`) and its tooltip
+  names them all beside the tag codes (`reasons`), because an album can fail
+  several album-wide checks at once and the one a reader went looking for was
+  not always the first on the list. "Album description missing — fetch one on
+  the album page" is the case that asked for it: the library has to say when a
+  description does not exist, and with another album-wide sentence ahead of it
+  the strip named everything else and never that. Three
   albums are never findings: a PENDING framework album (nothing was graded
   because its audio has not arrived), an album with `total_checks` 0 (which
   passes by the grader's own rule, `0 == 0`), and **an album a live job holds**
@@ -5507,14 +5514,47 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   per artist row (`server/library.py`, passed through to Home's shelf by
   `server/recommendations._top_artists`), and every place an artist's NAME is
   drawn — the artist page's title, the library's Artists view, Home's artist
-  shelf, Favorites — draws `web/src/components/ArtistName.tsx`'s green dot when
-  it passes, instead of chips spelling the two checks out (a FAILING artist still
-  names the check it failed, in words). The hero's blurred cover backdrop carries
-  the `.hero-ink` mask (a radial gradient ending transparent, the same idiom the
-  player's surfaces use), so it fades out instead of ending on a hard edge.
-  Pinned by `tools/check_library_az.mjs` (the dot present for a passing artist
-  and absent for a failing one, the two chips gone, the counts kept, and the blur
-  layer's box and computed mask measured).
+  shelf, Favorites — draws `web/src/components/ArtistName.tsx`'s mark for that
+  verdict: the green dot when it passes, and the amber warning when it FAILS,
+  instead of chips spelling the two checks out (the artist page has room and
+  still writes them out). A failure drawing NOTHING was the owner's complaint —
+  "make sure the library displays some sort of warning / grade error … if artist
+  images don't exist and … artist / album descriptions don't exist" — because a
+  list that stayed silent made an artist whose image never arrived look like one
+  nobody had graded; the warning's tooltip names the failing checks the way the
+  page's chips do (`label — reason`), and an artist the payload never graded
+  still draws neither mark ("not looked at" is not "failed"). The hero's blurred
+  cover backdrop carries the `.hero-ink` mask (a radial gradient ending
+  transparent, the same idiom the player's surfaces use), so it fades out instead
+  of ending on a hard edge. Pinned by `tools/check_library_az.mjs` (the dot for a
+  passing artist, the warning mark — with the missing check in its tooltip — for
+  a failing one on all four surfaces, the two chips gone, the counts kept, and
+  the blur layer's box and computed mask measured).
+
+- **R375 — an import FETCHES what the artist and album folders are missing, and
+  never overwrites what is stored.** `imports.run_metadata_step` runs on every
+  import path (`metadata_auto_fetch` / `metadata_review` are its own switches,
+  R183), and what it writes is `imports.apply_metadata`: the artist image when
+  the artist folder holds none (`artist_image_enabled`), the artist's biography
+  (`artist_description_enabled`) and the album's blurb
+  (`album_description_enabled`), each looked up by the identity the import just
+  settled. The writers FILL, they do not replace — an existing
+  `description.txt` (a hand-written one above all) is left exactly as it is, and
+  a second run reports that it wrote nothing — and a feature switched off writes
+  nothing at all, so "the app fetched something I did not allow" cannot happen.
+  The owner's ask ("make sure all this stuff is also fetched / optimized with
+  scripts during importing") is this step, not a script a reader has to
+  remember: script 19 only re-fits an image that is already there, which is what
+  its own check's reason says. The chained layout pass (script 20,
+  `layout_apply`, default ON) is the other half — it settles the folder
+  structure inside the same run, after the tagger has moved the album where the
+  naming script wants it and before the grade reads it
+  (`tools/test_import_pipeline.py` pins that order, and
+  `tools/test_layout_case.py` pins what an apply may do, Trash included).
+  Pinned by `tools/test_import_pipeline.py`'s metadata case: an album with no
+  image and no descriptions ends the step with all three written (a real
+  1200×1200 JPEG through `artistdata.save_image`), an edited description
+  survives a second run untouched, and the three switches off write nothing.
 
 ### 7.64 One knob decides the lanes, and only independent units get them
 

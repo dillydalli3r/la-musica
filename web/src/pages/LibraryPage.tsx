@@ -2192,6 +2192,7 @@ export default function LibraryPage() {
                               artist. */}
                           <ArtistName
                             to={artistRef(a)}
+                            issues={a.grade?.issues}
                             onClick={(e) => e.stopPropagation()}
                             name={a.display_name || a.name}
                             pass={a.grade?.pass}

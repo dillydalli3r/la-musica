@@ -387,7 +387,16 @@ def grade_warning(lib):
                           failing_tracks=len(bad),
                           codes=sorted({c for tr in bad
                                         for c in (tr.get("issues") or ())}),
-                          **({"reason": sentences[0]} if sentences else {})))
+                          # EVERY album-wide sentence, not just the first: the
+                          # row prints one ("— Missing MEDIA") and the tooltip
+                          # next to it names the rest, so a check the strip
+                          # cannot print — "Album description missing — fetch
+                          # one on the album page", the owner's own ask that the
+                          # library say when a description does not exist — is
+                          # still spelled out one hover away instead of being
+                          # dropped because another sentence came first.
+                          **({"reason": sentences[0],
+                              "reasons": sentences} if sentences else {})))
     # Worst first: the lowest grade, then the album with the most failing
     # tracks (a single-track row counts as the one track it is).
     items.sort(key=lambda it: (it["grade_pct"] if it["grade_pct"] is not None else 0.0,

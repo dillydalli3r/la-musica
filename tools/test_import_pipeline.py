@@ -262,6 +262,93 @@ assert full["skipped_families"] == [imports.SKIPPED_LYRICS], full["skipped_famil
 assert imports.chain_summary(full) == full["note"], full
 
 # --------------------------------------------------------------------------- #
+# The metadata step WRITES what is missing (artist image + both descriptions)
+# --------------------------------------------------------------------------- #
+# The step every path runs (asserted above) is not decoration: with the sources
+# answering, an album whose artist folder holds no image and whose folders hold
+# no descriptions ends the import with all three on disk — the owner's ask that
+# an import FETCH this instead of leaving it to a hand-run script. Only the
+# sources are stubbed (the three `discovery` finders and the image fetch); the
+# writers below them are the real ones, and the artist image is a real
+# 1200×1200 JPEG that `artistdata.save_image` fits to the configured policy.
+# Its own music root: this suite asserts elsewhere on the exact contents of
+# `LIB`, and a library the check wants to see is not the one under test.
+META_ROOT = os.path.join(ROOT, "meta_music")
+META_ALBUM = os.path.join(META_ROOT, "Artists", "Test Artist", "Test Album")
+meta_track = make_wav(os.path.join(META_ALBUM, "01 - track.wav"))
+from mlo.audio import AudioFile as _AudioFile
+_af = _AudioFile(meta_track)
+_af.set_tag("ARTIST", "Test Artist")
+_af.set_tag("ALBUMARTIST", "Test Artist")
+_af.set_tag("ALBUM", "Test Album")
+
+import io as _io
+from PIL import Image as _Image
+_buf = _io.BytesIO()
+_Image.new("RGB", (1200, 1200), (10, 20, 30)).save(_buf, format="JPEG")
+ARTIST_JPEG = _buf.getvalue()
+
+from server import discovery as _discovery
+from server import integrations as _intg
+from mlo import artistdata as _artistdata
+_saved = {n: getattr(_discovery, n) for n in
+          ("artist_image", "artist_description", "album_description")}
+_saved_fetch = _intg.fetch_image_bytes
+_discovery.artist_image = lambda artist, mbid="", cfg=None: {
+    "url": "http://stub.invalid/artist.jpg", "source": "stub", "label": "Stub portrait"}
+_discovery.artist_description = lambda artist, mbid="", cfg=None: {
+    "text": "Test Artist is a band from the fixture.", "source": "stub",
+    "source_url": "http://stub.invalid/artist"}
+_discovery.album_description = lambda artist, album, cfg=None: {
+    "text": "Test Album is the fixture's first record.", "source": "stub",
+    "source_url": "http://stub.invalid/album"}
+_intg.fetch_image_bytes = lambda url, **kw: (ARTIST_JPEG, "image/jpeg")
+
+META_CFG = {"music_folder": META_ROOT, "metadata_auto_fetch": True,
+            "metadata_review": False, "artist_image_enabled": True,
+            "artist_description_enabled": True, "album_description_enabled": True}
+try:
+    artist_folder = _artistdata.artist_dir(META_CFG, "Test Artist")
+    assert artist_folder and not _artistdata.has_image(artist_folder)
+    assert not os.path.exists(os.path.join(META_ALBUM, "description.txt"))
+    out = imports.run_metadata_step(META_ALBUM, META_CFG)
+    applied = out["applied"]
+    assert applied["artist_image"], out
+    assert applied["artist_description"], out
+    assert applied["album_description"], out
+    assert _artistdata.has_image(artist_folder),         "the import fetched the artist's missing image"
+    with open(os.path.join(artist_folder, "description.txt"), encoding="utf-8") as fh:
+        assert "Test Artist is a band" in fh.read(), "the artist biography was written"
+    with open(os.path.join(META_ALBUM, "description.txt"), encoding="utf-8") as fh:
+        album_text = fh.read()
+    assert "Test Album is the fixture" in album_text, "the album blurb was written"
+
+    # A second run never overwrites what is stored: the writers fill, they do
+    # not replace — an edited description is the reader's, not the source's.
+    edited = "Hand-written blurb, keep me.\n"
+    with open(os.path.join(META_ALBUM, "description.txt"), "w", encoding="utf-8") as fh:
+        fh.write(edited)
+    again = imports.run_metadata_step(META_ALBUM, META_CFG)
+    assert again["applied"]["album_description"] in (None, ""), again
+    with open(os.path.join(META_ALBUM, "description.txt"), encoding="utf-8") as fh:
+        assert fh.read() == edited, "an existing description is left as it is"
+
+    # ...and the per-feature switches decide what may be fetched at all: with
+    # all three off, a fresh album writes nothing.
+    off_album = os.path.join(META_ROOT, "Artists", "Test Artist", "Switched Off")
+    make_wav(os.path.join(off_album, "01 - track.wav"))
+    off_cfg = dict(META_CFG, artist_image_enabled=False,
+                   artist_description_enabled=False, album_description_enabled=False)
+    off = imports.run_metadata_step(off_album, off_cfg)
+    assert not any((off["applied"] or {}).values()), off
+    assert not os.path.exists(os.path.join(off_album, "description.txt")), \
+        "a switched-off feature writes nothing"
+finally:
+    for _n, _fn in _saved.items():
+        setattr(_discovery, _n, _fn)
+    _intg.fetch_image_bytes = _saved_fetch
+
+# --------------------------------------------------------------------------- #
 # AcoustID: unusable says why, and says nothing about matching
 # --------------------------------------------------------------------------- #
 res = imports.acoustid_match([album], {"acoustid_enabled": False})

@@ -153,9 +153,15 @@ gw_lib = {"artists": [{"path": "C:/M/A", "name": "Alpha", "albums": [
                 _tr("C:/M/A/Two/2.flac", AUDIT="track")]},
     # A failure recorded against the album itself names no file, so it is an
     # album row carrying the grader's own sentence.
+    # ...and an album with SEVERAL album-wide sentences keeps them all: the row
+    # prints the first, the tooltip beside it names the rest — which is how
+    # "Album description missing" (an enabled check, and the owner's ask that
+    # the library say when one does not exist) reaches a reader whose album
+    # happens to fail another album-wide check first.
     {"path": "C:/M/A/Three", "pass": False, "pass_count": 3, "total_checks": 4,
      "grade_pct": 75.0, "meta": {"ALBUM": "Three"}, "tracks": [],
-     "issues": {"Missing MEDIA": ["album-wide"]}},
+     "issues": {"Missing MEDIA": ["album-wide"],
+                "Album description missing — fetch one on the album page": ["album"]}},
     # NOT findings: a passing album, a PENDING framework album (nothing was
     # graded because its audio has not arrived — listing it would report a wish
     # as a broken album) and an album with no checks (0 == 0 passes).
@@ -181,6 +187,8 @@ two = gw["items"][0]
 assert two["failing_tracks"] == 2 and two["codes"] == ["AUDIT", "COVER"], two
 three = gw["items"][1]
 assert three["reason"] == "Missing MEDIA" and three["failing_tracks"] == 0, three
+assert three["reasons"] == ["Missing MEDIA",
+                            "Album description missing — fetch one on the album page"], three
 one = gw["items"][2]
 assert one["track_path"] == "C:/M/A/One/1.flac" and one["title"] == "1.flac", one
 assert one["codes"] == ["COVER"] and "failing_tracks" not in one, one

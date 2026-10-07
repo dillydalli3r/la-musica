@@ -425,6 +425,10 @@ export interface GradeWarningItem {
   /** The grader's own sentence for an album-level failure ("Missing cover
    *  image", "Missing .log file", …); absent when a file failed instead. */
   reason?: string;
+  /** EVERY album-wide failing check's own sentence, in the grader's order —
+   *  the row prints `reason` (the first) and its tooltip names the rest, so a
+   *  check that is not the first sentence still reaches the reader. */
+  reasons?: string[];
   /** The album's grade (what the worst-first order sorts on). */
   grade_pct: number | null;
 }
