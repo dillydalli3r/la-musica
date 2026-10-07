@@ -236,12 +236,15 @@ jobs:
           check Linux-appimage '*.AppImage'
           check Android '*.apk'
           check iOS '*.ipa'
-          # …and every OS needs an UPDATER artifact — a signed zip/tarball the
-          # installed app downloads rather than the installer a person does.
-          # Nothing else fails when one is missing: the manifest the next
-          # release builds would simply leave that platform out, and its apps
-          # would stop being offered updates without a word.
-          check Windows-updater '*-setup.exe.zip'
+          # …and every OS needs an UPDATER artifact — what an installed app
+          # downloads rather than what a person does. On Windows that is the
+          # NSIS installer itself, marked by the `.sig` the bundler wrote beside
+          # it (`createUpdaterArtifacts`; read off a real bundle, and the URL an
+          # installed 5.2.0 already updated from in testing); on macOS and Linux
+          # it is the tarball below. Nothing else fails when one is missing: the
+          # manifest the next release builds would simply leave that platform
+          # out, and its apps would stop being offered updates without a word.
+          check Windows-updater '*-setup.exe.sig'
           check macOS-updater '*.app.tar.gz'
           check Linux-updater '*.AppImage.tar.gz'
           exit "$missing"

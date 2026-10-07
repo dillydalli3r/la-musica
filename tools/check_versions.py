@@ -107,6 +107,13 @@ def main():
     for path in ("desktop/package.json", "web/package.json"):
         found[path] = str(json.loads(read(path)).get("version") or "")
 
+    # The npm lockfiles carry the package version in their root entry as well,
+    # and `npm ci` never compares it — so it drifts silently for releases at a
+    # time (both were a release and a half behind when this line was written),
+    # and the next `npm install` lands a diff nobody asked for.
+    for path in ("desktop/package-lock.json", "web/package-lock.json"):
+        found[path] = str(json.loads(read(path)).get("version") or "")
+
     found["Dockerfile"] = find(r'^ARG MLO_VERSION=([^\s\\]+)', read("Dockerfile"),
                                "Dockerfile", "`ARG MLO_VERSION`")
 
