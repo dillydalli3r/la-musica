@@ -512,6 +512,31 @@ jobs:
           set -e
           python tools/check_desktop_deps.py --bundle desktop/bundle/mlo-server
 
+      - name: Name the macOS updater tarball after its arch
+        # `tauri build` writes `la musica.app.tar.gz` — no arch and no version —
+        # while the updater's platform keys are `darwin-<arch>`: the arch has to
+        # come from somewhere, and the file's own name cannot say it. This leg
+        # knows it (`runner.arch`), and an installed app only cares about the
+        # bytes it downloads, so the tarball and its signature are renamed here
+        # rather than guessed at later. Without this the release job's platform
+        # check finds no darwin updater artifact at all and fails the release
+        # (`tools/make_updater_manifest.py` cannot classify a nameless arch —
+        # which is how this was noticed, on the release that added the check).
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        run: |
+          case "${{ runner.arch }}" in
+            ARM64) a=aarch64 ;;
+            X64)   a=x86_64 ;;
+            *) echo "::error::unknown runner arch ${{ runner.arch }}"; exit 1 ;;
+          esac
+          cd desktop/src-tauri/target/release/bundle/macos
+          for f in *.app.tar.gz; do
+            mv "$f" "${f%.app.tar.gz}_$a.app.tar.gz"
+            if [ -f "$f.sig" ]; then mv "$f.sig" "${f%.app.tar.gz}_$a.app.tar.gz.sig"; fi
+          done
+          ls -la
+
       - name: Upload the bundles
         uses: actions/upload-artifact@v4
         with:

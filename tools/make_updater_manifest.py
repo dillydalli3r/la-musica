@@ -39,19 +39,22 @@ from urllib.parse import quote
 # and in order (`.AppImage.tar.gz` must not be read as `.app.tar.gz`, which a
 # case-blind match would do, and each is an updater artifact in its own right).
 #
-# Windows is the INSTALLER itself: tauri 2.11 writes
-# `…_x64-setup.exe` and `…_x64-setup.exe.sig` (read off a real build, not the
-# docs — the zip form below is what tauri-plugin-updater also accepts, so both
-# are recognised and neither is invented). macOS and Linux are the tarballs the
-# updater swaps a bundle out of, with the raw forms kept for the same reason.
+# Read off real bundles (tauri 2.11), not off the docs, whose example manifest
+# shows a tarball for Linux: Windows updates from the NSIS installer itself
+# (`…_x64-setup.exe` + `.sig`) and Linux from the AppImage itself
+# (`…_amd64.AppImage` + `.sig`), while macOS really is a tarball
+# (`la musica.app.tar.gz` + `.sig`). The forms the bundler does NOT write today
+# are still recognised, after the measured one, because tauri-plugin-updater
+# accepts them too — so a release that ever produces both is described by
+# whichever Tauri names.
 _KINDS = (
     ("-setup.exe.zip", "windows", "nsis"),
     (".msi.zip", "windows", "msi"),
     ("-setup.exe", "windows", "nsis"),
     (".msi", "windows", "msi"),
     (".app.tar.gz", "darwin", "app"),
-    (".AppImage.tar.gz", "linux", "appimage"),
     (".AppImage", "linux", "appimage"),
+    (".AppImage.tar.gz", "linux", "appimage"),
     (".deb", "linux", "deb"),
     (".rpm", "linux", "rpm"),
 )
