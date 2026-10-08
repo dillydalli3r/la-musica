@@ -5130,27 +5130,38 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   rating and the cover URL, so no piece can land on a frame of its own (the
   owner's "title, then artist, then album, then the cover image"). A record is
   ready when the track's own tags payload has answered (the title/artist/album
-  fallbacks and the year that rides the album line), the cover's ADDRESS is
-  known — a queue row carrying its own cover filenames answers at once, while a
-  row built from an album card waits for the library tree in the bar and the
-  album payload in the pane — and, when there is art, that image is DECODED, so
-  the `<img>`/`CoverImg` that follows paints the same cached bytes instead of
-  arriving a round trip after the words. Until then the block keeps painting the
-  record it last committed (the stale-hold the lyrics pane and the tech readout
-  already use), and a surface with no record yet draws its rows EMPTY rather
-  than a filename stem, a folder name, a "—" or a disc the real values then
-  replace; `NOW_PLAYING_WAIT_MS` caps the wait, so a source that STALLS (a tags
-  read that is retrying, a cover that never comes back) ends in the previous
-  behaviour rather than in a permanently empty block. The next track's tags
-  payload is prefetched with the cover warm in `PlayerBar`, so a sequential
-  handover's pieces are all in hand and commit in the change's own paint. The
-  bar's sub-lines read the per-track tags exactly as the pane's already did,
-  which is what makes one record complete for a queue row the library does not
-  list (a playlist or .m3u8 entry, a previewed download). Pinned by
-  `tools/check_player_state.cjs` §11, whose sampler records the frame each
-  stamp latched on: the new record's strings and its DECODED art must be the
-  same frame (measured 0.1 ms apart), and a committed record must never be
-  observed dropping back to a blank block.
+  fallbacks and the year that rides the album line, the tech readout and the
+  marks): every STRING it feeds is then final, and the words land together.
+  Until then the block keeps painting the record it last committed (the
+  stale-hold the lyrics pane and the tech readout already use), and a surface
+  with no record yet draws its rows EMPTY rather than a filename stem, a folder
+  name, a "—" or a disc the real values then replace; `NOW_PLAYING_WAIT_MS`
+  caps the wait, so a source that STALLS (a tags read that is retrying) ends in
+  the previous behaviour rather than in a permanently empty block.
+
+  The ART is deliberately NOT part of that gate, and this is the one rule that
+  changed: the block used to hold its words until the cover's address was known
+  AND the image was decoded, which meant a slow cover held the title back with
+  it. The owner's ask is the other way round — "all data shows at the same
+  [time] … other info can load before the cover is updated" — so the words land
+  the moment they are final and the cover arrives after them (the committed
+  record is LIVE, so a late album payload or a late image updates the block in
+  place). What keeps that from being a pop in practice is the WARM: the queue's
+  own data is read ahead (`lib/queueWarm`) — the tags of the track playing and
+  of the next `QUEUE_WARM_AHEAD` (3) rows, the album payload that names the
+  cover, and the cover's colour the fullscreen ambience is painted from — so an
+  ordinary handover has everything in the cache and commits complete, and the
+  case the change removes is the one where the picture is LATE. The bar's
+  sub-lines read the per-track tags exactly as the pane's already did, which is
+  what makes one record complete for a queue row the library does not list (a
+  playlist or .m3u8 entry, a previewed download). Pinned by
+  `tools/check_player_state.cjs` §11 (its sampler counts the DISTINCT strings a
+  committed block went through — one is a one-paint commit — requires the art
+  to land at all and never to be drawn before the record that names it, and
+  requires a committed record never to be observed dropping back to a blank
+  block) and §12 (the warm: the tags of the playing track and the rows ahead
+  are read before their turn, and a press on Next requests NOTHING for the
+  track it lands on — no tags, no album payload, no colour).
 
 - **R346 — the bar's controls share only the room each of them can hold, and
   the seek bar answers while a menu is open.** The player bar's grid is three

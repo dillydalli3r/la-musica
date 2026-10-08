@@ -7,47 +7,6 @@ import { useEffect, useState } from "react";
  *  exactly as it did before this record existed. */
 export const NOW_PLAYING_WAIT_MS = 1500;
 
-/** Is `url`'s image decoded — or already known to be undrawable?
- *
- *  Decoded, not merely requested: the metadata block must not paint its words
- *  a round trip before the picture that belongs with them, and the browser's
- *  own image cache is keyed by URL, so the `Image` fetched here hands the
- *  surface's `<img>`/`CoverImg` the same bytes with no second request. An
- *  `error` is an answer too: the disc placeholder is then the FINAL state, not
- *  a piece still to come. `false` is only ever "still working on it". */
-function useArtReady(url: string | null): boolean {
-  const [state, setState] = useState<{ url: string | null; done: boolean }>({ url, done: url === null });
-  useEffect(() => {
-    if (!url) {
-      setState({ url: null, done: true });
-      return;
-    }
-    let live = true;
-    setState({ url, done: false });
-    const img = new Image();
-    img.decoding = "async";
-    const done = () => {
-      if (live) setState({ url, done: true });
-    };
-    img.onload = () => {
-      // `decode()` is the promise the browser resolves once the bytes are
-      // READY to paint; where it is missing or refuses the format, the load
-      // event is the best answer there is.
-      Promise.resolve(img.decode?.()).then(done, done);
-    };
-    img.onerror = done;
-    img.src = url;
-    const cap = window.setTimeout(done, NOW_PLAYING_WAIT_MS);
-    return () => {
-      live = false;
-      window.clearTimeout(cap);
-      img.onload = null;
-      img.onerror = null;
-    };
-  }, [url]);
-  return state.url === url && state.done;
-}
-
 /** The now-playing metadata block's own clock: ONE record per track, committed
  *  in ONE paint.
  *
@@ -66,15 +25,20 @@ function useArtReady(url: string | null): boolean {
  *  So the surfaces hand this hook the record as it resolves right now and keep
  *  painting the record they LAST committed until the new one is ready — the
  *  stale-hold the lyrics pane and the bar's tech readout already use for
- *  exactly this reason. A record is ready when
+ *  exactly this reason. A record is ready when `settled`: the per-track tags
+ *  have answered (or failed), so every STRING the record feeds is final — the
+ *  title, the artist, the album, the year that rides the album line, the tech
+ *  readout and the marks.
  *
- *    - `settled` — the per-track tags have answered (or failed), so every
- *      string they feed is final: the title, the artist, the album and the
- *      year that rides the album line;
- *    - the cover's ADDRESS is known — `cover` is `undefined` while only a
- *      payload that is still in flight can name the art, `null` when the track
- *      has none, the URL otherwise;
- *    - and, when there is art, its bytes are decoded (`useArtReady`).
+ *  The ART is deliberately NOT part of that, and this is the one rule that has
+ *  changed: the block used to hold its words until the cover's address was
+ *  known AND the image was decoded, so a slow cover held the title back with
+ *  it. The owner's ask is the other way round — "all data shows at the same
+ *  [time] … other info can load before the cover is updated" — so the words
+ *  land as soon as they are known and the cover arrives after them. The
+ *  queue's own data is warmed ahead (`lib/queueWarm`), so in the ordinary
+ *  handover the art is already in the cache and the record commits complete
+ *  anyway; what the change removes is the case where the picture is LATE.
  *
  *  `record === null` is the idle player: nothing is held and null comes back,
  *  so the surface draws its own idle state. Once a record is committed, the
@@ -83,11 +47,12 @@ function useArtReady(url: string | null): boolean {
  *  always did — the gate is about track CHANGES only. */
 export function useNowPlayingMeta<T extends { path: string }>(
   record: T | null,
-  settled: boolean,
-  cover: string | null | undefined
+  settled: boolean
 ): T | null {
-  const artReady = useArtReady(record && cover ? cover : null);
-  const complete = settled && cover !== undefined && artReady;
+  // `complete` is the gate: the strings are final. The art is the LIVE
+  // record's own business — a payload that names the cover, or the image's
+  // bytes, may land after this commit and update the block in place.
+  const complete = settled;
   // The track the block is painting. A record is only committed when its own
   // path is complete, so `held` doubles as "what is on screen right now".
   const [held, setHeld] = useState<T | null>(null);

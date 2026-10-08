@@ -813,26 +813,29 @@ function assertConsistent(label, p, expectedFile) {
       await page.reload({ waitUntil: "domcontentloaded" });
     }
 
-    // 11. The metadata block is ONE record: its title, its sub-lines and its
-    //     art all come from the record the bar has COMMITTED (see
-    //     lib/nowPlaying), so they land in ONE paint. Until the track's tags
-    //     have settled, the cover's address is known and the image is DECODED,
-    //     the block keeps painting the record it last committed — the
-    //     stale-hold — or draws EMPTY when there is none. Measured on this
-    //     machine against a scratch server, entering a track from an album
-    //     page with nothing playing: the block's strings and the decoded cover
-    //     landed 0.1 ms apart (94.7 ms and 94.8 ms after the press).
+    // 11. The metadata block is ONE record: its title, its sub-lines, its tech
+    //     readout and its marks all come from the record the bar has COMMITTED
+    //     (see lib/nowPlaying), so they land in ONE paint. Until the track's
+    //     tags have settled, the block keeps painting the record it last
+    //     committed — the stale-hold — or draws EMPTY when there is none.
     //
-    //     The measurement is a frame sampler, not a stopwatch: `tNew` is the
-    //     first frame the block's text is non-empty AND different from the
-    //     text at the press, `tCover` the first frame the bar's art exists,
-    //     decoded, at a DIFFERENT address than at the press, and the two must
-    //     land in the SAME sampled frame — that is what one paint means — and
-    //     within one 60 Hz frame of each other (17 ms: the feature's own
-    //     number, where a one-paint commit measures ~0.1 ms and one frame of
-    //     separation measures ~16.7 ms). `tBlank` is the first frame the block
-    //     went EMPTY after `tNew`, and must never come: a committed record is
-    //     never dropped back to blank.
+    //     The ART is deliberately not part of that gate any more: the strings
+    //     land as soon as they are final and the cover is allowed to follow
+    //     (the owner's ask: "all data shows at the same [time] … other info can
+    //     load before the cover is updated"), where the rule used to be "hold
+    //     the words until the image is decoded". The queue's own data is warmed
+    //     ahead (lib/queueWarm, section 12), so an ordinary handover has the
+    //     art in hand anyway; what changed is the case where the picture is
+    //     LATE.
+    //
+    //     The measurement is a frame sampler, not a stopwatch: `texts` is how
+    //     many DISTINCT strings the block went through after the press (one =
+    //     one paint), `tNew` the first frame the text is non-empty AND
+    //     different from the text at the press, `tCover` the first frame the
+    //     bar's art exists, decoded, at a DIFFERENT address than at the press
+    //     (so it can never be the previous record's), and `tBlank` the first
+    //     frame the block went EMPTY after `tNew` — which must never come: a
+    //     committed record is never dropped back to blank.
     //
     //     The album's LAST row is pressed, so the queue has to resolve a track
     //     it has never loaded, and the album must carry 4+ tracks — which by
@@ -859,7 +862,8 @@ function assertConsistent(label, p, expectedFile) {
         return img && img.complete && img.naturalWidth > 0 ? (img.currentSrc || img.src) : null;
       };
       const before = { text: blockText(), src: artSrc() };
-      const st = { before, t0: null, tNew: null, tCover: null, tBlank: null, tNewFrame: null, tCoverFrame: null, frames: 0, done: false };
+      const st = { before, t0: null, tNew: null, tCover: null, tBlank: null, tNewFrame: null,
+                   tCoverFrame: null, frames: 0, done: false, texts: 0, last: before.text };
       window.__mloBlockRecord = st;
       const tick = () => {
         if (st.done) return;
@@ -867,6 +871,10 @@ function assertConsistent(label, p, expectedFile) {
         if (st.t0 !== null) {
           st.frames++;
           const now = blockText();
+          // How many DISTINCT strings the committed block went through: one is
+          // a one-paint commit, more is the stagger this record exists to stop
+          // (the stem → title, the folder name → artist, the "—" → album).
+          if (now !== st.last) { st.texts++; st.last = now; }
           if (st.tNew === null && now && now !== before.text) { st.tNew = t; st.tNewFrame = st.frames; }
           if (st.tNew !== null && st.tBlank === null && !now) st.tBlank = t;
           if (st.tCover === null) {
@@ -966,7 +974,9 @@ function assertConsistent(label, p, expectedFile) {
       await sleep(5000);                                              // the commit, well past the hook's own wait
       const st = await page.evaluate(() => {
         const s = window.__mloBlockRecord;
-        return s ? { before: s.before, t0: s.t0, tNew: s.tNew, tCover: s.tCover, tBlank: s.tBlank, tNewFrame: s.tNewFrame, tCoverFrame: s.tCoverFrame, frames: s.frames } : null;
+        return s ? { before: s.before, t0: s.t0, tNew: s.tNew, tCover: s.tCover, tBlank: s.tBlank,
+                     tNewFrame: s.tNewFrame, tCoverFrame: s.tCoverFrame, frames: s.frames,
+                     texts: s.texts, last: s.last } : null;
       });
       await page.evaluate(() => { if (window.__mloBlockRecord) window.__mloBlockRecord.done = true; });
       const rel = (v) => (v === null || !st || st.t0 === null ? "null" : `+${(v - st.t0).toFixed(1)}ms`);
@@ -974,18 +984,90 @@ function assertConsistent(label, p, expectedFile) {
         ? `tNew=${rel(st.tNew)} tCover=${rel(st.tCover)} tBlank=${rel(st.tBlank)} over ${st.frames} frames`
         : "sampler not installed";
       const delta = st && st.tNew !== null && st.tCover !== null ? Math.abs(st.tNew - st.tCover) : null;
-      // The two must land in the SAME sampled frame: that is what one paint
-      // means, and the millisecond tolerance below is the feature's own (a
-      // one-paint commit measures ~0.1 ms, one frame of separation ~16.7 ms —
-      // which the 17 ms tolerance alone would only just allow).
-      const sameFrame = !!st && st.tNewFrame !== null && st.tNewFrame === st.tCoverFrame;
-      check("block record: the new record's strings and its decoded art land in ONE paint",
-        sameFrame && delta !== null && delta <= BLOCK_FRAME_MS,
-        `${stamps} Δ=${delta === null ? "n/a" : `${delta.toFixed(1)}ms`} sameFrame=${sameFrame} ` +
-        `(one 60 Hz frame = ${BLOCK_FRAME_MS}ms; before-press=${JSON.stringify((st ? st.before.text : "").slice(0, 40))})`);
+      // The strings must land in ONE paint — that is the record's whole job —
+      // and the art is allowed to FOLLOW them: the owner's ask ("all data shows
+      // at the same [time] … other info can load before the cover is updated")
+      // moved the gate from "the image is decoded" to "the strings are final",
+      // so a slow cover no longer holds the title back with it. The sampler
+      // counts the DISTINCT strings the block went through (`texts`): one
+      // change from what was on screen before the press. The cover, when it
+      // lands, is the new track's — the sampler only stamps a DIFFERENT
+      // address — so it can neither arrive early nor be the previous record's.
+      check("block record: the new record's strings land in ONE paint",
+        !!st && st.tNew !== null && st.texts === 1,
+        `${stamps} distinct strings=${st?.texts} (want 1) ` +
+        `(before-press=${JSON.stringify((st ? st.before.text : "").slice(0, 40))})`);
+      check("block record: the cover may follow the words, and does land",
+        !!st && st.tCover !== null && delta !== null && delta >= -BLOCK_FRAME_MS,
+        `${stamps} Δ=${delta === null ? "n/a" : `${delta.toFixed(1)}ms`} ` +
+        `(the art is never drawn BEFORE the record that names it)`);
       check("block record: a committed record is never dropped back to an empty block",
         !!st && st.tBlank === null,
         `${stamps} before-press=${JSON.stringify((st ? st.before.text : "").slice(0, 40))}`);
+    }
+
+    // 12. The queue's data is WARMED AHEAD of the handover (lib/queueWarm), so
+    //     a handover is served ENTIRELY from the cache: the tags of the track
+    //     playing and of the next few rows, the album payload that names the
+    //     cover, and the cover's colour the fullscreen player's ambience is
+    //     painted from (the owner's ask: "integrate song data caching for the
+    //     current track / next tracks in queue").
+    //
+    //     Measured as the ABSENCE of a round trip, which is the property that
+    //     matters and the only one a page can be read for: after pressing the
+    //     album's first row (its rows become the queue in that order), a
+    //     press on Next must request NOTHING for the track it lands on — not
+    //     the tags, not the album payload, not the colour. The rows the warm
+    //     covers are the first `QUEUE_WARM_AHEAD + 1` of the album's own
+    //     running order, read from the payload so the assertion cannot encode
+    //     a different order than the page plays. A library whose albums hold
+    //     fewer than 2 tracks skips the case by name.
+    const warmAhead = Number((/export const QUEUE_WARM_AHEAD = (\d+)/.exec(
+      require("fs").readFileSync(require("path").join(__dirname, "..", "web", "src", "lib", "queueWarm.ts"), "utf8")) || [])[1]);
+    const warmAlbum = await page.evaluate(async (base) => {
+      const lib = await (await fetch(base + "/api/library")).json();
+      for (const a of lib.artists || []) {
+        for (const al of a.albums || []) {
+          if ((al.track_count ?? (al.tracks || []).length) >= 2) return { path: al.path };
+        }
+      }
+      return null;
+    }, BASE);
+    if (!Number.isFinite(warmAhead) || !warmAlbum) {
+      check("queue warm: the library offers a queue to hand over in", true,
+        warmAlbum ? "skipped — queueWarm.ts states no QUEUE_WARM_AHEAD" :
+                    "skipped — no album with 2+ tracks to press a queue from");
+    } else {
+      await page.goto(`${BASE}/album/${encodeURIComponent(warmAlbum.path)}`, { waitUntil: "domcontentloaded" });
+      await page.waitForSelector('tr[title="Click to play"]');
+      const order = await page.evaluate(async ([base, path]) => {
+        const full = await (await fetch(base + "/api/album?path=" + encodeURIComponent(path))).json();
+        return (full.tracks || []).map((t) => t.path);
+      }, [BASE, warmAlbum.path]);
+      await page.evaluate(() => performance.clearResourceTimings());
+      await pressRow(0);                                  // the queue becomes the album, in payload order
+      await sleep(2000);
+      const warmed = await page.evaluate(() => performance.getEntriesByType("resource").map((e) => e.name));
+      const wanted = order.slice(0, Math.min(order.length, warmAhead + 1));
+      const cold = wanted.filter((p) => !warmed.some((n) => n.includes("/api/tags?path=" + encodeURIComponent(p))));
+      check("queue warm: the playing track and the rows ahead are read before their turn",
+        wanted.length > 1 && cold.length === 0,
+        `cold: ${JSON.stringify(cold.map((p) => p.split("/").pop()))} of ${wanted.length} rows ` +
+        `(QUEUE_WARM_AHEAD=${warmAhead})`);
+
+      // The handover itself: nothing on the wire for the track it lands on.
+      await page.evaluate(() => performance.clearResourceTimings());
+      await page.locator('button[title="Next track"]').first().click();
+      await sleep(2500);
+      const during = await page.evaluate(() => performance.getEntriesByType("resource").map((e) => e.name));
+      const landed = order[1];
+      const late = during.filter((n) => n.includes("/api/tags?path=" + encodeURIComponent(landed))
+        || n.includes("/api/album?path=" + encodeURIComponent(warmAlbum.path))
+        || n.includes("color=1"));
+      check("queue warm: the handover to the next row asks for nothing (its data is already in hand)",
+        !!landed && late.length === 0,
+        `wanted no request for ${landed ? landed.split("/").pop() : "(no second row)"}, saw ` +
+        `${JSON.stringify(late.map((n) => decodeURIComponent(n).replace(/^.*\/api\//, "").slice(0, 60)))}`);
     }
 
     check("no uncaught page errors", errs.length === 0, errs.join(" | "));

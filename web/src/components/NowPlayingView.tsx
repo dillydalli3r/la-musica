@@ -931,7 +931,7 @@ export default function NowPlayingView(p: Props) {
   // cover file + dominant color for the ambient background — the album
   // payload also supplies the canonical album artist / album name shown
   // under the cover.
-  const { data: album, isPending: albumPending } = useQuery({
+  const { data: album } = useQuery({
     queryKey: ["album", p.current.albumPath],
     queryFn: () => api.album(p.current.albumPath),
     staleTime: 5 * 60 * 1000,
@@ -953,9 +953,6 @@ export default function NowPlayingView(p: Props) {
   // Storage hop on top of the fetch). The metadata block's record waits for
   // both, and for this URL's bytes, so the picture is never a piece that lands
   // a round trip after the words (see lib/nowPlaying).
-  const coverNamed = !!(p.current.coverFile || p.current.albumCover) || !albumPending;
-  const paneCoverUrl =
-    coverNamed && coverFile ? api.coverUrl(p.current.albumPath, coverFile, { w: PANE_COVER_W }) : null;
   const { data: colorData } = useQuery({
     queryKey: ["coverColor", p.current.albumPath],
     queryFn: () => api.coverColor(p.current.albumPath),
@@ -1626,7 +1623,10 @@ export default function NowPlayingView(p: Props) {
     // than blanking it (undefined here would say "the web never rated it").
     web: trackWebRating(freshTags),
   };
-  const block = useNowPlayingMeta(blockRecord, !tagsStale, coverNamed ? paneCoverUrl : undefined);
+  // One gate: the strings are final. The cover may land after the words (see
+  // lib/nowPlaying) — `coverFile` rides the LIVE record, so an album payload
+  // that arrives after this commit still updates the art in place.
+  const block = useNowPlayingMeta(blockRecord, !tagsStale);
   // The art the block draws — the committed record's own cover, and NOTHING
   // while no record is committed yet. The picture is one of the pieces that
   // must not land ahead of the words, and the surfaces draw no placeholder that

@@ -27,6 +27,7 @@ import { eqApplyRefusal } from "../lib/eqNodes";
 import FavHeart from "./FavHeart";
 import { ROW_COVER_W } from "./CoverImg";
 import { useNowPlayingMeta } from "../lib/nowPlaying";
+import { useQueueWarm } from "../lib/queueWarm";
 import ScrollingText from "./ScrollingText";
 import { DetailsDialog } from "./AlbumDetails";
 import TrackDownloadExport from "./TrackDownloadExport";
@@ -766,24 +767,17 @@ export default function PlayerBar() {
     img.src = nextCover;
     img.decode?.().catch(() => {});
   }, [playing, nextCover]);
-  // The same warm, for the next track's TAGS payload: the metadata block's
-  // record waits for that payload (its title/artist/album fallbacks and the
-  // year that rides the album line — see lib/nowPlaying), so fetching it a
-  // track early is what makes a sequential handover commit in the change's own
-  // paint instead of a round trip after it. One key, the bar's own `["tags",
-  // path]` query below: the handover then reads it from the cache, and nothing
-  // is ever fetched twice.
-  const warmedTags = useRef<string | null>(null);
-  useEffect(() => {
-    const nx = queue[index + 1];
-    if (!playing || !nx || warmedTags.current === nx.path) return;
-    warmedTags.current = nx.path;
-    void qc.prefetchQuery({
-      queryKey: ["tags", nx.path],
-      queryFn: () => api.tags(nx.path),
-      staleTime: 5 * 60 * 1000,
-    });
-  }, [playing, queue, index, qc]);
+  // …and the queue's DATA, warm for the track playing and the rows ahead: the
+  // tags payload (the title/artist/album fallbacks, the year that rides the
+  // album line, the tech readout, the lyrics, the MBIDs and the public web
+  // rating), the album payload that names the cover, and the cover's colour.
+  // The metadata block's record waits on the tags (see lib/nowPlaying), so a
+  // payload already in the cache is what makes a handover commit in the
+  // change's OWN paint instead of a round trip after it. `lib/queueWarm` is
+  // the one place that decides what a handover needs, on the SAME query keys
+  // the bar and the fullscreen player read, so nothing is fetched twice and
+  // the two surfaces share one cache.
+  useQueueWarm(queue, index, !!playing);
 
   // The album and artist lines open their own pages, and a queue row carries
   // only the folder it came from — while the routes prefer a MusicBrainz ID
@@ -904,11 +898,10 @@ export default function PlayerBar() {
         artistHref,
       }
     : null;
-  const block = useNowPlayingMeta(
-    blockRecord,
-    current !== null && currentTags !== undefined,
-    coverNamed ? blockCoverUrl : undefined
-  );
+  // The gate is the STRINGS being final (`currentTags` answered); the cover is
+  // the record's own business and may land after the words (see lib/nowPlaying
+  // for the rule and why it changed).
+  const block = useNowPlayingMeta(blockRecord, current !== null && currentTags !== undefined);
   const [thumbFailed, setThumbFailed] = useState(false);
   // Keyed on the RECORD's path, not the queue's: the block describes the track
   // it committed, and a cover that failed earlier must not yet be holding the
