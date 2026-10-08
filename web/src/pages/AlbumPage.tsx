@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { ChevronDown, ChevronRight, CircleAlert, Play, Wand2, Trash2, FolderSync, FolderOpen, BarChart3, ImageUp, Image as ImageIcon, FileVideo, Film, Disc3, CloudDownload, Sparkles, ListPlus, ListStart, ShieldCheck, FileMusic, ListChecks, Info as InfoIcon, Loader2, Pencil, RefreshCw, Tags, Users } from "lucide-react";
 import { api } from "../api";
+import { rescanLayout } from "../lib/layoutScan";
 import { LinkChips, LinkEditorButton } from "../components/Links";
 import { SubtitledVideo } from "../components/SubtitledVideo";
 import { EmptyState, AdvisoryMark, albumAdvisory, CachedMark, DisambiguationMark, GradeBadge, PageLoading, PendingMark, pendingSummary, mediaCountryLabel } from "../components/Badges";
@@ -486,6 +487,10 @@ export default function AlbumPage() {
       await api.removeAlbum(data.path);
       toast("Album moved to trash");
       qc.invalidateQueries({ queryKey: ["library"] });
+      // The tree just changed — the artist folder may hold no album at all now
+      // — so the stored layout report is re-scanned (README: the Library's own
+      // layout warning and the Optimization panel read it).
+      void rescanLayout(qc);
       navigate("/");
     } catch (e) {
       toast.error(String(e));

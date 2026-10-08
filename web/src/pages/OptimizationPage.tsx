@@ -4,6 +4,7 @@ import {
   Check, ChevronDown as Down, ChevronUp as Up, FolderTree, Gauge, Play, RefreshCw, Wand2, X,
 } from "lucide-react";
 import { api } from "../api";
+import { LAYOUT_REPORT_KEY } from "../lib/layoutScan";
 import { toast, useStore } from "../store";
 import { ProgressInline } from "../components/ProgressBar";
 import Modal from "../components/Modal";
@@ -330,6 +331,7 @@ const FIX_LABEL_BY_ACTION: Record<string, string> = {
  *  deleted, always restorable). Scan reports; Apply fixes does those three
  *  and reports what it left alone. */
 function LayoutPanel() {
+  const qc = useQueryClient();
   const [report, setReport] = useState<LayoutReport | null>(null);
   // When the report on screen was scanned, and whether it is about a music
   // folder other than the configured one. The rows alone cannot say either:
@@ -344,8 +346,14 @@ function LayoutPanel() {
 
   useEffect(() => {
     let live = true;
-    // No toast on failure: a panel that cannot read the stored report simply
-    // starts empty, which is exactly what the Scan button is for.
+    // The stored report first, so the panel paints with the last answer instead
+    // of a spinner — and then a SCAN of its own, because that stored answer may
+    // describe a folder the app (or the reader) has since changed: the panel
+    // used to wait for the Rescan press, which is what the owner hit ("I need
+    // to manually use this section under rescan for the library to update. It
+    // should be done automatically"). The scan is the read-only route, so
+    // opening the page can never move anything; when it cannot run, the stored
+    // report stays on screen.
     api.libraryLayoutReport()
       .then((snap) => {
         if (!live || !snap.exists || !snap.report) return;
@@ -357,10 +365,14 @@ function LayoutPanel() {
         setScannedAt(snap.scanned_at);
         setOpen(new Set(LAYOUT_KINDS.filter((k) => snap.report!.counts[k.kind]).map((k) => k.kind)));
       })
-      .catch(() => { /* nothing stored yet */ });
+      .catch(() => { /* nothing stored yet */ })
+      .finally(() => {
+        if (live) void scan();
+      });
     return () => {
       live = false;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const scan = async () => {
@@ -375,6 +387,9 @@ function LayoutPanel() {
       // the stamp shown is the SERVER's clock, not the browser's guess at it.
       const snap = await api.libraryLayoutReport();
       setScannedAt(snap.scanned_at);
+      // ...and tell every other reader of that stored report (the Library
+      // page's own layout warning) that it moved.
+      qc.invalidateQueries({ queryKey: LAYOUT_REPORT_KEY });
     } catch (e) {
       toast.error(String(e));
     } finally {
@@ -395,6 +410,7 @@ function LayoutPanel() {
       setOpen(new Set(LAYOUT_KINDS.filter((k) => r.counts[k.kind]).map((k) => k.kind)));
       const snap = await api.libraryLayoutReport();
       setScannedAt(snap.scanned_at);
+      qc.invalidateQueries({ queryKey: LAYOUT_REPORT_KEY });
       const fixed = r.fixed ?? 0;
       const failed = r.fix_failed ?? 0;
       // A failed fix is not a failed run: the library is still there, and the

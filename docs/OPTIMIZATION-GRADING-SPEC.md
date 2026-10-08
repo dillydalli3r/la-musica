@@ -6642,6 +6642,31 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   built elsewhere, or one whose files moved, be opened, read and cleaned up
   instead of erroring.
 
+### 7.76 The library-layout report keeps itself up to date
+
+- **R378 — the layout panel SCANS when it opens, and every action that moves a
+  folder asks for a fresh scan.** The report the panel draws is a scan's output
+  (`mlo.layout.scan_library`, the walk script 20 runs) and what both it and the
+  Library page's own layout warning read is the STORED copy — so the panel used
+  to paint the last scan's answer and wait for the reader to press Rescan, and
+  a folder the app (or the reader) had already changed kept being reported until
+  they did (owner report: "I need to manually use this section under rescan for
+  the library to update. It should be done automatically"). Now: the panel
+  paints the stored report first (so it arrives with an answer instead of a
+  spinner) and then runs a scan of its own, and `web/src/lib/layoutScan.ts`'s
+  `rescanLayout` is called by every action that changes the tree — an album to
+  the Trash (`AlbumPage.removeAlbum`, `LibraryPage.removeAlbums`), a restore
+  from the Trash (`TrashPage`), an applied fix or an album-less artist folder
+  removed (the panel's own actions, which also republish the query the Library's
+  warning reads). The scan is the READ-ONLY half of the layout route, so nothing
+  behind a mutation can settle a reader's files by surprise — the fixing half
+  stays behind Apply fixes and script 20's own `layout_apply` — and a scan that
+  cannot run leaves the stored report standing, silently. Pinned by
+  `tools/check_layout.cjs`: opening the panel moves the stored report's
+  `scanned_at` with no Rescan press, and a folder deleted on disk behind the
+  app's back (the owner's actual case) is gone from both the report and the
+  panel when the page is reopened.
+
 ## 8. Recommended runbook
 
 Nothing here is a substitute for the app's own Dependencies page: run it first

@@ -9,6 +9,7 @@ import {
   ListFilter, ListPlus, Play, RefreshCw, Search, Tag, Trash2, Wand2, X,
 } from "lucide-react";
 import { api } from "../api";
+import { rescanLayout } from "../lib/layoutScan";
 import { SCRIPTS, DEFAULT_RUN_ALL, isScriptId } from "../lib/scripts";
 import { toast, useStore } from "../store";
 import {
@@ -795,6 +796,10 @@ export default function LibraryPage() {
       toast(`Moved ${paths.length} album(s) to trash`);
       clearSelection();
       invalidateLibrary(qc);
+      // Same reason as the album page's single removal: the folders moved, so
+      // the stored layout report is re-scanned rather than left describing the
+      // tree the reader just changed.
+      void rescanLayout(qc);
     } catch (e) {
       toast.error(String(e));
     } finally {

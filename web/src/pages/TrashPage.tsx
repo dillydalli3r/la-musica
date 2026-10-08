@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowDownUp, FolderOpen, ListChecks, Loader2, Search, Trash2, Undo2 } from "lucide-react";
 import { api, type TrashEntry } from "../api";
+import { rescanLayout } from "../lib/layoutScan";
 import { toast } from "../store";
 import { invalidateLibrary } from "../lib/invalidate";
 import { sortRows, SortHeader, toggleSort, type SortState } from "../lib/sort.tsx";
@@ -244,6 +245,11 @@ export default function TrashPage() {
       setSelected([]);
       qc.invalidateQueries({ queryKey: ["trash"] });
       invalidateLibrary(qc);
+      // A restore puts folders BACK into the tree (possibly into a new artist
+      // folder), so the stored layout report is re-scanned: the panel and the
+      // Library's layout warning read it, and neither should describe the tree
+      // as it was before the move.
+      void rescanLayout(qc);
     },
   });
 
