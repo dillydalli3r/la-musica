@@ -1,10 +1,11 @@
 import { useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { Disc3, FileVideo, Heart, ListMusic, Mic2, Play } from "lucide-react";import { api } from "../api";
+import { Disc3, FileVideo, Heart, HeartOff, ListChecks, ListMusic, Mic2, Play } from "lucide-react";import { api } from "../api";
 import { useStore } from "../store";
 import { toast } from "../store";
-import { useFavorites, useTrackLikes } from "../lib/favs";
+import { unfavoriteMany, useFavorites, useTrackLikes, type FavKind } from "../lib/favs";
+import SelectAllButton from "../components/SelectAllButton";
 import { AdvisoryMark, CachedMark, EmptyState, PageLoading } from "../components/Badges";
 import PageHeader from "../components/PageHeader";
 import { TrackCover } from "../components/CoverImg";
@@ -31,6 +32,15 @@ const TABS = [
 
 type Kind = (typeof TABS)[number]["id"];
 
+/** What the page hands every tab in select mode: the mode, what is ticked, and
+ *  the one way to tick it. The BATCH action lives on the page (one bar, one
+ *  wording per tab), so a tab never grows its own idea of what removal is. */
+type TabSelectProps = {
+  selectMode: boolean;
+  picked: string[];
+  onPick: (key: string) => void;
+};
+
 export default function FavoritesPage() {
   const { kind: raw } = useParams();
   const navigate = useNavigate();
@@ -39,6 +49,51 @@ export default function FavoritesPage() {
   const { artists, albums, tracks, libError } = useLibraryMaps();
   const { data: likes, isError: likesFailed } = useTrackLikes();
   const { data: favs, isError: favsFailed } = useFavorites();
+  const qc = useQueryClient();
+
+  // The page's ONE select mode, over the tab in view (the same idiom the
+  // Library, Home, the artist page and the trash use: a Select toggle in the
+  // header, a Select-all beside it, and a batch bar once something is ticked).
+  // The keys of one tab mean nothing in another — a track path is not an album
+  // path — so a tab change starts over rather than carrying a selection the
+  // reader can no longer see.
+  const [selectMode, setSelectMode] = useState(false);
+  // The selection CARRIES ITS TAB, so a tab change cannot leave a selection
+  // behind: the keys of one tab (track paths) mean nothing in another (album
+  // paths), and a batch action must never fire on a list the reader cannot
+  // see. An effect that emptied a shared array on `kind` would do the same
+  // thing a render later; this cannot be a render out of step at all.
+  const [pickedState, setPicked] = useState<{ tab: Kind; keys: string[] }>({ tab: kind, keys: [] });
+  const picked = pickedState.tab === kind ? pickedState.keys : [];
+  const [removing, setRemoving] = useState(false);
+
+  const togglePick = (key: string) =>
+    setPicked((prev) => {
+      const keys = prev.tab === kind ? prev.keys : [];
+      return { tab: kind, keys: keys.includes(key) ? keys.filter((k) => k !== key) : [...keys, key] };
+    });
+
+  /** Take everything ticked off the favourites list in one action. The writes
+   *  are `unfavoriteMany` (the same two endpoints the hearts call, one
+   *  invalidation at the end), and what happened is reported: a batch that
+   *  half-wrote says so instead of looking complete. */
+  const removePicked = async () => {
+    if (!picked.length || removing) return;
+    setRemoving(true);
+    try {
+      // The tab ids ARE the singular kind with an "s" (tracks/albums/artists/
+      // playlists), which is exactly what the store wants.
+      const singular = kind.slice(0, -1) as FavKind;
+      const { removed, failed } = await unfavoriteMany(kind === "tracks" ? "track" : singular, picked, qc);
+      const what = kind === "tracks" ? "track" : kind.slice(0, -1);
+      if (removed && !failed) toast(`Removed ${removed} ${what}${removed === 1 ? "" : "s"} from your favorites`);
+      else if (removed) toast(`Removed ${removed} of ${picked.length} — ${failed} could not be written`);
+      else toast.error(`Nothing could be removed (${failed} write${failed === 1 ? "" : "s"} failed)`);
+      setPicked({ tab: kind, keys: [] });
+    } finally {
+      setRemoving(false);
+    }
+  };
 
   // A liked playlist holds no paths of its own — only the playlists tab needs
   // them, so the detail fetches wait for that tab (same shared hook the
@@ -105,6 +160,16 @@ export default function FavoritesPage() {
               options={TABS.map((t) => ({ id: t.id, label: t.label, icon: t.icon }))}
               className="max-w-[calc(100vw-9rem)] flex-wrap justify-end"
             />
+            <button
+              className={`btn-ghost !py-1.5 text-xs tap ${selectMode ? "!text-accent !border-accent/50" : ""}`}
+              onClick={() => {
+                if (selectMode) setPicked({ tab: kind, keys: [] });
+                setSelectMode(!selectMode);
+              }}
+              title="Select mode — tick several and take them off your favorites at once"
+            >
+              <ListChecks className="h-3.5 w-3.5" /> Select
+            </button>
             {/* both act on the tab in view — a like list is the set this page
                 represents */}
             <DownloadButton
@@ -123,16 +188,40 @@ export default function FavoritesPage() {
           </>
         }
       />
-      {kind === "tracks" && <LikedTracks />}
+      {/* The batch bar the app's other select modes use (TrashPage's own
+          strip): what is ticked, and the ONE action that acts on it. */}
+      {selectMode && picked.length > 0 && (
+        <div className="flex items-center gap-2 bg-accent/15 border border-accent/40 rounded-lg px-3 py-2 flex-wrap">
+          <span className="text-xs font-medium text-accent-soft">
+            {picked.length} selected
+          </span>
+          <div className="ml-auto flex gap-1.5 flex-wrap">
+            <button
+              className="btn-danger !py-1 text-xs tap"
+              onClick={removePicked}
+              disabled={removing}
+              title={kind === "tracks" ? "Unlike every ticked track" : "Remove every ticked entry from your favorites"}
+            >
+              <HeartOff className="h-3.5 w-3.5" />
+              {kind === "tracks" ? "Unlike" : "Remove from favorites"}
+            </button>
+            <button className="btn-ghost !py-1 text-xs tap" onClick={() => setPicked({ tab: kind, keys: [] })}>
+              Clear
+            </button>
+          </div>
+        </div>
+      )}
+
+      {kind === "tracks" && <LikedTracks selectMode={selectMode} picked={picked} onPick={togglePick} />}
       {/* the shelf renders null while it has nothing to suggest, so it costs
           the tabs without a recommendation nothing */}
       {kind === "tracks" && <MoreLikeThis kind="favorites" target="tracks" />}
-      {kind === "albums" && <FavAlbums />}
-      {kind === "artists" && <FavArtists />}
+      {kind === "albums" && <FavAlbums selectMode={selectMode} picked={picked} onPick={togglePick} />}
+      {kind === "artists" && <FavArtists selectMode={selectMode} picked={picked} onPick={togglePick} />}
       {(kind === "albums" || kind === "artists") && (
         <MoreLikeThis kind="favorites" target="albums" />
       )}
-      {kind === "playlists" && <FavPlaylists />}
+      {kind === "playlists" && <FavPlaylists selectMode={selectMode} picked={picked} onPick={togglePick} />}
     </div>
   );
 }
@@ -171,6 +260,14 @@ function LoadFailed({ what, error, onRetry }: { what: string; error: unknown; on
       onAction={onRetry && { label: "Try again", onClick: onRetry }}
     />
   );
+}
+
+/** What an entry the LIBRARY cannot resolve is called: the folder's own name,
+ *  with the artist/album folder's MusicBrainz suffix stripped (`Artist
+ *  [a466c2a2-…]` reads "Artist", the same rule the artist rows use). */
+function folderName(path: string): string {
+  const base = String(path || "").split("/").filter(Boolean).pop() ?? String(path || "");
+  return base.replace(/\s*\[[0-9a-f-]{8,}\]\s*$/, "");
 }
 
 function displayArtist(al: Album, a: Artist) {
@@ -238,7 +335,11 @@ function likedHide(id: string): string {
   return LIKED_PHONE_CLS[id] ?? (id.startsWith("tag:") ? PHONE_HIDE : "");
 }
 
-function LikedTracks() {
+function LikedTracks({ selectMode, picked, onPick }: {
+  selectMode: boolean;
+  picked: string[];
+  onPick: (key: string) => void;
+}) {
   const { data: likes, isLoading, isError, error, refetch } = useTrackLikes();
   const { tracks } = useLibraryMaps();
   const playNow = useStore((s) => s.playNow);
@@ -330,10 +431,19 @@ function LikedTracks() {
 
   return (
     <div>
-      <div className="flex items-center gap-2 pb-2">
+      <div className="flex items-center gap-2 pb-2 flex-wrap">
         <span className="text-xs text-zinc-500">
           {rows.length} liked track{rows.length === 1 ? "" : "s"}
         </span>
+        {selectMode && (
+          <SelectAllButton
+            count={rows.length}
+            noun="tracks"
+            all={rows.length > 0 && picked.length === rows.length}
+            onSelectAll={() => rows.forEach((r) => !picked.includes(r.path) && onPick(r.path))}
+            onClear={() => rows.forEach((r) => picked.includes(r.path) && onPick(r.path))}
+          />
+        )}
         <div className="ml-auto flex items-center gap-2">
           <ColumnsMenu
             cols={likedDefs}
@@ -354,6 +464,9 @@ function LikedTracks() {
         <table className={`w-full text-sm ${LIKED_MIN_W}`}>
           <thead className="border-b border-border">
             <tr>
+              {/* The tick column exists only while select mode is on, exactly
+                  like the library's own tables. */}
+              {selectMode && <th className="th pr-0 w-8" aria-label="Select" />}
               {likedDefs.filter((c) => likedCols.includes(c.id)).map((c) =>
                 c.sortKey ? (
                   <SortHeader
@@ -376,16 +489,26 @@ function LikedTracks() {
             {view.map((r, i) => (
               <tr
                 key={r.path}
-                className="table-row group cursor-pointer"
-                title="Click to play · Ctrl-click to open track page"
+                className={`table-row group ${selectMode ? "" : "cursor-pointer"} ${picked.includes(r.path) ? "bg-accent/10" : ""}`}
+                title={selectMode ? "Click to select" : "Click to play · Ctrl-click to open track page"}
                 onClick={(e) => {
-                  if (!r.missing && (e.ctrlKey || e.metaKey || e.shiftKey)) {
+                  // Select mode owns the row click, like every other list in
+                  // the app: a tick and a play on the same gesture would do
+                  // both at once.
+                  if (selectMode) {
+                    onPick(r.path);
+                  } else if (!r.missing && (e.ctrlKey || e.metaKey || e.shiftKey)) {
                     navigate(`/track/${encodeURIComponent(r.trackPath)}`);
                   } else if (!r.missing) {
                     play(i);
                   }
                 }}
               >
+                {selectMode && (
+                  <td className="td pr-0" onClick={(e) => e.stopPropagation()}>
+                    <input type="checkbox" checked={picked.includes(r.path)} onChange={() => onPick(r.path)} title="Select track" />
+                  </td>
+                )}
                 {likedCols.includes("num") && <td className={`td cell-nowrap text-zinc-600 tabular-nums${PHONE_HIDE}`}>{i + 1}</td>}
                 {likedCols.includes("cover") && (
                 <td className="td cell-cover pr-0">
@@ -443,15 +566,34 @@ function LikedTracks() {
 // ------------------------------------------------------------------------ //
 // Favorite albums
 // ------------------------------------------------------------------------ //
-function FavAlbums() {
+function FavAlbums({ selectMode, picked, onPick }: TabSelectProps) {
   const { data: favs, isLoading, isError, error, refetch } = useFavorites();
   const { albums, libError, refetchLib } = useLibraryMaps();
 
+  // EVERY favourite, in the order the store returns them (newest first). One
+  // the library cannot resolve — its folder was moved, renamed, or holds no
+  // audio at all — is NOT dropped: it becomes the row shape the app already
+  // draws for a favourite the library no longer holds (`owned: false`: the
+  // card keeps the identity it was favourited by and draws no grade, no play
+  // button and no link), which is what Home's own favorites shelf does. The
+  // filter that used to sit here is why a favourite could be missing from this
+  // page while still being in the store, with nothing on screen able to take
+  // it off.
   const rows = useMemo(
     () =>
-      (favs?.albums ?? [])
-        .map((p) => albums.get(p))
-        .filter((x): x is NonNullable<typeof x> => !!x),
+      (favs?.albums ?? []).map((p) => {
+        const hit = albums.get(p);
+        if (hit) return { key: p, al: { ...hit.album, owned: true } as Album & { owned?: boolean },
+                          artistName: displayArtist(hit.album, hit.artist) };
+        return {
+          key: p,
+          al: {
+            path: p, owned: false, artist: "", tracks: [], cover_file: null,
+            meta: { ALBUM: folderName(p) },
+          } as unknown as Album & { owned?: boolean },
+          artistName: "",
+        };
+      }),
     [favs, albums]
   );
 
@@ -465,13 +607,35 @@ function FavAlbums() {
   // (shared AlbumCard, shared mlo.gridSize setting).
   const gridSize = (localStorage.getItem("mlo.gridSize") as "s" | "m" | "l" | null) ?? "m";
   return (
-    <div
-      className="grid gap-x-4 gap-y-5 stagger"
-      style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${GRID_SIZE_MIN[gridSize] ?? 164}px, 1fr))` }}
-    >
-      {rows.map(({ album: al, artist: a }) => (
-        <AlbumCard key={al.path} al={al} artistName={displayArtist(al, a)} />
-      ))}
+    <div>
+      {selectMode && (
+        <div className="flex items-center gap-2 pb-2">
+          <SelectAllButton
+            count={rows.length}
+            noun="albums"
+            all={rows.length > 0 && picked.length === rows.length}
+            onSelectAll={() => rows.forEach((r) => !picked.includes(r.key) && onPick(r.key))}
+            onClear={() => rows.forEach((r) => picked.includes(r.key) && onPick(r.key))}
+          />
+        </div>
+      )}
+      <div
+        className="grid gap-x-4 gap-y-5 stagger"
+        style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${GRID_SIZE_MIN[gridSize] ?? 164}px, 1fr))` }}
+      >
+        {rows.map(({ key, al, artistName }) => (
+          <AlbumCard
+            key={key}
+            al={al}
+            artistName={artistName}
+            /* A row the library does not hold has no page to open. */
+            href={al.owned === false ? null : undefined}
+            selectable={selectMode}
+            selected={picked.includes(key)}
+            onSelect={onPick}
+          />
+        ))}
+      </div>
     </div>
   );
 }
@@ -479,16 +643,23 @@ function FavAlbums() {
 // ------------------------------------------------------------------------ //
 // Favorite artists
 // ------------------------------------------------------------------------ //
-function FavArtists() {
+function FavArtists({ selectMode, picked, onPick }: TabSelectProps) {
   const { data: favs, isLoading, isError, error, refetch } = useFavorites();
   const { artists, libError, refetchLib } = useLibraryMaps();
   const playNow = useStore((s) => s.playNow);
 
+  // Every favourite, resolved or not: an artist the library cannot resolve
+  // (the folder was removed or renamed) stays a row — named by the folder it
+  // was favourited under, with no counts to show — so it can be seen and taken
+  // off here instead of silently vanishing from the page that owns it.
   const rows = useMemo(
     () =>
-      (favs?.artists ?? [])
-        .map((p) => artists.get(p))
-        .filter((x): x is Artist => !!x),
+      (favs?.artists ?? []).map((p) => {
+        const hit = artists.get(p);
+        return hit
+          ? { key: p, a: hit as Artist | null, name: "" }
+          : { key: p, a: null, name: folderName(p) };
+      }),
     [favs, artists]
   );
 
@@ -501,18 +672,60 @@ function FavArtists() {
   // Tracks columns, same cell classes); play + heart ride in the Artist
   // cell as hover affordances, exactly like hearts in the track table.
   return (
+    <div>
+      {selectMode && (
+        <div className="flex items-center gap-2 pb-2">
+          <SelectAllButton
+            count={rows.length}
+            noun="artists"
+            all={rows.length > 0 && picked.length === rows.length}
+            onSelectAll={() => rows.forEach((r) => !picked.includes(r.key) && onPick(r.key))}
+            onClear={() => rows.forEach((r) => picked.includes(r.key) && onPick(r.key))}
+          />
+        </div>
+      )}
     <div className="overflow-x-auto">
       <table className={`w-full text-sm ${FAV_TABLE_MIN_W}`}>
         <thead className="border-b border-border">
           <tr>
+            {selectMode && <th className="th pr-0 w-8" aria-label="Select" />}
             <th className="th">Artist</th>
             {/* a phone-width 12% is ~46 px — too narrow for a count */}
-            <th className="th w-16 md:w-[12%]">Albums</th>
+            {/* "Releases" — the Library's own Artists column has spelled an
+                artist's albums this way since it was added (see ARTIST_COLS),
+                and the same count under two names was the owner's report. */}
+            <th className="th w-16 md:w-[12%]">Releases</th>
             <th className="th w-16 md:w-[12%]">Tracks</th>
           </tr>
         </thead>
         <tbody className="stagger">
-          {rows.map((a) => {
+          {rows.map(({ key, a, name: folder }) => {
+            if (!a) {
+              // The library cannot resolve this favourite any more: the row
+              // says so, keeps the folder's own name, and the heart is the way
+              // off (the same control the resolved rows carry).
+              return (
+                <tr key={key} className={`table-row group ${picked.includes(key) ? "bg-accent/10" : ""}`}
+                    title="This artist is no longer in the library — remove it from your favorites with the heart">
+                  {selectMode && (
+                    <td className="td pr-0" onClick={(e) => e.stopPropagation()}>
+                      <input type="checkbox" checked={picked.includes(key)} onChange={() => onPick(key)} title="Select artist" />
+                    </td>
+                  )}
+                  <td className="td" colSpan={2}>
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <span className="font-medium break-words flex-1 min-w-0">{folder}</span>
+                      <span className="chip bg-amber-950/40 text-amber-300/90 border border-amber-900/50 text-[10px] shrink-0">
+                        not in the library
+                      </span>
+                      <span className="shrink-0">
+                        <FavHeart kind="artist" id={key} iconClass="h-3.5 w-3.5" revealOnHover />
+                      </span>
+                    </div>
+                  </td>
+                </tr>
+              );
+            }
             const displayName =
               a.display_name ||
               a.albums.find((al) => al.album_artist)?.album_artist ||
@@ -525,13 +738,30 @@ function FavArtists() {
               }))
             );
             return (
-              <tr key={a.path} className="table-row group">
+              <tr
+                key={a.path}
+                className={`table-row group ${selectMode ? "" : ""} ${picked.includes(key) ? "bg-accent/10" : ""}`}
+                onClick={selectMode ? () => onPick(key) : undefined}
+                title={selectMode ? "Click to select" : undefined}
+              >
+                {selectMode && (
+                  <td className="td pr-0" onClick={(e) => e.stopPropagation()}>
+                    <input type="checkbox" checked={picked.includes(key)} onChange={() => onPick(key)} title="Select artist" />
+                  </td>
+                )}
                 <td className="td">
                   <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 min-w-0">
                     <button
                       className="btn-ghost !px-1.5 !py-1 shrink-0 row-hover min-h-[2rem] md:min-h-0"
                       title="Play all"
-                      onClick={() => q.length && playNow(q)}
+                      onClick={(e) => {
+                        if (selectMode) {
+                          e.stopPropagation();
+                          onPick(key);
+                          return;
+                        }
+                        if (q.length) playNow(q);
+                      }}
                     >
                       <Play className="h-3.5 w-3.5" />
                     </button>
@@ -560,13 +790,14 @@ function FavArtists() {
         </tbody>
       </table>
     </div>
+    </div>
   );
 }
 
 // ------------------------------------------------------------------------ //
 // Favorite playlists
 // ------------------------------------------------------------------------ //
-function FavPlaylists() {
+function FavPlaylists({ selectMode, picked, onPick }: TabSelectProps) {
   const { data: favs, isLoading, isError, error, refetch } = useFavorites();
   const {
     data: playlists,
@@ -577,11 +808,16 @@ function FavPlaylists() {
   const { tracks } = useLibraryMaps();
   const playNow = useStore((s) => s.playNow);
 
+  // Every favourite id, resolved or not: a playlist that is gone (deleted, or
+  // another server's) stays a row — it says which playlist it was and carries
+  // the heart that takes it off — instead of disappearing from the one page
+  // whose job is to manage it.
   const rows = useMemo(() => {
     const byId = new Map<string, Playlist>((playlists ?? []).map((p) => [String(p.id), p]));
-    return (favs?.playlists ?? [])
-      .map((id) => byId.get(id))
-      .filter((x): x is Playlist => !!x);
+    return (favs?.playlists ?? []).map((id) => ({
+      key: String(id),
+      p: byId.get(String(id)) ?? null,
+    }));
   }, [favs, playlists]);
 
   const play = async (p: Playlist) => {
@@ -619,17 +855,63 @@ function FavPlaylists() {
 
   // Same table language as the other favorites tabs / the library tables.
   return (
+    <div>
+      {selectMode && (
+        <div className="flex items-center gap-2 pb-2">
+          <SelectAllButton
+            count={rows.length}
+            noun="playlists"
+            all={rows.length > 0 && picked.length === rows.length}
+            onSelectAll={() => rows.forEach((r) => !picked.includes(r.key) && onPick(r.key))}
+            onClear={() => rows.forEach((r) => picked.includes(r.key) && onPick(r.key))}
+          />
+        </div>
+      )}
     <div className="overflow-x-auto">
       <table className={`w-full text-sm ${FAV_TABLE_MIN_W}`}>
         <thead className="border-b border-border">
           <tr>
+            {selectMode && <th className="th pr-0 w-8" aria-label="Select" />}
             <th className="th">Playlist</th>
             <th className="th w-16 md:w-[12%]">Tracks</th>
           </tr>
         </thead>
         <tbody className="stagger">
-          {rows.map((p) => (
-            <tr key={p.id} className="table-row group">
+          {rows.map(({ key, p }) => {
+            if (!p) {
+              return (
+                <tr key={key} className={`table-row group ${picked.includes(key) ? "bg-accent/10" : ""}`}>
+                  {selectMode && (
+                    <td className="td pr-0" onClick={(e) => e.stopPropagation()}>
+                      <input type="checkbox" checked={picked.includes(key)} onChange={() => onPick(key)} title="Select playlist" />
+                    </td>
+                  )}
+                  <td className="td" colSpan={2}>
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <span className="font-medium flex-1 min-w-0">Playlist #{key}</span>
+                      <span className="chip bg-amber-950/40 text-amber-300/90 border border-amber-900/50 text-[10px] shrink-0">
+                        not in this library
+                      </span>
+                      <span className="shrink-0">
+                        <FavHeart kind="playlist" id={key} iconClass="h-3.5 w-3.5" revealOnHover />
+                      </span>
+                    </div>
+                  </td>
+                </tr>
+              );
+            }
+            return (
+            <tr
+              key={p.id}
+              className={`table-row group ${picked.includes(key) ? "bg-accent/10" : ""}`}
+              onClick={selectMode ? () => onPick(key) : undefined}
+              title={selectMode ? "Click to select" : undefined}
+            >
+              {selectMode && (
+                <td className="td pr-0" onClick={(e) => e.stopPropagation()}>
+                  <input type="checkbox" checked={picked.includes(key)} onChange={() => onPick(key)} title="Select playlist" />
+                </td>
+              )}
               <td className="td">
                 <div className="flex items-center gap-1.5 min-w-0">
                   <button
@@ -657,12 +939,14 @@ function FavPlaylists() {
               </td>
               <td className="td text-zinc-500">{p.track_count}</td>
             </tr>
-          ))}
+            );
+          })}
         </tbody>
       </table>
       <div className="text-[11px] text-zinc-600 px-3 pt-2">
         Playlists are managed on the <Link to="/playlists" className="text-accent-soft hover:underline">Playlists page</Link>.
       </div>
+    </div>
     </div>
   );
 }

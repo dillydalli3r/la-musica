@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { api } from "../api";
 import { toast } from "../store";
 
@@ -55,6 +55,40 @@ export function useTrackLikes() {
  *
  * `opts` carries what a call SITE wants to say about the outcome (the player
  * toasts, a row in a library does not); it never changes what is written. */
+/** Take several favourites off in ONE action — the Favorites page's select
+ *  mode, and the bulk half of what `useFav` does one entity at a time.
+ *
+ *  Every write is the same call the heart makes (`api.likeToggle` for a track,
+ *  `api.favoriteToggle` for an album/artist/playlist) and the two query keys
+ *  are invalidated ONCE at the end: a `useFav` per item would patch the same
+ *  cache N times and re-render the list between ticks, which is exactly the
+ *  flicker a select mode exists to avoid. The caller passes ids it is SHOWING
+ *  as favourites, so a toggle can only ever take one off; a write that failed
+ *  is counted and reported rather than thrown, because the rest of the batch
+ *  still has to happen.
+ *
+ *  Returns how many the server took and how many it refused. */
+export async function unfavoriteMany(
+  kind: FavKind | "track",
+  ids: string[],
+  qc: QueryClient,
+): Promise<{ removed: number; failed: number }> {
+  let removed = 0;
+  let failed = 0;
+  for (const id of ids) {
+    try {
+      if (kind === "track") await api.likeToggle(id);
+      else await api.favoriteToggle(kind, id);
+      removed += 1;
+    } catch {
+      failed += 1;
+    }
+  }
+  qc.invalidateQueries({ queryKey: ["likes"] });
+  qc.invalidateQueries({ queryKey: ["favorites"] });
+  return { removed, failed };
+}
+
 export function useFav(
   kind: FavKind | "track",
   id: string | undefined | null,

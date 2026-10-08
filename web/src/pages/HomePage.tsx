@@ -15,7 +15,7 @@ import StatsPanel from "../components/StatsPanel";
 import { useI18n } from "../lib/i18n";
 import ArtistAvatar from "../components/ArtistAvatar";
 import ArtistName from "../components/ArtistName";
-import { GRID_SIZE_MIN } from "../lib/fmt";
+import { GRID_SIZE_MIN, releaseCount } from "../lib/fmt";
 import { albumRef } from "../lib/refs";
 import { GRID_SIZES, useGridSize, useSelectMode } from "../lib/libraryView";
 import { useStore } from "../store";
@@ -116,20 +116,30 @@ function ArtistShelf({ title, artists }: { title: string; artists?: HomeArtist[]
         <h2 className="text-sm font-semibold tracking-tight">{title}</h2>
         <span className="text-[11px] text-zinc-600">{t("home.shelf.artists_blurb")}</span>
       </div>
-      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-6 gap-3 stagger">
+      {/* CONDENSED on purpose: the cards this replaced drew an 80 px circle, a
+          name and a count in a 2/3/4/6 grid with a `p-2` card and a `mt-2`
+          name row, which filled a screen with six artists. Same information,
+          half the box: a smaller square tile (the geometry the artist page's
+          own hero already draws — one square cover, `rounded-xl`), more
+          columns, tighter padding, and a smaller caption. */}
+      <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 xl:grid-cols-8 gap-2 stagger">
         {artists.map((ar) => (
           <Link
             key={ar.path || ar.artist}
             to={`/artist/${encodeURIComponent(ar.path)}`}
-            className="group rounded-xl p-2 flex flex-col items-center text-center transition-all duration-200 hover:bg-panel/70 hover:-translate-y-0.5"
+            className="group rounded-lg p-1.5 flex flex-col items-center text-center transition-all duration-200 hover:bg-panel/70 hover:-translate-y-0.5"
             title={ar.artist}
           >
+            {/* A SQUARE, like every other image this app draws of an entity
+                (the album cards, the artist page's hero tile): the circle was
+                the only round shape in the library, and the owner asked for
+                "more rectangular like how album covers are". */}
             <ArtistAvatar
               path={ar.path}
               hasImage={ar.has_image}
               coverPath={ar.cover_path}
               coverFile={ar.cover}
-              className="h-20 w-20 rounded-full bg-raise overflow-hidden shrink-0"
+              className="h-16 w-16 rounded-lg bg-raise overflow-hidden shrink-0"
             />
             {/* The card's own name row carries the artist's OWN verdict too
                 (`top_artists[].grade`, passed through from the library row the
@@ -140,11 +150,11 @@ function ArtistShelf({ title, artists }: { title: string; artists?: HomeArtist[]
               pass={ar.grade?.pass}
               issues={ar.grade?.issues}
               disambiguation={ar.disambiguation}
-              className="mt-2 w-full justify-center text-sm font-medium"
+              className="mt-1.5 w-full justify-center text-xs font-medium"
               nameClassName="truncate"
             />
-            <div className="text-[11px] text-zinc-500 tabular-nums">
-              {ar.album_count} album{ar.album_count === 1 ? "" : "s"}
+            <div className="text-[10px] text-zinc-500 tabular-nums">
+              {releaseCount(ar.album_count)}
               {ar.grade_pct != null && <span> · {Math.round(ar.grade_pct)}%</span>}
             </div>
           </Link>

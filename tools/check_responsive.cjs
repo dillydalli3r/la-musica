@@ -382,7 +382,15 @@ const MEASURE = `(() => {
   document.body.appendChild(hidden);
   const wordWidth = (el, word) => {
     const cs = getComputedStyle(el);
-    hidden.style.font = cs.font;
+    /* The font SHORTHAND (cs.font) is empty whenever any of its parts is not
+       representable, and an empty shorthand leaves the probe at the browser's
+       default 16px: a 10px caption was then measured against a 16px word and
+       reported as crushed when it plainly was not (the artist shelf's "1
+       Release" in a 45px box measured "Release" at 58px — a font three times
+       the size it is drawn in). The parts are always readable, so the probe
+       wears THOSE when the shorthand cannot say. */
+    hidden.style.font = cs.font
+      || [cs.fontStyle, cs.fontWeight, cs.fontSize + "/" + cs.lineHeight, cs.fontFamily].join(" ");
     hidden.style.letterSpacing = cs.letterSpacing;
     hidden.textContent = word;
     return hidden.getBoundingClientRect().width;

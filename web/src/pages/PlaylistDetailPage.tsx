@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams, useSearchParams, Link } from "react-router-dom";
 import {
-  ChevronDown, ChevronUp, Download, ListMusic, ListPlus, ListStart, Pencil, Play, Plus, Trash2,
+  ChevronDown, ChevronUp, Download, ListMusic, ListPlus, ListStart, ListChecks, Pencil, Play, Plus, Trash2,
 } from "lucide-react";
 import { api } from "../api";
 import { toast, useStore } from "../store";
@@ -12,6 +12,7 @@ import Modal from "../components/Modal";
 import MoreLikeThis from "../components/MoreLikeThis";
 import { TrackCover } from "../components/CoverImg";
 import DownloadButton from "../components/DownloadButton";
+import SelectAllButton from "../components/SelectAllButton";
 import { ExportButton } from "../components/ExportDialog";
 import { TrackActionsMenu } from "../components/TagActionsMenu";
 import FavHeart from "../components/FavHeart";
@@ -86,6 +87,12 @@ export default function PlaylistDetailPage() {
   const [matchAll, setMatchAll] = useState(true);
   const [dragIdx, setDragIdx] = useState<number | null>(null);
   const [overIdx, setOverIdx] = useState<number | null>(null);
+  // Select mode over the track list: the same idiom the Library, Home, the
+  // artist page, the trash and the Favorites page use. The keys are the track
+  // PATHS, which is what a playlist stores and what the remove route takes.
+  const [selectMode, setSelectMode] = useState(false);
+  const [picked, setPicked] = useState<string[]>([]);
+  const [removing, setRemoving] = useState(false);
 
   const invalidate = () => {
     qc.invalidateQueries({ queryKey: ["playlists"] });
@@ -217,6 +224,26 @@ export default function PlaylistDetailPage() {
       invalidate();
     } catch (e) {
       toast.error(String(e));
+    }
+  };
+
+  const togglePick = (path: string) =>
+    setPicked((prev) => (prev.includes(path) ? prev.filter((p) => p !== path) : [...prev, path]));
+
+  /** Take every ticked track out of the playlist in ONE request — the same
+   *  route the per-row bin calls, which already takes a list. */
+  const removePicked = async () => {
+    if (!picked.length || removing) return;
+    setRemoving(true);
+    try {
+      await api.playlistRemove(pid, picked);
+      toast(`Removed ${picked.length} track${picked.length === 1 ? "" : "s"} from “${playlist?.name ?? "the playlist"}”`);
+      setPicked([]);
+      invalidate();
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setRemoving(false);
     }
   };
 
@@ -387,6 +414,20 @@ export default function PlaylistDetailPage() {
                         <Pencil className="h-4 w-4" />
                       </button>
                     )}
+                    {/* Select mode for the track list: tick several and take
+                        them out of the playlist in one action, the same
+                        control every other list in the app carries. */}
+                    <button
+                      className={`btn-ghost !py-1.5 text-xs tap ${selectMode ? "!text-accent !border-accent/50" : ""}`}
+                      onClick={() => {
+                        if (selectMode) setPicked([]);
+                        setSelectMode(!selectMode);
+                      }}
+                      title="Select mode — tick several tracks and remove them at once"
+                      disabled={!tracks.length}
+                    >
+                      <ListChecks className="h-3.5 w-3.5" /> Select
+                    </button>
                     <OverflowMenu
                       buttonClass="btn-icon"
                       buttonTitle="All playlist actions"
@@ -418,6 +459,40 @@ export default function PlaylistDetailPage() {
           </div>
         </div>
 
+        {/* The two controls of select mode, exactly as the other lists draw
+            them: what to tick, and the one action that acts on it. */}
+        {selectMode && tracks.length > 0 && (
+          <div className="flex items-center gap-2 flex-wrap">
+            <SelectAllButton
+              count={tracks.length}
+              noun="tracks"
+              all={picked.length === tracks.length}
+              onSelectAll={() => setPicked(tracks)}
+              onClear={() => setPicked([])}
+            />
+          </div>
+        )}
+        {selectMode && picked.length > 0 && (
+          <div className="flex items-center gap-2 bg-accent/15 border border-accent/40 rounded-lg px-3 py-2 flex-wrap">
+            <span className="text-xs font-medium text-accent-soft">
+              {picked.length} selected
+            </span>
+            <div className="ml-auto flex gap-1.5 flex-wrap">
+              <button
+                className="btn-danger !py-1 text-xs tap"
+                onClick={removePicked}
+                disabled={removing}
+                title="Remove every ticked track from this playlist"
+              >
+                <Trash2 className="h-3.5 w-3.5" /> Remove from playlist
+              </button>
+              <button className="btn-ghost !py-1 text-xs tap" onClick={() => setPicked([])}>
+                Clear
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* ---------------- tracklist table (album-page style) ------------- */}
         {tracks.length > 0 ? (
           <div className="overflow-x-auto">
@@ -439,6 +514,7 @@ export default function PlaylistDetailPage() {
             <table className="w-full text-sm md:min-w-[700px]">
               <thead className="border-b border-border">
                 <tr>
+                  {selectMode && <th className="th pr-0 w-8" aria-label="Select" />}
                   <th className="th w-12">#</th>
                   <th className={`th w-12${PHONE_HIDE}`} title="Cover art"><span className="sr-only">Cover</span></th>
                   <th className="th">Title</th>
@@ -456,21 +532,21 @@ export default function PlaylistDetailPage() {
                   return (
                     <tr
                       key={t}
-                      draggable={reorderable}
+                      draggable={reorderable && !selectMode}
                       onDragStart={(e) => {
-                        if (!reorderable) return;
+                        if (!reorderable || selectMode) return;
                         setDragIdx(i);
                         e.dataTransfer.effectAllowed = "move";
                         e.dataTransfer.setData("text/plain", String(i));
                       }}
                       onDragOver={(e) => {
-                        if (!reorderable) return;
+                        if (!reorderable || selectMode) return;
                         e.preventDefault();
                         e.dataTransfer.dropEffect = "move";
                         if (overIdx !== i) setOverIdx(i);
                       }}
                       onDrop={(e) => {
-                        if (!reorderable) return;
+                        if (!reorderable || selectMode) return;
                         e.preventDefault();
                         const from = dragIdx ?? Number(e.dataTransfer.getData("text/plain"));
                         if (Number.isFinite(from)) moveTo(from, i);
@@ -481,10 +557,19 @@ export default function PlaylistDetailPage() {
                         setDragIdx(null);
                         setOverIdx(null);
                       }}
-                      className={`table-row group cursor-pointer ${isOver ? "outline outline-1 outline-accent" : ""} ${isDragging ? "opacity-40" : ""}`}
-                      title="Click to play · Ctrl-click to open track page"
-                      onClick={() => queueTracks.length && playNow(queueTracks, Math.min(i, queueTracks.length - 1))}
+                      className={`table-row group ${selectMode ? "" : "cursor-pointer"} ${isOver ? "outline outline-1 outline-accent" : ""} ${isDragging ? "opacity-40" : ""} ${picked.includes(t) ? "bg-accent/10" : ""}`}
+                      title={selectMode ? "Click to select" : "Click to play · Ctrl-click to open track page"}
+                      onClick={() =>
+                        selectMode
+                          ? togglePick(t)
+                          : queueTracks.length && playNow(queueTracks, Math.min(i, queueTracks.length - 1))
+                      }
                     >
+                      {selectMode && (
+                        <td className="td pr-0" onClick={(e) => e.stopPropagation()}>
+                          <input type="checkbox" checked={picked.includes(t)} onChange={() => togglePick(t)} title="Select track" />
+                        </td>
+                      )}
                       {/* position in the PLAYLIST (1, 2, 3…) */}
                       <td className="td cell-nowrap text-zinc-600 tabular-nums">{i + 1}</td>
                       <td className={`td cell-cover pr-0${PHONE_HIDE}`}>

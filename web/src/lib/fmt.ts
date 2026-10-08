@@ -191,6 +191,18 @@ export function fmtCount(n: number | null | undefined): string {
   return Number.isInteger(n) ? String(n) : n.toFixed(1);
 }
 
+/** An artist's album count, in the word the artist surfaces use: "1 Release" /
+ *  "2 Releases". "Releases" is the owner's word for what the library counts —
+ *  the albums of an artist that are in it, a pending one included — and the
+ *  Library's Artists column has spelled it that way since it was added (see
+ *  ARTIST_COLS). It lives here so the shelf, the artist page and Favorites
+ *  cannot disagree about the plural, which is the one part of the sentence a
+ *  caller is likely to get wrong by hand. */
+export function releaseCount(n: number | null | undefined): string {
+  const v = typeof n === "number" && Number.isFinite(n) ? Math.max(0, Math.trunc(n)) : 0;
+  return `${v} Release${v === 1 ? "" : "s"}`;
+}
+
 /** A whole, non-negative count — a progress readout says how many things are
  *  DONE, and "1.9 of 18" is not a number of anything (the fractional half is
  *  the sub-step of whatever is still running, which the bar already draws).

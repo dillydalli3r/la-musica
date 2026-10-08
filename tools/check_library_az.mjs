@@ -890,6 +890,9 @@ try {
   const alphaRow = served.artists.find((a) => a.name === ARTIST_ALPHA);
   const betaRow = served.artists.find((a) => a.name === ARTIST_BETA);
   const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+/** lib/fmt's own word for an artist's albums, spelled the same way here so the
+ *  check and the app cannot disagree about the plural. */
+const releaseCount = (n) => `${n} Release${n === 1 ? "" : "s"}`;
   check("fixture: one artist passes its own checks and one fails",
         alphaRow?.grade?.pass === true && betaRow?.grade?.pass === false,
         `alpha=${alphaRow?.grade?.pass} beta=${betaRow?.grade?.pass}`);
@@ -915,7 +918,10 @@ try {
         name: (hero.querySelector("h1")?.textContent || "").trim(),
         dot: !!dot,
         dotLabel: dot?.getAttribute("aria-label") || "",
-        counts: texts.find((t) => /^\d+ albums? · \d+ tracks?$/.test(t)) || "",
+        // "Releases" is the owner's word for an artist's albums (the Library's
+        // own Artists column has used it since it was added), so the subtitle
+        // the hero prints is matched in that word.
+        counts: texts.find((t) => /^\d+ Releases? · \d+ tracks?$/.test(t)) || "",
         // The two pass chips this hero used to spell its verdicts out with:
         // the album rollup's "albums", and "artist artwork 2/2".
         passChips: texts.filter((t) => t === "albums" || /^artist artwork/.test(t)),
@@ -939,7 +945,7 @@ try {
   check("and no longer spells the checks out in chips (`albums`, `artist artwork`)",
         alphaHero.passChips.length === 0, JSON.stringify(alphaHero.passChips));
   check(`while the informational counts stay (${alphaHero.counts})`,
-        alphaHero.counts === `${plural(alphaRow.aggregate.album_count, "album")} · `
+        alphaHero.counts === `${releaseCount(alphaRow.aggregate.album_count)} · `
           + plural(alphaRow.aggregate.track_count, "track"),
         `"${alphaHero.counts}"`);
 
@@ -1071,7 +1077,11 @@ try {
             // What the row NAMES, read the way tools/check_home_artists.cjs
             // reads a shelf caption (`span.text-sm` — the shared render's own
             // name span): the display name, never the folder's `[mbid]`.
-            caption: card.querySelector("span.text-sm")?.textContent?.trim() || "",
+            // The shared render's own NAME span: `min-w-0` + the caller's
+            // `truncate` (ArtistName), which does not move when a page rescales
+            // its shelf — the old `span.text-sm` read stopped finding the name
+            // the moment the card was condensed.
+            caption: card.querySelector("span.min-w-0")?.textContent?.trim() || "",
           }
         : { found: false, dot: false, warn: false, caption: "" };
     };

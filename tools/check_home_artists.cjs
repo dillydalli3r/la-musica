@@ -120,12 +120,26 @@ const readShelf = (page, title) => page.evaluate((want) => {
       return {
         name: a.getAttribute("title") || "",
         // The name is drawn by the shared artist-name render
-        // (components/ArtistName): a `span.text-sm` holding the name and,
-        // beside it, the artist's own verdict dot (no text of its own).
-        caption: a.querySelector("span.text-sm")?.textContent?.trim() || "",
+        // (components/ArtistName): the NAME span is `min-w-0` + the caller's
+        // `truncate` (read off a class that does not move when a page rescales
+        // its shelf — a font-size class stopped finding it the moment the
+        // shelf was condensed), holding the name, with the artist's own verdict
+        // mark beside it (no text of its own).
+        caption: a.querySelector("span.min-w-0")?.textContent?.trim() || "",
         src: img?.getAttribute("src") || null,
         decoded: img ? img.naturalWidth > 0 : null,
-        circle: !!a.querySelector("div.rounded-full"),
+        // The tile's own shape. It was a CIRCLE while the owner's report
+        // ("artist images should be more rectangular like how album covers
+        // are") stands: the card draws the artist page's own hero geometry
+        // now — a square tile with rounded corners — so no avatar may be a
+        // circle, and every one of them must be square.
+        tile: (() => {
+          const el = img?.parentElement || a.querySelector("div");
+          if (!el) return null;
+          const r = el.getBoundingClientRect();
+          const cs = getComputedStyle(el);
+          return { w: Math.round(r.width), h: Math.round(r.height), radius: cs.borderRadius };
+        })(),
       };
     }),
     cards: [...sec.querySelectorAll("div.group")].map((c) => ({
@@ -255,8 +269,11 @@ async function shelf(page, title, timeout = 45000) {
     (artists?.artists || []).map((a) => `${a.name} → ${a.src}`).join(" | "));
   check("page: that picture really came from the endpoint (200, one request)",
     imageCalls.some((c) => c.startsWith("200 ")), JSON.stringify(imageCalls));
-  check("page: the avatar is still a circle",
-    (artists?.artists || []).every((a) => a.circle), `${(artists?.artists || []).length} avatars`);
+  check("page: every avatar is a square tile, not a circle",
+    (artists?.artists || []).length >= 3
+      && (artists?.artists || []).every((a) => a.tile && a.tile.w === a.tile.h
+        && !/^50%|9999px/.test(a.tile.radius)),
+    JSON.stringify((artists?.artists || []).map((a) => a.tile)));
   // Beta has a cover on disk, Delta has neither a picture nor a cover: the
   // cover stands in for one, the placeholder for the other.
   check("page: a folder with no picture falls back to its album cover",

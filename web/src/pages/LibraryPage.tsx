@@ -2173,7 +2173,10 @@ export default function LibraryPage() {
                             hasImage={a.has_image}
                             coverPath={a.albums?.[0]?.path}
                             coverFile={a.albums?.[0]?.cover_file}
-                            className="h-8 w-8 rounded-full overflow-hidden shrink-0"
+                            /* A square tile, like every album row's own cover
+                               cell and the artist page's hero: the circle was
+                               the one round image in the library. */
+                            className="h-8 w-8 rounded overflow-hidden shrink-0"
                             title={a.display_name || a.name}
                           />
                           {/* the row click already opens the artist, so the link

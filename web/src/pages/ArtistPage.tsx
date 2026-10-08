@@ -26,7 +26,7 @@ import SelectAllButton from "../components/SelectAllButton";
 import TagActionsMenu from "../components/TagActionsMenu";
 import type { Album } from "../types";
 import { artistMbid } from "../lib/refs";
-import { GRID_SIZE_MIN } from "../lib/fmt";
+import { GRID_SIZE_MIN, releaseCount } from "../lib/fmt";
 import { invalidateLibrary } from "../lib/invalidate";
 import StatsPanel from "../components/StatsPanel";
 import { toast, useStore } from "../store";
@@ -293,7 +293,7 @@ export default function ArtistPage() {
               subtitle={
                 <span className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-zinc-400">
                   <span className="whitespace-nowrap">
-                    {data.aggregate.album_count} album{data.aggregate.album_count === 1 ? "" : "s"} · {data.aggregate.track_count} track{data.aggregate.track_count === 1 ? "" : "s"}
+                    {releaseCount(data.aggregate.album_count)} · {data.aggregate.track_count} track{data.aggregate.track_count === 1 ? "" : "s"}
                   </span>
                   {grade?.error ? (
                     <span className="text-xs text-zinc-600" title={grade.error}>artist grade unavailable</span>
@@ -544,7 +544,7 @@ export default function ArtistPage() {
 
       <section className="space-y-3">
         <div className="flex items-center gap-2 flex-wrap">
-          <h2 className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Albums</h2>
+          <h2 className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Releases</h2>
           <span className="text-[10px] text-zinc-600">{data.albums.length}</span>
           {data.albums.length > 0 && (
             <button
@@ -605,7 +605,7 @@ export default function ArtistPage() {
         {data.albums.length === 0 ? (
           <EmptyState
             title="No albums yet"
-            hint="Albums show up here once a folder is imported under this artist."
+            hint="Releases show up here once a folder is imported under this artist."
           />
         ) : (
           sections.map(({ type, albums }) => {

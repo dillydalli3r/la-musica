@@ -5556,6 +5556,28 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   1200×1200 JPEG through `artistdata.save_image`), an edited description
   survives a second run untouched, and the three switches off write nothing.
 
+- **R376 — an artist card is condensed, its image is a SQUARE, and its count
+  is in RELEASES.** The owner's screenshot of Home's "Top artists" shelf: an
+  80 px CIRCLE, a name and a count in a 2/3/4/6 grid, which filled a screen
+  with six artists. The shelf is now the same information at half the box —
+  `grid-cols-3 sm:4 md:6 xl:8`, `gap-2`, a `p-1.5` card, a 64 px tile and
+  smaller text (a card measures 113 px tall) — and the artist image is a
+  SQUARE (`rounded-lg`), the geometry the artist page's own hero tile and every
+  album card already draw: the circle was the only round image in the library,
+  and the owner asked for "more rectangular like how album covers are". The
+  Library's Artists view carries the same square (`rounded`, 32 px) beside the
+  name, so an artist looks like itself everywhere. The count reads
+  **"N Release(s)"**: `releaseCount` in `web/src/lib/fmt.ts` is the ONE
+  pluralizer, so the shelf caption, the artist page's subtitle ("1 Release · 0
+  tracks") and its section heading (`RELEASES`) cannot disagree about it, and
+  Favorites' artist table follows ("Releases" is the word the Library's own
+  Artists column has used since it was added — `ARTIST_COLS`).
+  `tools/check_responsive.cjs` holds the geometry; hunting it also found the
+  check's own word-width probe broken — `getComputedStyle().font` is EMPTY for
+  a font it cannot represent as a shorthand, and the probe then measured a
+  10 px caption against a 16 px word and called "1 Release" in a 45 px box
+  crushed. It now builds the font from its parts when the shorthand is empty.
+
 ### 7.64 One knob decides the lanes, and only independent units get them
 
 - **R323 — `worker_limit` is the ONE thread setting, and a script parallelises
@@ -6579,6 +6601,35 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   live pane: an inactive row computes `filter: none` at 0.9 opacity, no
   element inside the scroller carries a filter, the row has no transition
   duration, and the block under it transitions `transform` and not `color`.
+
+### 7.75 The favourites and the playlist manage their own items
+
+- **R377 — every favourites/playlist list has the app's select mode, and an
+  entry the library cannot resolve still loads.** The batch idiom is the one
+  the Library, Home, the artist page and the trash already share (a Select
+  toggle, a `SelectAllButton`, per-row checkboxes, a batch bar); the Favorites
+  page — all four tabs — and the playlist page's track list gained it, because
+  taking twenty tiles off a favourites list one heart at a time is not a way to
+  manage anything. The batch write is the store's own: `unfavoriteMany`
+  (`web/src/lib/favs.ts`: one `likeToggle`/`favoriteToggle` per ticked key and
+  ONE invalidation of the two query keys at the end, so the list does not
+  re-render between ticks) and `api.playlistRemove(pid, picked)` — the route
+  always took a list, only the UI was one track at a time.
+
+  The second half is the same page's other defect: a favourite the LIBRARY
+  cannot resolve (its folder was moved, renamed, or holds no audio, so no album
+  row exists) was dropped from the Favorites page's rows by `.filter(Boolean)`
+  — invisible, and therefore impossible to remove from the one page whose job
+  is managing them, while Home's own favorites shelf was drawing the same
+  entry as an `owned: false` card. Every tab now renders it: the album tab as
+  that same `owned: false` card (identity only — no grade, no play button, no
+  link the library cannot answer), the artist and playlist tabs as a row that
+  names the folder/`Playlist #id` it was favourited under and says "not in the
+  library", each carrying the heart that takes it off. A playlist's own entries
+  behave the same way, and always did for a track whose FILE is gone (the row
+  draws its file name with empty metadata) — that is what lets a playlist
+  built elsewhere, or one whose files moved, be opened, read and cleaned up
+  instead of erroring.
 
 ## 8. Recommended runbook
 
