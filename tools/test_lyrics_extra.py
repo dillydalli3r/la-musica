@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""The extra synced lyrics providers (QQ Music, Kuwo, YouTube captions) and the
-one gate every hit passes.
+"""The extra synced lyrics providers (QQ Music, Kuwo) and the one gate every
+hit passes.
 
 Offline: both HTTP entry points (`_get_json` for the JSON APIs, `_http` for
-Kuwo's single-quoted bodies) and the yt-dlp call are stubbed, so nothing here
-touches the network. The variant marker list is the shipped one out of
+Kuwo's single-quoted bodies) are stubbed, so nothing here touches the network.
+The variant marker list is the shipped one out of
 `server.integrations` — the guard has to work against the real thing.
 
 Pinned here:
@@ -17,9 +17,7 @@ Pinned here:
     chain's preference,
   * QQ's and Kuwo's real payload shapes: the right candidate wins, a namesake
     or a karaoke row loses, a translation is never written over the original,
-  * a provider that raises, an empty answer and a dead host are all just misses,
-  * YouTube needs a KNOWN video id (never a search), turns captions into LRC,
-    and is a skip — not a failure — when yt-dlp is missing.
+  * a provider that raises, an empty answer and a dead host are all just misses.
 
 Run:  python tools/test_lyrics_extra.py
 """
@@ -139,16 +137,6 @@ def dead_http(*a, **k):
     raise OSError("network is unreachable")
 
 
-def collect_log():
-    """Capture `mlo.ui.log` (the one-line skip notices) into a list."""
-    lines = []
-
-    def log(message, *a, **k):
-        lines.append(str(message))
-
-    return lines, log
-
-
 # Nothing in this file may touch the network: both HTTP entry points are
 # stubbed for the whole run, and every section below narrows them further
 # (Patch restores these silent stubs when a section ends).
@@ -159,7 +147,7 @@ _OFFLINE.__enter__()
 # --------------------------------------------------------------------------- #
 # The catalogue is synced-only, free, and describes itself
 # --------------------------------------------------------------------------- #
-assert lp.SOURCES == ["lrclib", "netease", "qq", "kuwo", "kugou", "youtube"], lp.SOURCES
+assert lp.SOURCES == ["lrclib", "netease", "qq", "kuwo", "kugou"], lp.SOURCES
 assert set(lp.SOURCE_LABELS) == set(lp.SOURCE_NOTES) == set(lp._PROVIDERS), lp.SOURCES
 # the plain-only providers are gone, not dormant
 for gone in ("lyricsovh", "genius", "musixmatch"):
@@ -180,13 +168,10 @@ for entry in listed:
     assert "synced" in entry["notes"].lower(), entry
     assert entry["label"].strip() and entry["notes"].strip(), entry
 assert "translations" in lp.SOURCE_NOTES["netease"], lp.SOURCE_NOTES["netease"]
-assert "captions" in lp.SOURCE_NOTES["youtube"], lp.SOURCE_NOTES["youtube"]
 
 # the config the providers read agrees with that
 assert mlo_config.DEFAULT_CONFIG["lyrics_allow_plain"] is False, \
     mlo_config.DEFAULT_CONFIG["lyrics_allow_plain"]
-assert mlo_config.DEFAULT_CONFIG["lyrics_youtube_captions"] is True, \
-    mlo_config.DEFAULT_CONFIG["lyrics_youtube_captions"]
 
 
 # --------------------------------------------------------------------------- #
@@ -341,7 +326,7 @@ def boom(*a, **k):
     raise RuntimeError("provider exploded")
 
 
-for broken in ("qq", "kuwo", "youtube"):
+for broken in ("qq", "kuwo"):
     providers = dict(lp._PROVIDERS, **{broken: boom})
     with Patch(lp, _PROVIDERS=providers,
                _get_json=fake_api([("client_search_cp", QQ_SEARCH),
@@ -353,114 +338,6 @@ for broken in ("qq", "kuwo", "youtube"):
                               "Radiohead", "Creep")
     assert hit and hit["provider"] != broken, (broken, hit)
     assert hit["synced"], hit
-
-
-# --------------------------------------------------------------------------- #
-# YouTube captions: a known id only, converted to LRC
-# --------------------------------------------------------------------------- #
-assert lp.youtube_id_from("https://www.youtube.com/watch?v=dQw4w9WgXcQ") == "dQw4w9WgXcQ"
-assert lp.youtube_id_from("https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=42s") == "dQw4w9WgXcQ"
-assert lp.youtube_id_from("https://youtu.be/dQw4w9WgXcQ?si=x") == "dQw4w9WgXcQ"
-assert lp.youtube_id_from("https://www.youtube.com/shorts/dQw4w9WgXcQ") == "dQw4w9WgXcQ"
-assert lp.youtube_id_from("dQw4w9WgXcQ") == "dQw4w9WgXcQ"
-assert lp.youtube_id_from("", None) is None
-assert lp.youtube_id_from("https://bandcamp.com/track/creep") is None
-assert lp.youtube_id_from("too-short") is None
-assert lp.youtube_id_from("https://youtube.com/", "dQw4w9WgXcQ") == "dQw4w9WgXcQ"
-# the app's own video download template leaves the id in the file name
-assert lp.youtube_id_from("Creep [dQw4w9WgXcQ].mkv") == "dQw4w9WgXcQ"
-
-# a caption track becomes the same LRC shape the other synced providers answer
-VTT = (
-    "WEBVTT\nKind: captions\nLanguage: en\n\n"
-    "00:00:19.920 --> 00:00:23.150 align:start position:0%\n"
-    "When you were here before\n\n"
-    "00:00:23.150 --> 00:00:26.640 align:start position:0%\n"
-    "Couldn't look you in the eye\n\n"
-    "00:00:26.640 --> 00:00:29.120\n"
-    "You're just like an angel\n"
-)
-assert lp._vtt_to_lrc(VTT) == (
-    "[00:19.92]When you were here before\n"
-    "[00:23.15]Couldn't look you in the eye\n"
-    "[00:26.64]You're just like an angel"
-), lp._vtt_to_lrc(VTT)
-# automatic captions: inline word tags dropped, the rolling repeat kept once,
-# SRT comma timestamps accepted, and the header before the first cue ignored
-SRT = (
-    "NOTE this is not a cue\n\n"
-    "1\n"
-    "00:00:19,920 --> 00:00:23,150\n"
-    "When you were here before\n\n"
-    "2\n"
-    "00:00:23,150 --> 00:00:26,640\n"
-    "When you were here before\nCouldn't look you in the eye\n\n"
-    "3\n"
-    "00:00:26,640 --> 00:00:29,120\n"
-    "<00:00:26.640><c>You're</c><00:00:27.100><c>just</c> like an angel\n"
-)
-assert lp._vtt_to_lrc(SRT) == (
-    "[00:19.92]When you were here before\n"
-    "[00:23.15]When you were here before Couldn't look you in the eye\n"
-    "[00:26.64]You're just like an angel"
-), lp._vtt_to_lrc(SRT)
-assert lp._vtt_to_lrc("WEBVTT\n\n") == ""
-assert lp._vtt_to_lrc("") == ""
-
-
-def stub_captions(files):
-    """Stand-in for `_caption_files`: writes fixtures, as yt-dlp would."""
-    def write(exe, video_id, tmpdir, flags):
-        made = []
-        for name, body in files:
-            path = os.path.join(tmpdir, name)
-            with open(path, "w", encoding="utf-8") as fh:
-                fh.write(body)
-            made.append(path)
-        return made
-    return write
-
-
-with Patch(lp, _ytdlp_exe=lambda: "yt-dlp",
-           _caption_files=stub_captions([("dQw4w9WgXcQ.en.vtt", VTT)])):
-    hit = lp.fetch_lyrics(dict(CFG, lyrics_sources=["youtube"]),
-                          "Radiohead", "Creep", "Pablo Honey", 238.0,
-                          youtube_id="dQw4w9WgXcQ")
-assert hit["provider"] == "youtube", hit
-assert hit["provider_label"] == "YouTube captions", hit
-assert hit["synced"] == lp._vtt_to_lrc(VTT), hit["synced"]
-assert hit["plain"] == ("When you were here before\n"
-                        "Couldn't look you in the eye\n"
-                        "You're just like an angel"), hit["plain"]
-assert hit["matched_title"] == "Creep" and hit["instrumental"] is False, hit
-
-
-def never(*a, **k):
-    raise AssertionError("a captions fetch happened without a video id")
-
-
-# without an id there is nothing to ask for — never a YouTube search
-with Patch(lp, _ytdlp_exe=lambda: "yt-dlp", _caption_files=never):
-    assert lp.fetch_lyrics(dict(CFG, lyrics_sources=["youtube"]),
-                           "Radiohead", "Creep") is None
-    denied = dict(CFG, lyrics_sources=["youtube"], lyrics_youtube_captions=False)
-    assert lp.fetch_lyrics(denied, "Radiohead", "Creep",
-                           youtube_id="dQw4w9WgXcQ") is None
-
-# yt-dlp is optional: missing means one log line, and the chain keeps working
-lp._LOGGED.clear()
-lines, log = collect_log()
-with Patch(lp, _ytdlp_exe=lambda: None, _caption_files=never,
-           _get_json=fake_api([("client_search_cp", QQ_SEARCH),
-                               ("lyric", QQ_LYRIC)])):
-    with Patch(sys.modules["mlo.ui"], log=log):
-        hit = lp.fetch_lyrics(dict(CFG, lyrics_sources=["youtube", "qq"]),
-                              "Radiohead", "Creep", youtube_id="dQw4w9WgXcQ")
-        assert lp.fetch_lyrics(dict(CFG, lyrics_sources=["youtube"]),
-                               "Radiohead", "Creep",
-                               youtube_id="dQw4w9WgXcQ") is None
-assert hit and hit["provider"] == "qq", hit
-assert len(lines) == 1 and "yt-dlp" in lines[0], lines
 
 
 # --------------------------------------------------------------------------- #
@@ -495,30 +372,22 @@ assert probe["status"] == "fail" and "raised" in probe["detail"], probe
 
 # the sample is the same one for every provider, so two runs compare
 assert lp.PROBE_SAMPLE == ("Radiohead", "Creep", "Pablo Honey", 238.0), lp.PROBE_SAMPLE
-# youtube can never be probed with the sample: it needs a track's own video id
-probe = lp.probe_source("youtube", CFG)
-assert probe["status"] == "skipped" and probe["id"] == "youtube", probe
-with Patch(lp, _ytdlp_exe=lambda: None):
-    probe = lp.probe_source("youtube", CFG)
-assert probe["status"] == "skipped" and "yt-dlp" in probe["detail"], probe
 assert lp.probe_source("megalobiz", CFG)["status"] == "skipped"
 
-# probe_source asks the provider with the sample and reports what came back —
-# it never passes a video id, and never writes anything
+# probe_source asks the provider with the fixed sample and reports what came
+# back — it never writes anything
 seen = {}
 
 
-def spy(artist, title, album=None, duration=None, cfg=None, youtube_id=None):
-    seen.update(artist=artist, title=title, album=album, duration=duration,
-                youtube_id=youtube_id)
+def spy(artist, title, album=None, duration=None, cfg=None):
+    seen.update(artist=artist, title=title, album=album, duration=duration)
     return {"synced": "[00:01.00]x\n[00:02.00]y", "plain": "x"}
 
 
 with Patch(lp, _PROVIDERS=dict(lp._PROVIDERS, qq=spy)):
     probe = lp.probe_source("qq", CFG)
 assert seen == {"artist": "Radiohead", "title": "Creep",
-                "album": "Pablo Honey", "duration": 238.0,
-                "youtube_id": None}, seen
+                "album": "Pablo Honey", "duration": 238.0}, seen
 assert probe["status"] == "ok" and probe["detail"] == "synced lyrics, 2 lines", probe
 
 print("ok")

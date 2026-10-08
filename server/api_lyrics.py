@@ -86,9 +86,9 @@ def lyrics_provider_probe(source: str = Query(...)):
     """Test ONE provider against the fixed sample track (Settings / wizard).
 
     One cheap lookup, no writes: `{id, kind, status: ok|skipped|fail, detail,
-    ms}`. `skipped` means this machine cannot run the provider (yt-dlp missing,
-    nothing to probe, the host refusing us), `fail` that it ran and had no
-    lyrics for the sample. The sample is the same for every provider, so two
+    ms}`. `skipped` means this machine cannot run the provider (the provider is
+    disabled, nothing to probe, the host refusing us), `fail` that it ran and
+    had no lyrics for the sample. The sample is the same for every provider, so two
     runs are comparable."""
     from mlo.lyrics_providers import probe_source
     if source not in SOURCES:

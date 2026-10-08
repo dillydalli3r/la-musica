@@ -87,7 +87,6 @@ export default function BackendChoice({ onDone, starting: startingProp = false }
           labels={{
             server: t("client.step_server"),
             account: t("client.step_account"),
-            notifications: t("client.step_notifications"),
             done: t("client.step_done"),
           }}
         />

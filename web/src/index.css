@@ -35,10 +35,9 @@
   /* The strip the desktop shell's own title bar covers (components/TitleBar)
      at the TOP OF THE WINDOW. The bar is in the app's normal flow, so the app
      box is already below it — but a `fixed` surface anchors to the window, and
-     one that starts at `top: 0` puts its own top row (the fullscreen player's
-     exit button and queue readout) under the window controls. TitleBar
-     publishes its height here while it is mounted; a browser and a phone shell
-     draw no bar and leave the 0. See `.shell-top` below. */
+     one that starts at `top: 0` puts its own top row under the window controls.
+     TitleBar publishes its height here while it is mounted; a browser and a
+     phone shell draw no bar and leave the 0. See `.shell-top` below. */
   --mlo-titlebar-h: 0px;
 }
 
@@ -92,33 +91,23 @@ input[type="range"]::-moz-range-track {
   background: #27272a;
 }
 
-/* Fat seek/volume sliders (player bar + fullscreen): a tall invisible hit
-   area around a slim visible track, with a big thumb — easy to grab and
-   drag without changing the bar's layout. The INPUT height is the draggable
-   strip; the visible track stays 5px.
+/* Fat seek/volume sliders: a tall invisible hit area around a slim visible
+   track, with a big thumb — easy to grab and drag without changing the
+   control's layout. The INPUT height is the draggable strip; the visible
+   track stays 5px.
  *
  *  The slider's whole paint is the four `--seek-*` values plus the position
  *  `--seek-pct`, and the defaults here are exactly what this slider has always
- *  drawn (a zinc track, an accent thumb and ring), so the player bar and the
- *  equalizer keep their look. The FULLSCREEN player overrides all five from
- *  its own ink/polarity table (NowPlayingView's LyricInk `seek*`): a fixed
- *  zinc track on a near-black cover is 1.7:1 and a white accent thumb on a
- *  bright one is 1.6:1 — the two "the bars disappear into the artwork"
- *  failures tools/check_np_metadata_contrast.cjs measures per cover polarity.
- *
- *  `--seek-pct` also gives the bar a real FILLED run: below the position the
- *  track paints `--seek-fill`, above it `--seek-track`. It defaults to 0 %, so
- *  a caller that does not set it (the player bar) keeps the flat track it has
- *  today; the fullscreen seek and volume sliders set it from their own value.
+ *  drawn (a zinc track, an accent thumb and ring). `--seek-pct` gives the
+ *  track a real FILLED run: below the position the track paints
+ *  `--seek-fill`, above it `--seek-track`. It defaults to 0 %, so a caller
+ *  that does not set it keeps the flat track it has today.
  *
  *  The five values are declared on `:root` and NOT on the slider itself, and
  *  that is deliberate: a custom property declared ON an element beats the one
- *  it inherits, so declaring them here would make the fullscreen player's own
- *  `--seek-*` (an inline style on its chrome container, closer in the tree)
- *  silently do nothing — the first draft did exactly that, and the sliders
- *  kept the fixed zinc on every cover while the check read the variables as
- *  "set". From the root, everything that does not override them (the player
- *  bar, the equalizer) keeps the look it has always had. */
+ *  it inherits, so declaring them here would make a caller's own `--seek-*`
+ *  do nothing. From the root, a caller that does not override them keeps the
+ *  look it has always had. */
 :root {
   --seek-track: #3a3a42;
   --seek-fill: rgb(var(--accent));
@@ -253,9 +242,9 @@ body {
    paints under the notch and the home indicator unless the shell pads itself
    by the device's own insets — which are 0 on every device without them.
    `.safe-shell` is the app shell: one padding on its root covers the sidebar,
-   the top bar, the content column and the player bar together, because they
-   are all inside it. The nav drawer is `fixed`, so it does NOT inherit that
-   padding and repeats the insets it needs. */
+   the top bar and the content column together, because they are all inside it.
+   The nav drawer is `fixed`, so it does NOT inherit that padding and repeats
+   the insets it needs. */
 .safe-shell {
   padding-top: env(safe-area-inset-top);
   padding-right: env(safe-area-inset-right);
@@ -272,126 +261,20 @@ body {
    box. The desktop shell draws its own title bar in the app's normal flow
    (components/TitleBar), so everything laid out inside the shell is below it
    already; a fixed layer starts UNDER it and paints its own top row behind the
-   window controls. That is exactly how the fullscreen player's exit button and
-   queue readout came out (owner report), and the video layer under it, and the
-   nav drawer. `inset-0` still writes `top: 0`, so this rule is what has to
-   win: it is written after Tailwind's utilities and out of their layer, which
-   is also how `.safe-np-top` has always overridden the padding utilities.
+   window controls. The nav drawer is exactly that layer. `inset-0` still
+   writes `top: 0`, so this rule is what has to win: it is written after
+   Tailwind's utilities and out of their layer.
    `--mlo-titlebar-h` is 0 everywhere else — a browser, a phone — so the layer
    is unchanged there, and the device insets keep doing their own job. */
 .shell-top {
   top: var(--mlo-titlebar-h, 0px);
 }
 
-/* The fullscreen player is portalled to <body> and `fixed inset-0`, so like
-   the nav drawer it inherits nothing from `.safe-shell` and repeats the
-   insets its own chrome needs: the top bar (the exit button and the queue
-   readout), the bottom control cluster and the up-next drawer. Only the
-   CHROME is padded, never the overlay root — the ambience layers are
-   `absolute inset-0` inside it and would shrink away from the notch.
-   Each rule keeps its block's old padding as a floor, so a device with no
-   insets (every desktop) lays out pixel-identically to before.
-   `--mlo-inset-*` is a TEST HOOK, not a second source of truth: env() is
+/* `--mlo-inset-*` is a TEST HOOK, not a second source of truth: env() is
    what a real phone reports and a machine with no notch always reports 0
    there, so the insets would be unverifiable without a way to override
    them. A check sets `--mlo-inset-top: 47px` and measures the real layout;
    unset, the variables fall back to 0. */
-.safe-np-top {
-  padding-top: max(0.75rem, env(safe-area-inset-top, 0px), var(--mlo-inset-top, 0px));
-  /* The bar's own 0.75rem bottom padding is not an inset: it is the gap
-     between the bar and the controls below it, so it does not grow with
-     the notch the way the top one does. */
-  padding-bottom: 0.75rem;
-  padding-left: max(1.25rem, env(safe-area-inset-left, 0px), var(--mlo-inset-left, 0px));
-  padding-right: max(1.25rem, env(safe-area-inset-right, 0px), var(--mlo-inset-right, 0px));
-}
-/* Bottom cluster: the transport, the seek/volume line and the visualizer
-   strip in the audio layout, and the control overlay in the video one — the
-   two differ only in the floor they were laid out with. */
-.safe-np-body {
-  padding-left: max(1rem, env(safe-area-inset-left, 0px), var(--mlo-inset-left, 0px));
-  padding-right: max(1rem, env(safe-area-inset-right, 0px), var(--mlo-inset-right, 0px));
-  padding-bottom: max(1rem, env(safe-area-inset-bottom, 0px), var(--mlo-inset-bottom, 0px));
-}
-.safe-np-video {
-  padding-left: max(1rem, env(safe-area-inset-left, 0px), var(--mlo-inset-left, 0px));
-  padding-right: max(1rem, env(safe-area-inset-right, 0px), var(--mlo-inset-right, 0px));
-  padding-bottom: max(1.25rem, env(safe-area-inset-bottom, 0px), var(--mlo-inset-bottom, 0px));
-}
-@media (min-width: 640px) {
-  .safe-np-body,
-  .safe-np-video {
-    padding-left: max(2rem, env(safe-area-inset-left, 0px), var(--mlo-inset-left, 0px));
-    padding-right: max(2rem, env(safe-area-inset-right, 0px), var(--mlo-inset-right, 0px));
-  }
-}
-/* The queue drawer is anchored just under the top bar, so it has to clear
-   the inset that bar now carries or it swallows the bar's own buttons. */
-.safe-np-queue {
-  top: calc(3rem + max(env(safe-area-inset-top, 0px), var(--mlo-inset-top, 0px)));
-  padding-right: max(env(safe-area-inset-right, 0px), var(--mlo-inset-right, 0px));
-  padding-bottom: max(env(safe-area-inset-bottom, 0px), var(--mlo-inset-bottom, 0px));
-}
-/* The lyrics pane is `fixed` too, and is anchored between the two bars rather
-   than inside them: under the top chrome (the 3rem bar — itself pushed down by
-   the notch — plus whatever hangs below it, see the rule) and above the player
-   bar (5.75rem = its 0.25rem + 4.75rem row + 0.75rem padding). The shell has
-   already lifted the player bar by the home-indicator inset, so an offset
-   measured from the viewport edge has to repeat both insets — otherwise the
-   pane covers the bar's top row on a notched device, and swallows the bar's
-   own controls. */
-.safe-lyrics {
-  /* The pane's top edge is the BOTTOM of the app's top chrome, not a fixed
-     3rem: the shell hangs the live progress rows off the bar's own bottom
-     edge (App's `LiveProgress`), so a run's row lands in the same band the
-     pane's title and controls were drawn in — the report this fixes. The rows
-     are `top-full`, i.e. OUTSIDE the bar's own box, and there is one per live
-     producer, so the band's height is measured and published as
-     `--mlo-chrome-bottom` (LyricsSidebar); unset (no JS, no rows) the bar's
-     own bottom is the anchor, which is the behaviour every desktop had.
-     The safe-area helper stays underneath as the FLOOR rather than a
-     duplicate: with `--mlo-inset-*` test-hooked (or a notch on a device whose
-     chrome is drawn by the OS) the inset term is what keeps the pane off the
-     notch, and the measured box already carries it on a real device. The
-     desktop shell's title bar is part of that floor for the same reason — this
-     pane is `fixed`, so it starts under the bar unless the bar's height is
-     added, and the measured box above already contains it. */
-  top: max(
-    var(--mlo-chrome-bottom, 3rem),
-    calc(var(--mlo-titlebar-h, 0px) + 3rem + max(env(safe-area-inset-top, 0px), var(--mlo-inset-top, 0px)))
-  );
-  bottom: calc(5.75rem + max(env(safe-area-inset-bottom, 0px), var(--mlo-inset-bottom, 0px)));
-  padding-right: max(env(safe-area-inset-right, 0px), var(--mlo-inset-right, 0px));
-}
-
-/* The lyric-size and offset chips, in the lyric pane's own top-right corner —
-   the fullscreen player's lyrics pane (NowPlayingView) and the docked
-   LyricsSidebar both draw them here, and the options popover keeps its copies
-   as the discoverable path (issue #63).
-
-   Revealed, not permanent: on a device that has a real pointer the strip
-   rides the words invisibly until the reader points at the pane — or tabs
-   into a chip — and then fades in. A TOUCH device has no hover to reveal it
-   with, so there it is always on, and always tappable. While it is hidden it
-   is `pointer-events: none`, so a tap on a lyric line near the corner still
-   seeks the track instead of landing on an invisible stepper; the chips stay
-   in the tab order either way, which is what `:focus-within` reveals them
-   for. */
-.lyr-corner {
-  opacity: 1;
-  transition: opacity 0.18s ease-out;
-}
-@media (hover: hover) and (pointer: fine) {
-  .lyr-corner {
-    opacity: 0;
-    pointer-events: none;
-  }
-  .lyr-corner-host:hover .lyr-corner,
-  .lyr-corner-host:focus-within .lyr-corner {
-    opacity: 1;
-    pointer-events: auto;
-  }
-}
 
 /* Every flyout panel (Popover.tsx) — the ONE clamp that keeps a long menu
    reachable, wherever it is rendered from.
@@ -508,13 +391,11 @@ body {
     /* Every icon button is a 36px square by design; growing the HIT area is the
        only way to reach 44px without making it taller than it is wide. */
     .btn-icon,
-    .btn-icon-primary,
     .btn-icon-danger {
       position: relative;
     }
   }
   .btn-icon::after,
-  .btn-icon-primary::after,
   .btn-icon-danger::after {
     content: "";
     position: absolute;
@@ -574,26 +455,13 @@ body {
     @apply btn bg-red-900/60 text-red-200 hover:bg-red-800/60 border border-red-900;
   }
   /* One square icon button for every entity action row (album, playlist).
-     All three variants are the SAME 36px box, so play, download, links, like,
-     tags and the overflow menu read as one row — a labelled button and an
-     icon button are different objects, so this does not reuse `.btn`'s
-     padding/radius. */
+     Every variant is the SAME 36px box, so links, tags and the overflow menu
+     read as one row — a labelled button and an icon button are different
+     objects, so this does not reuse `.btn`'s padding/radius. */
   .btn-icon {
     @apply inline-flex h-9 w-9 items-center justify-center rounded-md border border-border bg-panel/60 text-zinc-400 hover:bg-raise hover:text-white disabled:opacity-40 disabled:pointer-events-none;
     transition: transform 0.12s ease, background-color var(--motion-fast) ease,
       color var(--motion-fast) ease, border-color var(--motion-fast) ease;
-  }
-  /* Solid accent fill (play). The glyph is `--accent-fg`, never `text-white`:
-     the mono theme's accent IS white, so a white glyph on the white button
-     disappeared until something else coloured it. The explicit `:hover` rule
-     keeps that colour on the lightened hover fill, where `.btn-icon`'s own
-     `hover:text-white` would otherwise win. */
-  .btn-icon-primary {
-    @apply btn-icon border-accent bg-accent shadow-sm hover:bg-accent-soft;
-    color: rgb(var(--accent-fg));
-  }
-  .btn-icon-primary:hover {
-    color: rgb(var(--accent-fg));
   }
   /* The armed half of an icon-only confirmation (nothing to expand into). */
   .btn-icon-danger {
@@ -643,43 +511,6 @@ body {
   .table-scroll > table {
     min-width: 46rem;
   }
-}
-
-/* The detail hero's cover-derived wash: the stored artwork, blurred behind
-   the identity block. It FADES — it must never end on a line. The layer is
-   scaled past the hero's box (a blurred halo is bigger than the picture it
-   came from) and then masked, because the hero clips its overflow: without a
-   mask the wash is sliced off at the hero's own top and side edges, which is
-   the hard edge the owner's screenshot shows. The mask is a radial gradient
-   ending in `transparent`, the same idiom the fullscreen player's cover layers
-   use (`.amb-orb`, the ambience's radial fields) — the wash dissolves in every
-   direction instead of stopping at a rectangle.
-   The stops are read against the SCALED layer, and the fade is complete
-   BEFORE the hero's border: at `scale-125` the hero's own edge is ~83% of the
-   mask's horizontal radius and — the binding one, because the mask's centre
-   sits above the middle — ~53% of its vertical one, so a transparent stop at
-   50% leaves a margin of nothing at EVERY point of the hero's box for the clip
-   to cut. Sampled by tools/check_library_az.mjs, which resolves these numbers
-   against the layer it measures.
-   Legibility is untouched: the layer's own opacity, and the `bg` gradient
-   painted over it, are what keep the name readable — this only softens the
-   wash's edge, never brightens it. */
-.hero-ink {
-  -webkit-mask-image: radial-gradient(
-    ellipse 60% 60% at 50% 42%,
-    #000 0%, #000 20%, rgb(0 0 0 / 0) 50%);
-  mask-image: radial-gradient(
-    ellipse 60% 60% at 50% 42%,
-    #000 0%, #000 20%, rgb(0 0 0 / 0) 50%);
-}
-
-/* Back-and-forth marquee for overflowing titles (player bar): drifts to the
-   end, rests so it stays readable, drifts back. --title-shift carries the
-   overflow distance; the element is only animated when it actually clips. */
-@keyframes title-marquee {
-  0%, 15% { transform: translateX(0); }
-  45%, 55% { transform: translateX(var(--title-shift, 0px)); }
-  85%, 100% { transform: translateX(0); }
 }
 
 /* Borderless data rows: tables blend into the page — the only line is the
@@ -756,231 +587,13 @@ table td {
 }
 
 /* ------------------------------------------------------------------ */
-/* Now-playing ambience: the fullscreen player's background, tinted    */
-/* with the cover's dominant color (Apple Music / Monochrome style).   */
-/* Every layer is animated by CSS on a long clock; the music only      */
-/* drives .amb-glow through --amb, which the component writes every    */
-/* 70 ms (a stepped value, never a per-frame paint).                   */
+/* Frosted floating panels                                             */
 /* ------------------------------------------------------------------ */
-/* 1) the cover itself, blurred and breathing. The clocks here are what decide
-   whether the backdrop reads as ALIVE: at the old 62-180 s they moved ~0.2%
-   of their travel per second, which is indistinguishable from a still image.
-   These are slow enough to stay ambient and fast enough to see. */
-.amb-cover {
-  /* The blurred copy's own edge FADES: `blur-3xl` samples nothing past the
-     element's box, so the last ~64 px inside every edge of this layer ramp
-     from its full 34 % to zero. That ramp is 8-bit, and at 0.34 opacity over
-     the colour field it quantizes into a ladder of straight 1-level ribs
-     parallel to each frame edge — measured on the shipped tree, white cover,
-     1440x900: 21 adjacent-pixel jumps in the first 160 px of the left edge,
-     every one of them a straight line 1440 px long, and they are the SAME 21
-     jumps in the composite (the grain sits above them and cannot dither a
-     step that is a property of the layer's geometry, not of its banding).
-     The breathing scale below was already the anti-fade trick, but 1.06 of a
-     1440 px frame only covers 43 px of the ramp's 64, so the ribs survived.
-     Laid out past the frame instead, the whole ramp lands outside it and the
-     wash is flat to every edge (measured: 0 jumps, 0.1 level of range across
-     the same 160 px). */
-  inset: -6rem;
-  animation: amb-breathe 32s ease-in-out infinite alternate;
-  will-change: transform;
-}
-@keyframes amb-breathe {
-  from { transform: scale(1.06); }
-  to   { transform: scale(1.15); }
-}
-
-/* 2) aurora sweep: one conic band turning a full circle a minute.
-   Transform-only, so it costs nothing to keep running — except the one blur
-   below, which is paid once per raster (the band's own content never changes;
-   only this element's transform does).
-   A CONIC gradient's isophotes are straight rays from its centre, and this
-   layer's alpha ramp is 8-bit: it quantizes into a fan of straight 1-level
-   ribs reaching every corner of the frame (measured: 1-level jumps every
-   4-13 px along a circle around the centre), and the angle singularity in the
-   middle — where all 360 degrees of the ramp collapse onto a couple of pixels —
-   is the HARDEST edge anywhere in the ambience (measured on a white cover:
-   21.9 levels, 14.9 on a mid-grey one, 4.0 on the darkest, and 4.9 in the
-   composite, where every other layer of the stack measures at most 2.1). That
-   fan IS the "straight lines" the fullscreen background
-   shows, and it is geometry, not banding, so the grain cannot dither it away:
-   the ribs are a real radial ladder and the point in the middle is a point.
-   A blur past the rib pitch is what removes it — at 30 px the 4-13 px ribs
-   become a ramp and the point becomes a soft spot, while the band itself
-   survives intact (its angular span measures 41 levels before and 39 after).
-   Flattening the stops instead would be the other cure, but the gradient is
-   built from the cover's own colour in NowPlayingView, not here. */
-.amb-sweep {
-  opacity: 0.55;
-  filter: blur(30px);
-  animation: amb-sweep 55s linear infinite;
-  will-change: transform;
-}
-@keyframes amb-sweep {
-  from { transform: rotate(0deg); }
-  to   { transform: rotate(360deg); }
-}
-
-/* 3) drifting color fields. The blur has to READ through 70px, so each field
-   crosses a few viewport units, with an easing turn at each end (alternate),
-   which is what keeps the backdrop from reading as "moving on its own
-   clock". */
-.amb-orb {
-  position: absolute;
-  border-radius: 9999px;
-  filter: blur(70px) saturate(1.5);
-  /* additive color mixing: overlapping fields add light instead of turning
-     muddy, which is what keeps the backdrop colorful rather than grey */
-  mix-blend-mode: screen;
-  will-change: transform;
-  pointer-events: none;
-}
-/* Each field carries its own hue rotation: three tints of one cover colour
-   read as a single flat wash, three hues read as colour. */
-.amb-orb-b { filter: blur(70px) saturate(1.5) hue-rotate(-28deg); }
-.amb-orb-c { filter: blur(70px) saturate(1.5) hue-rotate(34deg); }
-.amb-orb-a { opacity: 0.82; animation: amb-drift-a 24s ease-in-out infinite alternate; }
-.amb-orb-b { opacity: 0.74; animation: amb-drift-b 30s ease-in-out infinite alternate; }
-.amb-orb-c { opacity: 0.68; animation: amb-drift-c 37s ease-in-out infinite alternate; }
-/* The beat moves the whole colour field, not just the glow: --amb is written
-   ~14x/s and this scales the field with it (transform only), with a little of
-   the pulse on top so a kick pushes the colour outward too. */
-.amb-orbs {
-  transform: scale(calc(0.94 + 0.16 * var(--amb, 0.45) + 0.06 * var(--amb-pulse, 0)));
-  transition: transform 0.18s ease-out;
-  will-change: transform;
-}
-@keyframes amb-drift-a {
-  from { transform: translate3d(0, 0, 0) scale(1); }
-  to   { transform: translate3d(18vw, 12vh, 0) scale(1.34); }
-}
-@keyframes amb-drift-b {
-  from { transform: translate3d(0, 0, 0) scale(1.2); }
-  to   { transform: translate3d(-15vw, -10vh, 0) scale(0.84); }
-}
-@keyframes amb-drift-c {
-  from { transform: translate3d(0, 0, 0) scale(0.86); }
-  to   { transform: translate3d(-13vw, 15vh, 0) scale(1.28); }
-}
-
-/* 4) the only music-driven layer. --amb (0..1) is written ~14x/s by the
-   ambience tick; the transitions below turn those steps into a breath that
-   follows the music instead of a slow swell. They must stay within a couple
-   of ticks of the write cadence: the JS easing already smooths the beat, and
-   a transition several times longer than the tick stacks a SECOND, slower
-   smoother on top of it — the layer then lags the music by more than a
-   second and a kick never lands. These are 2-4 ticks: enough to hide the
-   steps, short enough to stay snappy.
-   The RANGE is the other half: 0.06..0.46 opacity over a soft gradient is a
-   ~2% change on screen, which is why the glow looked frozen however fast it
-   tracked. It now swings most of a 0.9 peak and a third of the scale, which
-   is what makes the background read as following the music. Both properties
-   are compositor-only, so this is also the cheap layer. */
-.amb-glow {
-  opacity: calc(0.04 + 0.86 * var(--amb, 0.45));
-  transform: scale(calc(0.9 + 0.36 * var(--amb, 0.45)));
-  transition: opacity 0.16s ease-out, transform 0.3s ease-out;
-  will-change: opacity, transform;
-  pointer-events: none;
-}
-
-/* The second music-driven layer, and the FAST one: the same two values on a
-   hue-shifted tint, so a kick reads as light moving THROUGH the colour field
-   instead of one layer fading in place, and it reads on the BEAT rather than
-   on the swell. That is why the transitions here are half of `.amb-glow`'s:
-   `--amb-pulse` (the part of each tick that arrived above the smoothed
-   level — see NowPlayingView's ambience tick) lands in ~0.1 s, which is the
-   difference between a background that follows the music and one that pulses
-   with it. Screen-blended like the colour fields it sits over. */
-.amb-bloom {
-  mix-blend-mode: screen;
-  filter: hue-rotate(38deg) saturate(1.35);
-  opacity: calc(0.05 + 0.5 * var(--amb, 0.45) + 0.42 * var(--amb-pulse, 0));
-  transform: scale(calc(0.86 + 0.34 * var(--amb, 0.45) + 0.22 * var(--amb-pulse, 0)));
-  transition: opacity 0.1s ease-out, transform 0.16s ease-out;
-  will-change: opacity, transform;
-  pointer-events: none;
-}
-
-/* 5) grain + vignette: a static film grain (SVG turbulence, no animation)
-   and an edge darkening, so the color field settles into the corners
-   instead of looking like a flat wash.
-   The grain is also the DITHER, and that is not decoration: every layer here
-   is a huge soft gradient, an 8-bit screen renders those in bands, and the
-   owner's report ("you can kinda see lines") is exactly that — faint
-   horizontal edges across the colour field. Noise is the only cure; blur at
-   these radii cannot remove a band it created.
-   TWO blends, because one cannot cover both ends of the field: `overlay`
-   barely registers over the dark half (50 % grey leaves black black) and
-   `screen` barely registers over the bright half. The same tile is therefore
-   drawn twice — this element and its ::after — with a slightly different tile
-   size, so the two copies cannot beat against each other into a pattern of
-   their own. */
-.amb-grain {
-  opacity: 0.055;
-  mix-blend-mode: overlay;
-  pointer-events: none;
-  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='g'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/></filter><rect width='160' height='160' filter='url(%23g)'/></svg>");
-  background-size: 160px 160px;
-}
-.amb-grain::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  /* `inherit` on a pseudo-element takes the PARENT's computed value, which is
-     the point: one tile, two sizes, no second data URI to keep in step. */
-  background-image: inherit;
-  background-size: 131px 131px;
-  opacity: 0.55;
-  mix-blend-mode: screen;
-  pointer-events: none;
-}
-.amb-vignette {
-  pointer-events: none;
-  background: radial-gradient(ellipse 125% 100% at 50% 45%, transparent 46%, rgb(9 9 11 / 0.42) 100%);
-}
-/* Lyrics legibility: the fullscreen player puts its text straight onto the
-   ambience with NOTHING between them — no panel, no tint (the owner's "I
-   don't want backgrounds on UI elements" report was two grey rectangles, one
-   across the lyrics and one under the title). Two things carry the legibility
-   instead. The field itself is darkened for every cover by the player's
-   full-bleed wash (NowPlayingView), and the ink — always the light table now —
-   carries its own shadow.
-   The shadow is ALL halo, no core, and it has now been let go of twice: a
-   tight 3px blur at 0.92 once merged between glyphs into a slab of uniform
-   dark pixels under the line (the owner's "block … beneath it"), and the
-   stack that replaced it — four layers at 0.3–0.42 — still drew a visible
-   ring around every glyph, which is the "ghost border" report. What is left
-   is a wide, soft drop: the tightest layer is a 3px smoke rather than a 2px
-   edge, every opacity is halved, and the densest point of the stack is about
-   a third of what it was, so a bright cover gets depth under the line
-   instead of a stroke around it. Legibility comes from the wash and from the
-   ink's own contrast; the shadow only has to stop a glyph from dissolving
-   into a busy mid-tone. */
-/* The same stack mirrored for the DARK ink a bright cover asks for
-   (the polarity is decided once, in `npInk`): a light halo is what separates a
-   near-black glyph from a bright field, exactly as the dark one does for white
-   glyphs. Both stacks are the ink's opposite, so a cover that flips the table
-   flips its shadow with it. */
-.np-shade-light {
-  text-shadow: 0 1px 3px rgb(255 255 255 / 0.2), 0 4px 14px rgb(255 255 255 / 0.16),
-    0 10px 34px rgb(255 255 255 / 0.1);
-}
-.np-shade {
-  text-shadow: 0 1px 3px rgb(0 0 0 / 0.2), 0 4px 14px rgb(0 0 0 / 0.16),
-    0 10px 34px rgb(0 0 0 / 0.1);
-}
-/* ------------------------------------------------------------------ */
-/* The player's frosted menus                                          */
-/* ------------------------------------------------------------------ */
-/* Left for the surfaces that ARE floating panels — the player's own menus
-   (options, add-to-playlist, via Popover) and the queue drawer: frosted
-   instead of an opaque `bg-zinc-950` slab over the artwork. They pin the dark
-   tint themselves (`np-veil-dark`), because their rows are zinc-300 on a dark
-   panel and a lighter tint would wash them out. Nothing else uses these: the
-   lyrics pane and the metadata block carry no veil at all — the classes that
-   drew them (`np-veil-pane`, `np-veil-pill`) and the white tint
-   (`np-veil-light`) are gone with the polarity chooser that fed them. */
+/* For the surfaces that ARE floating panels — the frosted menus Popover
+   draws over artwork: frosted instead of an opaque `bg-zinc-950` slab over
+   the artwork. They pin the dark tint themselves (`np-veil-dark`), because
+   their rows are zinc-300 on a dark panel and a lighter tint would wash them
+   out. */
 .np-veil {
   backdrop-filter: blur(16px) saturate(1.05);
 }
@@ -988,18 +601,10 @@ table td {
 .np-veil-panel {
   background: rgb(var(--np-veil) / 0.72);
 }
-/* gentle breathing on the artwork glow */
-@keyframes glow-pulse {
-  0%, 100% { opacity: 0.55; transform: scale(1); }
-  50% { opacity: 0.85; transform: scale(1.04); }
-}
-.artwork-glow {
-  animation: glow-pulse 7s ease-in-out infinite;
-}
 
 /* ------------------------------------------------------------------ */
 /* App-wide motion: pages ease in on navigation and buttons give press  */
-/* feedback, so the UI feels alive beyond the fullscreen player.        */
+/* feedback, so the UI feels alive.                                     */
 /* ------------------------------------------------------------------ */
 @keyframes page-in {
   from { opacity: 0; transform: translateY(7px); }
@@ -1020,32 +625,6 @@ table td {
 }
 .chip {
   transition: background-color var(--motion-fast) ease, color var(--motion-fast) ease, border-color var(--motion-fast) ease;
-}
-
-/* Frosted panel used across the redesigned surfaces */
-/* Scrollable-but-chromeless: wheel/touch scrolling still works, no bar. */
-.no-scrollbar {
-  scrollbar-width: none;
-  -ms-overflow-style: none;
-}
-.no-scrollbar::-webkit-scrollbar {
-  display: none;
-}
-
-/* A lyrics scroller fades into its own edges. A line sliced through its middle
-   by the pane's edge is the one place a reading surface looks BROKEN rather
-   than alive — the row above the anchor is meant to be readable, and the pane's
-   top (under the header) and bottom (where the visualizer strip starts) cut
-   whatever sits there in half. A MASK, not an overlay: nothing is painted, so
-   the reading surface still has no panel, tint or gradient of its own (R52c) —
-   the text simply dissolves over the last 26 px. The first and last lines are
-   never affected: the scroller's own pads (LYRICS_PAD_TOP/BOTTOM) hold them a
-   third of the pane away from either edge. */
-.lyr-fade {
-  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 26px,
-    #000 calc(100% - 26px), transparent 100%);
-  mask-image: linear-gradient(to bottom, transparent 0, #000 26px,
-    #000 calc(100% - 26px), transparent 100%);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1091,16 +670,6 @@ table td {
   .modal-sheet {
     animation: sheet-up 0.18s var(--ease-motion);
   }
-}
-
-/* An icon button changing state (download → progress → done) swaps its glyph
-   in place: a small scale-in instead of a hard cut, and never a label. */
-@keyframes icon-swap {
-  from { opacity: 0; transform: scale(0.55); }
-  to   { opacity: 1; transform: none; }
-}
-.icon-swap {
-  animation: icon-swap 0.22s var(--ease-motion);
 }
 
 /* Armed confirmation on a square button: a ring pulses out of it, so the
@@ -1169,34 +738,14 @@ table td {
   .anim-pop,
   .anim-fade,
   .modal-sheet,
-  .icon-swap,
   .btn-armed,
   .page-enter,
   .toast-in,
   .skeleton,
-  .amb-cover,
-  .amb-sweep,
-  .amb-orb,
-  .amb-orbs,
-  .amb-glow,
-  .amb-bloom,
-  .artwork-glow,
-  .title-marquee,
-  .lyr-corner,
   .nav-link,
   .nav-icon {
     animation: none !important;
     transition: none !important;
     transform: none !important;
-  }
-  /* Lyric emphasis (NowPlayingView LINE_QUIET = .np-quiet): an inactive line
-     carries no motion and no blur — this is the marker for the one thing that
-     IS motion, the active line's growth — and a reduced-motion reader keeps
-     full-brightness text on every line. */
-  .np-quiet {
-    opacity: 1 !important;
-  }
-  .np-quiet:focus-within {
-    opacity: 1;
   }
 }

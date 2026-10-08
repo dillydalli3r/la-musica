@@ -147,7 +147,7 @@ _chain_calls = []
 _step_calls = []
 _real = {n: getattr(imports, n) for n in
          ("stamp_rym_links", "fetch_advisories", "fetch_instrumentals",
-          "run_metadata_step", "run_cover_step", "_stamp_release")}
+          "run_cover_step", "_stamp_release")}
 _real_chain = script_runners.run_chain
 
 
@@ -185,11 +185,6 @@ def stub_advisory(paths, cfg):
 
 def stub_instrumentals(paths, cfg):
     return {"updated": 0, "values": {}, "evidence": {}}
-
-
-def stub_metadata(album_dir, cfg):
-    _step_calls.append(("metadata", os.path.basename(album_dir), dict(cfg)))
-    return {"staged": False, "applied": {}}
 
 
 def stub_cover(album_dir, cfg):
@@ -261,7 +256,7 @@ def stub_chain(cfg, ids, targets=None, force=None, progress=None, wait=True,
 
 for _name, _fn in (("stamp_rym_links", stub_stamp), ("fetch_advisories", stub_advisory),
                    ("fetch_instrumentals", stub_instrumentals),
-                   ("run_metadata_step", stub_metadata), ("run_cover_step", stub_cover),
+                   ("run_cover_step", stub_cover),
                    ("_stamp_release", stub_genres)):
     setattr(imports, _name, _fn)
 integrations.resolve_release = stub_resolve

@@ -1,6 +1,5 @@
 #!/usr/bin/env node
-/* The Library's alphabet toolbar, and the album page's LOCAL recommendation
- * shelf — the two things the owner asked for, and the numbers that prove them.
+/* The Library's alphabet toolbar, and the numbers that prove it.
  *
  *   * The Library's own name box and A–Z rail are TWO controls over ONE filter,
  *     so the check drives them the way a reader does and counts what comes
@@ -18,42 +17,14 @@
  *     no album in the payload is titled with a symbol, and only one has an
  *     accent, so the fallback cases are proved there.
  *   * Select mode's "Select all" is ONE control (components/SelectAllButton)
- *     over four different selections — the Library's five views, Home's
- *     shelves, the artist page and the trash — so the check drives each
- *     wiring: the label's number against what the list shows (the toolbar's
- *     own counts, the artist rows, the de-duplicated shelves, the entries),
- *     every drawn box ticked by one click, the batch bar reading the same
- *     number, and the same button clearing it again. With a name typed, "all"
- *     is what the filter left. The fixture puts one album on two Home shelves
- *     on purpose: the count stays one album.
- *   * The album page's "Recommended (Local)" shelf was a single horizontal row
- *     that ran off the shelf's own width and cut the card at the edge (the
- *     owner's screenshot: six cards, the sixth in halves). It is a wrapped grid
- *     now, and the check measures that: one grid, more than one row, every
- *     card's right edge inside the shelf's, and no horizontal overflow in it.
- *   * The two shelves on that page are read as a PAIR and the reader counts
- *     them, so the local shelf must ask for the same 12 rows the online shelf
- *     asks for and print the count it got (issue #54) — the request body is
- *     kept by the stub and the printed count is read off the heading line.
+ *     over three different selections — the Library's five views, the artist
+ *     page and the trash — so the check drives each wiring: the label's number
+ *     against what the list shows (the toolbar's own counts, the artist rows,
+ *     the entries), every drawn box ticked by one click, the batch bar reading
+ *     the same number, and the same button clearing it again. With a name
+ *     typed, "all" is what the filter left.
  *   * At 390 px the name box and the letter button must still share ONE row and
  *     stay inside the screen: the phone is where a toolbar turns into a stack.
- *   * The ARTIST's own verdict is one GREEN DOT beside the name — the artist
- *     folder's checks (image + description, `grade_artist`) — instead of the
- *     two chips the artist hero used to spell out ("albums", "artist artwork
- *     2/2"), and the SAME mark, from the SAME payload field, is drawn wherever
- *     a name is listed: the hero, the Library's Artists view, Home's artist
- *     shelf and Favorites' artist table. A FAILING artist draws the amber
- *     warning instead of nothing (its tooltip names the failing checks), so a
- *     list can never make an artist whose artwork never arrived look like one
- *     nobody graded. The stub answers all four surfaces out of the two `grade`
- *     objects the payload carries (one artist passing, one failing), so the
- *     check reads both sides of the rule on every surface.
- *     The artist hero's cover-derived backdrop is measured too — the blurred
- *     layer covers the hero's box and is extended past it, it is masked by a
- *     gradient whose transparent stop is already reached along the hero's
- *     whole border (a fade, never the hard line `overflow-hidden` used to slice
- *     it off at), and the legibility rules it must not touch — the layer's
- *     opacity and the `bg` gradient over it — are still exactly what they were.
  *
  * The payload is a REAL capture (tools/fixtures/library-az.json): a scratch
  * server over tools/make_test_library.py's synthetic library, grown by hand so
@@ -85,9 +56,9 @@ if (!existsSync(payloadPath)) {
   process.exit(2);
 }
 const payload = JSON.parse(readFileSync(payloadPath, "utf8"));
-const { library, album, recommend, album_path: albumPath } = payload;
-if (!library?.artists?.length || !album || !recommend?.items?.length || !albumPath) {
-  console.error("[library-az] the payload carries no library, no album answer or no recommendation answer.");
+const { library, album } = payload;
+if (!library?.artists?.length || !album) {
+  console.error("[library-az] the payload carries no library or no album answer.");
   process.exit(2);
 }
 
@@ -188,7 +159,7 @@ const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
  * app), the auth status — and one left unanswered sends the reader to the setup
  * wizard, where there is no list to check. These answers come from the fixture;
  * anything else the shell asks for gets an empty object, which is what keeps the
- * page's own reads (grades, ratings, the play counts) out of the way without
+ * page's own reads (grades, the play counts) out of the way without
  * pretending they said something. */
 const VERSION = {
   version: "4.0.3",
@@ -201,87 +172,19 @@ const VERSION = {
   checked_at: 0,
   source: "unavailable",
 };
-/* Every body the shelf POSTs to `/api/recommend`, kept for the check at the
- * bottom of this file: how many rows the local shelf ASKS for is half of the
- * pair the server suite proves (tools/test_recommendations.py asserts the
- * server's own default is the same number). */
-const recommendAsked = [];
-/* A 4x4 PNG (the fixture's artists claim `has_image`, so the page asks for
- * one): real bytes, so the hero's backdrop layer is a layer that painted
- * something rather than a broken image the browser drew a glyph for. */
-const PNG = Buffer.from(
-  "iVBORw0KGgoAAAANSUhEUgAAAAQAAAAECAIAAAAmkwkpAAAAE0lEQVR4nGOsiDrBAANMcBZeDgBQyAGi+HlBlgAAAABJRU5ErkJggg==",
-  "base64");
 /* The artist under test. */
 const ARTIST_ALPHA = "Artist Alpha";
-const ARTIST_BETA = "Artist Beta";
 
-/** `GET /api/artist` for one library row: the row's own albums/aggregate plus
- *  the artwork block the page draws (image, description, provenance) and the
- *  row's own `grade` — the artist folder's verdict, which is what the dot
- *  beside the name reads. */
-const artistPayload = (row) => {
-  const hasImage = !!row.has_image;
-  return {
-    path: row.path,
-    name: row.name,
-    display_name: row.display_name || row.name,
-    albums: row.albums,
-    aggregate: row.aggregate,
-    artwork: {
-      image: hasImage,
-      image_file: hasImage ? "artist.jpg" : null,
-      image_url: hasImage ? `/api/artist/image?artist=${encodeURIComponent(row.path)}` : null,
-      description: row.grade?.artwork?.description ? "A stored artist description." : null,
-      description_source: null,
-      description_url: null,
-      provenance: {},
-      auto_image: true,
-      auto_description: true,
-    },
-    grade: row.grade,
-  };
-};
-
-/** What Home's artist shelf draws, per row (`recommendations._top_artists`):
- *  the card's own fields plus the artist's grade, which the shelf passes
- *  through from the library row it was built from. */
-const homeArtist = (row) => ({
+/** `GET /api/artist` for one library row: the row's own albums/aggregate and
+ *  its `grade` — the artist folder's verdict, which the grading surfaces read. */
+const artistPayload = (row) => ({
   path: row.path,
-  artist: row.display_name || row.name,
-  album_count: row.albums.length,
-  track_count: row.aggregate?.track_count ?? 0,
-  grade_pct: row.aggregate?.grade_pct ?? null,
-  cover_path: row.albums[0]?.path || "",
-  cover: row.albums[0]?.cover_file ?? null,
-  has_image: !!row.has_image,
+  name: row.name,
+  display_name: row.display_name || row.name,
+  albums: row.albums,
+  aggregate: row.aggregate,
   grade: row.grade,
 });
-/* Home's payload, kept to what the page reads: the shelves the fixture has no
- * rows for answer empty (each shelf draws nothing), and the artist shelf
- * carries the same graded rows the Library lists. */
-const HOME = {
-  stats: {
-    artists: served.artists.length,
-    albums: served.artists.reduce((n, a) => n + a.albums.length, 0),
-    tracks: served.artists.reduce(
-      (n, a) => n + a.albums.reduce((m, al) => m + (al.tracks?.length || 0), 0), 0),
-    playlists: 0,
-    grade_pct: null,
-  },
-  recent: [], top_rated: [], rated: [], favorites: [], discover: [],
-  podcasts: [], pending: [], wanted: [], needs_attention: [],
-  top_artists: served.artists.slice(0, 3).map(homeArtist),
-  grade_warning: null,
-};
-/* Two album shelves, with ONE album on both of them: Home's own rows are
- * library albums, and the same album rides on several shelves — which is what
- * "Select all" has to count once (the check reads 3 out of these 4 rows). */
-HOME.recent = served.artists.find((a) => a.name === "Zed Case")?.albums ?? [];
-HOME.favorites = [
-  ...(served.artists.find((a) => a.name === "Zed Case")?.albums.slice(1) ?? []),
-  ...(served.artists.find((a) => a.name === "Ásgeir")?.albums ?? []),
-];
 /* The trash's own payload: enough rows for "Select all" to mean something, and
  * one entry with no recorded origin — an older removal, the case the restore
  * path has to ask about instead of guessing a destination. */
@@ -323,14 +226,7 @@ const apiStub = createHttpServer((req, res) => {
   if (url.startsWith("/api/library")) return json(served);
   if (url.startsWith("/api/album?")) return json(album);
   /* The artist page's own payload, built from the row the LIBRARY answer
-   * carries — one `grade` object drives both, which is exactly the agreement
-   * the dot cases below are about. `/api/artist/image` answers real PNG bytes
-   * so the hero's cover-derived backdrop is a layer with pixels in it (the
-   * fixture's artists carry `has_image`, so the page asks for it). */
-  if (url.startsWith("/api/artist/image")) {
-    res.writeHead(200, { "content-type": "image/png" });
-    return res.end(PNG);
-  }
+   * carries — one `grade` object drives both. */
   if (url.startsWith("/api/artist?")) {
     const want = new URL(url, "http://127.0.0.1").searchParams.get("path") || "";
     const row = served.artists.find((a) => a.path === want);
@@ -340,35 +236,9 @@ const apiStub = createHttpServer((req, res) => {
     }
     return json(artistPayload(row));
   }
-  if (url.startsWith("/api/home")) return json(HOME);
   if (url.startsWith("/api/trash")) return json(TRASH);
-  if (url.startsWith("/api/recommend")) {
-    // The shelf asks with a POST body (a playlist or a favourites set is a seed
-    // LIST); the older GET form has none. Either way the answer is the
-    // fixture's, and the body is kept for the check below.
-    let raw = "";
-    req.on("data", (chunk) => { raw += chunk; });
-    req.on("end", () => {
-      let body = {};
-      try { body = JSON.parse(raw || "{}"); } catch { body = {}; }
-      recommendAsked.push(body);
-      json(recommend);
-    });
-    return;
-  }
-  if (url.startsWith("/api/ratings")) return json({ ratings: {} });
-  /* The Favorites page's own store: the two graded artists are hearted, so its
-   * artist table lists them (it joins these paths with the library payload the
-   * page also holds, and draws the shared name render). */
-  if (url.startsWith("/api/favorites")) {
-    return json({
-      albums: [],
-      artists: [served.artists[0].path, served.artists[1].path],
-      playlists: [],
-    });
-  }
   if (url.startsWith("/api/auth/users")) return json({ users: [] });
-  // Everything else — the grade summary, the favorites, the lock list — is a
+  // Everything else — the grade summary, the lock list — is a
   // question the pages under test guard on: an ERROR is what those guards are
   // written for (`if (!data) return null`), while a hand-made empty object is
   // a shape the component trusts and then reads a field off.
@@ -601,8 +471,8 @@ try {
    * spelling), and the Grid and the album table grouped on the raw tag — so one
    * artist drew two headers and its albums were split across them. The group key
    * is the app's own name fold now (the one the A–Z rail files names under), and
-   * the header is the FOLDER's spelling — the name the Artists view, Home's
-   * shelf and the artist page all draw. The fixture carries the case: one
+   * the header is the FOLDER's spelling — the name the Artists view and the
+   * artist page both draw. The fixture carries the case: one
    * "Zed Case" folder whose second album is tagged "ZED CASE". */
   const gridHeaders = () => page.evaluate(() =>
     [...document.querySelectorAll("main div.col-span-full")]
@@ -739,88 +609,6 @@ try {
   await page.waitForTimeout(60);
   await page.setViewportSize({ width: 1440, height: 900 });
 
-  // ------------------------- 4. the album page's Recommended (Local) shelf
-  await page.goto(`${base}/album/${encodeURIComponent(albumPath)}`);
-  await page.waitForSelector("h2:has-text('Recommended (Local)')", { timeout: 30000 });
-  // The cards enter on `.stagger`, which animates each one up from below on its
-  // own delay: measured mid-animation every card reports a different top and
-  // there is no layout to read. Settled first.
-  await page.waitForTimeout(800);
-  const shelf = await page.evaluate(() => {
-    const h = [...document.querySelectorAll("h2")]
-      .find((el) => (el.textContent || "").includes("Recommended (Local)"));
-    const section = h.closest("section");
-    const grid = [...section.querySelectorAll("div")]
-      .find((el) => (el.style.gridTemplateColumns || "").includes("auto-fill"));
-    if (!grid) return null;
-    const box = grid.getBoundingClientRect();
-    const style = getComputedStyle(grid);
-    const cards = [...grid.children].map((el) => {
-      const r = el.getBoundingClientRect();
-      return {
-        // offsetTop/Left are the LAYOUT position — a transform (the entry
-        // animation, a hover lift) moves the painted box without moving the
-        // grid, and the grid is what is being checked here.
-        row: el.offsetTop,
-        col: el.offsetLeft,
-        left: r.left, right: r.right, width: Math.round(r.width),
-      };
-    });
-    return {
-      display: style.display,
-      overflowX: style.overflowX,
-      // The heading line: the title AND the count this shelf prints beside it.
-      // `h.parentElement` is the flex row holding the icon, the title and the
-      // meta slot.
-      heading: (h.parentElement?.textContent || "").replace(/\s+/g, " ").trim(),
-      // The RESOLVED layout, not the template string: how many columns the
-      // browser actually drew is how many distinct left edges the cards have.
-      columns: new Set(cards.map((c) => c.col)).size,
-      scrollWidth: grid.scrollWidth,
-      clientWidth: grid.clientWidth,
-      boxLeft: box.left,
-      boxRight: box.right,
-      rows: new Set(cards.map((c) => c.row)).size,
-      cards,
-    };
-  });
-  check("the album page draws the local shelf", shelf !== null, "no grid found under the shelf's heading");
-  if (shelf) {
-    const items = recommend.items.length;
-    check("the shelf's cards are laid out in a grid, not the old scroller",
-          shelf.display === "grid" && shelf.overflowX !== "auto",
-          `display ${shelf.display}, overflow-x ${shelf.overflowX}`);
-    check("every recommended album is on the shelf", shelf.cards.length === items,
-          `${shelf.cards.length} cards for ${items} items`);
-    check("the cards wrap onto more than one row",
-          shelf.rows >= 2, `${shelf.rows} row(s) across ${shelf.columns} column(s)`);
-    check("and the rows are full ones — no orphan row of half a row's worth",
-          shelf.rows === Math.ceil(shelf.cards.length / shelf.columns),
-          `${shelf.cards.length} cards over ${shelf.rows} rows at ${shelf.columns} columns`);
-    const outside = shelf.cards.filter((c) => c.right > shelf.boxRight + 0.5 || c.left < shelf.boxLeft - 0.5);
-    check("no card is cut off at the shelf's edge (the sixth card in halves)",
-          outside.length === 0, JSON.stringify(outside));
-    check("and the shelf itself does not scroll sideways",
-          shelf.scrollWidth <= shelf.clientWidth + 1,
-          `scrollWidth ${shelf.scrollWidth} vs clientWidth ${shelf.clientWidth}`);
-    const widths = shelf.cards.map((c) => c.width);
-    check("every card clears the Library grid's own floor (164 px)",
-          Math.min(...widths) >= 164, `narrowest card ${Math.min(...widths)} px`);
-    // The pair's NUMBERS — issue #54. The page's two shelves are read side by
-    // side and the reader counts them, so the local shelf asks for the same 12
-    // the online shelf asks for (the server suite proves the server's own
-    // default is that same number) and prints the count it got, which is what
-    // makes "9 local albums beside 12 online suggestions" read as the library
-    // rather than as a shelf that lost three rows.
-    check("the local shelf asks for 12 rows — the same number the online shelf asks for",
-          recommendAsked.length > 0 && recommendAsked.every((b) => b.limit === 12),
-          JSON.stringify(recommendAsked));
-    const counted = `${items} album${items === 1 ? "" : "s"}`;
-    check(`the shelf prints its own count (${counted}), like the online shelf beside it`,
-          shelf.heading.includes(counted), JSON.stringify(shelf.heading));
-    console.log(`\n[library-az] shelf: ${shelf.cards.length} cards, ${shelf.rows} rows x ${shelf.columns} columns, `
-      + `card widths ${Math.min(...widths)}–${Math.max(...widths)} px, heading "${shelf.heading}"`);
-  }
   // ------------------------- 5. the album's advisory mark
   // Every card reads the album's advisory through the same rule
   // (`albumAdvisory`), so the check walks both shapes it must get right: one
@@ -877,356 +665,16 @@ try {
         + `(${seededCols?.stored ?? 0} ids stored, # kept: ${seededCols?.storedHasNum})`,
         !!seededCols && seededCols.stored >= 8 && seededCols.storedHasNum === true,
         JSON.stringify(seededCols));
-  // ------------------------- 7. the artist's own verdict: one dot
-  // The owner's ask: an artist's health is ONE green dot beside its name, not
-  // two chips spelling the checks out — and the dot is the SAME bit on the
-  // artist page and in every list that names an artist, so a list and the page
-  // it opens can never disagree. The fixture grades two artists: Artist Alpha
-  // passes its own checks (artist image + description, 2/2) and Artist Beta
-  // fails one (no description, 1/2). The stub answers the artist page, the
-  // library and Home out of those same two `grade` objects, which is what makes
-  // "the list and the page agree" a property of what is DRAWN and not of two
-  // fixtures that happen to match.
-  const alphaRow = served.artists.find((a) => a.name === ARTIST_ALPHA);
-  const betaRow = served.artists.find((a) => a.name === ARTIST_BETA);
-  const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
-/** lib/fmt's own word for an artist's albums, spelled the same way here so the
- *  check and the app cannot disagree about the plural. */
-const releaseCount = (n) => `${n} Release${n === 1 ? "" : "s"}`;
-  check("fixture: one artist passes its own checks and one fails",
-        alphaRow?.grade?.pass === true && betaRow?.grade?.pass === false,
-        `alpha=${alphaRow?.grade?.pass} beta=${betaRow?.grade?.pass}`);
-
-  /** One artist's hero, read off the live DOM: the name and its dot, the
-   *  counts line, whether the two removed chips are still drawn anywhere in
-   *  it, and the cover-derived backdrop's own geometry and computed style. */
-  const heroOf = async (row) => {
-    await page.goto(`${base}/artist/${encodeURIComponent(row.path)}`);
-    await page.waitForSelector(".hero-flat h1", { timeout: 30000 });
-    await page.waitForTimeout(250);
-    return page.evaluate(() => {
-      const box = (el) => {
-        const r = el.getBoundingClientRect();
-        return { left: r.left, top: r.top, right: r.right, bottom: r.bottom, width: r.width, height: r.height };
-      };
-      const hero = document.querySelector(".hero-flat");
-      const layer = hero.querySelector(".hero-ink");
-      const style = layer ? getComputedStyle(layer) : null;
-      const texts = [...hero.querySelectorAll("span")].map((s) => (s.textContent || "").trim());
-      const dot = hero.querySelector("h1 .artist-dot");
-      return {
-        name: (hero.querySelector("h1")?.textContent || "").trim(),
-        dot: !!dot,
-        dotLabel: dot?.getAttribute("aria-label") || "",
-        // "Releases" is the owner's word for an artist's albums (the Library's
-        // own Artists column has used it since it was added), so the subtitle
-        // the hero prints is matched in that word.
-        counts: texts.find((t) => /^\d+ Releases? · \d+ tracks?$/.test(t)) || "",
-        // The two pass chips this hero used to spell its verdicts out with:
-        // the album rollup's "albums", and "artist artwork 2/2".
-        passChips: texts.filter((t) => t === "albums" || /^artist artwork/.test(t)),
-        failures: texts.filter((t) => t === "Artist description"),
-        heroBox: box(hero),
-        layerBox: layer ? box(layer) : null,
-        layerOpacity: style?.opacity ?? null,
-        layerMask: style ? style.maskImage || style.webkitMaskImage : null,
-        // The legibility rule this fade is not allowed to change: the `bg`
-        // gradient still painted over the wash, between it and the text.
-        overlay: !!hero.querySelector("div.absolute.inset-0.bg-gradient-to-t"),
-      };
-    });
-  };
-
-  const alphaHero = await heroOf(alphaRow);
-  check(`the hero draws the passing artist's dot beside the name (${alphaHero.name})`,
-        alphaHero.name === ARTIST_ALPHA && alphaHero.dot === true
-          && alphaHero.dotLabel.includes("Artist checks pass"),
-        JSON.stringify({ name: alphaHero.name, dot: alphaHero.dot, label: alphaHero.dotLabel }));
-  check("and no longer spells the checks out in chips (`albums`, `artist artwork`)",
-        alphaHero.passChips.length === 0, JSON.stringify(alphaHero.passChips));
-  check(`while the informational counts stay (${alphaHero.counts})`,
-        alphaHero.counts === `${releaseCount(alphaRow.aggregate.album_count)} · `
-          + plural(alphaRow.aggregate.track_count, "track"),
-        `"${alphaHero.counts}"`);
-
-  // The backdrop: the layer is scaled PAST the hero's box and masked, so the
-  // wash fades instead of being sliced off at the hero's `overflow-hidden`
-  // edge. Coverage is geometry — the layer's own box against the hero's.
-  const covers = (l, h) => !!l
-    && l.left <= h.left + 1 && l.top <= h.top + 1
-    && l.right >= h.right - 1 && l.bottom >= h.bottom - 1;
-  // The numbers, the way this check logs the shelf's own geometry: what the
-  // backdrop measured, so a passing run says how much bigger the layer is.
-  console.log(`\n[library-az] artist hero: backdrop layer `
-    + `${Math.round(alphaHero.layerBox?.width ?? 0)}x${Math.round(alphaHero.layerBox?.height ?? 0)} px `
-    + `over the hero's ${Math.round(alphaHero.heroBox.width)}x${Math.round(alphaHero.heroBox.height)} px, `
-    + `opacity ${alphaHero.layerOpacity}, mask "${String(alphaHero.layerMask).replace(/\s+/g, " ").slice(0, 120)}", `
-    + `overlay ${alphaHero.overlay}`);
-  check(`the backdrop's blur layer covers the hero box `
-        + `(layer ${Math.round(alphaHero.layerBox?.width ?? 0)}x${Math.round(alphaHero.layerBox?.height ?? 0)} `
-        + `over hero ${Math.round(alphaHero.heroBox.width)}x${Math.round(alphaHero.heroBox.height)})`,
-        covers(alphaHero.layerBox, alphaHero.heroBox), JSON.stringify(alphaHero.layerBox));
-  check("…and it is extended past that box, so the fade lands inside the hero's clip",
-        !!alphaHero.layerBox
-          && alphaHero.layerBox.width > alphaHero.heroBox.width + 8
-          && alphaHero.layerBox.height > alphaHero.heroBox.height + 8,
-        JSON.stringify({ layer: alphaHero.layerBox, hero: alphaHero.heroBox }));
-  check("…and the blur is masked by a gradient ending transparent, not a hard edge",
-        typeof alphaHero.layerMask === "string" && /gradient/.test(alphaHero.layerMask)
-          && /rgba\(0, 0, 0, 0\)|transparent/.test(alphaHero.layerMask),
-        String(alphaHero.layerMask));
-  /* The fade itself, as geometry rather than by eye: the mask's transparent
-   * stop, resolved against the layer the browser actually laid out, must
-   * already be reached along the hero's WHOLE border. Positive alpha anywhere
-   * on that border is the hard edge the owner reported — `overflow-hidden`
-   * slicing a wash that was still visible — and coverage alone would not catch
-   * it: the old `scale-110` layer covered the box too. The border is sampled
-   * (corners, edge midpoints and between) because the binding point is not a
-   * corner: it is wherever the ellipse's own radius runs out first. */
-  const fadeAtBorder = (mask, layer, hero) => {
-    const m = /radial-gradient\(\s*([\d.]+)%\s+([\d.]+)%\s+at\s+([\d.]+)%\s+([\d.]+)%\s*,([\s\S]*)\)/
-      .exec(mask || "");
-    const stop = /(?:rgba\(0, 0, 0, 0\)|transparent)\s+([\d.]+)%/.exec(m?.[5] || "");
-    if (!m || !stop || !layer || !hero) return null;
-    const rx = (Number(m[1]) / 100) * layer.width;
-    const ry = (Number(m[2]) / 100) * layer.height;
-    const cx = layer.left + (Number(m[3]) / 100) * layer.width;
-    const cy = layer.top + (Number(m[4]) / 100) * layer.height;
-    // 32 points around the hero's own border, in the mask's own units.
-    const points = [];
-    for (const [edge, n] of [["top", hero.width], ["bottom", hero.width],
-                             ["left", hero.height], ["right", hero.height]]) {
-      for (let i = 0; i <= 8; i += 1) {
-        const t = i / 8;
-        const x = edge === "left" ? hero.left
-          : edge === "right" ? hero.right : hero.left + t * hero.width;
-        const y = edge === "top" ? hero.top
-          : edge === "bottom" ? hero.bottom : hero.top + t * hero.height;
-        points.push(Math.sqrt(((x - cx) / rx) ** 2 + ((y - cy) / ry) ** 2));
-      }
-    }
-    return { end: Number(stop[1]) / 100, min: Math.min(...points) };
-  };
-  const fade = fadeAtBorder(alphaHero.layerMask, alphaHero.layerBox, alphaHero.heroBox);
-  check(`…and that fade is already complete along the hero's whole border `
-        + `(transparent by ${Math.round((fade?.end ?? 0) * 100)}% of the mask's radius; `
-        + `the border's own nearest point is at ${Math.round((fade?.min ?? 0) * 100)}%)`,
-        !!fade && fade.min >= fade.end, JSON.stringify(fade));
-  check("…with the legibility rules untouched: the wash keeps its opacity and the "
-        + "bg gradient is still painted over it",
-        alphaHero.layerOpacity === "0.25" && alphaHero.overlay === true,
-        `opacity=${alphaHero.layerOpacity} overlay=${alphaHero.overlay}`);
-
-  const betaHero = await heroOf(betaRow);
-  check(`an artist that fails its own checks carries no dot (${betaHero.name})`,
-        betaHero.name === ARTIST_BETA && betaHero.dot === false,
-        JSON.stringify({ name: betaHero.name, dot: betaHero.dot, label: betaHero.dotLabel }));
-  check("…and the failing check is still named in the hero, in words",
-        betaHero.failures.length === 1, JSON.stringify(betaHero.failures));
-
-  // The Library's Artists view: the same dot, on the rows whose `grade` says
-  // the same thing — and nothing at all on an artist the payload never graded.
-  await page.goto(`${base}/library`);
-  await page.waitForSelector("text=Artists", { timeout: 30000 });
-  await viewTab("Artists").click();
-  await page.waitForTimeout(250);
-  const artistRows = await page.evaluate(([alpha, beta]) => {
-    const rows = [...document.querySelectorAll("main table tbody tr")];
-    const read = (name) => {
-      const row = rows.find((r) => (r.querySelector("a")?.textContent || "").trim() === name);
-      const warn = row?.querySelector("a .artist-warn");
-      return row
-        ? { found: true, dot: !!row.querySelector("a .artist-dot"), warn: !!warn,
-            warnTitle: warn?.getAttribute("title") || "",
-            name: (row.querySelector("a")?.textContent || "").trim() }
-        : { found: false, dot: false, warn: false, warnTitle: "", name: "" };
-    };
-    return {
-      alpha: read(alpha),
-      beta: read(beta),
-      dots: rows.filter((r) => r.querySelector("a .artist-dot")).length,
-      warns: rows.filter((r) => r.querySelector("a .artist-warn")).length,
-    };
-  }, [ARTIST_ALPHA, ARTIST_BETA]);
-  check("the Library's Artists view draws that dot beside the name that passes",
-        artistRows.alpha.found && artistRows.alpha.dot === true, JSON.stringify(artistRows));
-  // A FAILING artist is a warning, not a silence: "the artist image and the
-  // description are missing" is the claim the library owes a reader where the
-  // artist is listed, and the mark's tooltip names the failing checks.
-  check("…and the warning mark beside the name that fails",
-        artistRows.beta.found && artistRows.beta.dot === false && artistRows.beta.warn === true &&
-          /artist description/i.test(artistRows.beta.warnTitle),
-        JSON.stringify(artistRows.beta));
-  check("…and a row the payload never graded grew neither mark",
-        artistRows.dots === 1 && artistRows.warns === 1,
-        `${artistRows.dots} dots, ${artistRows.warns} warnings`);
-
-  // Home's artist shelf — the third place a name is listed, and the one whose
-  // rows come off the SAME library row: one dot, two surfaces.
-  await page.goto(`${base}/`);
-  await page.waitForSelector(`a[title="${ARTIST_ALPHA}"]`, { timeout: 30000 });
-  await page.waitForTimeout(250);
-  const shelfDots = await page.evaluate(([alpha, beta]) => {
-    const read = (name) => {
-      const card = document.querySelector(`a[title="${CSS.escape(name)}"]`);
-      return card
-        ? {
-            found: true,
-            dot: !!card.querySelector(".artist-dot"),
-            warn: !!card.querySelector(".artist-warn"),
-            // What the row NAMES, read the way tools/check_home_artists.cjs
-            // reads a shelf caption (`span.text-sm` — the shared render's own
-            // name span): the display name, never the folder's `[mbid]`.
-            // The shared render's own NAME span: `min-w-0` + the caller's
-            // `truncate` (ArtistName), which does not move when a page rescales
-            // its shelf — the old `span.text-sm` read stopped finding the name
-            // the moment the card was condensed.
-            caption: card.querySelector("span.min-w-0")?.textContent?.trim() || "",
-          }
-        : { found: false, dot: false, warn: false, caption: "" };
-    };
-    return { alpha: read(alpha), beta: read(beta) };
-  }, [ARTIST_ALPHA, ARTIST_BETA]);
-  check("Home's artist shelf draws it too, on the same artist",
-        shelfDots.alpha.found && shelfDots.alpha.dot === true, JSON.stringify(shelfDots));
-  check("…and the warning mark on the artist that fails, so the shelf and the page agree",
-        shelfDots.beta.found && shelfDots.beta.dot === false && shelfDots.beta.warn === true,
-        JSON.stringify(shelfDots));
-  check("…while the card still names the artist (the caption the shelf's own check reads)",
-        shelfDots.alpha.caption === ARTIST_ALPHA && shelfDots.beta.caption === ARTIST_BETA,
-        JSON.stringify([shelfDots.alpha.caption, shelfDots.beta.caption]));
-
-  // Favorites' artist table is the fourth surface listing an artist's name,
-  // off the same library rows: same dot, same rule.
-  await page.goto(`${base}/favorites/artists`);
-  await page.waitForSelector("text=Artist Alpha", { timeout: 30000 });
-  await page.waitForTimeout(250);
-  const favDots = await page.evaluate(([alpha, beta]) => {
-    const rows = [...document.querySelectorAll("main table tbody tr")];
-    const read = (name) => {
-      const row = rows.find((r) => (r.querySelector("a")?.textContent || "").trim() === name);
-      return row
-        ? { found: true, dot: !!row.querySelector("a .artist-dot"),
-            warn: !!row.querySelector("a .artist-warn") }
-        : { found: false, dot: false, warn: false };
-    };
-    return { alpha: read(alpha), beta: read(beta) };
-  }, [ARTIST_ALPHA, ARTIST_BETA]);
-  check("Favorites' artist table draws it on the artist that passes…",
-        favDots.alpha.found && favDots.alpha.dot === true, JSON.stringify(favDots));
-  check("…and the warning mark on the one that fails",
-        favDots.beta.found && favDots.beta.dot === false && favDots.beta.warn === true,
-        JSON.stringify(favDots));
-
-  /* The sidebar's OWN entry, pressed while its page is already open, is a
-   * RESET of that page's search rather than a navigation (App.tsx's
-   * `clearSearchOnRePress`): it empties the app-wide query box — the Library's
-   * own box edits the same store value — tells the page to clear the rest of
-   * its toolbar, and does NOT navigate. Pressed from ANOTHER page it is an
-   * ordinary first navigation and must leave the search alone. */
-  const libraryRows = () => page.evaluate(() =>
-    document.querySelectorAll("main table tbody tr, main a[href^='/album/']").length);
-  const searchBox = page.locator('main input[title^="Plain words match"]').first();
-  await page.goto(`${base}/library`);
-  await page.waitForSelector('main input[title^="Plain words match"]', { timeout: 30000 });
-  await page.waitForTimeout(600);
-  const allRows = await libraryRows();
-  await searchBox.fill("zzzz-matches-nothing");
-  await page.waitForTimeout(600);
-  const narrowedRows = await libraryRows();
-  await page.getByRole("link", { name: "Library", exact: true }).first().click();
-  await page.waitForTimeout(600);
-  const pressed = { value: await searchBox.inputValue(), rows: await libraryRows() };
-  check(`re-pressing the sidebar's own entry clears the Library's search `
-        + `(${narrowedRows} of ${allRows} rows while typed, ${pressed.rows} rows after, box "${pressed.value}")`,
-        narrowedRows < allRows && pressed.value === "" && pressed.rows === allRows,
-        JSON.stringify(pressed));
-
-  await page.goto(`${base}/genres`);
-  await page.waitForTimeout(400);
-  await page.getByRole("link", { name: "Library", exact: true }).first().click();
-  await page.waitForTimeout(700);
-  check(`and a first press from another page still just navigates (${new URL(page.url()).pathname})`,
-        new URL(page.url()).pathname === "/library" && (await searchBox.inputValue()) === "",
-        page.url());
-
-  /* ---- 8. a download's badge names where its files came from ------------
-   * A pressing's badge is its medium and its release countries ("CD · US, CA").
-   * A DIGITAL release has no pressing, so the fact that takes that place is
-   * where the files came from — the album's own `source_summary`, built by the
-   * server from the tracks' SOURCE tags ("Bandcamp", "Qobuz", the reader's own
-   * shop word). The app's own default source is the word "Digital"
-   * (mlo.paths.DEFAULT_DIGITAL_SOURCE): it repeats the medium and is dropped
-   * rather than printed twice. The card and the album page print the same
-   * words in the same order, because they are built by the same helper. */
-  const sourced = albumAt(0);           // the album page's own release
-  sourced.source_summary = "Bandcamp";
-  sourced.meta = { ...(sourced.meta || {}), RELEASECOUNTRY: "US; CA" };
-  album.source_summary = "Bandcamp";    // the page's payload for the same album
-  album.meta = { ...(album.meta || {}), RELEASECOUNTRY: "US; CA" };
-  const unsourced = albumAt(3);         // a download with no shop of its own
-  unsourced.source_summary = "Digital";
-  const physical = albumAt(1);          // the rip: its badge must not move
-  physical.source_summary = null;
-
-  /** One card's badges: the medium (+source) chip and, beside it, the release
-   *  countries — read off the card that links to `title`, the way a reader
-   *  finds it. */
-  const cardBadge = (title) => page.evaluate((name) => {
-    const link = [...document.querySelectorAll("a")].find((a) => (a.getAttribute("title") || "") === name);
-    const card = link?.closest(".group");
-    const media = card?.querySelector('[title^="Media: "]');
-    const country = card?.querySelector('[title^="Released in "]');
-    return media
-      ? { media: (media.textContent || "").trim(), title: media.getAttribute("title"),
-          country: (country?.textContent || "").trim() }
-      : null;
-  }, title);
-
-  await page.goto(`${base}/library`);
-  await page.waitForSelector("input[aria-label='Filter the list by name']", { timeout: 30000 });
-  await page.waitForTimeout(700);
-  const sourcedCard = await cardBadge(titleOf(sourced));
-  check(`a digital release that states a source wears it beside the medium `
-        + `("${sourcedCard?.media || "no media chip"}")`,
-        sourcedCard?.media === "Digital · Bandcamp", JSON.stringify(sourcedCard));
-  check(`…and the tooltip still names the release's own medium `
-        + `("${sourcedCard?.title || "no tooltip"}")`,
-        sourcedCard?.title === "Media: Digital Media · Source: Bandcamp", String(sourcedCard?.title));
-  const unsourcedCard = await cardBadge(titleOf(unsourced));
-  check(`a digital release that states none keeps the medium alone `
-        + `("${unsourcedCard?.media || "no media chip"}")`,
-        unsourcedCard?.media === "Digital", JSON.stringify(unsourcedCard));
-  const physicalCard = await cardBadge(titleOf(physical));
-  check(`a disc release's badge is unchanged ("${physicalCard?.media || "no media chip"}")`,
-        physicalCard?.media === "CD", JSON.stringify(physicalCard));
-  await page.goto(`${base}/album/${encodeURIComponent(albumPath)}`);
-  await page.waitForSelector("h1", { timeout: 30000 });
-  await page.waitForTimeout(600);
-  const WANT_CHIP = "Digital · Bandcamp · US, CA";
-  const albumChip = await page.evaluate((want) => {
-    const seen = [...document.querySelectorAll("main span")].map((el) => (el.textContent || "").trim());
-    // The chip itself, not a card's badge on the page's own shelf.
-    return { hit: seen.includes(want) || null, digital: seen.filter((t) => t.startsWith("Digital")) };
-  }, WANT_CHIP);
-  check(`…and the album page names the same release the same way, countries and all `
-        + `("${albumChip.digital.join(" / ") || "no chip"}")`,
-        albumChip.hit === true, JSON.stringify(albumChip.digital));
-  console.log(`\n[digital badges] card "${sourcedCard?.media}" (tooltip "${sourcedCard?.title}") | `
-    + `no source of its own "${unsourcedCard?.media}" | disc "${physicalCard?.media}" (countries "${physicalCard?.country}") | `
-    + `album page "${albumChip.digital.join(" / ")}"`);
-
   /* ---- 8b. Select mode's "Select all" -----------------------------------
    * The owner's ask: one click for the whole list, wherever the Select button
-   * is. It is the same control in four places (lib: components/SelectAllButton)
-   * over four different selections, so the check drives each wiring: the
-   * Library's five views, Home's shelves, the artist page and the trash.
+   *     is. It is the same control in three places (lib: components/SelectAllButton)
+   *     over three different selections, so the check drives each wiring: the
+   *     Library's five views, the artist page and the trash.
    *
    * Two claims are read off the running app rather than assumed:
    *   * the number in the label is the number the list shows — the toolbar's
    *     own count for the albums and tracks views, the artist rows for the
-   *     artists view, the de-duplicated shelves for Home (the fixture puts one
-   *     album on two shelves on purpose), the entries for the trash;
+   *     artists view, the entries for the trash;
    *   * clicking it ticks EVERY box the view draws, and clicking it again (it
    *     is the way back out once everything is ticked) leaves nothing ticked
    *     and no batch bar behind.
@@ -1242,8 +690,8 @@ const releaseCount = (n) => `${n} Release${n === 1 ? "" : "s"}`;
       ticked: els.filter((e) => e.checked).length,
     }));
   /** The batch bar's own sentence, whichever page drew it: the Library's
-   *  "N albums · M artists · K tracks · T total tracks", Home's and the artist
-   *  page's "N albums selected", the trash's "N selected". Empty when no bar is
+   *  "N albums · M artists · K tracks · T total tracks", the artist page's
+   *  "N albums selected", the trash's "N selected". Empty when no bar is
    *  drawn at all. */
   const barLine = () =>
     page.evaluate(() =>
@@ -1335,46 +783,9 @@ const releaseCount = (n) => `${n} Release${n === 1 ? "" : "s"}`;
         renderPhaseWarnings.length === warningsBeforeLeaving,
         renderPhaseWarnings.slice(warningsBeforeLeaving).join(" | "));
 
-  // ---- Home: the shelves' own albums, de-duplicated ----
-  const homeTicked = (() => {
-    const seen = new Set();
-    const out = [];
-    for (const row of [
-      ...(HOME.recent ?? []), ...(HOME.pending ?? []), ...(HOME.top_rated ?? []),
-      ...(HOME.rated ?? []), ...(HOME.needs_attention ?? []), ...(HOME.discover ?? []),
-      ...(HOME.favorites ?? []), ...(HOME.podcasts ?? []),
-    ]) {
-      const key = row.path || `mb:${row.mbid ?? ""}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      if (row.owned !== false && row.path) out.push(row.path);
-    }
-    return out;
-  })();
-  await page.goto(`${base}/`);
-  await selectBtn.waitFor({ timeout: 30000 });
-  await selectBtn.click();
-  await page.waitForTimeout(80);
-  check("Home: the count is the tickable albums the shelves show, counted once each",
-        (await allLabel()) === `Select all ${homeTicked.length} albums`,
-        `"${await allLabel()}" vs ${homeTicked.length} of ${(HOME.recent ?? []).length + (HOME.favorites ?? []).length} rows`);
-  await selectAllBtn.click();
-  await page.waitForTimeout(80);
-  const homeBoxes = await boxCounts();
-  check("Home: every card that draws a ticked album shows it ticked, and the two "
-        + "shelves' shared album is still ONE album in the count",
-        homeBoxes.drawn === 4 && homeBoxes.ticked === 4
-          && (await barLine()) === `${homeTicked.length} ${homeTicked.length === 1 ? "album" : "albums"} selected`,
-        `${JSON.stringify(homeBoxes)} for ${homeTicked.length} distinct albums`);
-  check("and Home's bar carries the way to act on them, in the Library",
-        (await page.getByRole("link", { name: /Act on them in the Library/ }).count()) === 1);
-  await selectAllBtn.click();
-  await page.waitForTimeout(80);
-  check("Home: the same button clears it again",
-        (await boxCounts()).ticked === 0 && (await barLine()) === "",
-        `"${await barLine()}"`);
-
   // ---- the artist page: every album it lists ----
+  const alphaRow = served.artists.find((a) => a.name === ARTIST_ALPHA);
+  const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
   await page.goto(`${base}/artist/${encodeURIComponent(alphaRow.path)}`);
   await selectBtn.waitFor({ timeout: 30000 });
   await selectBtn.click();
@@ -1587,4 +998,4 @@ if (failures.length) {
   for (const f of failures) console.log(`  - ${f}`);
   process.exit(1);
 }
-console.log("\nPASS — the Library's alphabet filter, select mode's Select all, and the album page's wrapped shelf");
+console.log("\nPASS — the Library's alphabet filter and select mode's Select all");

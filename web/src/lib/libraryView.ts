@@ -41,7 +41,7 @@ export const GRID_SIZES: { id: GridSize; label: string }[] = [
 /** Quick-filter presets — the album-table conditions worth one click.
  *
  *  Explicit is NOT here any more: the advisory is a three-state ladder (0 not
- *  explicit / 1 explicit / 2 clean edition, see `AdvisoryBadge`), so it needs a
+ *  explicit / 1 explicit / 2 clean edition), so it needs a
  *  facet of its own rather than one preset that could only ever mean "1". Two
  *  controls for one condition is how they end up disagreeing. */
 export type Preset =
@@ -51,8 +51,7 @@ export type Preset =
   | "digital"
   | "instrumental"
   | "missingLyrics"
-  | "videos"
-  | "podcasts";
+  | "videos";
 
 export const PRESETS: { id: Preset; label: string }[] = [
   { id: "all", label: "All" },
@@ -61,34 +60,8 @@ export const PRESETS: { id: Preset; label: string }[] = [
   { id: "digital", label: "Digital" },
   { id: "instrumental", label: "Instrumental" },
   { id: "videos", label: "Music videos" },
-  // Not a medium and not a MusicBrainz release-group type: a podcast episode
-  // is a release group linked `part of` a series of type Podcast (see
-  // mlo.naming.DERIVED_RELEASE_TYPES), and the app records that series on the
-  // episode's own files — so this preset asks the album's `podcast` block,
-  // which a scan fills without asking MusicBrainz.
-  { id: "podcasts", label: "Podcasts" },
   { id: "missingLyrics", label: "No lyrics" },
 ];
-
-/** Star-rating facet — "have I rated this yet", which is a question about the
- *  user's own verdicts and nothing else. See `RATED_NOTE`. */
-export type RatingFilter = "any" | "rated" | "unrated";
-
-export const RATING_FILTERS: { id: RatingFilter; label: string; hint: string }[] = [
-  { id: "any", label: "Any rating", hint: "Ignore the stars — show everything" },
-  { id: "rated", label: "Rated", hint: "Only rows you have given a star rating" },
-  { id: "unrated", label: "Unrated", hint: "Only rows you have not rated yet" },
-];
-
-/** What "rated" means for a row that has no rating of its own. An album's
- *  stars are the FOLDER rating (its own verdict, stored in the DB); a track's
- *  are its file's. Read as one sentence everywhere the facet is applied, so
- *  the albums, artists and tracks tables cannot describe it differently — and
- *  an album is only RATED once the verdict on the album itself is in AND every
- *  track of it carries one of its own: a half-rated album is not finished, and
- *  naming it in the "Unrated" list is exactly what that list is for. */
-export const RATED_NOTE =
-  "An album counts as rated when its own folder rating is set AND every track in it is rated; an artist when any of its albums is. Nothing here is an average.";
 
 /** Advisory facet — the app's own three-state ladder, in the two questions a
  *  listener actually asks: "show me the explicit ones" and "keep them away

@@ -7,7 +7,7 @@ export interface SegmentedOption<T extends string> {
 }
 
 /** The app's one segmented-control style — the same look the Library view
- * switcher and the Favorites tabs already use, shared so every tab row /
+ * switcher and the Trash tabs already use, shared so every tab row /
  * mode switcher reads identically. */
 export default function Segmented<T extends string>({ value, onChange, options, className }: {
   value: T;

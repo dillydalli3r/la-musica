@@ -2,25 +2,15 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams } from "react-router-dom";
 import { useState } from "react";
 import {
-  BarChart3, ChevronDown, ChevronRight, Disc3, FileDown, ImagePlus,
-  ListChecks, Loader2, Music2, Pencil, Play, RefreshCw, Square, SquareCheck, Trash2,
+  BarChart3, ChevronDown, ChevronRight, Disc3, FileDown,
+  ListChecks, Music2, Square, SquareCheck,
 } from "lucide-react";
 import { api } from "../api";
 import { LinkChips, LinkEditorButton } from "../components/Links";
 import { EmptyState, PageLoading } from "../components/Badges";
 import AlbumCard from "../components/AlbumCard";
-import StarRating from "../components/StarRating";
-import { ratingOf, useRatings, useSetRating, FOLDER_RATING_NOTE } from "../lib/ratings";
-import Description from "../components/Description";
-import DownloadButton from "../components/DownloadButton";
 import { ExportButton } from "../components/ExportDialog";
-import FavHeart from "../components/FavHeart";
-import ArtistImageModal from "../components/ArtistImageModal";
 import ArtistName from "../components/ArtistName";
-import MetadataReviewModal from "../components/MetadataReviewModal";
-import MoreLikeThis from "../components/MoreLikeThis";
-import OnlineRecommendations from "../components/OnlineRecommendations";
-import OverflowMenu from "../components/OverflowMenu";
 import PageHeader from "../components/PageHeader";
 import SelectAllButton from "../components/SelectAllButton";
 import TagActionsMenu from "../components/TagActionsMenu";
@@ -29,42 +19,18 @@ import { artistMbid } from "../lib/refs";
 import { GRID_SIZE_MIN, releaseCount } from "../lib/fmt";
 import { invalidateLibrary } from "../lib/invalidate";
 import StatsPanel from "../components/StatsPanel";
-import { toast, useStore } from "../store";
-
-/** Provider id → the name a reader knows ("wikipedia" → Wikipedia). */
-const SOURCE_NAMES: Record<string, string> = {
-  wikipedia: "Wikipedia",
-  lastfm: "Last.fm",
-  discogs: "Discogs",
-  musicbrainz: "MusicBrainz",
-  deezer: "Deezer",
-  itunes: "Apple Music",
-  audiodb: "TheAudioDB",
-  listenbrainz: "ListenBrainz",
-  upload: "Uploaded",
-  manual: "Manual",
-};
 
 /** The album sections the list groups by, in display order. */
-const TYPE_ORDER = ["Album", "EP", "Single", "Live", "Compilation", "Podcast", "Other"] as const;
+const TYPE_ORDER = ["Album", "EP", "Single", "Live", "Compilation", "Other"] as const;
 type ReleaseType = (typeof TYPE_ORDER)[number];
 
 /** AlbumMeta carries no RELEASETYPE, so the type comes from the first track
  *  that tags one (the importer stamps the same value on every track). A
  *  combined type ("Album + Compilation") buckets by the first match in
- *  releaseType's precedence.
- *
- *  A PODCAST episode is asked about FIRST and answers for itself: it is not
- *  an album by a band, and MusicBrainz states no Podcast release-group type
- *  (an episode is Broadcast + `part of` a series of type Podcast), so the
- *  RELEASETYPE tag alone can never name it. The app's own derived identity
- *  does — the album `podcast` block, or a RELEASETYPE an editor set to
- *  "Podcast" — and without this check every episode would fall through to
- *  "Other", which says nothing about why it is there. */
+ *  releaseType's precedence. */
 function releaseType(al: Album): ReleaseType {
   const tags = al.tracks.find((t) => t.tags?.RELEASETYPE)?.tags;
   const raw = (tags?.RELEASETYPE ?? "").toLowerCase();
-  if (al.podcast?.series || raw.includes("podcast") || tags?.PODCASTSERIES) return "Podcast";
   if (raw.includes("compilation")) return "Compilation";
   if (raw.includes("live")) return "Live";
   if (raw.includes("ep")) return "EP";
@@ -81,25 +47,13 @@ export default function ArtistPage() {
     queryKey: ["artist", decoded],
     queryFn: () => api.artist(decoded),
   });
-  const { playNow } = useStore();
   const [statsOpen, setStatsOpen] = useState(false);
-  const [imageOpen, setImageOpen] = useState(false);
-  const [descEditing, setDescEditing] = useState(false);
-  const [descDraft, setDescDraft] = useState("");
-  // One flag for every in-flight artwork/description/batch write — the buttons
-  // in a block share a target, so two at once is always a mistake.
-  const [busy, setBusy] = useState<string | null>(null);
   // Album-list UI: collapsed RELEASETYPE sections, and the select-mode set of
   // album paths the batch bar acts on.
   const [collapsed, setCollapsed] = useState<Set<ReleaseType>>(new Set());
   const [selectMode, setSelectMode] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [reviewOpen, setReviewOpen] = useState(false);
   const navigate = useNavigate();
-  // The artist's OWN rating: one request for the artist scope, deduped by the
-  // query cache, and the optimistic setter its header control writes through.
-  const { data: artistRatingsData } = useRatings("artist");
-  const { setRating: setArtistRating, pending: artistPending } = useSetRating("artist");
 
   if (error)
     return (
@@ -129,12 +83,6 @@ export default function ArtistPage() {
     (s, a) => s + a.tracks.reduce((n, t) => n + (t.tech?.length ?? 0), 0),
     0
   );
-  // The artist's OWN rating — the user's verdict on the artist, out of the
-  // artist scope and deliberately not a rollup of anything below it. (The album
-  // page draws the mean of its tracks' ratings BESIDE its own rating; this page
-  // draws no track stars at all, so there is no average here to be confused
-  // with — and no whole-library track map is fetched for one number.)
-  const artistVerdict = ratingOf(artistRatingsData?.ratings, data.path);
   // Identity links for this artist: MBID from any album's album-artist tag,
   // RYM artist URL from any track that carries one.
   const artistTags = {
@@ -144,80 +92,18 @@ export default function ArtistPage() {
         .find((v) => v) ?? "",
   };
 
-  // Stored artwork (artist.jpg + description.txt, see mlo/artistdata) and the
-  // artist-level grade that watches for both. The image URL the payload hands
-  // over is authoritative; the endpoint URL is the fallback when it is absent.
-  const art = data.artwork;
-  const imageUrl = art?.image_url ?? (art?.image ? api.artistImageUrl(decoded) : null);
-  const descText = art?.description ?? "";
+  // The artist-level grade, watched by the identity dot and the chips below.
   const grade = data.grade;
   const gradeIssues = grade?.issues ?? [];
-  // Notes inform without failing (an undersized artist image is accepted here):
-  // they are shown muted, next to the chips the failures use.
+  // Notes inform without failing: they are shown muted, next to the chips the
+  // failures use.
   const gradeNotes = grade?.notes ?? [];
   const monogram = name.trim().split(/\s+/).map((w) => w[0] ?? "").join("").slice(0, 2).toUpperCase();
 
-  /** Every artwork/description write invalidates the SAME queries the rest of
-   *  the app refreshes after a library write: the artist payload this page
-   *  renders, plus library/home/album/track-tags (see lib/invalidate). */
+  /** Every library write invalidates the SAME queries the rest of the app
+   *  refreshes after one: the artist payload this page renders, plus
+   *  library/home/album/track-tags (see lib/invalidate). */
   const refresh = () => invalidateLibrary(qc);
-
-  const fetchDescription = async () => {
-    setBusy("desc-fetch");
-    try {
-      await api.artistDescriptionSave(decoded);
-      toast("Description fetched");
-      refresh();
-    } catch (e) {
-      toast.error(String(e));
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const saveDescription = async () => {
-    setBusy("desc-save");
-    try {
-      await api.artistDescriptionSave(decoded, descDraft);
-      toast("Description saved");
-      setDescEditing(false);
-      refresh();
-    } catch (e) {
-      toast.error(String(e));
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const clearDescription = async () => {
-    if (!window.confirm("Remove the stored artist description?")) return;
-    setBusy("desc-clear");
-    try {
-      await api.artistDescriptionClear(decoded);
-      toast("Description removed");
-      refresh();
-    } catch (e) {
-      toast.error(String(e));
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const removeImage = async () => {
-    if (!window.confirm(`Remove the stored image of ${name}?\nThe artist folder keeps no artist.jpg afterwards.`)) return;
-    setBusy("image-clear");
-    try {
-      await api.artistImageClear(decoded);
-      toast("Artist image removed");
-      refresh();
-    } catch (e) {
-      toast.error(String(e));
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const artistMb = artistMbid(data);
 
   /** One section per non-empty RELEASETYPE bucket, in TYPE_ORDER. */
   const sections = TYPE_ORDER.map((type) => ({
@@ -249,29 +135,14 @@ export default function ArtistPage() {
   return (
     <div className="p-6 space-y-5 mx-auto max-w-[1600px]">
       <div className="hero-flat relative overflow-hidden">
-        {/* The stored image doubles as the hero backdrop, blurred behind the
-            identity block so the name stays readable. `.hero-ink` masks the
-            blur so it dissolves into the page: the hero clips its overflow,
-            and an unmasked wash is sliced off on a line at the hero's own top
-            and side edges. The layer is scaled PAST the hero box as well, so
-            the mask's transparent stop lands inside it (see index.css). */}
-        {imageUrl && (
-          <img
-            src={imageUrl}
-            alt=""
-            aria-hidden
-            className="hero-ink absolute inset-0 h-full w-full object-cover opacity-25 blur-2xl scale-125"
-          />
-        )}
         <div className="absolute inset-0 bg-gradient-to-t from-bg via-bg/70 to-bg/30" />
         <div className="relative flex flex-col sm:flex-row items-start gap-5">
-          {/* Same cover geometry as the album hero: one square tile, the
-              stored image or a plain monogram when there is none. */}
+          {/* Same cover geometry as the album hero: one square tile, a plain
+              generic avatar (a monogram, or a music glyph when the name has
+              no usable initials). */}
           <div className="h-40 w-40 shrink-0 mx-auto sm:mx-0 rounded-xl overflow-hidden bg-gradient-to-br from-accent/30 to-accent/5 flex items-center justify-center shadow-2xl">
-            {imageUrl ? (
-              <img src={imageUrl} alt={`${name} artist image`} className="h-full w-full object-cover" />
-            ) : monogram ? (
-              <span className="text-4xl font-semibold tracking-tight text-zinc-500 select-none" title="No artist image stored yet">
+            {monogram ? (
+              <span className="text-4xl font-semibold tracking-tight text-zinc-500 select-none">
                 {monogram}
               </span>
             ) : (
@@ -283,12 +154,10 @@ export default function ArtistPage() {
             <PageHeader
               overline="Artist"
               /* The name carries its OWN verdict: one green dot when the
-                 artist folder passes its checks (the artist image and the
-                 description). The two chips that spelled those checks out
-                 ("albums", "artist artwork 2/2") are gone — the same dot
-                 sits beside the name in every list an artist is listed in
-                 (components/ArtistName), and it reads from the same payload
-                 field this page holds. */
+                 artist folder passes its checks. The chips that spelled those
+                 checks out are gone — the same dot sits beside the name in
+                 every list an artist is listed in (components/ArtistName),
+                 and it reads from the same payload field this page holds. */
               title={<ArtistName name={name} pass={grade?.pass} issues={grade?.issues} disambiguation={data.disambiguation} nameClassName="truncate" />}
               subtitle={
                 <span className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-zinc-400">
@@ -326,53 +195,13 @@ export default function ArtistPage() {
               }
             >
               <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-                {/* The artist's OWN rating, first in the identity row: a verdict
-                    on the artist, kept in the app's database (an artist folder
-                    has no file to carry a RATING tag — the tooltip says so), and
-                    never a rollup of the albums or tracks below. */}
-                <span
-                  className="inline-flex items-center gap-1.5"
-                  title="Your rating for the artist — kept in the app's database; an artist folder has no file tag"
-                >
-                  <StarRating
-                    size="lg"
-                    showValue
-                    label="Artist rating"
-                    hint={`Your rating for the artist: click a star's left half for a half star, click the value already set to clear it (← / → nudge, Delete clears). ${FOLDER_RATING_NOTE}`}
-                    value={artistVerdict}
-                    onChange={(v) => setArtistRating(data.path, v)}
-                    pending={artistPending(data.path)}
-                  />
-                  <span className="text-[11px] text-zinc-500">Artist rating</span>
-                </span>
                 <LinkChips tags={artistTags} />
-                {!imageUrl && (
-                  <span className="text-xs text-zinc-500">
-                    No artist image yet —{" "}
-                    <button className="text-accent-soft hover:underline" onClick={() => setImageOpen(true)}>
-                      look for one or upload your own
-                    </button>
-                    .
-                  </span>
-                )}
               </div>
               {/* The actions sit in their OWN wrapping row under the title: a
-                  header row of ten buttons sharing a line with the identity
-                  block squeezes the title and the counts into a column at
+                  header row of buttons sharing a line with the identity block
+                  squeezes the title and the counts into a column at
                   1024-1568px. Out of that row they just wrap. */}
               <div className="flex items-center gap-1.5 flex-wrap">
-                  {/* beside the title, but out of its truncating span so a long
-                    name can never clip the heart */}
-                <FavHeart kind="artist" id={data.path} mbid={artistMb} />
-                <button className="btn-primary" onClick={() => playNow(allTracks)} title={`Play all ${allTracks.length} tracks`}>
-                  <Play className="h-4 w-4 fill-current" /> Play all
-                </button>
-                <DownloadButton
-                  paths={allTracks.map((t) => t.path)}
-                  size="md"
-                  label="Download all"
-                  emptyReason="Nothing to download — this artist has no tracks"
-                />
                 <ExportButton
                   paths={allTracks.map((t) => t.path)}
                   seconds={allSeconds}
@@ -386,36 +215,12 @@ export default function ArtistPage() {
                   paths={allTracks.map((t) => t.path)}
                   artist={decoded}
                   // The artist's own folder, so the folder-scoped scripts run on
-                  // the artist (its image, the layout of its subtrees) instead
-                  // of being derived from the tracks one album at a time.
+                  // the artist (the layout of its subtrees) instead of being
+                  // derived from the tracks one album at a time.
                   artistPath={data.path}
                   onDone={refresh}
                   buttonTitle="Tag actions on every track of this artist"
                 />
-                <button
-                  className="btn-ghost"
-                  onClick={() => setReviewOpen(true)}
-                  title="Review candidate artist images and descriptions"
-                >
-                  Metadata review
-                </button>
-                <button
-                  className="btn-ghost"
-                  onClick={() => setImageOpen(true)}
-                  title={imageUrl ? "Pick a different artist image" : "Find an artist image online, or upload your own"}
-                >
-                  <ImagePlus className="h-4 w-4" /> {imageUrl ? "Change image" : "Find image"}
-                </button>
-                {imageUrl && (
-                  <button
-                    className="btn-ghost !px-2.5 text-red-300/80 hover:text-red-200"
-                    onClick={removeImage}
-                    disabled={busy === "image-clear"}
-                    title="Delete artist.jpg from the artist folder"
-                  >
-                    {busy === "image-clear" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
-                  </button>
-                )}
                 <LinkEditorButton mode="artist" paths={allTracks.map((t) => t.path)} current={artistTags} artist={data.name} />
                 <button className="btn-ghost" onClick={() => setStatsOpen(true)}>
                   <BarChart3 className="h-4 w-4" /> Stats
@@ -434,113 +239,6 @@ export default function ArtistPage() {
           onClose={() => setStatsOpen(false)}
         />
       )}
-
-      <div className="section">
-        <div className="flex items-center gap-2 flex-wrap">
-          <span className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Description</span>
-          {art?.description_source && (
-            <span className="text-[10px] text-zinc-600">
-              {art.description_url ? (
-                <a
-                  href={art.description_url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="hover:text-accent-soft underline decoration-dotted"
-                  title={art.description_url}
-                >
-                  {SOURCE_NAMES[art.description_source] ?? art.description_source}
-                </a>
-              ) : (
-                SOURCE_NAMES[art.description_source] ?? art.description_source
-              )}
-            </span>
-          )}
-          {/* Same boxed "…" as the album page: every description action in
-              one square at the block's top right. */}
-          <div className="ml-auto">
-            <OverflowMenu
-              buttonClass="p-1.5 rounded-lg border border-border bg-panel/60 text-zinc-500 hover:text-white hover:bg-raise transition-colors"
-              buttonTitle="Description actions"
-              sections={[
-                {
-                  items: [
-                    {
-                      label: busy === "desc-fetch" ? "Fetching…" : "Fetch description",
-                      icon: RefreshCw,
-                      onClick: fetchDescription,
-                      disabled: !!busy,
-                      title: "Fetch the biography from the configured sources (Wikipedia first)",
-                    },
-                    {
-                      label: "Edit description",
-                      icon: Pencil,
-                      onClick: () => {
-                        setDescDraft(descText);
-                        setDescEditing(true);
-                      },
-                      title: "Write or edit the description yourself",
-                    },
-                    {
-                      label: busy === "desc-clear" ? "Removing…" : "Remove description",
-                      icon: Trash2,
-                      danger: true,
-                      hidden: !descText,
-                      onClick: clearDescription,
-                      disabled: !!busy,
-                      title: "Remove the stored description",
-                    },
-                  ],
-                },
-              ]}
-            />
-          </div>
-        </div>
-        {descEditing ? (
-          <div className="mt-2.5 space-y-2">
-            <textarea
-              className="input w-full h-40 text-sm leading-relaxed"
-              value={descDraft}
-              onChange={(e) => setDescDraft(e.target.value)}
-              placeholder="Artist biography…"
-            />
-            <div className="flex items-center gap-2 flex-wrap">
-              <button
-                className="btn-primary !py-1 text-xs"
-                onClick={saveDescription}
-                disabled={busy === "desc-save" || !descDraft.trim()}
-              >
-                {busy === "desc-save" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null} Save
-              </button>
-              <button className="btn-ghost !py-1 text-xs" onClick={() => setDescEditing(false)}>
-                Cancel
-              </button>
-              <span className="text-[10px] text-zinc-600">
-                Stored as description.txt in the artist folder — counts for the artist grade.
-              </span>
-            </div>
-          </div>
-        ) : descText ? (
-          <Description key={decoded} text={descText} />
-        ) : (
-          <div className="mt-2 text-xs text-zinc-500">
-            No description yet —{" "}
-            <button className="text-accent-soft hover:underline" onClick={fetchDescription} disabled={!!busy}>
-              fetch one
-            </button>{" "}
-            or{" "}
-            <button
-              className="text-accent-soft hover:underline"
-              onClick={() => {
-                setDescDraft("");
-                setDescEditing(true);
-              }}
-            >
-              write your own
-            </button>
-            .
-          </div>
-        )}
-      </div>
 
       <section className="space-y-3">
         <div className="flex items-center gap-2 flex-wrap">
@@ -637,7 +335,7 @@ export default function ArtistPage() {
                   >
                     {albums.map((al) => (
                       // The library's own album card (cover, title, artist,
-                      // year, verdict dot, play, heart). The per-release grade
+                      // year, verdict dot). The per-release grade
                       // verdict is NOT repeated here any more: the card's own
                       // status dot IS that verdict (`statusFor(al.pass,
                       // al.audit_summary)`), so a failing album wore a red dot
@@ -662,38 +360,6 @@ export default function ArtistPage() {
           })
         )}
       </section>
-
-      {/* Two shelves side by side, each labelled with where its rows come
-          from: artists the LOCAL scorer ranks closest to this catalogue (the
-          library's own tags — from OTHER artists, since this page already
-          lists its own), and what the online providers suggest for this
-          artist. The online shelf loads on its own, after the page is usable. */}
-      <div className="grid gap-4 lg:grid-cols-2 items-start">
-        <MoreLikeThis kind="artist" id={decoded} />
-        <OnlineRecommendations
-          kind="artists"
-          seedKind="artist"
-          seedMbid={artistMbid(data) ?? ""}
-          seedName={name}
-        />
-      </div>
-
-      {imageOpen && (
-        <ArtistImageModal
-          artist={decoded}
-          onClose={() => setImageOpen(false)}
-          onSaved={refresh}
-        />
-      )}
-
-      {reviewOpen && (
-        <MetadataReviewModal
-          artist={decoded}
-          title="Artist metadata"
-          onClose={() => setReviewOpen(false)}
-          onSaved={refresh}
-        />
-      )}
     </div>
   );
 }

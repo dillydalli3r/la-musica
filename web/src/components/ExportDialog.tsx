@@ -61,7 +61,6 @@ export const BLANK_FORM: ExportForm = {
   lyrics: "embedded",
   eq_profile: "",
   clean_tags: true,
-  playlists: false,
   /* WHICH files a run writes (server.exporter.FILE_FAMILIES): the tracks
      alone, which is what an export has always written — no .m3u8, no
      cover.jpg, no rip evidence (the cover travels EMBEDDED). The dialog's
@@ -122,31 +121,6 @@ function Opt({ checked, onChange, label, hint, danger }: {
       </span>
     </label>
   );
-}
-
-/** Every track of the given playlists, in playlist order and deduplicated —
- *  what a page that represents a set of playlists exports/downloads. One
- *  query keyed by the id list, so the header buttons on a listing page cost
- *  one request per playlist instead of one per render. */
-export function usePlaylistTracks(ids: number[], enabled = true) {
-  const key = ids.join(",");
-  return useQuery({
-    queryKey: ["playlistTracks", key],
-    queryFn: async () => {
-      const details = await Promise.all(ids.map((id) => api.playlist(id)));
-      const seen = new Set<string>();
-      const out: string[] = [];
-      for (const d of details)
-        for (const p of d.tracks ?? [])
-          if (!seen.has(p)) {
-            seen.add(p);
-            out.push(p);
-          }
-      return out;
-    },
-    enabled: enabled && ids.length > 0,
-    staleTime: 30_000,
-  });
 }
 
 /** One destination the server offers (server/exporter.list_drives). */
@@ -311,7 +285,6 @@ export function useExportOptions(paths: string[], seconds = 0, page?: ExportPage
       const gb = (r.bytes / 1024 ** 3).toFixed(2);
       const extras = [
         r.skipped ? `${r.skipped} already there` : "",
-        r.playlists ? `${r.playlists} playlist(s)` : "",
         r.sidecars ? `${r.sidecars} file(s) beside the audio` : "",
         r.excluded_total ? `${r.excluded_total} file(s) left behind` : "",
         r.pruned ? `${r.pruned} removed from the device` : "",
@@ -392,7 +365,7 @@ export function useExportOptions(paths: string[], seconds = 0, page?: ExportPage
  *  folder structure, artwork, tag compatibility, audio processing (ReplayGain
  *  and the equalizer), WHICH files a run copies (the file-family checkboxes,
  *  server.exporter.FILE_FAMILIES), the files written beside the audio
- *  (playlists, a checksum manifest), verification, concurrency and sync mode —
+ *  (a checksum manifest), verification, concurrency and sync mode —
  *  plus the run / cancel / save / reset row. The Export page and the per-page
  *  dialog both render exactly this, so the two can never drift apart.
  *
@@ -858,12 +831,6 @@ export function ExportOptionsPanel({ e, hint }: {
 
       {/* ---- files written beside the audio ----------------------- */}
       <div className="text-xs font-bold text-zinc-300 mt-4 mb-2">Files written beside the audio</div>
-      <Opt
-        checked={f.playlists}
-        onChange={(v) => set("playlists", v)}
-        label="Write .m3u8 playlists"
-        hint="One per exported album, plus all.m3u8 for the whole export — UTF-8 with relative paths and durations."
-      />
       <Opt
         checked={f.manifest}
         onChange={(v) => set("manifest", v)}

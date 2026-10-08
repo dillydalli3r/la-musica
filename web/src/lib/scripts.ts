@@ -21,16 +21,10 @@ export const SCRIPTS: { ids: number[]; label: string }[] = [
   { ids: [15], label: "Release tracklist" },
   { ids: [16], label: "Mood & Energy" },
   { ids: [17], label: "Lyrics transliterate (AI)" },
-  { ids: [19], label: "Optimize artist images" },
   { ids: [20], label: "Scan library layout" },
   { ids: [21], label: "Fix AcoustID pairs" },
   { ids: [22], label: "Submit fingerprints (AcoustID)" },
   { ids: [23], label: "Optimize tags" },
-  // 24 fills the public rating tags. It rides right behind 8 in
-  // DEFAULT_RUN_ALL below, where the server's own order puts it: both are
-  // tag-filling fetches that want the release identity 14/beets has settled,
-  // and both must land before 10's canonical trim and 4's grade.
-  { ids: [24], label: "Web ratings" },
 ];
 
 /** The scripts the SHIPPED Run All chain deliberately does not carry
@@ -50,22 +44,20 @@ export const SCRIPT_LABEL: Record<number, string> = Object.fromEntries(
  *  library-wide grader.
  *
  *  11 videos → 3 FLACs (a lossless conversion changes the extension) → 14
- *  beets (`move: yes`: it renames and moves the album) → 2 CUEs (canonical
+ *  beets (`move: yes`: it renames and moves the album) → 15 the release
+ *  manifest (after the tagger that gives it its release id) → 2 CUEs (canonical
  *  sidecar names AND the cue's FILE lines, now pointed at the names the album
  *  actually has) → 1 lyrics format (writes .lrc named after the track). From
- *  there every script reads or writes final paths: 13 fetch lyrics → 18
- *  publish → 17 transliterate, 8 auto tagging, 24 web ratings (the public
- *  album/track score, which needs the MBIDs 14/8 have just settled), 5 images →
- *  19 the artist images stored beside them, 6 audit, 7 DR & ReplayGain, 9
- *  AccurateRip (its own sidecar names), 12 key & BPM, 16 mood, 15 the release manifest (after the
- *  tagger that gives it its release id), 10 format all, 23 the tag strip (the
- *  same excess lists 10 trims by, on their own) right behind it, 20 the layout
- *  report of the tree format all just settled, 21 the AcoustID pair the grader
- *  then reads as complete, and 4 grade last. This mirrors
- *  server/imports.py's DEFAULT_CHAIN, which lists the same steps minus the
- *  opt-in 16/17 and 19 — and minus 20, which describes the whole music folder
- *  and so has nothing to say about the one album a chain is finishing. */
-export const DEFAULT_RUN_ALL = [11, 3, 14, 15, 2, 1, 13, 17, 8, 24, 5, 19, 6, 7, 9, 12, 16, 10, 23, 20, 21, 4];
+ *  there every script reads or writes final paths: 13 fetch lyrics → 17
+ *  transliterate, 8 auto tagging, 5 images, 6 audit, 7 DR & ReplayGain, 9
+ *  AccurateRip (its own sidecar names), 12 key & BPM, 16 mood, 10 format all,
+ *  23 the tag strip (the same excess lists 10 trims by, on their own) right
+ *  behind it, 20 the layout report of the tree format all just settled, 21 the
+ *  AcoustID pair the grader then reads as complete, and 4 grade last. This
+ *  mirrors server/imports.py's DEFAULT_CHAIN, which lists the same steps minus
+ *  the opt-in (and minus 20, which describes the whole music folder and so has
+ *  nothing to say about the one album a chain is finishing). */
+export const DEFAULT_RUN_ALL = [11, 3, 14, 15, 2, 1, 13, 17, 8, 5, 6, 7, 9, 12, 16, 10, 23, 20, 21, 4];
 
 /** True when the id is a script the runner knows about. */
 export function isScriptId(n: unknown): n is number {

@@ -10,8 +10,6 @@ pins the payloads, because that is what every surface draws from:
   * the library row carries `pending` + WHY it waits;
   * the artist page lists it at all (its own walk looks for AUDIO, so a
     framework folder is invisible there unless the payload adds it);
-  * Home has a shelf that shows EVERYTHING still waiting, and the album also
-    rides along in "recently added";
   * a query's album rows carry the marker, and `library.pending` is a field a
     user can filter on;
   * a COMPLETE album carries no marker at all — not false-but-present on the
@@ -88,7 +86,6 @@ from server import artcache, pending_albums, tagcache           # noqa: E402
 from server import integrations as intg_mod                    # noqa: E402
 from server import library as lib_mod                          # noqa: E402
 from server import main as mlo_main                            # noqa: E402
-from server import recommendations                             # noqa: E402
 
 FAILED = []
 
@@ -178,15 +175,6 @@ def library_rows(cfg):
     return payload, out
 
 
-def home(cfg):
-    recommendations.invalidate()
-    return recommendations.build_home(cfg, "")
-
-
-def home_rows(payload, shelf):
-    return payload.get(shelf) or []
-
-
 def find(rows, path):
     for row in rows:
         if norm(row.get("path")) == norm(path):
@@ -244,26 +232,6 @@ if entry:
     eq(entry.get("pending_reason"), "the audio for this release",
        "artist page: why it is pending")
 
-# Home: the shelf that shows everything waiting, plus the album where it would
-# otherwise be listed.
-home_payload = home(CFG)
-shelf = home_rows(home_payload, "pending")
-shelf_row = find(shelf, folder)
-ok(shelf_row is not None, "home: the 'waiting for its audio' shelf lists it",
-   [(r.get("meta") or {}).get("ALBUM") for r in shelf])
-if shelf_row:
-    eq(shelf_row.get("pending"), True, "home shelf: pending")
-    eq(shelf_row.get("pending_reason"), "the audio for this release",
-       "home shelf: why it is pending")
-    eq(shelf_row.get("owned"), True, "home shelf: it links to the album page")
-ok(find(home_rows(home_payload, "recent"), folder) is not None,
-   "home: it is in 'recently added' too — its folder is the newest thing there")
-ok(all(norm(r.get("path")) != norm(folder)
-       for r in home_rows(home_payload, "discover")),
-   "home: 'rediscover' stays the albums whose audio is here")
-ok(find(home_rows(home_payload, "needs_attention"), folder) is None,
-   "home: a pending album is not reported as FAILING its checks")
-
 # A query's album rows come from the same tree — and the field is filterable.
 query_rows = album_query()
 query_row = find(query_rows, folder)
@@ -293,8 +261,6 @@ ok(all(norm(r.get("path")) != norm(done_dir) for r in done_query),
    "query: library.pending does not select it")
 done_qrow = find(album_query(), done_dir) or {}
 ok(not done_qrow.get("pending"), "query row: no marker")
-ok(find(home_rows(home(CFG), "pending"), done_dir) is None,
-   "home: not on the waiting shelf")
 
 # --------------------------------------------------------------------------- #
 # 3. the import fills it: the marker goes, the row renders normally
@@ -312,11 +278,6 @@ ok("pending_reason" not in after and after.get("wish") is None,
 ok((after.get("track_count") or 0) > 0, "library row: now it has audio to play")
 after_q = find(album_query(), folder) or {}
 ok(not after_q.get("pending"), "query row: the marker is gone")
-home_payload = home(CFG)
-ok(find(home_rows(home_payload, "pending"), folder) is None,
-   "home: it has left the waiting shelf")
-ok(find(home_rows(home_payload, "recent"), folder) is not None,
-   "home: it is still where its album belongs")
 
 # --------------------------------------------------------------------------- #
 # 4. the naming preview's RELEASECOUNTRY: every country, first event first

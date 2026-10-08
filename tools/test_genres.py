@@ -879,42 +879,18 @@ assert got["levels"] == {FILE_ONE: None, FILE_TWO: None}, got["levels"]
 assert set(got["notes"]) == set(ORDER), got["notes"]
 
 # --------------------------------------------------------------------------- #
-# 7) The two advisory extras — last, explicit-only, out of the way when absent
+# 7) The advisory extras — last, explicit-only, out of the way when absent
 # --------------------------------------------------------------------------- #
-# A YouTube id is read from the track's OWN tags only: an 11-character id or a
-# YouTube URL, never a token scraped out of an unrelated SOURCE value.
-assert intg.youtube_video_id({"YOUTUBEID": "dQw4w9WgXcQ"}) == "dQw4w9WgXcQ"
-assert intg.youtube_video_id({"SOURCE": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"}) == "dQw4w9WgXcQ"
-assert intg.youtube_video_id({"SOURCE": "https://youtu.be/dQw4w9WgXcQ?t=1"}) == "dQw4w9WgXcQ"
-assert intg.youtube_video_id({"SOURCE": "CD"}) == ""
-assert intg.youtube_video_id({"SOURCE": "Vinyl"}) == ""
-assert intg.youtube_video_id(None) == ""
-
-
 # No advisory source answers here (they are stubbed to "no data"), which is
-# what lets the two extras be checked by `checked` alone.
+# what lets the extras be checked by `checked` alone.
 intg._advisory_json = lambda url, params=None, **kwargs: None
 
-# Nobody is asked and nothing is added when no id is known.
+# Nobody is asked and nothing is added when nothing states a value.
 intg._ADVISORY_CACHE.clear()
 route = intg.resolve_advisory_route(title="Track One", artist="Test Artist",
                                     album="Test Album", cfg={})
 assert route["checked"] == ["apple-album", "itunes-song"], route
 assert route["answers"] == {} and route["value"] is None, route
-
-# A known video id is asked, and only ever adds an explicit signal.
-_real_age = intg.youtube_age_advisory
-intg.youtube_age_advisory = lambda vid, cfg=None: (1, "youtube-age")
-try:
-    intg._ADVISORY_CACHE.clear()
-    route = intg.resolve_advisory_route(title="Track One", artist="Test Artist",
-                                        album="Test Album", cfg={},
-                                        tags={"SOURCE": "https://youtu.be/dQw4w9WgXcQ"})
-finally:
-    intg.youtube_age_advisory = _real_age
-assert route["checked"][-1] == "youtube-age", route
-assert route["answers"]["youtube-age"] == 1 and route["value"] == 1, route
-assert route["source"] == "youtube-age", route
 
 # Discogs' Parental Advisory format is album-level, token-only and WEAK: it
 # can only add an explicit signal (never clear a track), and without a token

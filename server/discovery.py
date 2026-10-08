@@ -60,29 +60,6 @@ AUDIODB_KEY = "2"
 APP_UA = integrations.USER_AGENT
 BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
 
-# Provider ids, in the built-in order per feature. Every "sources" config key
-# (discovery_rec_sources, discovery_search_sources, artist_image_sources,
-# description_sources) is a subset of these, in the user's preferred order.
-SOURCES = ["deezer", "listenbrainz", "itunes", "audiodb", "wikipedia", "musicbrainz"]
-SOURCE_LABELS = {
-    "deezer": "Deezer",
-    "listenbrainz": "ListenBrainz",
-    "itunes": "iTunes",
-    "audiodb": "TheAudioDB",
-    "wikipedia": "Wikipedia",
-    "musicbrainz": "MusicBrainz",
-}
-SOURCE_NOTES = {
-    "deezer": "Popularity-ranked catalogue and 1000px artist photos.",
-    "listenbrainz": "What people are listening to right now (MetaBrainz, MBID-native).",
-    "itunes": "Apple catalogue search and high-resolution artwork.",
-    "audiodb": "Artist biographies, album notes and press photos.",
-    "wikipedia": "Artist and album descriptions from Wikipedia summaries.",
-    "musicbrainz": "The identity anchor: release-group MBIDs, used as the final fallback.",
-}
-IMAGE_SOURCES = ["deezer", "audiodb", "itunes", "wikipedia"]
-DESCRIPTION_SOURCES = ["wikipedia", "audiodb", "musicbrainz"]
-
 # --------------------------------------------------------------------------- #
 # Cached, throttled JSON transport
 # --------------------------------------------------------------------------- #
@@ -182,43 +159,10 @@ def _rank_rows(rows):
     return rows
 
 
-TTL_META = 1800.0        # artist/album metadata, images, descriptions, MBIDs
+TTL_META = 1800.0        # artist/album metadata and MBIDs
 TTL_CHART = 900.0        # charts (they move)
-
-
-def source_order(cfg, key, default):
-    """Configured provider order for *key*, filtered to real providers.
-
-    An empty/absent list means "the built-in order"; unknown ids are dropped
-    so a hand-edited config can never wedge a feature."""
-    if not cfg:
-        return list(default)
-    if not cfg.get("discovery_enabled", True):
-        # Only a feature whose own provider list contains MusicBrainz can
-        # fall back to it. Returning it blindly made the artist-image chain
-        # walk a "musicbrainz" branch that does not exist and silently find
-        # nothing instead of reporting "no candidate".
-        return ["musicbrainz"] if "musicbrainz" in default else []
-    raw = cfg.get(key) or []
-    if isinstance(raw, str):
-        raw = [t for t in raw.replace(";", ",").split(",") if t.strip()]
-    chosen = [str(s).strip().lower() for s in raw if str(s).strip()]
-    chosen = [s for s in chosen if s in SOURCES]
-    return chosen or list(default)
-
-
-def sources_catalog():
-    """Providers for the settings UI, plus the built-in feature orders."""
-    return {
-        "sources": [
-            {"id": sid, "label": SOURCE_LABELS[sid], "notes": SOURCE_NOTES[sid]}
-            for sid in SOURCES
-        ],
-        "defaults": {
-            "artist_image_sources": list(IMAGE_SOURCES),
-            "description_sources": list(DESCRIPTION_SOURCES),
-        },
-    }
+# How long one provider request may take before it is given up on.
+DEFAULT_TIMEOUT_S = 12.0
 
 
 def invalidate(prefix=None):
@@ -286,15 +230,9 @@ def _json(url, params=None, headers=None, timeout=None, ttl=TTL_META, host=None)
         sent = {"User-Agent": APP_UA if polite else BROWSER_UA,
                 "Accept": "application/json"}
         sent.update(headers or {})
-        # A caller's own timeout wins; otherwise the configured one
-        # (Settings → Discovery → Request timeout). That key used to be
-        # written and never read, so every source waited the hardcoded 12 s.
+        # A caller's own timeout wins; otherwise the module default below.
         if not timeout:
-            try:
-                from mlo.config import load_config
-                timeout = float(load_config().get("discovery_timeout_s") or 12.0)
-            except (TypeError, ValueError):
-                timeout = 12.0
+            timeout = DEFAULT_TIMEOUT_S
         resp = httpx.get(
             url,
             params=params or {},
@@ -890,23 +828,6 @@ def wikidata_entity(term, timeout=None):
     return (hits[0] or {}).get("id") if hits else None
 
 
-def wikidata_sitelink(qid, site="enwiki", timeout=None):
-    """The title Wikidata's *site* links this entity to, or None.
-
-    This is how an entity becomes a Wikipedia TITLE: an artist's article is
-    rarely at their bare name ("Nirvana" is the Buddhist concept, the band is
-    "Nirvana (band)"), and the sitelink is the exact title Wikidata stores for
-    it, so nothing is guessed.
-    """
-    qid = str(qid or "").strip()
-    if not qid:
-        return None
-    data = _wikidata({"action": "wbgetentities", "ids": qid, "props": "sitelinks",
-                      "sitefilter": site}, timeout=timeout)
-    item = ((data or {}).get("entities") or {}).get(qid) or {}
-    return (((item.get("sitelinks") or {}).get(site) or {}).get("title")) or None
-
-
 def wikidata_genres(qid="", term="", timeout=None):
     """Genres Wikidata states for one entity (P136), or None.
 
@@ -993,19 +914,6 @@ def itunes_search_artist(name, limit=5, timeout=None):
             "source": "itunes",
         })
     return rows
-
-
-def itunes_artist_artwork(name, limit=1, timeout=None):
-    """Apple has no artist photo endpoint; the artist's best-known album art is
-    the closest honest fallback and is only used when nothing else has an
-    image."""
-    data = _json(f"{ITUNES_BASE}/search",
-                 {"term": name, "entity": "album", "limit": limit},
-                 timeout=timeout)
-    results = (data or {}).get("results") or []
-    if not results:
-        return None
-    return itunes_artwork(results[0].get("artworkUrl100"))
 
 
 # --------------------------------------------------------------------------- #
@@ -1463,14 +1371,7 @@ def spotify_artist_top_tracks(artist, limit=25, cfg=None, timeout=None):
 # --------------------------------------------------------------------------- #
 # Wikipedia
 # --------------------------------------------------------------------------- #
-def wikipedia_search(query, limit=5, timeout=None):
-    """Article titles matching a query (album articles are usually
-    "Album (album)" — the search API knows)."""
-    data = _json(f"{WIKIPEDIA_BASE}/w/api.php",
-                 {"action": "query", "list": "search", "srsearch": query,
-                  "format": "json", "srlimit": limit}, timeout=timeout)
-    hits = ((data or {}).get("query") or {}).get("search") or []
-    return [h.get("title") for h in hits if h.get("title")]
+
 
 
 # Parsed article HTML (`action=parse`) is the ONE Wikimedia answer that keeps
@@ -1495,183 +1396,19 @@ _HTML_BLOCK = frozenset("p br hr li ul ol dl dd dt div".split())
 _HTML_HEADING = re.compile(r"h[1-6]")
 
 
-def _absolute_link(href):
-    """An article link's absolute target, or None when there is nothing to link.
-
-    Parsed HTML spells wikilinks relatively (`/wiki/X`, `//en.wikipedia.org/X`)
-    and page furniture as bare fragments (`#cite_note-1`) or index.php edit
-    calls; a URL invented for the latter links nowhere, so it stays plain text
-    rather than becoming a dead anchor.
-    """
-    href = (href or "").strip()
-    if not href or href.startswith("#") or "action=edit" in href:
-        return None
-    if href.startswith("//"):
-        return "https:" + href
-    if href.startswith("/"):
-        return WIKIPEDIA_BASE + href
-    if re.match(r"[a-z][a-z0-9+.\-]*:", href, re.I):
-        return href
-    return None
 
 
-class _ArticleHTML(HTMLParser):
-    """Article HTML → `(heading level, text)` blocks, links as `[label](url)`.
-
-    `convert_charrefs` decodes entities (`&amp;`, `&nbsp;`); each block's
-    whitespace is collapsed on flush, and markup other than links is unwrapped
-    with its text kept — markdown is all the description viewer has to render.
-    """
-
-    def __init__(self):
-        super().__init__(convert_charrefs=True)
-        self.blocks = []
-        self._buf = []
-        self._drop = None   # tag whose subtree is being discarded
-        self._depth = 0     # open elements inside that subtree
-        self._link = None   # (href, the buffer index the label starts at)
-        self._heading = 0
-
-    def flush(self, level=0):
-        text = re.sub(r"\s+", " ", "".join(self._buf)).strip()
-        self._buf = []
-        if text:
-            self.blocks.append((level, text))
-
-    def handle_starttag(self, tag, attrs):
-        if self._drop:
-            if tag not in _HTML_VOID:
-                self._depth += 1
-            return
-        attrs = dict(attrs)
-        if tag == "a":
-            href = _absolute_link(attrs.get("href"))
-            # No markdown until the closing tag: the label is whatever text
-            # lands in the buffer first, nested markup included.
-            self._link = (href, len(self._buf)) if href else None
-            return
-        if tag in _HTML_DROP or _HTML_DROP_CLASS.search(attrs.get("class") or ""):
-            if tag not in _HTML_VOID:
-                self._drop, self._depth = tag, 0
-            return
-        if tag in _HTML_BLOCK:
-            self.flush()
-        if _HTML_HEADING.fullmatch(tag):
-            self.flush()
-            self._heading = int(tag[1])
-
-    def handle_startendtag(self, tag, attrs):
-        if tag in _HTML_VOID:
-            if tag in ("br", "hr"):
-                self.flush()
-            return
-        self.handle_starttag(tag, attrs)
-
-    def handle_endtag(self, tag):
-        if tag in _HTML_VOID:
-            return
-        if self._drop:
-            if self._depth:
-                self._depth -= 1
-            else:
-                self._drop = None
-            return
-        if tag == "a" and self._link:
-            href, start = self._link
-            label = "".join(self._buf[start:]).strip()
-            del self._buf[start:]
-            if label:
-                self._buf.append(f"[{label}]({href})")
-            self._link = None
-        if tag in _HTML_BLOCK:
-            self.flush()
-        if _HTML_HEADING.fullmatch(tag):
-            self.flush(self._heading)
-            self._heading = 0
-
-    def handle_data(self, data):
-        if not self._drop:
-            self._buf.append(data)
 
 
-def _article_prose(html):
-    """Article HTML → its prose, links as markdown, headings as `== Title ==`.
-
-    Headings keep the wiki shape (level 2 is `==`, level 3 `===`, and so on)
-    rather than plain text, because the viewer renders those lines as headings
-    and strips the markers itself.
-    """
-    parser = _ArticleHTML()
-    parser.feed(html or "")
-    parser.flush()
-    kept = []
-    for i, (level, text) in enumerate(parser.blocks):
-        if level:
-            # A section with no prose under it is a scar, not content ("Band
-            # members", whose only body was a dropped table; "Timeline", which
-            # held nothing). Its span runs to the next heading of the same or a
-            # shallower level, so a parent heading whose body is only `<h3>`
-            # subsections (History, References) still counts as having one.
-            body = False
-            for lv, _ in parser.blocks[i + 1:]:
-                if lv and lv <= level:
-                    break
-                if not lv:
-                    body = True
-            if not body:
-                continue
-            # Article prose never sits under an `<h1>`; two `=` is the floor
-            # the viewer's heading pattern accepts.
-            mark = "=" * max(2, level)
-            text = f"{mark} {text} {mark}"
-        kept.append(text)
-    return "\n\n".join(kept)
 
 
-def wikipedia_text(title, timeout=None):
-    """The WHOLE article, its links included, or None.
-
-    `/api/rest_v1/page/summary` (see `wikipedia_summary`) answers with the LEAD
-    SECTION only — one paragraph — which is why a stored description read like
-    a teaser.
-
-    `action=parse&prop=text` is the one Wikimedia request that keeps the
-    article's LINKS: `prop=extracts` drops every anchor whether or not
-    `explaintext` is set, and prose with no URL in it cannot link anything.
-    `prop=extracts&explaintext=1` remains the fallback — same prose, no links,
-    a tenth of the bytes — so a parse that answers nothing still describes the
-    artist (`wikipedia_summary` after that, see `_wikipedia_description`).
-
-    `redirects=1` so a plain name still lands on its article;
-    `formatversion=2` so a missing title answers as a list entry instead of a
-    dict keyed by page id; `disableeditsection` keeps `[edit]` — and the
-    maintenance hrefs behind it — out of the prose."""
-    if not title:
-        return None
-    data = _json(f"{WIKIPEDIA_BASE}/w/api.php",
-                 {"action": "parse", "page": str(title), "prop": "text",
-                  "redirects": 1, "disableeditsection": 1, "format": "json",
-                  "formatversion": 2},
-                 timeout=timeout)
-    page = (data or {}).get("parse") or {}
-    text = _article_prose(page.get("text") or "")
-    if text:
-        return {"title": page.get("title") or title, "extract": text}
-    return _wikipedia_plain_text(title, timeout)
 
 
-def _wikipedia_plain_text(title, timeout=None):
-    """`prop=extracts&explaintext=1`: the article's prose, links stripped."""
-    data = _json(f"{WIKIPEDIA_BASE}/w/api.php",
-                 {"action": "query", "prop": "extracts", "explaintext": 1,
-                  "redirects": 1, "titles": str(title), "format": "json",
-                  "formatversion": 2},
-                 timeout=timeout)
-    for page in ((data or {}).get("query") or {}).get("pages") or []:
-        text = (page.get("extract") or "").strip()
-        if text:
-            return {"title": page.get("title") or title, "extract": text}
-    return None
+
+
+
+
+
 
 
 def wikipedia_summary(title, timeout=None):
@@ -1773,351 +1510,23 @@ def resolve_artist_mbid(name, cfg=None, timeout=None):
     return (exact or rows)[0].get("id")
 
 
-# --------------------------------------------------------------------------- #
-# Artist / album artwork and text
-# --------------------------------------------------------------------------- #
-def audiodb_artist_mbid(mbid, timeout=None):
-    """TheAudioDB's own record for a MusicBrainz artist id — exact, not a search.
-
-    `search.php` matches on the NAME, and a name can be another band: asking it
-    for "Nirvana" answers with the MusicBrainz-linked Seattle band only by luck
-    of ordering, while Deezer's name search returned the 1960s UK band and its
-    album cover was stored as the artist photo. `artist-mb.php?i=<mbid>`
-    returns this very artist or nothing."""
-    mbid = str(mbid or "").strip().lower()
-    if not mbid:
-        return None
-    data = _json(f"{AUDIODB_BASE}/{AUDIODB_KEY}/artist-mb.php", {"i": mbid},
-                 timeout=timeout)
-    rows = (data or {}).get("artists") or []
-    if not rows:
-        return None
-    item = rows[0]
-    if str(item.get("strMusicBrainzID") or "").strip().lower() != mbid:
-        return None
-    return {
-        "kind": "artist",
-        "name": item.get("strArtist") or "",
-        "bio": (item.get("strBiography") or "").strip(),
-        "genre": item.get("strGenre") or "",
-        "style": item.get("strStyle") or "",
-        "mood": item.get("strMood") or "",
-        "thumb": item.get("strArtistThumb"),
-        "banner": item.get("strArtistBanner"),
-        "fanart": item.get("strArtistFanart"),
-        "wide_thumb": item.get("strArtistWideThumb"),
-    }
-
-
-def artist_image(name, mbid=None, cfg=None):
-    """Best available artist photo, walking the configured image sources.
-
-    Returns `{url, source, label, kind}` — the caller downloads and stores it
-    (see `mlo.artistdata.save_image`). Deezer's 1000px photo is the primary;
-    TheAudioDB adds press photos and banners; Apple's best-known album art is
-    the last resort because it is not a photo of the artist.
-
-    A known `mbid` is asked FIRST and exactly (TheAudioDB), because every
-    name-based source answers for whichever band owns the name: the name walk
-    stays as the fallback for artists MusicBrainz has no id for."""
-    if mbid:
-        exact = audiodb_artist_mbid(mbid)
-        if exact:
-            for key, label in (("thumb", "TheAudioDB artist thumb (MBID)"),
-                               ("wide_thumb", "TheAudioDB wide thumb (MBID)"),
-                               ("fanart", "TheAudioDB fanart (MBID)"),
-                               ("banner", "TheAudioDB banner (MBID)")):
-                if exact.get(key):
-                    return {"url": exact[key], "source": "audiodb", "label": label,
-                            "kind": "photo" if key == "thumb" else "wide"}
-    for source in source_order(cfg, "artist_image_sources", IMAGE_SOURCES):
-        if source == "deezer":
-            row = deezer_artist(name)
-            if row and row.get("image"):
-                return {"url": row["image"], "source": "deezer",
-                        "label": "Deezer artist photo", "kind": "photo"}
-        elif source == "audiodb":
-            row = audiodb_artist(name)
-            if row:
-                for key, label in (("thumb", "TheAudioDB artist thumb"),
-                                   ("banner", "TheAudioDB artist banner"),
-                                   ("wide_thumb", "TheAudioDB wide thumb"),
-                                   ("fanart", "TheAudioDB fanart")):
-                    if row.get(key):
-                        return {"url": row[key], "source": "audiodb",
-                                "label": label, "kind": "photo" if key == "thumb" else "wide"}
-        elif source == "itunes":
-            url = itunes_artist_artwork(name)
-            if url:
-                return {"url": url, "source": "itunes",
-                        "label": "Apple album artwork (artist has no photo API)",
-                        "kind": "album_art"}
-        elif source == "wikipedia":
-            summary = wikipedia_summary(name)
-            if summary and summary.get("image"):
-                return {"url": summary["image"], "source": "wikipedia",
-                        "label": "Wikipedia lead image", "kind": "photo"}
-    return None
-
-
-def _described(found):
-    """A description dict plus its honest character count (`chars`).
-
-    The UI sizes its Read more/Show less control from this; nothing here is
-    ever clipped — a whole Wikipedia article is stored as it came back."""
-    if not found:
-        return found
-    return {**found, "chars": len(found.get("text") or "")}
-
-
-def _wikipedia_description(candidate, cfg=None):
-    """One Wikipedia article title as a description dict, or None.
-
-    The returned text is the article's FULL prose (`wikipedia_text`), its
-    in-text links kept as markdown (`[label](https://en.wikipedia.org/wiki/X)`)
-    so the description viewer has something to hyperlink; `description_full`
-    off restores the lead-paragraph summary, whose REST extract is plain text,
-    and a title whose parsed-article and extracts calls both answer nothing
-    falls back to that same summary rather than to no text.
-    """
-    if not candidate:
-        return None
-    full = True if not cfg else bool(cfg.get("description_full", True))
-    if full:
-        article = wikipedia_text(candidate)
-        if article:
-            slug = quote(str(article["title"]).replace(" ", "_"), safe="()")
-            return {"text": article["extract"], "title": article["title"],
-                    "source": "wikipedia",
-                    "source_url": f"{WIKIPEDIA_BASE}/wiki/{slug}"}
-    summary = wikipedia_summary(candidate)
-    if summary and summary.get("extract"):
-        return {"text": summary["extract"], "title": summary["title"],
-                "source": "wikipedia", "source_url": summary.get("url"),
-                "short": summary.get("description") or ""}
-    return None
-
-
-def _wikipedia_identity_description(name, mbid=None, cfg=None):
-    """The artist's OWN Wikipedia article, by identity rather than by title.
-
-    An entity's article is rarely at its bare name ("Nirvana" is the Buddhist
-    concept; the band's article is "Nirvana (band)"), so the title comes from
-    Wikidata: the artist MBID's own `wikidata` relation (MusicBrainz states
-    it), or — with no MBID — Wikidata's own search for the name. None when any
-    link of that chain is missing or the article has no prose, which lets the
-    caller fall through to its usual order.
-    """
-    qid = (integrations._mb_wikidata_qid(mbid, entity="artist") if mbid
-           else wikidata_entity(name))
-    title = wikidata_sitelink(qid) if qid else None
-    return _wikipedia_description(title, cfg) if title else None
-
-
-def _description_from_wikipedia(kind, artist, title=None, cfg=None):
-    """Artist or album description straight from Wikipedia.
-
-    Artists are looked up by name (the identity-resolved article is tried
-    before this, see `_wikipedia_identity_description`); albums by "artist
-    album" search, then by the "(album)" disambiguation Wikipedia uses.
-    """
-    def describe(candidate):
-        return _wikipedia_description(candidate, cfg)
-
-    if kind == "artist":
-        found = describe(artist)
-        if found:
-            return found
-        for candidate in wikipedia_search(artist, limit=3):
-            found = describe(candidate)
-            if found:
-                return found
-        return None
-    queries = [f"{artist} {title} album", f"{title} {artist}", title]
-    for query in queries:
-        for candidate in wikipedia_search(query, limit=3):
-            if _norm(title) not in _norm(candidate):
-                continue
-            found = describe(candidate)
-            if found:
-                return found
-    return None
-
-
-def artist_description(name, mbid=None, cfg=None):
-    """Artist description from the configured description sources.
-
-    A known `mbid` is answered by TheAudioDB's own record for it BEFORE any
-    name is handed to a search: a name alone picks the wrong subject too easily
-    ("Nirvana" is the band, but Wikipedia's summary for it is the Buddhist
-    concept, and a name search on Deezer found a 1960s UK band of the same
-    name), and that text was then stored as the artist's description.
-
-    The WHOLE Wikipedia article is the first thing tried, for the artists
-    whose Wikidata item can be resolved (MBID -> `wikidata` relation -> the
-    item's enwiki sitelink -> that exact title): TheAudioDB has one English
-    biography field and it is a paragraph, while the article is the long text
-    the UI's Read more expands. Everything after that is unchanged, so an
-    artist with no Wikidata link still gets the TheAudioDB/MusicBrainz order
-    below.
-
-    Every source answers with its FULL prose (`description_full`, ON by
-    default). TheAudioDB has one biography field, `strBiography`, and it is the
-    whole English text — its `<lang>`-suffixed siblings are translations, never
-    a longer English version — so nothing there is truncated by taking it."""
-    # FIRST, before any name is handed to a search: the artist's own article,
-    # resolved through their Wikidata item (see
-    # `_wikipedia_identity_description`) instead of by title.
-    found = _wikipedia_identity_description(name, mbid, cfg)
-    if found:
-        return _described(found)
-    if mbid:
-        row = audiodb_artist_mbid(mbid)
-        if row and row.get("bio"):
-            return _described({
-                "text": row["bio"], "title": row.get("name") or name,
-                "source": "audiodb",
-                "source_url": (f"{AUDIODB_BASE}/{AUDIODB_KEY}/artist-mb.php"
-                               f"?i={quote(str(mbid))}")})
-    for source in source_order(cfg, "description_sources", DESCRIPTION_SOURCES):
-        if source == "wikipedia":
-            summary = _description_from_wikipedia("artist", name, cfg=cfg)
-            if summary:
-                return _described(summary)
-        elif source == "audiodb":
-            row = audiodb_artist(name)
-            if row and row.get("bio"):
-                return _described({
-                    "text": row["bio"], "title": row.get("name") or name,
-                    "source": "audiodb",
-                    "source_url": f"{AUDIODB_BASE}/{AUDIODB_KEY}/search.php?s={quote(name)}"})
-        elif source == "musicbrainz":
-            artist_mbid = mbid or resolve_artist_mbid(name)
-            if not artist_mbid:
-                continue
-            try:
-                data = integrations.mb_get_cached(
-                    f"artist/{artist_mbid}", {"inc": "annotation+url-rels", "fmt": "json"})
-            except Exception:
-                continue
-            annotation = (data or {}).get("annotation") or ""
-            if annotation.strip():
-                return _described({
-                    "text": annotation.strip(), "title": (data or {}).get("name") or name,
-                    "source": "musicbrainz",
-                    "source_url": f"https://musicbrainz.org/artist/{artist_mbid}"})
-    return None
-
-
-def album_description(artist, album, mbid=None, cfg=None):
-    """Album description from the configured description sources.
-
-    Same rule as `artist_description`: the provider's FULL text (the whole
-    Wikipedia article by default, TheAudioDB's `strDescription` — its own
-    complete English prose, there is no longer `strDescriptionEN` variant)."""
-    for source in source_order(cfg, "description_sources", DESCRIPTION_SOURCES):
-        if source == "wikipedia":
-            summary = _description_from_wikipedia("album", artist, album, cfg=cfg)
-            if summary:
-                return _described(summary)
-        elif source == "audiodb":
-            row = audiodb_album(artist, album)
-            if row and row.get("description"):
-                return _described({
-                    "text": row["description"], "title": row.get("title") or album,
-                    "source": "audiodb", "source_url": None})
-        elif source == "musicbrainz":
-            rg = None
-            if mbid:
-                rg = {"mbid": mbid}
-            else:
-                rg = resolve_release_group(artist, album, cfg)
-            if not rg or not rg.get("mbid"):
-                continue
-            try:
-                data = integrations.mb_get_cached(
-                    f"release-group/{rg['mbid']}",
-                    {"inc": "annotation+url-rels", "fmt": "json"})
-            except Exception:
-                continue
-            annotation = (data or {}).get("annotation") or ""
-            if annotation.strip():
-                return _described({
-                    "text": annotation.strip(), "title": (data or {}).get("title") or album,
-                    "source": "musicbrainz",
-                    "source_url": f"https://musicbrainz.org/release-group/{rg['mbid']}"})
-    return None
-
-
-def metadata_candidates(artist, album="", cfg=None):
-    """Image + description candidates for an artist (and their album).
-
-    One composition point for the reliable providers: the configured image
-    chain's own best pick plus every individual provider's images (Deezer
-    photo, TheAudioDB thumb/banner/wide/fanart, Apple artwork, Wikipedia lead
-    image) and the first artist/album description from the configured
-    description chain. Nothing is written here — callers save through
-    `mlo.artistdata` (see server.imports.apply_metadata).
-
-    Returns {"images": [{url, source, label, kind}], "artist_description":
-    {text, source, ...}|None, "album_description": {...}|None}.
-    """
-    artist = str(artist or "").strip()
-    album = str(album or "").strip()
-    images = []
-    seen = set()
-
-    def add(url, source, label, kind="photo"):
-        if url and url not in seen:
-            seen.add(url)
-            images.append({"url": url, "source": source, "label": label, "kind": kind})
-
-    if artist:
-        auto = artist_image(artist, cfg=cfg)
-        if auto:
-            add(auto.get("url"), auto.get("source"),
-                auto.get("label") or "Automatic pick", auto.get("kind") or "photo")
-        row = audiodb_artist(artist)
-        if row:
-            for key, label in (("thumb", "TheAudioDB artist thumb"),
-                               ("banner", "TheAudioDB artist banner"),
-                               ("wide_thumb", "TheAudioDB wide thumb"),
-                               ("fanart", "TheAudioDB fanart")):
-                add(row.get(key), "audiodb", label, "photo" if key == "thumb" else "wide")
-        dz = deezer_artist(artist)
-        if dz:
-            add(dz.get("image"), "deezer", "Deezer artist photo", "photo")
-        add(itunes_artist_artwork(artist), "itunes",
-            "Apple album artwork (artist has no photo API)", "album_art")
-        summary = wikipedia_summary(artist)
-        if summary:
-            add(summary.get("image"), "wikipedia", "Wikipedia lead image", "photo")
-    return {
-        "images": images,
-        "artist_description": artist_description(artist, cfg=cfg) if artist else None,
-        "album_description": (album_description(artist, album, cfg=cfg)
-                              if (artist and album) else None),
-    }
-
-
 def album_genres(artist, album, dz_id=None, cfg=None):
     """Genre names for an album from the discovery providers (Deezer first:
     its album detail carries a real genre list, iTunes carries one primary
     genre). Used to fill a missing GENRE tag."""
     genres = []
-    if cfg is None or cfg.get("discovery_enabled", True):
-        detail = deezer_album(dz_id) if dz_id else None
-        if not detail:
-            hits = deezer_search_album(f'artist:"{artist}" album:"{album}"', limit=3) if artist else []
-            match = next((h for h in hits if _norm(h["title"]) == _norm(album)), None) \
-                or (hits[0] if hits else None)
-            detail = deezer_album(match["deezer_id"]) if match else None
-        if detail:
-            genres.extend(detail.get("genres") or [])
-        if not genres:
-            for row in itunes_search_album(artist, album, limit=1):
-                if row.get("genre"):
-                    genres.append(row["genre"])
+    detail = deezer_album(dz_id) if dz_id else None
+    if not detail:
+        hits = deezer_search_album(f'artist:"{artist}" album:"{album}"', limit=3) if artist else []
+        match = next((h for h in hits if _norm(h["title"]) == _norm(album)), None) \
+            or (hits[0] if hits else None)
+        detail = deezer_album(match["deezer_id"]) if match else None
+    if detail:
+        genres.extend(detail.get("genres") or [])
+    if not genres:
+        for row in itunes_search_album(artist, album, limit=1):
+            if row.get("genre"):
+                genres.append(row["genre"])
     out = []
     for genre in genres:
         name = str(genre).strip()

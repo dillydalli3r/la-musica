@@ -5,7 +5,6 @@ import { api } from "../api";
 import type { Album } from "../types";
 import Modal from "./Modal";
 import LogReport from "./LogReport";
-import DownloadButton from "./DownloadButton";
 import { ExportButton } from "./ExportDialog";
 import TrackDetails, { DetailRows, DetailSection, type DetailItem } from "./TrackDetails";
 import { albumTech, fmtDuration, fmtTech } from "../lib/fmt";
@@ -113,11 +112,6 @@ export function AlbumDetails({ album, onClose }: { album: Album; onClose: () => 
 
       {album.tracks.length > 0 && (
         <div className="flex flex-wrap items-center gap-2">
-          <DownloadButton
-            paths={paths}
-            label="Download for offline playback"
-            emptyReason="Nothing to download — this album has no tracks"
-          />
           <ExportButton
             paths={paths}
             seconds={seconds}

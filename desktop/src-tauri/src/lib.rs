@@ -20,10 +20,7 @@
 //! so the choice exists before the webview does.
 //!
 //! What is left here is the desktop-only shell furniture: the tray icon, the
-//! autostart registry, the native folder picker and the local backend. Android
-//! and iOS compile this same crate without those — a phone has no tray and no
-//! backend to own — and carry no Python at all: every mobile client is a
-//! client of the same server every other client uses.
+//! autostart registry, the native folder picker and the local backend.
 
 // A parking_lot Mutex for the tray checkbox state: it is locked on every tray
 // menu click and never needs the poisoning dance.
@@ -36,30 +33,10 @@ use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 #[cfg(desktop)]
 use tauri::{Emitter, Manager, RunEvent};
-// The mobile path needs `Manager` too, for the one thing it does at startup:
-// look up the window from the config and show it.
-#[cfg(mobile)]
-use tauri::Manager;
 #[cfg(desktop)]
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt as AutostartManagerExt};
 #[cfg(desktop)]
 use tauri_plugin_dialog::DialogExt;
-
-// The iOS Now Playing star (Control Center / lock screen): MediaPlayer's
-// `MPRemoteCommandCenter.likeCommand`. iOS alone has it — Android's
-// now-playing notification follows the webview's Media Session, and the
-// desktop targets have no such centre — so the module, and everything it
-// calls, is compiled for iOS only. See src/ios_like.rs for the whole story.
-#[cfg(target_os = "ios")]
-mod ios_like;
-
-// The iOS audio session (AVAudioSession, category `playback`): what keeps the
-// music playing when the app is not in front, and what makes the Now Playing
-// module — the card the star above is drawn on — exist at all. iOS only, for
-// the same reason as the star: Android plays through its own audio path and the
-// desktop targets have no AVAudioSession. See src/ios_audio.rs.
-#[cfg(target_os = "ios")]
-mod ios_audio;
 
 // The desktop-only shell furniture: the bundled local backend (spawn,
 // supervise, stop), the window-attach logic that points the webview at it,
@@ -71,15 +48,6 @@ mod backend_handle;
 #[cfg(desktop)]
 mod settings;
 
-// Windows' own media session, the card its flyout draws for the app: the
-// shell publishes it because WebView2's Media Session is published under the
-// RUNTIME's identity (`msedgewebview2.exe`), which Windows 11 labels "Unknown
-// app" — see src/win_media.rs for the measurement and the alternative that was
-// closed. Public because `main.rs` reaches in for the AUMID registration, and
-// Windows-only: no other target has System Media Transport Controls.
-#[cfg(all(desktop, target_os = "windows"))]
-pub mod win_media;
-
 /// The tray's "Start on Login" checkbox, kept in managed state so the
 /// click handler can re-sync its visual with the registry after toggling.
 #[cfg(desktop)]
@@ -87,10 +55,6 @@ struct AutostartItem(Mutex<Option<CheckMenuItem<tauri::Wry>>>);
 
 /// Native folder picker (also reachable from the web UI via invoke when
 /// running inside the Tauri webview).
-///
-/// Desktop only: mobile has no folder to pick, and the dialog plugin's
-/// blocking folder API does not exist there at all — only `blocking_pick_file`
-/// does — so registering this command would not even compile for Android/iOS.
 #[cfg(desktop)]
 #[tauri::command]
 fn pick_folder(app: tauri::AppHandle) -> Option<String> {
@@ -237,23 +201,6 @@ struct UpdateProgress {
     total: Option<u64>,
 }
 
-/// A press the OS delivered to the app's own media session (a button in
-/// Windows 11's media flyout, a media key, a headset), on the `mlo-media-key`
-/// event — the other half of the bridge `set_now_playing` is the first half of
-/// (see src/win_media.rs). `action` is named after the Media Session action it
-/// stands for, so the page runs it through the handlers it already has, and
-/// `seconds` carries a position only for a `seekto` (a scrub on the flyout's
-/// own progress bar).
-#[cfg(all(desktop, target_os = "windows"))]
-const MEDIA_KEY_EVENT: &str = "mlo-media-key";
-
-#[cfg(all(desktop, target_os = "windows"))]
-#[derive(Clone, serde::Serialize)]
-struct MediaKey {
-    action: &'static str,
-    seconds: Option<f64>,
-}
-
 /// Is there a newer release than this build? `offer: None` means this is the
 /// newest, and `current` is always this build's own version — the page says
 /// what it is on without a second call.
@@ -371,103 +318,6 @@ async fn update_install(app: tauri::AppHandle) -> Result<(), String> {
         .await
         .map_err(|e| format!("the update could not be installed: {e}"))?;
     app.restart()
-}
-
-/// Tell the shell whether the track playing right now is favourited.
-///
-/// This is how the iOS Now Playing star (Control Center / lock screen) is kept
-/// in step with the app's own hearts: the web UI calls it whenever the current
-/// track or its liked state changes (`web/src/lib/iosFavs.ts`), and on iOS the
-/// answer is mirrored onto `MPFeedbackCommand.active` — the OS's "the user
-/// already likes this item", which is what draws the star filled rather than
-/// hollow (see src/ios_like.rs).
-///
-/// Registered on EVERY target, with an empty body off iOS, for one reason: the
-/// web UI must be able to make this call unconditionally. In a plain browser
-/// `invoke` is never reached at all (the bridge is inert), while the desktop
-/// and Android shells have no such star — there the call is a no-op, not an
-/// error, so nothing in the player has to know which shell it is running in.
-#[tauri::command]
-fn set_now_playing_liked(liked: bool) {
-    #[cfg(target_os = "ios")]
-    ios_like::set_liked(liked);
-    // Everywhere else there is nothing that mirrors the state; the argument is
-    // taken (and here explicitly dropped) so the command's signature — and
-    // therefore the web UI's call — is identical on all five targets.
-    #[cfg(not(target_os = "ios"))]
-    let _ = liked;
-}
-
-/// Tell the shell whether the player is producing sound right now.
-///
-/// This is the iOS audio session's input (`src/ios_audio.rs`): playback
-/// STARTING activates the session, which is Apple's own guidance ("defer this
-/// call until your app begins audio playback… to ensure that you won't
-/// prematurely interrupt any other background audio"), and playback stopping
-/// deliberately does NOT hand it back — a pause landing in the same second as a
-/// start once took the session away mid-startup, which is the owner's "pressing
-/// play just makes them pause immediately" (R268). The web UI calls it as the
-/// player's `playing` state changes (`web/src/lib/iosAudio.ts`).
-///
-/// Registered on EVERY target, with an empty body off iOS, for the same reason
-/// as the star's command above: the web UI calls it unconditionally, and the
-/// desktop and Android shells have no such session, so the call is a no-op
-/// rather than an error.
-#[tauri::command]
-fn set_playback_active(active: bool) {
-    #[cfg(target_os = "ios")]
-    ios_audio::set_playing(active);
-    #[cfg(not(target_os = "ios"))]
-    let _ = active;
-}
-
-/// What the OS's own media card should say the app is playing.
-///
-/// This is Windows' System Media Transport Controls (see src/win_media.rs):
-/// the shell publishes the session ITSELF, because the one the webview's Media
-/// Session publishes belongs to the WebView2 runtime — Windows resolves its id
-/// to `msedgewebview2.exe`, finds no app, and draws "Unknown app" over the
-/// app's own music. The web UI calls this with the same state it hands
-/// `navigator.mediaSession` (`web/src/lib/winMedia.ts`), and the payload is
-/// that state verbatim: the current track's title/artist/album/artwork, whether
-/// the element is really producing sound, the timeline, and whether the queue
-/// can step either way.
-///
-/// Registered on EVERY target, inert off Windows, exactly like the iOS
-/// commands above: the web UI makes the call unconditionally inside a Tauri
-/// shell, and macOS/Linux draw their now-playing UI from the webview's own
-/// Media Session — the page already drives it — so there is nothing for the
-/// shell to carry there.
-///
-/// The update lands on the MAIN thread, which is where the session was created
-/// and the only thread it may be called from (see win_media.rs's "Threading").
-/// Nothing is returned and nothing needs to be: a card that failed to update
-/// is a stale title, not a broken player, and the shell's own log says so.
-#[cfg(all(desktop, target_os = "windows"))]
-#[tauri::command]
-fn set_now_playing(app: tauri::AppHandle, state: win_media::NowPlaying) {
-    let _ = app.run_on_main_thread(move || win_media::update(&state));
-}
-
-#[cfg(not(target_os = "windows"))]
-#[tauri::command]
-fn set_now_playing(_state: serde_json::Value) {}
-
-/// What the shell's iOS audio state IS — the readout behind Settings →
-/// Downloads & playback → Playback diagnostics.
-///
-/// Registered on EVERY target, exactly like the other two iOS commands: the
-/// web UI calls it unconditionally whenever it is inside a Tauri shell, and
-/// off iOS the list comes back empty (nothing about `AVAudioSession` exists
-/// there). See `ios_audio::state` for what each row means and why a readout
-/// exists at all.
-#[tauri::command]
-fn ios_audio_state() -> Vec<(String, String)> {
-    #[cfg(target_os = "ios")]
-    let state = ios_audio::state();
-    #[cfg(not(target_os = "ios"))]
-    let state = Vec::new();
-    state
 }
 
 /// Show and focus the main window (tray click / tray menu "Open").
@@ -868,12 +718,6 @@ fn choose_backend(app: tauri::AppHandle, mode: String) -> Result<(), String> {
 }
 
 /// Tauri entry point.
-///
-/// On mobile this is called by the generated Android/iOS project: the
-/// `mobile_entry_point` macro emits the JNI / Objective-C glue that boots the
-/// Tauri runtime and then calls this function, so it must stay public under
-/// exactly this name.
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // ONE shell per machine, and it is the very first thing registered: a
     // second launch must reach nothing that touches state. The login
@@ -882,8 +726,6 @@ pub fn run() {
     // `<music>/.mlo/data` over each other, two servers on 8011/8012 and two
     // tray icons. The second launch instead brings the running window
     // forward — which is what a double-click on the icon was asking for.
-    // Desktop only: a phone app gets one process from its OS, and the crate
-    // has no mobile backend at all.
     let builder = tauri::Builder::default();
     #[cfg(desktop)]
     let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
@@ -893,21 +735,14 @@ pub fn run() {
             let _ = window.set_focus();
         }
     }));
-    // Plugins every target has: native notifications, which the web UI sends
-    // for "wish found", "download done" and "import ready" on desktop and
-    // mobile alike, and the dialog plugin (its `pick_folder` command below is
-    // desktop-only, but the plugin itself builds everywhere).
+    // Native notifications, which the web UI sends for "wish found", "download
+    // done" and "import ready", and the dialog plugin (its `pick_folder`
+    // command below is registered here).
     let builder = builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init());
-    // Desktop additionally owns the tray icon, the autostart registry and the
-    // folder picker — all things with no mobile counterpart
-    // (tauri-plugin-autostart does not even compile for Android or iOS, its
-    // lib.rs is `#![cfg(not(any(target_os = "android", target_os = "ios")))]`).
-    // The one command BOTH shells register is `set_now_playing_liked`: it is
-    // how the web UI tells the shell what the current track's favourite state
-    // is, and off iOS its body does nothing (see its docs above — the desktop
-    // and Android now-playing UI is the webview's own Media Session).
+    // The shell additionally owns the tray icon, the autostart registry and the
+    // folder picker.
     #[cfg(desktop)]
     let builder = builder
         .plugin(tauri_plugin_autostart::init(
@@ -917,8 +752,7 @@ pub fn run() {
         // The in-app updater: `plugins.updater` in tauri.conf.json names the
         // endpoint (the release's own manifest) and the public key every
         // download is verified against, and `update_check`/`update_install`
-        // below are what the page drives. Desktop only — no phone builds this
-        // crate's updater at all, and a phone updates from its own store.
+        // below are what the page drives.
         .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             pick_folder,
@@ -926,10 +760,6 @@ pub fn run() {
             open_external,
             update_check,
             update_install,
-            set_now_playing_liked,
-            set_playback_active,
-            set_now_playing,
-            ios_audio_state,
             shell_backend_choice,
             choose_backend,
         ])
@@ -952,105 +782,13 @@ pub fn run() {
             // The tray carries the outcome at startup ("Backend: unavailable");
             // there is no screen to answer to yet.
             let _ = enter_backend_mode(app.handle(), &settings);
-
-            // Windows' own media card, published by the SHELL: the webview's
-            // Media Session belongs to the WebView2 runtime and Windows draws
-            // it as "Unknown app" (see src/win_media.rs). The window exists by
-            // now — `app.windows` in tauri.conf.json is created before this
-            // hook runs — and its HWND is what the session is attached to, so
-            // Windows resolves the card's id through THIS process, whose AUMID
-            // `main.rs` already set. Every press the OS delivers comes back as
-            // the `mlo-media-key` event, which the page runs through the same
-            // handlers `navigator.mediaSession` used to receive.
-            //
-            // Failure is logged and survivable: a shell with no OS media card
-            // is a worse shell, not a broken one.
-            #[cfg(target_os = "windows")]
-            {
-                match app.get_webview_window("main").map(|w| w.hwnd()) {
-                    Some(Ok(hwnd)) => {
-                        let handle = app.handle().clone();
-                        if let Err(e) = win_media::attach(hwnd, move |press| {
-                            let _ = handle.emit(
-                                MEDIA_KEY_EVENT,
-                                MediaKey {
-                                    action: press.action(),
-                                    seconds: press.seconds(),
-                                },
-                            );
-                        }) {
-                            eprintln!("[mlo-desktop] media session unavailable: {e}");
-                        }
-                    }
-                    Some(Err(e)) => {
-                        eprintln!("[mlo-desktop] media session unavailable: {e}");
-                    }
-                    None => eprintln!("[mlo-desktop] media session unavailable: no window"),
-                }
-            }
-            Ok(())
-        });
-
-    // Mobile: the OS owns the window and there is no tray to show it from, so
-    // the shell shows it exactly once, here, and never touches it again.
-    // `tauri.conf.json`'s window flags are a DESKTOP concern and the mobile
-    // runtime happens to ignore `visible` today (tao's iOS `Window::new`
-    // carries a TODO for it, Android's `set_visible` is a no-op), so this is the
-    // explicit form of a guarantee that must not rest on an upstream TODO: an
-    // unseen window is a phone with no setup screen, i.e. no way to type the
-    // server address that screen exists to collect. Nothing on the mobile path
-    // may create, recreate, hide or reload this window — a webview torn down and
-    // rebuilt is exactly the "the app keeps refreshing" a user sees as the app
-    // restarting.
-    //
-    // The phone shells also register `set_now_playing_liked` and
-    // `set_playback_active` — the same two commands the desktop shell does —
-    // because those are the ones a phone needs: the favourite state the web UI
-    // pushes for the OS's now-playing UI, and the player's play/pause the iOS
-    // audio session follows. On Android both bodies are empty (its media
-    // notification follows the webview's own Media Session, and it has no
-    // AVAudioSession); on iOS they drive the star and the session registered
-    // just below.
-    #[cfg(mobile)]
-    let builder = builder
-        .invoke_handler(tauri::generate_handler![
-            set_now_playing_liked,
-            set_playback_active,
-            set_now_playing,
-            ios_audio_state
-        ])
-        .setup(|app| {
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.show();
-            }
-            // The audio session comes FIRST: a playback category is what keeps
-            // playback alive once the app is not in front, and what makes the
-            // Now Playing card — the star's home — exist at all. `configure`
-            // only sets the category; the session itself is activated when the
-            // web player says it is playing (`set_playback_active`), and
-            // `register` keeps it that way across backgrounding, interruptions
-            // and a restart of the audio server (see src/ios_audio.rs).
-            // Logged, never fatal, exactly as the star is.
-            #[cfg(target_os = "ios")]
-            ios_audio::configure();
-            #[cfg(target_os = "ios")]
-            ios_audio::register();
-            // iOS additionally owns the OS's Now Playing star. Setup is the one
-            // place the runtime hands us the app handle before any track can
-            // play, which is what the star's handler needs to reach the webview
-            // (see src/ios_like.rs). A failure here is logged, never fatal:
-            // losing the OS star must not cost the user the app.
-            #[cfg(target_os = "ios")]
-            ios_like::register(app.handle());
             Ok(())
         });
 
     builder
         .on_window_event(|_window, _event| {
-            // Desktop: closing the window hides it to the tray — the app keeps
-            // running (and the icon stays) until Quit is used. Mobile has no
-            // tray to restore the window from and the OS owns window
-            // lifecycle, so nothing is intercepted there.
+            // Closing the window hides it to the tray — the app keeps
+            // running (and the icon stays) until Quit is used.
             #[cfg(desktop)]
             if let tauri::WindowEvent::CloseRequested { api, .. } = _event {
                 api.prevent_close();
@@ -1087,7 +825,5 @@ pub fn run() {
                 }
                 api.prevent_exit();
             }
-            #[cfg(not(desktop))]
-            let _ = (app, event);
         });
 }

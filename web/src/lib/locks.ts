@@ -6,12 +6,12 @@
  *  server matches under (`key`), the sentence it refuses a request with
  *  (`why`), and the job's kind/label. This module polls that ONE payload,
  *  keeps the latest answer in a small store, and answers "is this file
- *  playable?" with the registry's own rule — the same path, or inside a held
- *  folder at a separator boundary. That is why the player and the 409 cannot
- *  disagree: both are reading the same keys.
+ *  held?" with the registry's own rule — the same path, or inside a held
+ *  folder at a separator boundary. That is why the client and the server's 409
+ *  cannot disagree: both are reading the same keys.
  *
  *  Only what a job holds RIGHT NOW is here. A file merely QUEUED for a job is
- *  not locked and plays exactly as before.
+ *  not locked and reads/writes pass exactly as before.
  */
 import { useQuery } from "@tanstack/react-query";
 import { create } from "zustand";
@@ -40,8 +40,8 @@ export interface LocksPayload {
 }
 
 /** How often the app re-reads the lock list. ONE interval for every surface
- *  that needs it: react-query dedupes on the query key, so the player bar, the
- *  In-progress page and every marked row share one request per tick — the
+ *  that needs it: react-query dedupes on the query key, so the In-progress
+ *  page and every marked row share one request per tick — the
  *  interval MAINTAIN → In progress already polled at. */
 export const LOCKS_POLL_MS = 2000;
 
@@ -108,13 +108,6 @@ function find(index: LocksIndex, path: string | null | undefined): Held | null {
  *  a poll every 2 s must not repaint a library table. */
 export const useLocks = create<{ index: LocksIndex }>(() => ({ index: EMPTY }));
 
-/** The job holding *path* right now, or null — the synchronous question the
- *  play path asks before handing a URL to an <audio> element (a locked track
- *  answers with the server's sentence instead of silence). */
-export function heldBy(path: string | null | undefined): Held | null {
-  return find(useLocks.getState().index, path);
-}
-
 /** A row's subscription: one primitive out of the lock list, so a poll that
  *  changes nothing re-renders nothing. */
 function useHeldField(
@@ -127,27 +120,23 @@ function useHeldField(
   });
 }
 
-/** The server's refusal sentence for this path, "" while it is playable. */
+/** The server's refusal sentence for this path, "" while nothing holds it. */
 export const useLockWhy = (path: string | null | undefined) =>
   useHeldField(path, (hit) => hit.held.why);
 
-/** The job's own name ("Optimize FLACs"), "" while the path is playable. */
-export const useLockLabel = (path: string | null | undefined) =>
-  useHeldField(path, (hit) => hit.job.label);
-
-/** What KIND of work holds this path, in the app's words, "" while playable. */
+/** What KIND of work holds this path, in the app's words, "" while nothing does. */
 export const useLockKind = (path: string | null | undefined) =>
   useHeldField(path, (hit) => kindLabel(hit.job.kind));
 
-/** The one poll. Mounted by the player bar (always on screen) and by the pages
- *  that render the list; the shared query key means N callers, one request. */
+/** The one poll. Mounted by the pages that render the list; the shared query
+ *  key means N callers, one request. */
 export function useJobLocks() {
   return useQuery({
     queryKey: ["jobLocks"],
     queryFn: async () => {
       const payload = (await api.jobLocks()) as LocksPayload;
       // The same answer the hooks above read, kept where a non-React caller
-      // (the play store, the player's own load) can reach it synchronously.
+      // can reach it synchronously.
       useLocks.setState({ index: buildIndex(payload) });
       return payload;
     },

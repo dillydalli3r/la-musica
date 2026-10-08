@@ -1,7 +1,7 @@
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Bell, Save, RotateCcw, LayoutGrid, Settings as SettingsIcon, Check, Eye, EyeOff, ChevronDown, ChevronUp, Wand2, X, FolderOpen, Loader2, Copy, Trash2 } from "lucide-react";
+import { Save, RotateCcw, LayoutGrid, Settings as SettingsIcon, Check, Eye, EyeOff, ChevronDown, ChevronUp, Wand2, X, FolderOpen, Loader2 } from "lucide-react";
 import { api, deviceUnavailable, unavailableFeatures } from "../api";
 import ConfirmButton from "../components/ConfirmButton";
 import CookieJarPanel from "../components/CookieJarPanel";
@@ -11,58 +11,20 @@ import SecurityPanel from "../components/SecurityPanel";
 import AiTestButton from "../components/AiTestButton";
 import PageHeader from "../components/PageHeader";
 import { toast } from "../store";
-import { applyAccent } from "../App";
-import { ACCENT_PRESETS, DEFAULT_ACCENT, accentHex, normalizeHex, parseHexColor, presetHex, resolveAccent } from "../lib/accent";
 import { DEFAULT_RUN_ALL, OPT_IN_SCRIPTS, SCRIPT_LABEL, isScriptId } from "../lib/scripts";
-import { LOCALES, applyConfigLocale, setLocale, useI18n, type MessageKey } from "../lib/i18n";
+import { LOCALES, applyConfigLocale, setLocale, useI18n } from "../lib/i18n";
 import { CODEC_CHOICES } from "../lib/codecMeta";
-import { notificationState, requestNotifications, type NotifyState } from "../lib/notify";
-import { pbDiagClear, pbDiagEvents, pbDiagVersion, subscribe, type DiagEvent } from "../lib/pbDiag";
-import { iosShellState } from "../lib/iosState";
-
-/** The accent swatches, each with the ink its own colour needs for the tick —
- *  derived (lib/accent), not a hardcoded `text-black`, which was invisible on
- *  the dark swatches. The row itself comes from ACCENT_PRESETS, so a preset
- *  that exists is a preset that is offered. */
-const ACCENT_OPTIONS: { id: string; hex: string; fg: string }[] = ACCENT_PRESETS.map((p) => ({
-  id: p.id,
-  hex: p.hex,
-  fg: resolveAccent(p.id)[2],
-}));
-
-/** The swatches' names, one translated key per preset id. A `Record` keyed by
- *  id rather than a template string, so `t()` is type-checked here: a preset
- *  whose name was never added to the bundles fails the build instead of
- *  showing its raw key in the tooltip. */
-const ACCENT_LABEL: Record<string, MessageKey> = {
-  red: "settings.accent_red",
-  orange: "settings.accent_orange",
-  amber: "settings.accent_amber",
-  yellow: "settings.accent_yellow",
-  lime: "settings.accent_lime",
-  emerald: "settings.accent_emerald",
-  teal: "settings.accent_teal",
-  sky: "settings.accent_sky",
-  blue: "settings.accent_blue",
-  indigo: "settings.accent_indigo",
-  violet: "settings.accent_violet",
-  fuchsia: "settings.accent_fuchsia",
-  pink: "settings.accent_pink",
-  rose: "settings.accent_rose",
-  mono: "settings.accent_mono",
-};
 
 const ENCODER_FORMATS = ["flac", "jpeg", "png", "jxl"] as const;
 const ENCODER_FIELDS = ["ENCODER_PROGRAM", "ENCODER_QUALITY", "ENCODER_VERSION"] as const;
 
 /** Interface zoom, as a percentage of the app's normal size.
  *
- *  Stored per browser (like the accent color and the player's own picks), and
- *  APPLIED by the app shell: web/src/App.tsx reads this key and scales the
- *  root, so this page only writes the value and tells it (the shell listens
- *  for `mlo:zoom`). 80–150%: below that the player's own controls stop being
- * tappable on a phone, above it a desktop window shows two albums and one
- *  album's worth of scrolling. */
+ *  Stored per browser, and APPLIED by the app shell: web/src/App.tsx reads
+ *  this key and scales the root, so this page only writes the value and tells
+ *  it (the shell listens for `mlo:zoom`). 80–150%: below that the app's own
+ *  controls stop being tappable on a phone, above it a desktop window shows
+ *  two albums and one album's worth of scrolling. */
 const ZOOM_KEY = "mlo.zoom";
 const ZOOM_DEFAULT = 100;
 
@@ -80,11 +42,7 @@ const CFG_DEFAULTS: Record<string, unknown> = {
   mb_genre_count: 2,
   genre_sources: ["rateyourmusic", "musicbrainz", "listenbrainz", "itunes", "lastfm", "theaudiodb", "wikidata", "bandcamp", "discogs", "deezer", "spotify"],
   advisory_auto_fetch: true,
-  metadata_auto_fetch: true,
-  metadata_review: false,
   trash_cap_gb: 5,
-  youtube_enabled: true,
-  youtube_max_height: 0,
   auto_import_avoid_promo: true,
   auto_import_require_country: true,
   prefer_release_country: "",
@@ -337,18 +295,6 @@ function CoverDefaults() {
   );
 }
 
-/** The YouTube cookie jar (Settings → Videos).
- *
- *  The panel itself is `components/CookieJarPanel.tsx` — ONE implementation for
- *  every cookie login, shared with Settings → Sources, the wizard's Keys step
- *  and the Discovery tab's RYM box, so the two credentials' import boxes (and
- *  the per-cookie comment list both now show) cannot drift apart. This wrapper
- *  is only where the Videos tab renders it, exactly as before.
- */
-function YoutubeCookieJar() {
-  return <CookieJarPanel source="youtube" />;
-}
-
 /** The RateYourMusic cookie (Settings → Discovery): the same shared panel for
  *  the RYM credential.
  *
@@ -357,155 +303,7 @@ function YoutubeCookieJar() {
  *  "Save all settings") has to agree with what RYM is actually sent.
  */
 function RymCookieJar({ onStored }: { onStored: (value: string) => void }) {
-  return <CookieJarPanel source="rym" onStored={onStored} />;
-}
-
-/** HH:MM:SS on the reader's own clock. The report is read next to the moment
- *  the owner heard the sound stop, so local time is the only useful clock —
- *  an ISO string with a timezone in it would be one more thing to translate on
- *  a phone screenshot. */
-function clockOf(t: number): string {
-  const d = new Date(t);
-  const p = (n: number) => String(n).padStart(2, "0");
-  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
-}
-
-/** One event's detail as `key=value …`, in the order the recorder wrote it —
- *  the same text the panel draws and the Copy button puts on the clipboard, so
- *  what is read and what is sent can never disagree. */
-function diagDetailText(detail: DiagEvent["detail"]): string {
-  if (!detail) return "";
-  return Object.entries(detail)
-    .map(([k, v]) => `${k}=${v === null ? "null" : v}`)
-    .join(" ");
-}
-
-/** The on-device playback report (lib/pbDiag) — the black box for the iOS
- *  reports that cannot be reproduced anywhere else: "audio stops when I tab
- *  out", "the lock-screen controls do nothing".
- *
- *  Everything here is built to be READ ON A PHONE and then handed over: the
- *  groups stack, every value sits under its own key, nothing scrolls sideways,
- *  and Copy writes the whole report as tab-separated lines so it survives being
- *  pasted into a chat. Live by subscription: a row the player appends while
- *  this block is open appears here without a refresh (the point is to watch it
- *  happen, on the device that misbehaves).
- *
- *  The shell group is asked for ONCE, when the block is first opened — the IPC
- *  is only reachable inside the Tauri shell (lib/iosState), and a Settings page
- *  nobody opened the report on must not pay for it. No shell answering is a
- *  fact worth stating ("no shell (browser)"), never a spinner. */
-function PlaybackDiag() {
-  const { t } = useI18n();
-  // Subscribed rather than polled: `subscribe` + the version counter is what
-  // useSyncExternalStore wants, and it re-renders only when a row is added.
-  useSyncExternalStore(subscribe, pbDiagVersion);
-  const events = pbDiagEvents();
-  // undefined = not asked yet, null = no shell answered (or no shell at all).
-  const [shell, setShell] = useState<[string, string][] | null | undefined>(undefined);
-  const shellAsked = useRef(false);
-
-  const reportLines = () => {
-    const lines = [`la musica playback report — ${new Date().toISOString()}`];
-    if (shell === undefined || shell === null) {
-      lines.push(`shell\t${shell === null ? t("settings.playback_diag_no_shell") : t("settings.playback_diag_asking")}`);
-    } else {
-      for (const [k, v] of shell) lines.push(`shell\t${k}\t${v}`);
-    }
-    for (const ev of events) lines.push(`${clockOf(ev.t)}\t${ev.kind}\t${diagDetailText(ev.detail)}`);
-    return lines;
-  };
-
-  const copyReport = async () => {
-    const text = reportLines().join("\n");
-    try {
-      await navigator.clipboard.writeText(text);
-      toast.success(t("settings.playback_diag_copied", { n: String(events.length) }));
-    } catch {
-      // The Clipboard API needs a secure context, and this app is normally
-      // served over plain http on the LAN, where `navigator.clipboard` is
-      // undefined — so the report goes in the message instead of being lost
-      // (the same fallback DependenciesPage's `copyCommand` uses for its
-      // upgrade command).
-      toast.error(`${t("settings.playback_diag_copy_failed")}\n${text}`);
-    }
-  };
-
-  return (
-    <details
-      className="mt-3 bg-zinc-950/40 rounded-lg border border-border px-3 py-2"
-      onToggle={(e) => {
-        if (!e.currentTarget.open || shellAsked.current) return;
-        shellAsked.current = true;
-        void iosShellState().then(setShell);
-      }}
-    >
-      <summary className="text-xs font-medium cursor-pointer text-zinc-300 select-none">
-        {t("settings.playback_diag", { n: String(events.length) })}
-      </summary>
-      <div className="mt-2 space-y-2">
-        <div className="text-[10px] text-zinc-600">{t("settings.playback_diag_help")}</div>
-
-        {/* Shell first: it is the half of the report the page cannot see for
-            itself, and its absence is itself an answer. */}
-        <div className="min-w-0">
-          <div className="text-[10px] uppercase tracking-wide text-zinc-500">
-            {t("settings.playback_diag_shell")}
-          </div>
-          {shell === undefined ? (
-            <div className="text-[11px] text-zinc-600">{t("settings.playback_diag_asking")}</div>
-          ) : shell === null ? (
-            <div className="text-[11px] text-zinc-600">{t("settings.playback_diag_no_shell")}</div>
-          ) : (
-            <div className="space-y-1">
-              {shell.map(([k, v]) => (
-                <div key={k} className="min-w-0">
-                  <div className="text-[10px] text-zinc-600 break-all">{k}</div>
-                  <div className="font-mono text-xs text-zinc-200 break-all">{v || "—"}</div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        <div className="min-w-0">
-          <div className="text-[10px] uppercase tracking-wide text-zinc-500">
-            {t("settings.playback_diag_events", { n: String(events.length) })}
-          </div>
-          {events.length === 0 ? (
-            <div className="text-[11px] text-zinc-600">{t("settings.playback_diag_empty")}</div>
-          ) : (
-            <div className="font-mono text-[11px] leading-relaxed">
-              {events.map((ev, i) => (
-                <div key={`${ev.t}-${i}`} className="border-t border-border/50 pt-0.5 mt-0.5 first:border-0 first:pt-0 first:mt-0">
-                  <span className="text-zinc-500">{clockOf(ev.t)}</span>{" "}
-                  <span className="text-zinc-300">{ev.kind}</span>
-                  {ev.detail && (
-                    <div className="text-zinc-400 break-words">{diagDetailText(ev.detail)}</div>
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        <div className="flex items-center gap-2 flex-wrap pt-1">
-          <button className="btn-ghost !py-0.5 text-[11px] tap" onClick={copyReport}>
-            <Copy className="h-3 w-3" /> {t("settings.playback_diag_copy")}
-          </button>
-          <button
-            className="btn-ghost !py-0.5 text-[11px] tap"
-            onClick={() => {
-              pbDiagClear();
-              toast(t("settings.playback_diag_cleared"));
-            }}
-          >
-            <Trash2 className="h-3 w-3" /> {t("settings.playback_diag_clear")}
-          </button>
-        </div>
-      </div>
-    </details>
-  );
+  return <CookieJarPanel onStored={onStored} />;
 }
 
 export default function SettingsPage() {
@@ -533,18 +331,6 @@ export default function SettingsPage() {
   // empty there) — the shipped default is the server's, never a copy here.
   const [namingScript, setNamingScript] = useState("");
   const [shortFolderNames, setShortFolderNames] = useState(false);
-  const [accent, setAccent] = useState<string>(() => localStorage.getItem("mlo.accent") ?? DEFAULT_ACCENT);
-  // The custom-colour row: the native picker's swatch and the text field are two
-  // views of ONE value. `customHex` is always a whole "#rrggbb" (what a Use
-  // applies, and what <input type="color"> requires); `customText` is whatever
-  // has been typed, so a half-finished "#ff7" is not rewritten mid-keystroke.
-  // Both start on the accent in force, so the picker opens where the app is.
-  const [customHex, setCustomHex] = useState<string>(() => accentHex(accent));
-  const [customText, setCustomText] = useState<string>(() => accentHex(accent));
-  // What "back to presets" returns to: the last preset this page applied, so a
-  // custom colour is a detour and not a one-way door (a stored custom value
-  // leaves the default as the way back).
-  const lastPreset = useRef<string>(presetHex(accent) ?? DEFAULT_ACCENT);
   const [defaultView, setDefaultView] = useState<string>(() => localStorage.getItem("mlo.defaultView.v2") ?? "grid");
   const [loaded, setLoaded] = useState(false);
   // Settings search: matches field labels/keys across every tab; picking a
@@ -559,8 +345,7 @@ export default function SettingsPage() {
   // names none the app ships); `t` labels the picker itself.
   const { t, locale } = useI18n();
 
-  // Provider catalogues behind the order editors (Discovery / Lyrics lists).
-  const { data: discoveryCat } = useQuery({ queryKey: ["discoverySources"], queryFn: api.discoverySources });
+  // Provider catalogue behind the lyrics order editor.
   const { data: lyricsCat } = useQuery({ queryKey: ["lyricsProviders"], queryFn: api.lyricsProviders });
 
   // The genre picker offers EXACTLY the chain's own genre sources (the genre
@@ -584,7 +369,7 @@ export default function SettingsPage() {
     | { k: string; label: string; type: "text"; help?: string }
     | { k: string; label: string; type: "password"; help?: string }
     /** Ordered provider preference list; an empty list means the built-in order. */
-    | { k: string; label: string; type: "list"; catalog: "discovery" | "lyrics"; help?: string }
+    | { k: string; label: string; type: "list"; catalog: "lyrics"; help?: string }
     /** Unordered set of values (a string list in config) shown as checkboxes. */
     | { k: string; label: string; type: "multi"; options: [string, string][]; help?: string }
     /** Comma-separated list in one text input; kept in config as a string list. */
@@ -732,10 +517,7 @@ export default function SettingsPage() {
           help: t("settings.lyrics_search_aliases_help"),
         },
         {
-          k: "lyrics_youtube_captions", label: "Use YouTube captions (yt-dlp)", type: "bool",
-          help: "Time-synced captions, but only for tracks that carry a YouTube id — the id the video download records — so this never searches YouTube for a track. Automatic captions are used when a video has no typed subtitles and can mishear; needs yt-dlp under Dependencies, otherwise the provider is skipped.",
-        },
-        { k: "lrc_timestamp_precision", label: "Timestamp precision (decimals)", type: "number", min: 2, max: 3 },
+          k: "lrc_timestamp_precision", label: "Timestamp precision (decimals)", type: "number", min: 2, max: 3 },
         { k: "lrc_strip_metadata", label: "Strip metadata tags ([ti:], [ar:])", type: "bool" },
         { k: "lrc_collapse_blank_lines", label: "Collapse blank lines", type: "bool" },
         { k: "lrc_enhanced_enabled", label: "Enhanced LRC (word timestamps)", type: "bool" },
@@ -761,16 +543,6 @@ export default function SettingsPage() {
       title: "DR / ReplayGain (script 7)",
       fields: [
         { k: "dr_replaygain_enabled", label: "Enabled", type: "bool" },
-        {
-          k: "replaygain_mode", label: "Gain mode", type: "select",
-          options: [["track", "Track gain"], ["album", "Album gain"], ["off", "Off — no gain applied"]],
-        },
-        { k: "replaygain_preamp_db", label: "Preamp (dB)", type: "number", min: -24, max: 24, step: 0.5 },
-        {
-          k: "replaygain_analyze_missing", label: "Measure tracks without ReplayGain tags instead of playing them at unity",
-          type: "bool",
-        },
-        { k: "replaygain_clip_protection", label: "Clip protection", type: "bool" },
         { k: "replaygain_skip_existing", label: "Skip files that already have RG tags", type: "bool" },
         { k: "force_dr_replaygain", label: "Force re-run", type: "bool" },
       ],
@@ -876,10 +648,6 @@ export default function SettingsPage() {
         { k: "write_log_grade", label: "Write LOG_GRADE scores", type: "bool" },
         { k: "write_replaygain_tags", label: "Write ReplayGain tags", type: "bool" },
         { k: "write_dynamic_range_tags", label: "Write DR tags", type: "bool" },
-        { k: "write_rating_tags", label: "Write RATING tags (your stars)", type: "bool",
-          help: "Rating a track also writes RATING (0-100, Picard's scale: one half-star = 10) into the file, "
-                + "and clearing a rating removes the tag. Off, ratings stay in the app only. Keeping it on is what "
-                + "makes an imported Picard-rated library and this app agree." },
         { k: "normalize_media_source", label: "Normalize MEDIA / SOURCE", type: "bool" },
         { k: "strip_source_on_cd", label: "Strip SOURCE on CD rips", type: "bool" },
         { k: "fill_empty_source", label: "Fill empty SOURCE on digital", type: "bool" },
@@ -908,7 +676,6 @@ export default function SettingsPage() {
         { k: "grade_include_log", label: "Allow LOG files", type: "bool" },
         { k: "grade_include_lrc", label: "Allow LRC files", type: "bool" },
         { k: "grade_include_accurip", label: "Allow .accurip files", type: "bool" },
-        { k: "grade_include_description", label: "Allow album description files (description.txt)", type: "bool" },
         { k: "grade_include_video", label: "Allow remuxed videos (MKV)", type: "bool" },
         { k: "grade_include_other", label: "Allow other files", type: "bool" },
         { k: "grade_check_raw_video", label: "Fail un-remuxed videos (VOB/AVI...)", type: "bool" },
@@ -925,18 +692,6 @@ export default function SettingsPage() {
       title: "Videos (script 11)",
       blurb: "Lossless remux: any video container → MKV with the video copied bit-exact and lossless audio converted to FLAC (level below); lossy audio (AC3/DTS/AAC) is copied rather than inflated into FLAC unless that is turned off. Captions/subtitles are always kept and verified — never removed. If the muxer refuses the video codec, H.264 is a last-resort fallback (off by default: it re-encodes the only copy). The original (e.g. the .VOB) is removed after a verified remux.",
       fields: [
-        { k: "youtube_enabled", label: "Fetch missing music videos from YouTube", type: "bool", help: "The master switch for every YouTube download: the album header's film button and a track's \"Download music video\" action both refuse to search while it is off. Script 11 itself never searches YouTube — it remuxes the video files already in the folder." },
-        { k: "youtube_max_height", label: "Maximum video height (px, 0 = best available)", type: "number", min: 0, max: 4320 },
-        {
-          k: "youtube_cookies_mode", label: "Cookies for YouTube", type: "select",
-          options: [["none", "None — anonymous"], ["file", "A cookies file (saved below)"], ["browser", "Read from a browser"]],
-          help: "Your own YouTube session is the only thing that opens an age-gated or members-only video — without it YouTube answers \"Sign in to confirm your age\" — and it stops the throttling a fresh IP gets. None: nothing is sent. A cookies file: the jar saved in the box below this row — paste a cookies.txt into it or drop the file on it, in Netscape format, which is what a browser-extension exporter like \"Get cookies.txt\" writes. Read from a browser: yt-dlp opens that browser's own cookie store — same machine, signed in to YouTube, and closed if its store is locked.",
-        },
-        {
-          k: "youtube_cookies_browser", label: "Browser to read cookies from", type: "select",
-          options: [["chrome", "Chrome"], ["chromium", "Chromium"], ["edge", "Edge"], ["firefox", "Firefox"], ["brave", "Brave"], ["opera", "Opera"], ["safari", "Safari"], ["vivaldi", "Vivaldi"], ["whale", "Whale"]],
-          help: "Which browser \"Read from a browser\" opens, using its DEFAULT profile. Pick the one you are signed in to YouTube with.",
-        },
         { k: "video_reencode_incompatible", label: "Allow H.264 video fallback (lossy re-encode, last resort)", type: "bool" },
         { k: "video_lossy_audio_copy", label: "Copy lossy audio streams instead of re-encoding to FLAC", type: "bool" },
         { k: "video_crf", label: "H.264 CRF (lower = better)", type: "number", min: 0, max: 51 },
@@ -996,73 +751,19 @@ export default function SettingsPage() {
       ],
     },
     {
-      title: "Downloads & playback",
-      blurb:
-        "What a downloaded (offline) copy holds, and which copy plays. Downloading caches a track on this device so it plays with the server away — see the Downloads page. Quality here is about the CACHE: the library's own audio is never touched, and streaming always serves the library file.",
-      fields: [
-        {
-          k: "download_codec", label: "Downloaded copies are", type: "select",
-          options: [["copy", "Copy (the file's own codec) — default"], ...CODEC_CHOICES.filter(([v]) => v !== "keep")],
-          help: "Copy stores exactly what the library holds — nothing is re-encoded, so a track is downloaded in the codec it is already in. "
-                + "Any other target re-encodes the track for this device's cache only (smaller downloads for a phone; the library file keeps its own format). "
-                + "There is no \"keep\" here: copy IS never re-encode.",
-        },
-        {
-          k: "download_bitrate", label: "Download bitrate (kbps) / Vorbis quality", type: "number", min: 0, max: 512,
-          help: "The re-encode's rate: kbps for MP3/AAC/Opus, Vorbis' own 0-10 quality scale for Ogg. 0 uses the codec's own "
-                + "default (MP3 320, AAC 256, Ogg 6, Opus 128). Ignored while the codec above is Copy, and by a lossless target.",
-        },
-        {
-          k: "playback_source", label: "Play tracks from", type: "select",
-          options: [["stream", "Streaming from the server — default"], ["downloaded", "The downloaded copy"]],
-          help: "Streaming asks the server for the library file even when a copy is downloaded; the downloaded copy plays what is cached, "
-                + "saving bandwidth and working with the server away. Either way a copy plays when the server cannot be reached.",
-        },
-        {
-          k: "gapless_playback", label: "Play albums without a gap between tracks", type: "bool",
-          help: "On, the player keeps the next track preloaded and hands the sound over at a natural track end, so an album plays as the CD did. "
-                + "Off, every track is loaded and started on its own — pick it for a device that dislikes the handover, or when a track's trailing silence is being swallowed.",
-        },
-        {
-          k: "infinite_playback", label: "Keep playing past the end of the queue", type: "bool",
-          help: "On, the queue's last track gets a few SIMILAR tracks appended as ORDINARY queue rows before it ends, so the play never stops — they reorder, "
-                + "remove and count like any other row, and nothing already in the queue is added twice. They are scored from this library's own tags, so no "
-                + "provider is asked and playback cannot hang on one; Repeat one still appends nothing. Off, the queue ends after its last track.",
-        },
-      ],
-    },
-    {
       title: "Server & remote access",
       blurb: "Where this server listens and the address clients should dial. A change to the port or host is picked up at the next start; the address is what a phone or desktop client is told to use.",
       fields: [
-        { k: "download_concurrency", label: "Files read at once for one download (1–8)", type: "number", min: 1, max: 8, help: "The reader pool behind a queue or offline-cache download: higher fills a socket faster, at the cost of staging more file data in memory." },
         { k: "server_host", label: "Listen address (0.0.0.0 = every interface)", type: "text", help: "Anything but 127.0.0.1 means other machines can reach this server — the login gate turns itself on there (see the Security tab)." },
         { k: "server_port", label: "Port", type: "number", min: 1, max: 65535 },
         { k: "server_public_url", label: "Public address clients should use (blank = this machine)", type: "text" },
       ],
     },
     {
-      title: "Home",
-      blurb:
-        "The Home section in the sidebar — its shelves are built from the library itself (recently added, best graded, top artists, favorites, wants, needs attention) with nothing fetched online.",
-      fields: [
-        { k: "home_recent_count", label: "Recently-added albums shown", type: "number", min: 4, max: 60 },
-      ],
-    },
-    {
       title: "Discovery",
       blurb:
-        "Online providers (Deezer, ListenBrainz, MusicBrainz, Last.fm, Wikipedia…) used for artist images and album/artist descriptions. Each order list is tried top to bottom; the first provider with a usable answer wins. An empty list means the built-in order shown as the placeholder.",
+        "The RateYourMusic and Spotify credentials the link and advisory sources ask for; each is optional, and a source without its key is simply skipped.",
       fields: [
-        {
-          k: "artist_image_sources", label: "Artist image sources (order)", type: "list", catalog: "discovery",
-          help: "Used when fetching an artist image automatically; the picked image can still be overridden per artist.",
-        },
-        {
-          k: "description_sources", label: "Description sources (order)", type: "list", catalog: "discovery",
-          help: "Used for artist and album descriptions.",
-        },
-        { k: "discovery_timeout_s", label: "Request timeout (s)", type: "number", min: 3, max: 30 },
         {
           k: "rym_cookie", label: "RateYourMusic cookie", type: "password",
           help: "Only needed when RYM answers with a challenge. Two ways in: the import panel below takes a cookies.txt in Netscape format — what a browser-extension exporter like \"Get cookies.txt\" writes — pasted into the box or dropped on it, and keeps only its rateyourmusic.com cookies; or open the devtools route — sign in to rateyourmusic.com, press F12 → Network → reload → click any request to rateyourmusic.com → Headers → Request Headers → copy everything after \"Cookie:\" and paste it in the field above (newlines and the \"Cookie:\" label are handled for you). RYM's `session` cookie is HttpOnly, so a browser extension's export is the only way to get it out of a browser at all. It is a session credential — do not share it, and paste a fresh one when RYM starts refusing, since signing out or clearing cookies invalidates it. Blank = RYM is skipped like any other unavailable source; MusicBrainz still resolves RYM links for well-known releases. Test it with the Sources panel's Test button.",
@@ -1079,29 +780,6 @@ export default function SettingsPage() {
           k: "spotify_client_secret", label: "Spotify client secret (optional)", type: "password",
           help: "Pairs with the client ID above — both are needed before the Spotify lookup runs.",
         },
-        { k: "discovery_enabled", label: "Use online discovery providers", type: "bool", help: "Off, the Home shelves and every artist/album lookup answer from the library and MusicBrainz alone: no Deezer, ListenBrainz, Last.fm or Wikipedia request leaves the machine." },
-      ],
-    },
-    {
-      title: "Artist images & descriptions",
-      blurb:
-        "Artwork and text that live next to the audio: artist photos stored with the artist, and descriptions stored in non-destructive tags. Grading can require them (see the Grading tab).",
-      fields: [
-        { k: "metadata_auto_fetch", label: "Fetch artist image / descriptions on import", type: "bool" },
-        { k: "metadata_review", label: "Review metadata candidates before writing them", type: "bool" },
-        { k: "artist_image_enabled", label: "Fetch artist images", type: "bool" },
-        { k: "artist_image_crop", label: "Crop artist images to the configured aspect", type: "bool" },
-        // The Settings page's own CfgField text member carries no pattern pair
-        // (only configMeta's does, and the wizard is what consumes it), so this
-        // row keeps the shape in its help text instead.
-        {
-          k: "artist_image_aspect", label: "Artist image aspect (W:H)", type: "text",
-          help: "Width:height, e.g. 1:1 (square), 4:5, 16:9. The shape artist images are stored in: the fetch crops to it, grading fails an image further than 2% from it, and script 19 (Optimize artist images) crops the ones already in the library back to it.",
-        },
-        { k: "artist_image_target_size", label: "Artist image max size (px, 0 = keep native size)", type: "number", min: 0, max: 4000 },
-        { k: "artist_description_enabled", label: "Fetch artist descriptions", type: "bool" },
-        { k: "album_description_enabled", label: "Fetch album descriptions", type: "bool" },
-        { k: "description_full", label: "Fetch the full description text (not just the summary)", type: "bool" },
       ],
     },
     {
@@ -1170,24 +848,6 @@ export default function SettingsPage() {
           // row says whether it can answer per track or only for the release.
           options: genreOptions,
           help: "The genres the sources answer with are merged, deduped and capped at the count above, per track. MusicBrainz is the app's own identity anchor — it also supplies the family every list ends with — so leave it on in most setups.",
-        },
-        {
-          k: "web_ratings_enabled", label: "Web ratings (script 24)", type: "bool",
-          help: "Asks the public sources below for an album's and each track's score and writes them beside your own stars as WEBRATING / ALBUMWEBRATING (plus a _SOURCE tag naming who answered). Your own RATING is never touched — the star field always prefers it, and a web value is drawn in its own dimmer tone. Folded in fill-only, so nothing already on a file is overwritten unless force_web_ratings is set — by hand or through the Force menu (24 · Web ratings re-fetch).",
-        },
-        {
-          k: "web_ratings_sources", label: "Web rating sources — priority order, asked top to bottom", type: "multi",
-          options: [
-            ["rateyourmusic", "RateYourMusic — answers for the album AND for each track (one song page per track); needs the cookie above, or an archived page"],
-            ["musicbrainz", "MusicBrainz — the release group for the album, the recording (then its work) for a track"],
-            ["albumoftheyear", "Album of the Year — the album only; the site publishes no track scores"],
-            ["discogs", "Discogs — the release only; needs the discogs token above"],
-          ],
-          help: "Only these four ids are understood; anything else is ignored. All four ship, RateYourMusic first — it leads because it is the widest verdict the app can read (one score from tens of thousands of ratings) and it answers at BOTH levels: the release page for the album, and each track's own song page (found by slug and verified against the page's own title and artist before it is believed). MusicBrainz and RYM are the only two that rate a track; Album of the Year and Discogs are album-only. The archive-backed sources (RYM when its live page refuses, Album of the Year, Discogs) are cached 30 days, misses included, and RYM's per-track lookups are paced at one request per second, so a first pass over an album costs seconds rather than milliseconds — a first-run cost per album, not a per-run one. Each source's own vote count weights the average, so a score from 49,000 ratings counts for more than one from 16. A value is written only when at least one source answered, and the album's score and a track's are separate facts — neither is invented from the other.",
-        },
-        {
-          k: "aoty_archive_fallback", label: "Album of the Year: read archived pages", type: "bool",
-          help: "On (the default), albumoftheyear.org is read from its newest archived capture. The site answers every automated client with a Cloudflare 403 — plain HTTP, headless and headed browsers alike, all measured — so the archive is the only route that works. Off, the source contributes nothing.",
         },
         {
           k: "rym_archive_fallback", label: "RateYourMusic: fall back to archived pages", type: "bool",
@@ -1292,17 +952,14 @@ export default function SettingsPage() {
       k: "grade_check_genre_vocab", label: "Genre vocabulary (MusicBrainz)", type: "bool",
       help: "Every GENRE name must be one MusicBrainz publishes (shoegaze, dream pop, …); an unknown name fails with issue code GENRE_VOCAB and is named in the report. Grading never rewrites the tag — run Auto tagging (8) or Format all (10) to canonicalize.",
     },
-    { k: "grade_check_album_description", label: "Album description stored", type: "bool" },
-    { k: "grade_check_artist_image", label: "Artist image stored", type: "bool" },
-    { k: "grade_check_artist_description", label: "Artist description stored", type: "bool" },
     { k: "grade_check_replaygain", label: "ReplayGain tags present (only when a file already carries one)", type: "bool" },
     { k: "grade_check_acoustid", label: "AcoustID tags present (only when a file already carries one)", type: "bool" },
   ];
   // Toggles the General tab renders by hand (they belong to no group tab) —
   // listed here so they load, save and search like every other setting.
   const GENERAL_TOGGLES: CfgField[] = [
-    { k: "auto_advance", label: "Auto-advance between Run All scripts", type: "bool" },
     { k: "show_sidecar_files", label: "Show sidecar files (cue/log/lrc/accurip) in library", type: "bool" },
+    { k: "auto_advance", label: "Auto-advance between Run All scripts", type: "bool" },
   ];
   const ALL_CFG_KEYS = [
     ...CFG_GROUPS.flatMap((g) => g.fields),
@@ -1355,9 +1012,6 @@ export default function SettingsPage() {
     next.delete("tab");
     setParams(next, { replace: true });
   };
-  // This browser's own notification permission, re-read on mount so the
-  // panel shows the truth even when it was granted in another tab.
-  const [notifyState, setNotifyState] = useState<NotifyState>(() => notificationState());
   const [runAll, setRunAll] = useState<number[]>(DEFAULT_RUN_ALL);
   const [beetsBusy, setBeetsBusy] = useState(false);
   const { data: beetsStatus, refetch: refetchBeets } = useQuery({
@@ -1426,9 +1080,6 @@ export default function SettingsPage() {
     // (`web/src/lib/force.ts` keeps the two lists in step; it used to be
     // missing here, which left the master toggle unable to turn the fixer off).
     { k: "layout_apply", label: "20 · Layout fix (rename / gather)" },
-    // Script 24's runner only FILLS a missing web-rating tag; this switch is
-    // what re-fetches one a file already carries.
-    { k: "force_web_ratings", label: "24 · Web ratings re-fetch" },
   ];
 
   /** The server-side notification switches — one per event kind the backend
@@ -1445,8 +1096,6 @@ export default function SettingsPage() {
     { id: "security", label: t("settings.security") },
     { id: "notifications", label: t("settings.notifications") },
     { id: "remote", label: "Remote access" },
-    { id: "downloads", label: "Downloads & playback" },
-    { id: "home", label: "Home" },
     { id: "naming", label: "Naming" },
     { id: "storage", label: "Storage" },
     { id: "tagwrites", label: "Tagging" },
@@ -1456,7 +1105,6 @@ export default function SettingsPage() {
     { id: "deps", label: "Dependencies", section: "Integrations" },
     { id: "discovery", label: "Discovery", section: "Providers" },
     { id: "sources", label: "Sources", section: "Providers" },
-    { id: "artistimages", label: "Artist images", section: "Providers" },
     { id: "ai", label: "AI", section: "Providers" },
     { id: "import", label: "Import", section: "Providers" },
     { id: "flac", label: "FLACs & lossless", section: "Scripts" },
@@ -1535,30 +1183,6 @@ export default function SettingsPage() {
     setLoaded(true);
   }, [config, loaded]);
 
-  /** Apply an accent for this browser: a preset id or a custom "#rrggbb". The
-   *  value is stored AND painted — the paint is what makes every other page
-   *  (and the canvases, via lib/accent's subscribers) follow along without a
-   *  reload. */
-  const pickAccent = (id: string) => {
-    setAccent(id);
-    localStorage.setItem("mlo.accent", id);
-    applyAccent(id);
-    const hex = presetHex(id);
-    // A preset pick moves the custom row onto it too, so the picker and the
-    // text field always show the colour actually in force.
-    if (hex) {
-      lastPreset.current = id;
-      setCustomHex(hex);
-      setCustomText(hex);
-    }
-  };
-
-  // The custom row's two derived facts: what the text field currently spells,
-  // and whether the accent in force IS a custom colour (a preset id never
-  // parses as a hex).
-  const typedHex = normalizeHex(customText);
-  const customActive = parseHexColor(accent) !== null;
-
   const pickDefaultView = (v: string) => {
     setDefaultView(v);
     localStorage.setItem("mlo.defaultView.v2", v);
@@ -1592,11 +1216,11 @@ export default function SettingsPage() {
     toast("Settings reset to defaults — click Save all settings to persist");
   };
 
-  /** Clear every UI preference this browser kept: accent, sidebar collapse,
-   *  grid sizes, table column layouts and widths, custom columns, the
-   *  fullscreen player's look, and the lyrics editor's key map. None of it
-   *  lives in the server config, so "Reset to defaults" above cannot reach
-   *  it — and a reload is what makes the built-in defaults apply again. */
+  /** Clear every UI preference this browser kept: sidebar collapse,
+   *  grid sizes, table column layouts and widths, custom columns, and the
+   *  lyrics editor's key map. None of it lives in the server config, so
+   *  "Reset to defaults" above cannot reach it — and a reload is what makes
+   *  the built-in defaults apply again. */
   const resetUiLayout = () => {
     const keys = Object.keys(localStorage).filter((k) => k.startsWith("mlo"));
     keys.forEach((k) => localStorage.removeItem(k));
@@ -1666,9 +1290,8 @@ export default function SettingsPage() {
       ["audiometa", "Key & BPM"], ["beets", "Beets tagging"],
       ["storage", "Storage & cleanup"],
       ["releasechoice", "Release choice"], ["remote", "Server & remote access"],
-      ["downloads", "Downloads & playback"],
-      ["home", "Home"], ["deps", "Dependencies"],
-      ["discovery", "Discovery"], ["artistimages", "Artist images"], ["ai", "AI lyric transforms"], ["import", "Import pipeline"],
+      ["deps", "Dependencies"],
+      ["discovery", "Discovery"], ["ai", "AI lyric transforms"], ["import", "Import pipeline"],
       ["importtags", "Import & tag cleanup"],
     ].map(([tab, prefix]) => [
       tab,
@@ -1774,8 +1397,7 @@ export default function SettingsPage() {
 
   // Catalogues behind the `list` fields: pickable providers plus the built-in
   // order, shown as the placeholder while a list is empty.
-  const listCatalogs: Record<"discovery" | "lyrics", { options: ProviderOption[]; builtin: (k: string) => string[] }> = {
-    discovery: { options: discoveryCat?.sources ?? [], builtin: (k) => discoveryCat?.defaults?.[k] ?? [] },
+  const listCatalogs: Record<"lyrics", { options: ProviderOption[]; builtin: (k: string) => string[] }> = {
     // Only time-synced providers are pickable: a plain-lyrics-only entry has
     // no place in the chain (the `synced` flag comes from the endpoint).
     lyrics: {
@@ -2160,81 +1782,6 @@ export default function SettingsPage() {
                   <span className="w-9 text-right tabular-nums">{zoom}%</span>
                 </span>
               </label>
-              <div>
-                <span className="text-xs text-zinc-500 uppercase">{t("settings.accent")}</span>
-                <div className="flex flex-wrap gap-2 mt-1.5">
-                  {ACCENT_OPTIONS.map((a) => (
-                    <button
-                      key={a.id}
-                      // The tick's OWN ink comes from the swatch's colour, so it
-                      // stays visible on a light preset (the old hardcoded black
-                      // vanished on every dark one).
-                      style={{
-                        backgroundColor: a.hex,
-                        borderColor: accent === a.id ? "#fff" : "#3f3f46",
-                        color: `rgb(${a.fg})`,
-                      }}
-                      title={t(ACCENT_LABEL[a.id])}
-                      aria-label={t(ACCENT_LABEL[a.id])}
-                      aria-pressed={accent === a.id}
-                      onClick={() => pickAccent(a.id)}
-                      className="h-8 w-8 rounded-lg border-2 flex items-center justify-center transition-transform hover:scale-110 tap"
-                    >
-                      {accent === a.id && <Check className="h-4 w-4" />}
-                    </button>
-                  ))}
-                </div>
-                {/* Custom colour: the native picker and the text field are two
-                    views of one value, and the field takes #rgb / #rrggbb with
-                    or without the hash — whichever form is to hand. */}
-                <div className="flex flex-wrap items-center gap-2 mt-2">
-                  <input
-                    type="color"
-                    value={customHex}
-                    title={t("settings.accent_custom")}
-                    aria-label={t("settings.accent_custom")}
-                    onChange={(e) => {
-                      setCustomHex(e.target.value);
-                      setCustomText(e.target.value);
-                    }}
-                    className="h-8 w-10 shrink-0 cursor-pointer rounded-lg border border-border bg-transparent p-0.5"
-                  />
-                  <input
-                    value={customText}
-                    spellCheck={false}
-                    placeholder="#ff7a18"
-                    title={t("settings.accent_hex")}
-                    aria-label={t("settings.accent_hex")}
-                    onChange={(e) => {
-                      setCustomText(e.target.value);
-                      // Only a WHOLE colour moves the swatch, so the field can be
-                      // typed through "#ff7", "#ff7a18" without the picker
-                      // jumping to a colour that was never meant.
-                      const next = normalizeHex(e.target.value);
-                      if (next) setCustomHex(next);
-                    }}
-                    className="input !w-28 !py-1 font-mono text-xs"
-                  />
-                  <button
-                    className="btn !py-1 text-xs tap"
-                    disabled={!typedHex}
-                    onClick={() => typedHex && pickAccent(typedHex)}
-                  >
-                    {t("settings.accent_use")}
-                  </button>
-                  {customText.trim() !== "" && !typedHex && (
-                    <span className="text-[10px] text-red-400">{t("settings.accent_invalid")}</span>
-                  )}
-                  {/* The presets are always one tap above; this is the way back
-                      for a colour that REPLACED the preset that was in force. */}
-                  {customActive && (
-                    <button className="btn-ghost !py-1 text-xs tap" onClick={() => pickAccent(lastPreset.current)}>
-                      {t("settings.accent_back")}
-                    </button>
-                  )}
-                </div>
-                <div className="text-[10px] text-zinc-600 mt-1">{t("settings.accent_help")}</div>
-              </div>
               <label className="block">
                 <span className="text-xs text-zinc-500 uppercase">Default library view</span>
                 <select className="input mt-1" value={defaultView} onChange={(e) => pickDefaultView(e.target.value)}>
@@ -2247,36 +1794,8 @@ export default function SettingsPage() {
               </label>
 
               <div className="pt-2 border-t border-border">
-                <span className="text-xs text-zinc-500 uppercase">Player &amp; lyrics display</span>
+                <span className="text-xs text-zinc-500 uppercase">Lyrics display</span>
                 <div className="space-y-2.5 mt-2">
-                  <label className="flex items-center justify-between gap-3 text-xs text-zinc-300">
-                    <span>Fullscreen lyrics size</span>
-                    <select
-                      className="input !w-28 !py-1 tap"
-                      value={localStorage.getItem("mlo.np.size") ?? "md"}
-                      onChange={(e) => localStorage.setItem("mlo.np.size", e.target.value)}
-                    >
-                      <option value="sm">Small</option>
-                      <option value="md">Medium</option>
-                      <option value="lg">Large</option>
-                    </select>
-                  </label>
-                  <label className="flex items-center justify-between gap-3 text-xs text-zinc-300 cursor-pointer">
-                    <span>Karaoke word highlight (vs. whole-line)</span>
-                    <input
-                      type="checkbox"
-                      defaultChecked={localStorage.getItem("mlo.np.karaoke") === "1"}
-                      onChange={(e) => localStorage.setItem("mlo.np.karaoke", e.target.checked ? "1" : "0")}
-                    />
-                  </label>
-                  <label className="flex items-center justify-between gap-3 text-xs text-zinc-300 cursor-pointer">
-                    <span>Animated background in fullscreen player</span>
-                    <input
-                      type="checkbox"
-                      defaultChecked={localStorage.getItem("mlo.np.orbs") !== "0"}
-                      onChange={(e) => localStorage.setItem("mlo.np.orbs", e.target.checked ? "1" : "0")}
-                    />
-                  </label>
                   <label className="flex items-center justify-between gap-3 text-xs text-zinc-300">
                     <span>Default lyrics save target</span>
                     <select
@@ -2290,7 +1809,7 @@ export default function SettingsPage() {
                     </select>
                   </label>
                 </div>
-                <div className="text-[10px] text-zinc-600 mt-2">Stored per browser, like the accent color.</div>
+                <div className="text-[10px] text-zinc-600 mt-2">Stored per browser.</div>
               </div>
             </div>
           )}
@@ -2389,7 +1908,7 @@ export default function SettingsPage() {
               {caps && deviceReason && (
                 <div className="rounded-md border border-border bg-bg/60 px-3 py-2 text-[11px] text-zinc-400 leading-relaxed">
                   <span className="text-amber-400">Unavailable on this device</span> — {deviceReason}. Browsing,
-                  tagging, playing, playlists and lyrics work here; the {unavailable.length} other feature
+                  tagging and lyrics work here; the {unavailable.length} other feature
                   {unavailable.length === 1 ? "" : "s"} need a tool this device can start.
                 </div>
               )}
@@ -2495,12 +2014,6 @@ export default function SettingsPage() {
               <div className="text-xs font-bold text-zinc-300">{GROUP_BY_TAB[tab].title}</div>
               {GROUP_BY_TAB[tab].blurb && <div className="text-[10px] text-zinc-600">{GROUP_BY_TAB[tab].blurb}</div>}
               {renderFields(GROUP_BY_TAB[tab].fields)}
-              {/* The on-device playback report belongs beside the playback
-                  settings it explains: this is the block the owner opens on the
-                  phone that misbehaves (lib/pbDiag holds the black box, and the
-                  panel is deliberately collapsible so Settings stays readable
-                  for everyone else). */}
-              {tab === "downloads" && <PlaybackDiag />}
               {tab === "ai" && (
                 <div className="pt-2 border-t border-border space-y-1">
                   <AiTestButton value={scriptCfg} />
@@ -2515,7 +2028,6 @@ export default function SettingsPage() {
                   <CoverDefaults />
                 </div>
               )}
-              {tab === "videos" && <YoutubeCookieJar />}
               {tab === "discovery" && <RymCookieJar onStored={(v) => setCfg("rym_cookie", v)} />}
               {tab === "beets" && (
                 <div className="pt-2 border-t border-border space-y-2">
@@ -2654,26 +2166,6 @@ export default function SettingsPage() {
                 {t("settings.notifications")}
               </div>
               <p className="text-[11px] text-zinc-600 leading-relaxed">{t("settings.notifications_help")}</p>
-              <div className="flex flex-wrap items-center gap-2">
-                <button
-                  className="btn-ghost !py-1.5 text-xs tap"
-                  onClick={async () => {
-                    const state = await requestNotifications();
-                    setNotifyState(state);
-                    if (state === "granted") toast.success(t("notify.enabled"));
-                    else if (state === "denied") toast.error(t("notify.blocked_help"));
-                  }}
-                >
-                  <Bell className="h-3.5 w-3.5" /> {t("notify.enable")}
-                </button>
-                <span className="text-[11px] text-zinc-500">
-                  {notifyState === "granted"
-                    ? t("notify.title_granted")
-                    : notifyState === "denied"
-                    ? t("notify.blocked")
-                    : t("notify.enable")}
-                </span>
-              </div>
               <div className="flex flex-wrap gap-x-6 gap-y-1.5">
                 {NOTIFY_KEYS.map((f) => (
                   <label key={f.k} className="flex items-center gap-2 text-xs text-zinc-300 cursor-pointer select-none">
@@ -2697,7 +2189,7 @@ export default function SettingsPage() {
             <ConfirmButton
               onConfirm={resetUiLayout}
               confirmLabel="Reset layout"
-              title="Clear this browser's UI preferences — accent, sidebar, grid sizes, column layouts and widths, custom columns, viewer options — and reload"
+              title="Clear this browser's UI preferences — sidebar, grid sizes, column layouts and widths, custom columns, viewer options — and reload"
             >
               <LayoutGrid className="h-4 w-4" /> Reset UI & layout
             </ConfirmButton>

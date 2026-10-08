@@ -1,30 +1,22 @@
 import { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useParams, useNavigate, Link } from "react-router-dom";
-import { Save, Play, Disc3, ListPlus, ListStart, ListMusic, ShieldCheck, ImageUp, Clapperboard, Search, FolderOpen, Users, Info } from "lucide-react";
+import { Save, Disc3, ShieldCheck, ImageUp, Clapperboard, Search, FolderOpen, Users, Info } from "lucide-react";
 import { api } from "../api";
 import { fmtTech, fmtDuration, isVideoFile } from "../lib/fmt";
-import { uncacheTrack } from "../lib/mediaCache";
 import { LinkEditorButton, MbIcon, RymIcon } from "../components/Links";
-import { SubtitledVideo } from "../components/SubtitledVideo";
-import { useStore, toast } from "../store";
+import { toast } from "../store";
 import { AuditBadge, DisambiguationMark, GradeBadge, IssueList, EmptyState, PageLoading, LyricsKindChip, allowPlainOf, isInstrumental } from "../components/Badges";
 import CoverImg from "../components/CoverImg";
-import DownloadButton from "../components/DownloadButton";
 import { ExportButton } from "../components/ExportDialog";
 import LyricsViewer from "../components/LyricsViewer";
 import LyricsManagerModal from "../components/LyricsManagerModal";
 import LyricsEditorModal from "./../components/LyricsEditorModal";
 import OverflowMenu from "../components/OverflowMenu";
 import PageHeader from "../components/PageHeader";
-import StarRating from "../components/StarRating";
-import { ratingOf, useRatings, useSetRating, trackWebRating, webStarProps } from "../lib/ratings";
 import TagActionsMenu from "../components/TagActionsMenu";
 import Modal from "../components/Modal";
-import MoreLikeThis from "../components/MoreLikeThis";
-import OnlineRecommendations from "../components/OnlineRecommendations";
 import LockedChip from "../components/LockedChip";
-import { useLockWhy } from "../lib/locks";
 import TrackDetails, { CreditsPanel, creditTagsFrom } from "../components/TrackDetails";
 import { failedChecksOf, invalidValueReason, isExcessTag, tagInfoOf, tagLabel, tagTooltip, useTagRegistry } from "../lib/tags";
 
@@ -32,12 +24,6 @@ export default function TrackPage() {
   const { path = "" } = useParams();
   const decoded = decodeURIComponent(path);
   const qc = useQueryClient();
-  const playNow = useStore((s) => s.playNow);
-  const queue = useStore((s) => s.queue);
-  const queueAdd = useStore((s) => s.queueAdd);
-  // Held by a job right now? Then there is no stream to play and the page says
-  // why up front, in the server's own words.
-  const lockWhy = useLockWhy(decoded);
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["track-tags", decoded],
@@ -73,17 +59,10 @@ export default function TrackPage() {
   const [managerOpen, setManagerOpen] = useState(false);
   const [editorOpen, setEditorOpen] = useState(false);
   const [coverBusy, setCoverBusy] = useState(false);
-  const [videoOpen, setVideoOpen] = useState(false);
   const [creditsOpen, setCreditsOpen] = useState(false);
   // This track's own details modal — TrackDetails renders the stored readout.
   const [detailsOpen, setDetailsOpen] = useState(false);
   const coverInput = useRef<HTMLInputElement>(null);
-  // One GET /api/ratings for the page (react-query dedupes it across rows) and
-  // the optimistic setter — declared with the other hooks, ABOVE the early
-  // returns below: a hook after a conditional return is a crash on the second
-  // render, which is exactly how this page broke once already.
-  const { data: ratingsData } = useRatings();
-  const { setRating, pending } = useSetRating();
 
   const tags: Record<string, string> = {};
   for (const [k, v] of Object.entries(data?.tags ?? {})) {
@@ -160,34 +139,6 @@ export default function TrackPage() {
     qc.invalidateQueries({ queryKey: ["album", albumDir] });
   };
 
-  // The page's own rating state: one GET /api/ratings for the whole page,
-  // and the same optimistic setter the rows use.
-  const ratings = ratingsData?.ratings;
-
-  const queueTrack = {
-    path: realPath, file: fileName, albumPath: albumDir,
-    artist: tags.ALBUMARTIST ?? tags.ARTIST, album: tags.ALBUM, title: tags.TITLE || undefined,
-    advisory: tags.ITUNESADVISORY ?? null,
-  };
-  const enqueue = (position: "next" | "end") => {
-    if (!queue.length) {
-      playNow([queueTrack]);
-      return;
-    }
-    queueAdd([queueTrack], position);
-    toast(position === "next" ? "Playing next" : "Added to the queue");
-  };
-  const addToPlaylist = async () => {
-    const pls = await api.playlists();
-    const manual = pls.find((p) => p.kind === "manual");
-    if (!manual) {
-      const created = await api.createPlaylist("Library selection", "manual");
-      await api.playlistAdd(created.id, [decoded]);
-    } else {
-      await api.playlistAdd(manual.id, [decoded]);
-    }
-    toast.success("Added to playlist");
-  };
   const openFolder = async () => {
     try {
       await api.openFolder(albumDir);
@@ -263,31 +214,6 @@ export default function TrackPage() {
 
   return (
     <div className="p-6 space-y-5 mx-auto max-w-[1600px]">
-      {/* A music video in a dialog, not a hand-rolled overlay: the portal,
-          backdrop click, Escape, focus trap and the phone sheet all come from
-          `Modal` (#53) — the old `fixed inset-0 z-50` box had none of them, so
-          on iOS the only way out was the one Close button, and the file name
-          scrolled under the video on a phone. The name is the dialog title and
-          the Close sits in the pinned footer, both always reachable. */}
-      {videoOpen && isVideo && (
-        <Modal
-          onClose={() => setVideoOpen(false)}
-          title={fileName}
-          icon={Clapperboard}
-          width="max-w-4xl"
-          bodyClass="p-2"
-          footer={
-            <div className="flex justify-end">
-              <button className="btn-ghost !py-1.5 tap" onClick={() => setVideoOpen(false)}>
-                Close
-              </button>
-            </div>
-          }
-        >
-          <SubtitledVideo path={decoded} className="w-full max-h-[70vh] rounded-lg border border-border bg-black" />
-        </Modal>
-      )}
-
       <PageHeader
         overline="Track"
         title={
@@ -303,17 +229,6 @@ export default function TrackPage() {
         }
         subtitle={
           <>
-        {/* the track's own star rating — large, with the numeric value
-            beside it, so it reads as a fact about this file */}
-        <StarRating
-          size="lg"
-          showValue
-          label="Track rating"
-          value={ratingOf(ratings, realPath)}
-          onChange={(v) => setRating(realPath, v)}
-          pending={pending(realPath)}
-          {...webStarProps(trackWebRating(tags))}
-        />
             <Link to={tags.MUSICBRAINZ_ALBUMID ? `/album/mb:${tags.MUSICBRAINZ_ALBUMID}` : `/album/${encodeURIComponent(albumDir)}`} className="hover:text-accent-soft">
               {tags.ALBUM || albumDir.split("/").pop()}
             </Link>
@@ -325,18 +240,6 @@ export default function TrackPage() {
         }
         actions={
           <>
-            <button
-              className={`btn-ghost${lockWhy ? " opacity-60" : ""}`}
-              onClick={() => playNow([queueTrack])}
-              title={lockWhy || "Play this track"}
-            >
-              <Play className="h-4 w-4 fill-current" /> Play
-            </button>
-            <DownloadButton
-              paths={realPath ? [realPath] : []}
-              size="md"
-              emptyReason="Nothing to download — this track has no file"
-            />
             {/* one track in, one file out — the server never archives a
                 single-track export */}
             <ExportButton
@@ -371,9 +274,6 @@ export default function TrackPage() {
                 {
                   items: [
                     { label: "Find lyrics", icon: Search, onClick: () => setManagerOpen(true) },
-                    { label: "Add to playlist", icon: ListPlus, onClick: addToPlaylist },
-                    { label: "Play next", icon: ListStart, onClick: () => enqueue("next") },
-                    { label: "Add to queue", icon: ListMusic, onClick: () => enqueue("end") },
                   ],
                 },
                 {
@@ -382,7 +282,6 @@ export default function TrackPage() {
                     { label: "Details", icon: Info, onClick: () => setDetailsOpen(true), disabled: !track,
                       title: "Stored tags, technical readout, failed checks and the AudioAuditor verdict for this track" },
                     { label: "Credits", icon: Users, onClick: () => setCreditsOpen(true) },
-                    { label: "Watch video", icon: Clapperboard, hidden: !isVideo, onClick: () => setVideoOpen(true) },
                     { label: "Open album folder", icon: FolderOpen, onClick: openFolder },
                   ],
                 },
@@ -411,12 +310,11 @@ export default function TrackPage() {
               user's `lyrics_allow_plain` says plain is not acceptable — never
               for a track with no lyrics at all (nothing is rendered then), and
               never for an INSTRUMENTAL one either: the app hides its stored
-              words everywhere (`npLyricsMode`), so grading them here told the
-              reader a track with no words to sync "should hold a synced
-              version" (reported). */}
+              words, so grading them here told the reader a track with no
+              words to sync "should hold a synced version" (reported). */}
           {isInstrumental(tags) ? (
             <span className="chip border border-border bg-zinc-800 text-zinc-400"
-                  title="Instrumental track — its stored lyrics stay hidden, as in the player">
+                  title="Instrumental track — its stored lyrics stay hidden">
               Instrumental
             </span>
           ) : (
@@ -591,21 +489,6 @@ export default function TrackPage() {
         </div>
       </div>
 
-      {/* Two shelves, side by side: tracks the LOCAL scorer ranks closest to
-          this one from elsewhere in the library (its own album excluded), and
-          what the online providers suggest for this track. The online shelf
-          has its own loading state, so it never delays the page. */}
-      <div className="grid gap-4 lg:grid-cols-2 items-start">
-        <MoreLikeThis kind="track" id={decoded} />
-        <OnlineRecommendations
-          kind="tracks"
-          seedKind="track"
-          seedMbid={tags.MUSICBRAINZ_TRACKID ?? ""}
-          seedName={tags.TITLE ?? fileName}
-          seedArtist={tags.ARTIST ?? ""}
-        />
-      </div>
-
       {managerOpen && (
         <LyricsManagerModal
           path={decoded}
@@ -649,7 +532,6 @@ export default function TrackPage() {
           artist={tags.ARTIST}
           track={tags.TITLE}
           album={tags.ALBUM || undefined}
-          duration={tech.length ? Math.round(tech.length) : undefined}
           initialLyrics={lyrics}
           onClose={() => setEditorOpen(false)}
           onSaved={refreshAfterEditor}
@@ -695,11 +577,9 @@ function VideoTagCard({
       if (advisory.trim()) clean.ITUNESADVISORY = advisory.trim();
       const r = await api.videoTag(path, clean);
       if (r.renamed) {
-        // the file moved (remux rename) — the old stream URL's offline cache
-        // entry would serve the stale file forever, and this page's own tags
-        // query would 404 on the path that no longer exists. The new path
-        // itself is announced by api.videoTag's container-swap toast.
-        await uncacheTrack(path);
+        // the file moved (remux rename) — this page's own tags query would
+        // 404 on the path that no longer exists. The new path itself is
+        // announced by api.videoTag's container-swap toast.
         navigate(`/track/${encodeURIComponent(r.path)}`, { replace: true });
       }
       toast("Tags written");

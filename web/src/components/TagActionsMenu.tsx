@@ -1,8 +1,8 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import {
-  ArrowDownToLine, BadgeInfo, Disc3, Ellipsis, ExternalLink, FileOutput, Film, ImagePlus, Info, Music2, Play,
+  BadgeInfo, Ellipsis, ExternalLink, FileOutput, Info, Music2, Play,
   RefreshCw, Sparkles, Tags, Users, Wand2,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
@@ -10,17 +10,13 @@ import { api } from "../api";
 import BulkTagsDialog from "./BulkTagsDialog";
 import ExportDialog from "./ExportDialog";
 import OverflowMenu from "./OverflowMenu";
-import MetadataReviewModal from "./MetadataReviewModal";
 import Modal from "./Modal";
 import { CreditsPanel } from "./TrackDetails";
 import { DetailsDialog } from "./AlbumDetails";
 import { advisoryOutcome } from "./Badges";
 import { entityKind, scriptSections, type ScriptEntry } from "../lib/scriptMenu";
 import { useI18n } from "../lib/i18n";
-import { CACHED_PATHS_KEY, CACHED_SIZES_KEY } from "../lib/mediaCache";
-import { downloadForOffline } from "../lib/offline";
 import { trackRef } from "../lib/refs";
-import { downloadTrackVideo } from "../lib/videoDownload";
 import { toast } from "../store";
 import type { EntityKind, ScriptRunResult } from "../types";
 
@@ -43,12 +39,13 @@ export default function TagActionsMenu({
 }: {
   /** The tracks/albums the actions apply to. */
   paths: string[];
-  /** Artist folder path or name — enables the artist image/description review. */
+  /** Artist folder path or name — scopes the artist-level scripts. */
   artist?: string;
   /** The artist's folder, when the caller has it: what a folder-scoped script
-   *  (the artist image, the layout of the artist's subtrees) runs on. */
+   *  (the layout of the artist's subtrees) runs on. */
   artistPath?: string;
-  /** Album folder — enables the album description review. */
+  /** Album folder — what the release-scoped actions (credits, cover search,
+   *  export, the album's own scripts) run on. */
   albumPath?: string;
   /** Release MBID, when known, so the advisory lookup can go straight to it. */
   releaseMbid?: string;
@@ -69,10 +66,8 @@ export default function TagActionsMenu({
    *  "…" where it is one more action among a row's others. */
   icon?: LucideIcon;
 }) {
-  const [review, setReview] = useState<null | "artist" | "album">(null);
   const [tagsOpen, setTagsOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
-  const qc = useQueryClient();
   // Credits / Details of the CURRENT selection. Per release, so they need an
   // album folder (the whole release) or exactly one file (that recording);
   // a multi-track selection without an album has nothing to show.
@@ -80,9 +75,6 @@ export default function TagActionsMenu({
   // The Run-all entry waits here while the user confirms it: a multi-script
   // pass over the selection is not a press to fire behind their back.
   const [confirmRunAll, setConfirmRunAll] = useState<ScriptEntry | null>(null);
-  // The video download asks the track's own tags for its title/artist/length
-  // before searching, so a press has a moment of work behind it.
-  const [videoBusy, setVideoBusy] = useState(false);
   const viewable = !!albumPath || paths.length === 1;
   const singleTrack = albumPath ? undefined : paths[0];
   const navigate = useNavigate();
@@ -92,63 +84,21 @@ export default function TagActionsMenu({
   // derives the kinds each script applies to from the runner's own code).
   const entity = entityKind({ kind, albumPath, artist, paths });
   // The ONE track this menu is ON — the only selection that may be opened as a
-  // page or searched for a music video. An album's folder menu and a multi-row
-  // selection have no single track, and guessing one of several is exactly what
-  // must not happen; `singleTrack` above is the FIRST of a list and is only
-  // used where `viewable` has already excluded the multi-selection.
+  // page. An album's folder menu and a multi-row selection have no single
+  // track, and guessing one of several is exactly what must not happen;
+  // `singleTrack` above is the FIRST of a list and is only used where
+  // `viewable` has already excluded the multi-selection.
   const menuTrack = entity === "track" && paths.length === 1 ? paths[0] : undefined;
   // The registry, asked once per session: ids, labels, groups, the stack's
   // order, each script's force flag and its feature switch. A menu that cannot
   // reach the server (or is still loading) simply shows no script entries —
-  // the tag editors, imports and reviews below are unaffected.
+  // the tag editors and imports below are unaffected.
   const { data: scripts } = useQuery({
     queryKey: ["script-menu"],
     queryFn: api.scriptMenu,
     staleTime: 5 * 60 * 1000,
   });
   const generated = scriptSections(scripts, entity, { paths, albumPath, artistPath });
-
-  /** Download the music video of the ONE track this menu is on.
-   *
-   *  The menu holds one fact about a listed track — its path — so the title,
-   *  artist and length the search needs are read off the file's own tags at
-   *  the press (the same read the track page makes), not guessed from the list
-   *  the row came from. The download itself is the album page's own
-   *  implementation (lib/videoDownload), so what this asks the server for is
-   *  what the film button beside a row used to. */
-  const downloadVideoHere = async () => {
-    if (!menuTrack || videoBusy) return;
-    setVideoBusy(true);
-    try {
-      const res = await api.tags(menuTrack);
-      const tags = (res?.tags ?? {}) as Record<string, string | null>;
-      const seconds = Number(res?.tech?.length ?? 0);
-      await downloadTrackVideo(
-        {
-          path: menuTrack,
-          artist: tags.ARTIST ?? tags.ALBUMARTIST ?? artist,
-          title: tags.TITLE ?? undefined,
-          duration: seconds > 0 ? Math.round(seconds) : undefined,
-          tracknumber: Number(tags.TRACKNUMBER) || null,
-          discnumber: Number(tags.DISCNUMBER) || null,
-        },
-        {
-          // A saved video changes the album's own tracklist and its video
-          // shelf. Prefix keys: this menu reaches the current page's queries
-          // without holding their album.
-          onSaved: () => {
-            qc.invalidateQueries({ queryKey: ["videos"] });
-            qc.invalidateQueries({ queryKey: ["album"] });
-          },
-        }
-      );
-      onDone?.();
-    } catch (e) {
-      toast.error(String(e));
-    } finally {
-      setVideoBusy(false);
-    }
-  };
 
   // Generic over the reply: each action reports from its OWN payload, so the
   // handler type is the real response shape, not a lowest common denominator.
@@ -290,49 +240,19 @@ export default function TagActionsMenu({
             ],
           },
           {
-            // What the selection is FOR, next to what it IS: the same two
-            // actions the album and track pages keep in their header row. The
-            // row menu had neither, so "download this track" and "export this
-            // album" both meant opening another page first (issue #50). Both
-            // entries run the SHARED implementations — lib/offline for the
-            // cache, the pages' own ExportDialog for the drive.
+            // What the selection is FOR, next to what it IS: the same export
+            // action the album and track pages keep in their header row. The
+            // row menu had none, so "export this album" meant opening another
+            // page first (issue #50); the entry runs the SHARED implementation
+            // — the pages' own ExportDialog for the drive.
             title: "Files",
             items: [
-              {
-                label: "Download for offline playback",
-                icon: ArrowDownToLine,
-                disabled: !paths.length,
-                title: "Cache the selection in this client for offline playback",
-                onClick: () => {
-                  void downloadForOffline(paths).then(() => {
-                    // Every "downloaded" mark and the downloads page's own byte
-                    // total read these two; both are stale the moment the cache
-                    // changes (see DownloadButton.rescan).
-                    qc.invalidateQueries({ queryKey: CACHED_PATHS_KEY });
-                    qc.invalidateQueries({ queryKey: CACHED_SIZES_KEY });
-                  });
-                },
-              },
               {
                 label: "Export…",
                 icon: FileOutput,
                 disabled: !paths.length,
                 title: "Transcode and save the selection to a drive",
                 onClick: () => setExportOpen(true),
-              },
-              {
-                // The music video of the one track this menu is on. It used to
-                // be a film button beside that track's own row (the album page's
-                // title cell), which read as a file mark rather than an action;
-                // the release-wide version stays the album header's film button,
-                // and the video overlay keeps its own while a video plays. All
-                // three run the ONE implementation in lib/videoDownload.
-                label: t("menu.downloadVideo"),
-                icon: Film,
-                hidden: !menuTrack,
-                disabled: videoBusy,
-                title: t("menu.downloadVideoHint"),
-                onClick: () => void downloadVideoHere(),
               },
             ],
           },
@@ -437,20 +357,8 @@ export default function TagActionsMenu({
               }]
             : []),
           {
-            title: "Artwork & text",
+            title: "Artwork",
             items: [
-              {
-                label: "Artist image + description…",
-                icon: ImagePlus,
-                hidden: !artist,
-                onClick: () => setReview("artist"),
-              },
-              {
-                label: "Album description…",
-                icon: Disc3,
-                hidden: !albumPath,
-                onClick: () => setReview("album"),
-              },
               {
                 label: "Cover search…",
                 icon: Sparkles,
@@ -500,16 +408,6 @@ export default function TagActionsMenu({
             ))}
           </ol>
         </Modal>
-      )}
-      {review && (
-        <MetadataReviewModal
-          artist={review === "artist" ? artist : undefined}
-          albumPath={review === "album" ? albumPath : undefined}
-          paths={review === "album" ? paths : undefined}
-          title={review === "artist" ? "Artist metadata" : "Album description"}
-          onClose={() => setReview(null)}
-          onSaved={onDone}
-        />
       )}
       {view === "credits" && (
         <Modal

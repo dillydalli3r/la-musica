@@ -561,7 +561,7 @@ try:
     # `load_config` alias patched above), so it is switched off HERE rather than
     # left to whatever auth state the machine happens to have.
     mlo_main.auth_mod.requires_login = lambda request, state: False
-    BASE = dict(embed_covers=False, playlists=False, sidecars=False,
+    BASE = dict(embed_covers=False, sidecars=False,
                 verify=True, workers=1)
 
     src_quiet, src_loud = lufs(quiet), lufs(loud)
@@ -733,7 +733,7 @@ try:
     os.makedirs(DEST_MP3)
     first_mp3 = exporter.export_tracks(CFG, [loud], DEST_MP3, codec="mp3",
                                        eq_profile="test_bass", embed_covers=False,
-                                       playlists=False, sidecars=False, verify=True)
+                                       sidecars=False, verify=True)
     assert first_mp3["exported"] == 1 and first_mp3["eq_applied"] == 1, first_mp3
     mp3_out = os.path.join(DEST_MP3, "Music", "Artist One", "Album A",
                            "1-02 Loud.mp3")
@@ -741,7 +741,7 @@ try:
         AudioFile(mp3_out).all_tags()
     again_mp3 = exporter.export_tracks(CFG, [loud], DEST_MP3, codec="mp3",
                                        eq_profile="test_bass", embed_covers=False,
-                                       playlists=False, sidecars=False, verify=True)
+                                       sidecars=False, verify=True)
     assert (again_mp3["exported"], again_mp3["skipped"]) == (0, 1), again_mp3
 
     # A profile id that no longer exists fails every track that asked for it
@@ -901,7 +901,7 @@ try:
     broken_run = client.post("/api/export", json={
         "paths": [loud], "dest": DEST_BROKEN, "codec": "flac",
         "structure": exporter.DEFAULT_STRUCTURE, "eq_profile": "half_broken",
-        "embed_covers": False, "playlists": False, "sidecars": False})
+        "embed_covers": False, "sidecars": False})
     assert broken_run.status_code == 200, broken_run.text[:300]
     broken_body = broken_run.json()
     assert broken_body["failed"] == 1 and broken_body["eq_applied"] == 0, broken_body
@@ -1133,7 +1133,7 @@ try:
         res = client.post("/api/export", json={
             "paths": [tagged_track, sidecar_track], "dest": dest, "codec": "flac",
             "structure": exporter.DEFAULT_STRUCTURE, "embed_covers": False,
-            "playlists": False, "sidecars": False, "lyrics": mode})
+            "sidecars": False, "lyrics": mode})
         assert res.status_code == 200, res.text[:300]
         run = res.json()
         assert run["failed"] == 0, run["errors"]
@@ -1189,7 +1189,7 @@ try:
     partial = client.post("/api/export", json={
         "paths": [tagged_track], "dest": PARTIAL_DIR,
         "codec": "flac", "structure": exporter.DEFAULT_STRUCTURE,
-        "embed_covers": False, "playlists": False, "sidecars": False, "lyrics": "lrc"})
+        "embed_covers": False, "sidecars": False, "lyrics": "lrc"})
     assert partial.status_code == 200, partial.text[:200]
     partial_run = partial.json()
     assert {f["name"] for f in partial_run["excluded"] if f["kind"] == "lyrics"} == \
@@ -1219,7 +1219,7 @@ try:
     # ---------------------------------------------------- zip target
     zip_body = {"paths": [quiet, loud], "dest": "", "target": "zip",
                 "codec": "flac", "quality": "", "structure": exporter.DEFAULT_STRUCTURE,
-                "manifest": True, "playlists": True, "sidecars": False,
+                "manifest": True, "sidecars": False,
                 "embed_covers": False, "verify": True, "workers": 1}
     run = client.post("/api/export", json=zip_body)
     assert run.status_code == 200, run.text[:400]
@@ -1239,11 +1239,11 @@ try:
     with zipfile.ZipFile(io.BytesIO(download.content)) as zf:
         names = sorted(zf.namelist())
         # The archive opens as the folder structure the run asked for — the
-        # selection, its playlist and the checksum manifest, nothing else.
+        # selection and the checksum manifest, nothing else (playlists are gone,
+        # so no `.m3u8` is written by any run).
         assert names == ["Artist One/Album A/1-01 Quiet.flac",
                          "Artist One/Album A/1-02 Loud.flac",
-                         "Artist One/Album A/Album A.m3u8",
-                         "all.m3u8", "checksums.sha256"], names
+                         "checksums.sha256"], names
         manifest = zf.read("checksums.sha256").decode("utf-8").splitlines()
         assert len(manifest) == len(names) - 1, manifest
         for line in manifest:

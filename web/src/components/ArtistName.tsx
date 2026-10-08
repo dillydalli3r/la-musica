@@ -6,28 +6,21 @@ import type { ArtistGradeIssue } from "../types";
 
 /** An artist's name, with the artist's OWN verdict beside it.
  *
- *  The artist's own grade (`mlo.grader.grade_artist` — the artist image and
- *  the description stored in the artist folder, never the album checks) is one
- *  bit a reader needs at a glance, and it is the SAME bit on the artist page
- *  and in every list that names an artist: the page's identity block, the
- *  Library's Artists view, Home's artist shelf and Favorites' artist table all
- *  draw the identical dot from the identical payload field, so a list and the
- *  page it links to can never disagree about an artist's health.
+ *  The artist's own grade (`mlo.grader.grade_artist` — whether the folder is a
+ *  real artist folder that holds albums, never the album checks) is one bit a
+ *  reader needs at a glance, and it is the SAME bit on the artist page and in
+ *  every list that names an artist: the page's identity block and the Library's
+ *  Artists view both draw the identical dot from the identical payload field,
+ *  so a list and the page it links to can never
+ *  disagree about an artist's health.
  *
  *  A PASS draws the green dot. A FAILURE draws the amber warning — the
- *  library's own failing idiom (components/GradeWarning) — because "the artist
- *  image and the description are missing" is exactly the kind of claim the
- *  library has to make where the artist is listed: a list that drew nothing at
- *  all for a failing artist made an artist whose artwork never arrived look
- *  like one nobody had graded, and the only place that said otherwise was the
- *  artist's own page (the owner's ask: "make sure the library displays some
- *  sort of warning / grade error … if artist images don't exist and … artist /
- *  album descriptions don't exist"). Its tooltip names the failing checks the
- *  way the artist page's chips do (`label — reason`), so the row says WHAT is
- *  missing and the page it links to is where it gets fixed. A verdict the
- *  payload does not carry (an artist that was never graded) still draws
- *  nothing: "not looked at" is not "failed". The counts beside it ("1 album ·
- *  17 tracks") are unaffected. */
+ *  library's own failing idiom (components/GradeWarning). Its tooltip names the
+ *  failing checks the way the artist page's chips do (`label — reason`), so the
+ *  row says WHAT is wrong and the page it links to is where it gets fixed. A
+ *  verdict the payload does not carry (an artist that was never graded) still
+ *  draws nothing: "not looked at" is not "failed". The counts beside it ("1
+ *  album · 17 tracks") are unaffected. */
 export function ArtistDot({ pass, issues }: { pass?: boolean | null; issues?: ArtistGradeIssue[] | null }) {
   // The same shape, green and tooltip the library's own verdict dot uses
   // (GradeWarning's `grade-dot`): one green dot means "this passed its
@@ -50,7 +43,7 @@ export function ArtistDot({ pass, issues }: { pass?: boolean | null; issues?: Ar
   if (pass !== false) return null;
   const said = (issues ?? []).map((i) => [i.label, i.reason].filter(Boolean).join(" — "));
   const label = said.length
-    ? `Artist checks failed — ${said.join("; ")}. Open the artist page to fetch what is missing.`
+    ? `Artist checks failed — ${said.join("; ")}. Open the artist page for the folder's own verdict.`
     : "Artist checks failed — open the artist page to see what is missing";
   return (
     <span

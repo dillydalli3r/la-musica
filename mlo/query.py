@@ -1,32 +1,16 @@
-"""One query engine behind smart playlists and the library browser.
+"""The query engine behind the library browser.
 
 The condition language (``{"conditions": [{field, op, value}], "match":
-"all"|"any"}``) was born in ``server.playlists`` for saved smart playlists.
-It lives here now, verbatim, so a saved playlist and an ad-hoc browser query
-can never disagree about what matches: both compile their condition list
-through :func:`compile_spec` and walk the library through :func:`walk`, and
-two rows match if and only if the same predicate says so.
+"all"|"any"}``) was born in the smart-playlist evaluator. It lives here now,
+verbatim, so every saved spec and an ad-hoc browser query can never disagree
+about what matches: both compile their condition list through
+:func:`compile_spec` and walk the library through :func:`walk`, and two rows
+match if and only if the same predicate says so.
 
 Layering
 --------
 This module never imports ``server``. Everything it needs from the app the
 caller injects:
-
-``rating_of(path, raw_tag) -> half-stars | None``
-    The rating store (``server.ratings``). Half-stars are its unit (0-10,
-    0/absent = unrated); stars are what the catalogue advertises, so the
-    engine halves them. Without a source every track is unrated — which is
-    all the payload alone can prove. ``raw_tag`` is the file's own RATING,
-    which only the track scope has: a folder carries no tag.
-
-    The same source answers the FOLDER scopes through an optional attribute,
-    ``rating_of.folder(scope, path) -> half-stars | None``, where scope is
-    "album" or "artist" and path is that entity's folder — the store's own
-    folder rows, keyed by the paths the app already uses for those entities.
-    The engine needs one fact there that a track lookup does not carry: which
-    KIND of entity the path names. A source without the attribute answers
-    every album/artist rating field as unrated, which is all such a store can
-    prove.
 
 ``bool_fields``
     The catalogue's boolean field names, so ``true``/``"1"``/``"yes"`` from a
@@ -37,16 +21,10 @@ Field vocabulary
 ``tags.<KEY>``, ``tech.<KEY>``, ``analysis.<KEY>``, ``library.<KEY>``,
 ``album.<KEY>``, ``artist.<KEY>``, plus the payload's own bare keys
 (``grade_pass``, ``audit``, …) and the bare sort aliases the API contract
-names (``album``, ``artist``, ``title``, ``year``, ``genre``, ``rating``,
-``path``). A bare key resolves against the track exactly as the original
-evaluator did — tags first, then the track payload, then ``tech`` — so a
-saved smart playlist keeps its meaning; the aliases only add names that
-resolved to nothing before.
-
-``rating``, ``album.rating`` and ``artist.rating`` are one family: the same
-unit (stars, halves) and the same ops over the three scopes a rating can name
-— the track's own verdict, the album's, the artist's. An album's rating is the
-user's verdict on the ALBUM, never the average of its tracks' ratings.
+names (``album``, ``artist``, ``title``, ``year``, ``genre``, ``path``). A
+bare key resolves against the track exactly as the original evaluator did —
+tags first, then the track payload, then ``tech`` — so a saved smart playlist
+keeps its meaning; the aliases only add names that resolved to nothing before.
 """
 from __future__ import annotations
 
@@ -233,8 +211,6 @@ OPERATORS: Dict[str, str] = {
     "missing": "is empty",
     "present": "is not empty",
     "issues_contain": "has issue",
-    "is_unrated": "is unrated",
-    "is_rated": "is rated",
 }
 
 # Which ops a field advertises, by its declared type. The evaluator accepts
@@ -247,8 +223,6 @@ OPS_FOR_TYPE: Dict[str, Tuple[str, ...]] = {
     "enum": ("eq", "ne", "missing", "present"),
     "bool": ("eq", "ne"),
     "issues": ("issues_contain", "missing", "present"),
-    "rating": ("eq", "ne", "lt", "gt", "lte", "gte", "between",
-               "is_unrated", "is_rated"),
 }
 
 
@@ -502,7 +476,6 @@ ALIASES = {
     "genre": "tags.GENRE",
     "year": "tags.DATE",
     "path": "library.path",
-    "rating": "rating",
     "is_video": "library.is_video",
     "unreadable": "library.unreadable",
     "lyrics_present": "library.lyrics_present",
@@ -515,67 +488,14 @@ ALIASES = {
     "issues": "issues",
 }
 
-_RATING_HALF = 2.0
 
-# The three fields that ARE a rating — one unit (stars, halves), one op family,
-# three scopes. The album/artist two resolve through the store's folder half.
-# Public: `server.playlists` reads it to know whether a smart playlist's spec
-# needs the store at all.
-RATING_FIELDS = ("rating", "album.rating", "artist.rating")
-_ENTITY_RATING_FIELDS = RATING_FIELDS[1:]
-
-
-def _rating_getter(rating_of: Optional[Callable]):
-    def get(row: Row):
-        if row.track is None or rating_of is None:
-            return None
-        raw = (row.track.get("tags") or _EMPTY).get("RATING")
-        half = rating_of(_norm_path(row.track.get("path")), raw)
-        if not half:
-            return None
-        return float(half) / _RATING_HALF
-    return get
-
-
-def _entity_rating_getter(scope: str, rating_of: Optional[Callable]):
-    """``album.rating`` / ``artist.rating`` — the user's verdict on the ENTITY.
-
-    Deliberately NOT the average of the tracks' own ratings: that is a
-    different number, drawn beside this one and labelled, and the two must
-    never be confusable. Same unit and the same op semantics as ``rating``
-    (stars, halves; unrated is no value at all), read from the folder half of
-    the injected store — which is asked once per row and answers the rows
-    where the row has no such entity at all with None."""
-    folder_of = getattr(rating_of, "folder", None)
-    if folder_of is None:
-        # A source that predates the folder scopes (or a store with no folder
-        # rows): nothing is rated there, which is all it can prove.
-        return lambda row: None
-
-    def get(row: Row):
-        entity = row.album if scope == "album" else row.artist
-        path = _norm_path((entity or _EMPTY).get("path"))
-        if not path:
-            return None
-        half = folder_of(scope, path)
-        if not half:
-            return None
-        return float(half) / _RATING_HALF
-    return get
-
-
-def field_getter(field: str, rating_of: Optional[Callable] = None
-                 ) -> Callable[[Row], Any]:
+def field_getter(field: str) -> Callable[[Row], Any]:
     """Compile *field* into a ``row -> value`` callable, once per request.
 
     Unknown fields resolve to None (the row simply never matches), which is
     what the original evaluator did; the API rejects them for ad-hoc queries
     before this is ever reached."""
     name = ALIASES.get(field, field)
-    if name == "rating":
-        return _rating_getter(rating_of)
-    if name in _ENTITY_RATING_FIELDS:
-        return _entity_rating_getter(name.split(".", 1)[0], rating_of)
     scope, _, key = name.partition(".")
     if scope == "tags":
         if not key:
@@ -641,14 +561,7 @@ def _as_bool_text(v) -> str:
     return "true" if text in ("true", "1", "yes", "y", "on") else "false"
 
 
-_RATING_STATE = {
-    "is_unrated": lambda stars: stars is None,
-    "is_rated": lambda stars: stars is not None,
-}
-
-
 def compile_conditions(conditions: Sequence[dict], target: str = "tracks",
-                       rating_of: Optional[Callable] = None,
                        bool_fields: Iterable[str] = ()) -> List[Callable[[Row], bool]]:
     """Compile the condition list into one predicate per condition."""
     bools = frozenset(bool_fields)
@@ -657,11 +570,7 @@ def compile_conditions(conditions: Sequence[dict], target: str = "tracks",
         field = str(cond.get("field") or "")
         op = str(cond.get("op") or "eq")
         value = cond.get("value")
-        get = field_getter(field, rating_of)
-        if ALIASES.get(field, field) in RATING_FIELDS and op in _RATING_STATE:
-            state = _RATING_STATE[op]
-            out.append(lambda row, get=get, state=state: state(get(row)))
-            continue
+        get = field_getter(field)
         fn = _OPS.get(op)
         if fn is None:
             # Unknown op: matches nothing, as it always has. The API rejects
@@ -681,7 +590,6 @@ def compile_conditions(conditions: Sequence[dict], target: str = "tracks",
 
 
 def compile_spec(spec: dict, target: str = "tracks",
-                 rating_of: Optional[Callable] = None,
                  bool_fields: Iterable[str] = ()) -> Callable[[Row], bool]:
     """One predicate for a whole filter spec (``all``/``any``), as the
     smart-playlist evaluator and the browser query both need it.
@@ -689,7 +597,7 @@ def compile_spec(spec: dict, target: str = "tracks",
     An empty condition list matches everything (an empty rule is "all your
     music"), which is what smart playlists already did."""
     predicates = compile_conditions((spec or {}).get("conditions") or [],
-                                    target, rating_of, bool_fields)
+                                    target, bool_fields)
     match_all = (spec or {}).get("match", "all") != "any"
     if not predicates:
         return lambda row: True
@@ -701,9 +609,7 @@ def compile_spec(spec: dict, target: str = "tracks",
 # --------------------------------------------------------------------------- #
 # Grouping
 # --------------------------------------------------------------------------- #
-GROUP_KEYS = ("artist", "album", "genre", "year", "rating")
-
-_UNRATED = "Unrated"
+GROUP_KEYS = ("artist", "album", "genre", "year")
 
 
 def _group_artist(row: Row):
@@ -730,26 +636,13 @@ def _group_album(row: Row):
     return _basename((row.album or _EMPTY).get("path"), (row.album or _EMPTY).get("name"))
 
 
-def _group_rating(rating_of: Optional[Callable]):
-    get = _rating_getter(rating_of)
-
-    def key(row: Row):
-        stars = get(row)
-        if stars is None:
-            return _UNRATED
-        return f"{stars:g}"
-    return key
-
-
-def group_getter(name: str, target: str = "tracks",
-                 rating_of: Optional[Callable] = None) -> Optional[Callable[[Row], str]]:
+def group_getter(name: str, target: str = "tracks"
+                 ) -> Optional[Callable[[Row], str]]:
     """Compile a group key into ``row -> key`` ("" when the field is empty)."""
     if name == "artist":
         return _group_artist
     if name == "album":
         return _group_album
-    if name == "rating":
-        return _group_rating(rating_of)
     if name == "genre":
         get = field_getter("tags.GENRE")
     elif name == "year":
@@ -769,13 +662,12 @@ def group_getter(name: str, target: str = "tracks",
 # --------------------------------------------------------------------------- #
 # Sorting
 # --------------------------------------------------------------------------- #
-def sort_getter(key: str, target: str = "tracks",
-                rating_of: Optional[Callable] = None) -> Callable[[Row], Any]:
+def sort_getter(key: str, target: str = "tracks") -> Callable[[Row], Any]:
     if key in GROUP_KEYS:
-        g = group_getter(key, target, rating_of)
+        g = group_getter(key, target)
         if g is not None:
             return g
-    return field_getter(key, rating_of)
+    return field_getter(key)
 
 
 def _sort_tuple(value) -> tuple:
@@ -790,7 +682,7 @@ def _sort_tuple(value) -> tuple:
 
 
 def order(rows: List[Row], keys: Optional[Sequence[str]] = None,
-          desc: bool = False, rating_of: Optional[Callable] = None,
+          desc: bool = False,
           group: Optional[str] = None, target: str = "tracks") -> List[Row]:
     """Sort in place-stable fashion, cheaply.
 
@@ -798,7 +690,7 @@ def order(rows: List[Row], keys: Optional[Sequence[str]] = None,
     one per comparison), and an empty value sorts last whichever direction was
     asked for — a table sorted by bitrate descending has no reason to put
     "no bitrate" on top."""
-    getters = [sort_getter(k, target, rating_of) for k in (keys or ())]
+    getters = [sort_getter(k, target) for k in (keys or ())]
     decorated = []
     for row in rows:
         tup = tuple(_sort_tuple(g(row)) for g in getters)
@@ -862,13 +754,13 @@ def facet_values(counts: Counter, limit: int = 50, q: Optional[str] = None) -> d
 
 
 def facet(rows: Iterable[Row], field: str, limit: int = 50,
-          q: Optional[str] = None, rating_of: Optional[Callable] = None) -> dict:
+          q: Optional[str] = None) -> dict:
     """Value counts for one field over the rows given.
 
     Blank values are counted separately (``missing``) rather than as a bucket,
     so a value picker lists values and the client can still say "42 rows have
     none"."""
-    counts, missing = count_values(rows, field_getter(field, rating_of))
+    counts, missing = count_values(rows, field_getter(field))
     out = facet_values(counts, limit, q)
     return {"field": field, "values": out["values"],
             "total_values": out["total_values"], "missing": missing}
@@ -882,7 +774,7 @@ MAX_LIMIT = 10000
 FACET_LIMIT = 50
 
 
-def run(library, req: dict, rating_of: Optional[Callable] = None,
+def run(library, req: dict,
         bool_fields: Iterable[str] = ()) -> dict:
     """Answer one browser query against the library payload.
 
@@ -897,11 +789,11 @@ def run(library, req: dict, rating_of: Optional[Callable] = None,
     group = req.get("group") or None
     if group not in GROUP_KEYS:
         group = None
-    predicate = compile_spec(spec, target, rating_of, bool_fields)
-    group_of = group_getter(group, target, rating_of) if group else None
+    predicate = compile_spec(spec, target, bool_fields)
+    group_of = group_getter(group, target) if group else None
 
     facets = [f for f in facet_fields(req) if f]
-    facet_getters = [(f, field_getter(f, rating_of)) for f in facets]
+    facet_getters = [(f, field_getter(f)) for f in facets]
     facet_counts: Dict[str, Counter] = {f: Counter() for f in facets}
     facet_missing: Dict[str, int] = {f: 0 for f in facets}
     group_counter: Counter = Counter()
@@ -926,7 +818,7 @@ def run(library, req: dict, rating_of: Optional[Callable] = None,
     if keys:
         keys = [keys] if isinstance(keys, str) else list(keys)
         rows = order(rows, keys, int(sort_spec.get("dir") or 1) < 0,
-                     rating_of, target=target)
+                     target=target)
     elif group_of is not None:
         rows = order_by_group(rows, group_of)
 
@@ -981,22 +873,3 @@ def facet_fields(req: dict) -> List[str]:
     if isinstance(raw, str):
         return [raw]
     return [str(f) for f in raw]
-
-
-# --------------------------------------------------------------------------- #
-# Smart playlists
-# --------------------------------------------------------------------------- #
-def match_paths(library, spec: dict, base_paths: Optional[Iterable[str]] = None,
-                rating_of: Optional[Callable] = None,
-                bool_fields: Iterable[str] = ()) -> List[str]:
-    """The paths a smart playlist's spec selects, in payload order.
-
-    This is the original ``server.playlists.evaluate_smart`` body — same walk,
-    same ``base_paths`` filter applied before the conditions, same order — now
-    the shared implementation."""
-    predicate = compile_spec(spec or {}, "tracks", rating_of, bool_fields)
-    hits: List[str] = []
-    for row, _payload in walk(library, "tracks", base_paths):
-        if predicate(row):
-            hits.append(row.track.get("path"))
-    return hits

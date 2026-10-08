@@ -157,7 +157,6 @@ def _move(order: List[int], sid: int, index: int) -> List[int]:
 # Grading page's "Other checks" section) is a failure the test names.
 GROUPS = (
     ("tracks", "Tracks & albums"),
-    ("artist", "Artist"),
     ("auditing", "Auditing"),
     ("links", "Identity links"),
     ("covers", "Covers"),
@@ -167,7 +166,6 @@ GROUPS = (
 )
 
 _GROUP_KEYS = {
-    "artist": ("grade_check_artist_image", "grade_check_artist_description"),
     "auditing": ("grade_check_audit", "grade_check_flac_md5",
                  "grade_check_log_checksum",
                  "grade_check_accuraterip", "grade_check_log_grade"),
@@ -240,8 +238,7 @@ RELAXED_OFF = frozenset((
     "grade_check_filename_case", "grade_check_ext_case",
     "grade_check_excess_tags", "grade_check_alias_excess",
     "grade_check_mb_links", "grade_check_rym_links",
-    "grade_check_replaygain", "grade_check_album_description",
-    "grade_check_artist_image", "grade_check_artist_description",
+    "grade_check_replaygain",
 ))
 
 
@@ -260,16 +257,14 @@ def preset_value(pid: str, key: str, default: bool) -> bool:
 
 def _gate_codes() -> dict:
     """The issue codes a check raises ITSELF, keyed by gate — from the grader's
-    own tables (``TAG_PRESENCE_CHECKS`` names the code beside the gate, and the
-    artist checks carry theirs). A check that grades a tag through a shared
-    sweep has no code of its own to claim, so it claims none: the tag's code
-    list would credit it with another check's verdicts."""
-    from mlo.grader import TAG_PRESENCE_CHECKS, _ARTIST_CHECK_ISSUES
+    own table (``TAG_PRESENCE_CHECKS`` names the code beside the gate). A check
+    that grades a tag through a shared sweep has no code of its own to claim,
+    so it claims none: the tag's code list would credit it with another check's
+    verdicts."""
+    from mlo.grader import TAG_PRESENCE_CHECKS
     out: Dict[str, set] = {}
     for _tag, (gate, code) in TAG_PRESENCE_CHECKS.items():
         out.setdefault(gate, set()).add(code)
-    for gate, (codes, _key) in _ARTIST_CHECK_ISSUES.items():
-        out.setdefault(gate, set()).update(codes)
     return {gate: sorted(codes) for gate, codes in out.items()}
 
 
@@ -557,13 +552,8 @@ def put_stack(edit: StackEdit):
     if writes:
         # The library payload carries grading results computed from exactly
         # these toggles, and the shelf's answers depend on the script switches:
-        # both caches go, so the next read reflects the stack (the same pair
+        # the cache goes, so the next read reflects the stack (the same call
         # /api/config drops after a save).
-        try:
-            from server import recommendations
-            recommendations.invalidate()
-        except Exception:
-            pass
         try:
             from server import tagcache
             tagcache.invalidate_all()

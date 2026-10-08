@@ -18,9 +18,6 @@ export const FORCE_SCRIPTS: { key: string; label: string }[] = [
   // the layout pass always scans, and its apply (rename wrong-case names,
   // gather loose audio) is what an unticked box asks to skip for this run.
   { key: "layout", label: "20 · Layout fix" },
-  // Script 24's runner only FILLS a missing web-rating tag; this switch is
-  // what re-fetches one a file already carries.
-  { key: "web_ratings", label: "24 · Web ratings re-fetch" },
 ];
 
 const KEY = "mlo.force.sel";

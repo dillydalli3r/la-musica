@@ -4,26 +4,15 @@ import type { ReactNode } from "react";
  *  per-track actions in a FIXED trailing slot on the right.
  *
  *  Why the split. The marks a row carries are not the same from track to track
- *  — one has an EXPLICIT badge, one a clean badge, one a heart, one a cached
+ *  — one has an EXPLICIT badge, one a clean badge, one a cached
  *  marker — and when they all sat in one left-to-right run, every row's marks
  *  landed at a different x: they drifted with the title's length. The fix is
  *  the shape of the cell, not a per-row tweak: `children` is the flexible part
  *  (it absorbs whatever width the column has, so the name and its marks stay
  *  together and the EXPLICIT/CLEAN badge sits directly beside the title), and
- *  `trailing` is the fixed part, whose contents are all constant-width — the
- *  heart keeps its space whether or not the track is liked (`FavHeart`'s
- *  `revealOnHover` is opacity, never `display`), the actions menu is always
- *  drawn — so those controls end at the same x on every row.
- *
- *  A caller that draws the rating passes it LAST in `trailing`, because it is
- *  the one thing a reader scans down a column and the cell's edge is what makes
- *  that scan straight (the album tracklist does). The rating is then the one
- *  trailing item that can change its own width — the web reading beside the
- *  stars becomes the user's own number once they rate — so a column passes
- *  `webReadout="slot"` (see StarRating): the readout reserves its box and the
- *  stars keep one x. The Library's Tracks view gives the rating a COLUMN of
- *  its own instead and passes none: one cell holding the name, the marks and
- *  the stars at once is how that table ended up with a 0 px title.
+ *  `trailing` is the fixed part, whose contents are all constant-width — a
+ *  readout reserves its box, and the actions menu is always drawn — so those
+ *  controls end at the same x on every row.
  *
  *  Devices: nothing here wraps or hides by breakpoint EXCEPT `stackOnPhone`,
  *  which the album tracklist asks for because its own cell is narrower than the
@@ -39,7 +28,7 @@ export default function TrackTitleCell({
 }: {
   children: ReactNode;
   /** Constant-width marks only: a variable-width mark belongs in `children`,
-   *  or the slot — and the rating with it — shifts from row to row. */
+   *  or the slot shifts from row to row. */
   trailing: ReactNode;
   /** For a row that is itself a flex container (the compact list): `flex-1`
    *  makes the cell take the space the row has left, which is what puts the
@@ -48,9 +37,9 @@ export default function TrackTitleCell({
   /** Below `md`, fold the trailing slot UNDER the name instead of beside it.
    *
    *  The album tracklist is the one caller that needs this, and the numbers
-   *  are why: at 390 px its cell measured 122 px while the slot measured
-   *  ~138 px (heart, "…", five stars) — the fixed part won, the name was
-   *  handed 0 px, and the album page rendered one syllable per line. The slot
+   *  are why: at 390 px its cell measured 122 px while the slot's fixed
+   *  controls would not give up their width — the fixed part won, the name
+   *  was handed 0 px, and the album page rendered one syllable per line. The slot
    *  still may not shrink (its constant width is what this cell exists for),
    *  so what gives is the LINE: the name gets the cell's full width first, the
    *  slot keeps its own row — and its own x on every row, which is the
@@ -76,10 +65,10 @@ export default function TrackTitleCell({
           that second line unnecessary: each column carries the width its
           data needs, so a row that fits the table always fits the cell. */}
       <div className={`flex items-center gap-1.5 min-w-0 flex-wrap grow basis-auto${stackOnPhone ? " max-md:basis-full" : ""}`}>{children}</div>
-      {/* gap-1.5, the same as the title side: at gap-0.5 the actions menu sat
-          2 px from the star rating, so the `…` and the stars ran together as
-          one cluster while every other pair in the row was 6 px apart — the
-          spacing the eye reads as "these are separate controls" (#36).
+      {/* gap-1.5, the same as the title side: at gap-0.5 the trailing
+          controls sat 2 px apart while every other pair in the row was 6 px
+          apart — the spacing the eye reads as "these are separate controls"
+          (#36).
           `max-md:flex-wrap` with `stackOnPhone`: below `md` the whole slot is
           narrower than the album cell (132 px of controls against 98 px of
           content box), so the controls break into their own rows there instead

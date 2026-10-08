@@ -359,9 +359,9 @@ def _stamp_mb_tags(album_dir, release, force_ids=False):
 # The import chain IS the Run All order, taken from the one place that keeps it
 # (`mlo.config.DEFAULT_RUN_ALL_ORDER`) — one order, one list, so a script added
 # to Run All can never go missing from the import path. This used to be a
-# hand-kept second list that had already drifted: 16 (Mood & Energy), 17
-# (Lyrics transliterate (AI)) and 19 (Optimize artist images) ran everywhere
-# Run All ran and never on an import, so the same album got them through
+# hand-kept second list that had already drifted: 16 (Mood & Energy) and 17
+# (Lyrics transliterate (AI)) ran everywhere Run All ran and never on an
+# import, so the same album got them through
 # Optimize → Run All and never when it was simply imported. The order's own
 # reasons (path-changing scripts first — beets moves the folder — then the
 # sidecar namers, 10 Format all, 4 Grade last) are documented beside the list
@@ -383,8 +383,12 @@ def _stamp_mb_tags(album_dir, release, force_ids=False):
 # makes the layout the grade reads the fixed one. A library-wide Run All still
 # gets the whole-folder pass and its stored report.
 LIBRARY_WIDE_SCRIPTS = ()
+# The registry is the second guard: a saved Run All order that still names a
+# script the app no longer ships (the artist-image optimiser, the web-rating
+# fetcher) cannot leak it into the import chain.
 DEFAULT_CHAIN = [sid for sid in DEFAULT_RUN_ALL_ORDER
-                 if sid not in LIBRARY_WIDE_SCRIPTS]
+                 if sid not in LIBRARY_WIDE_SCRIPTS
+                 and sid in script_runners.RUNNERS]
 
 # The ids a configured chain may name, kept in step with the registry itself
 # (a bound that still advertised a removed id let a saved one come back as an
@@ -559,7 +563,7 @@ def _phase(text):
     """One line saying what the import is doing BEFORE its chain starts.
 
     The steps between the press and the first script are the slow ones — the
-    links, the metadata and the cover art are network lookups — and none of
+    links, the genres and the cover art are network lookups — and none of
     them is a script, so nothing was publishing anything: the header bar and
     the run's row kept whatever the last producer had left on them (measured on
     a throwaway album: 5.4 s from the press to the first script, all of it
@@ -617,8 +621,8 @@ def finish_album(album_dir, cfg=None, progress=None, force=None, release=None,
     THE claim of the whole import — not only of its chain — is taken here, for
     the length of the call
     (``script_runners.claim_paths``): every step below writes to the album (the
-    arrived values are dropped, the links, the genres, the metadata, the cover
-    art), so an album another job is on must be queued behind (``wait=True``,
+    arrived values are dropped, the links, the genres, the cover art), so an
+    album another job is on must be queued behind (``wait=True``,
     every autonomous path) or refused at once with the claim's own sentence
     (``wait=False``, the user's own press) — and the album has to be held from
     the FIRST tag write, not from the first script. Claiming only at the chain
@@ -680,9 +684,8 @@ def finish_album(album_dir, cfg=None, progress=None, force=None, release=None,
     import.
 
     The staged work is gated by its OWN keys, not by the chain switch:
-    ``metadata_auto_fetch`` / ``cover_auto_fetch`` decide the artist image,
-    descriptions and cover art, ``rym_links_auto`` the links and
-    ``genre_autofill`` the genres (the family's only fetcher — see the step
+    ``cover_auto_fetch`` decides the cover art, ``rym_links_auto`` the links
+    and ``genre_autofill`` the genres (the family's only fetcher — see the step
     itself), so an import with the chain switched off still does those (the
     unattended import has fetched them since it existed, and turning the
     scripts off must not silently take the cover art with it) — while
@@ -1064,42 +1067,27 @@ def _finish_album(path, cfg, progress=None, force=None, release=None,
         traceback.print_exc()
 
 
-    # ---- the FILE-writing pair, beside the TAG-writing steps ---------------
-    # Metadata (artist image, artist/album description) and cover art write
-    # FILES — the review record they share, and the art the album folder keeps
-    # — while links, genres, advisory and instrumentals write TAGS on the audio
-    # files. Different files, so they go side by side: started here (the
-    # album's identity is settled by the genre step above, which is what the
-    # metadata lookup reads — `album_identity`) and joined before the chain,
-    # which is the first thing that needs them on disk (script 5 processes the
-    # images, the grade wants the cover). ONE worker for BOTH steps in their
-    # own order, because they stage into ONE review record and must not
-    # clobber each other (`stage_metadata` / the `covers` entry of the same
-    # file).
+    # ---- the FILE-writing step, beside the TAG-writing steps ---------------
+    # Cover art writes FILES — the review record it shares with the cover
+    # review screen and the art the album folder keeps — while links, genres,
+    # advisory and instrumentals write TAGS on the audio files. Different
+    # files, so it goes beside them: started here (the album's identity is
+    # settled by the genre step above) and joined before the chain, which is
+    # the first thing that needs it on disk (script 5 processes the images,
+    # the grade wants the cover).
     #
-    # Both run on EVERY path, chain or no chain: `metadata_auto_fetch` /
-    # `cover_auto_fetch` are their own switches, and the unattended import has
-    # fetched them since it existed — the chain's own switch is about the
-    # scripts, and turning it off must not silently take the cover art away
-    # with it. Cover art: an album that arrived without one gets it now, found
-    # by the identity the import just stamped and stored by the cover page's
-    # own writer. With `*_review` on, the candidates are staged for the user
-    # instead.
-    # Both file steps are announced together — one frame for the pair, because
-    # that is what it is: two steps on one worker, in their own order — and
-    # only when at least one of them will run: with `metadata_auto_fetch` and
-    # `cover_auto_fetch` both off there is nothing being fetched (the album is
-    # not having its artwork or its descriptions looked for), so the strip is
-    # not told that there is.
-    if run_cfg.get("metadata_auto_fetch", True) or run_cfg.get("cover_auto_fetch", True):
-        _phase("Fetching metadata and cover art…")
+    # It runs on EVERY path, chain or no chain: `cover_auto_fetch` is its own
+    # switch, and the unattended import has fetched it since it existed — the
+    # chain's own switch is about the scripts, and turning it off must not
+    # silently take the cover art away with it. An album that arrived without
+    # a cover gets it now, found by the identity the import just stamped and
+    # stored by the cover page's own writer. With `cover_review` on, the
+    # candidates are staged for the user instead.
+    if run_cfg.get("cover_auto_fetch", True):
+        _phase("Fetching cover art…")
 
     def _files_step():
         got = {}
-        try:
-            got["metadata"] = run_metadata_step(path, run_cfg)
-        except Exception:
-            traceback.print_exc()
         try:
             got["cover"] = run_cover_step(path, run_cfg)
         except Exception:
@@ -1135,20 +1123,18 @@ def _finish_album(path, cfg, progress=None, force=None, release=None,
         except Exception:
             traceback.print_exc()
 
-    # Artist image / descriptions: fetched here (the metadata step) so an
-    # import leaves the album graded-ready. metadata_review on stages the
-    # candidates instead of writing them. Staged BEFORE the chain on purpose:
-    # the record is looked up by the album's own identity (see
-    # `staged_metadata`), so it survives the chain moving the album to its
-    # canonical folder — which it does, via beets/organize. Never fatal.
-    # The two file steps had the whole advisory/instrumental pass to run in;
-    # this is where their work is collected, before the chain (which reads what
-    # they wrote) and before the no-chain return (whose result reports them).
+    # Cover art: fetched here so an import leaves the album graded-ready, and
+    # staged BEFORE the chain on purpose — the record is looked up by the
+    # album's own identity (see `staged_metadata`), so it survives the chain
+    # moving the album to its canonical folder — which it does, via
+    # beets/organize. Never fatal. The step had the whole advisory/instrumental
+    # pass to run in; this is where its work is collected, before the chain
+    # (which reads what it wrote) and before the no-chain return (whose result
+    # reports it).
     try:
         _files_got = _files.result()
-        for _key in ("metadata", "cover"):
-            if _files_got.get(_key) is not None:
-                out[_key] = _files_got[_key]
+        if _files_got.get("cover") is not None:
+            out["cover"] = _files_got["cover"]
     except Exception:
         traceback.print_exc()
     finally:
@@ -1198,7 +1184,7 @@ def _finish_album(path, cfg, progress=None, force=None, release=None,
         # handed is not the album any more (`_follow_moved_targets` follows it
         # and this is how the import hears about it).
         # The sink is armed on the run config ONLY for the chain call: the steps
-        # BEFORE the chain (links, genres, advisory, instrumentals, metadata,
+        # BEFORE the chain (links, genres, advisory, instrumentals,
         # cover) are handed `run_cfg` too, and they must see exactly the config
         # they always saw — a step's own arguments are part of its contract (a
         # test double dispatches on them). Only the chain's Grade step reads this
@@ -1943,7 +1929,7 @@ def fetch_advisories(paths, cfg=None, force=False):
     # `_apple_json` together turned a spacing that the serial pass never even
     # reached — it was already three seconds between calls — into 38 s of
     # sleep for the same twelve tracks, and the pass went 24 s to 41 s. The
-    # concurrency that pays is one level up: the metadata/cover pair runs
+    # concurrency that pays is one level up: the cover step runs
     # beside this pass (`_files_step`), and instrumentals fan out per file
     # because LRCLIB's interval is 0.4 s, where overlap does win.
     updated = 0
@@ -1990,7 +1976,7 @@ def fetch_advisories(paths, cfg=None, force=False):
                 # (server.integrations._advisory_alias_queries reads exactly
                 # these keys). With none, the route is its old self and asks
                 # nothing; only the four MBID keys travel, so the route's own
-                # youtube_video_id(tags) is untouched.
+                # reading of the file's tags is otherwise untouched.
                 tags={k: af.get_tag(k) for k in (
                     "MUSICBRAINZ_TRACKID", "MUSICBRAINZ_ARTISTID",
                     "MUSICBRAINZ_ALBUMARTISTID",
@@ -2191,11 +2177,12 @@ def fetch_instrumentals(paths, cfg=None):
 
 
 # --------------------------------------------------------------------------- #
-# Metadata step — artist image / artist description / album description
+# Cover review — the ranked cover candidates an album is staging
 # --------------------------------------------------------------------------- #
-# With metadata_review ON the candidates are STAGED here (nothing is written
-# until the user applies one through POST /api/metadata/apply); with it OFF
-# the best candidate is saved as part of the import.
+# With `cover_review` ON the candidates are STAGED here for the pick screen;
+# with it OFF the best candidate is saved as part of the import. The staged
+# record is keyed by the album's own identity as well as its path, so it
+# survives the chain relocating the album.
 _METADATA_REVIEW_NAME = "metadata_review.json"
 
 
@@ -2326,7 +2313,7 @@ def album_identity(album_dir, cfg=None):
     (`server.pending_albums`, added to the library before any audio exists) has
     no tags to read at all, and its marker carries the release's artist and
     title. Without this the add path's pre-fetch would search every provider
-    for ""/"" — and the metadata and cover steps would report "nothing found"
+    for ""/"" — and the cover step would report "nothing found"
     for an album whose identity the app itself wrote down.
     """
     artist, album = _album_identity(album_dir)
@@ -2427,102 +2414,10 @@ def album_identity_label(album_dir, cfg=None):
     return f"{name} ({year})" if year else name
 
 
-def apply_metadata(album_dir, cfg=None):
-    """Fetch and store the best artist image / descriptions for an album.
-
-    The import chain's metadata step and the manual apply route share this:
-    it honours the per-feature switches (artist_image_enabled,
-    artist_description_enabled, album_description_enabled — what the app may
-    fetch on the user's behalf) and NEVER overwrites stored content. Returns
-    {"artist_image", "artist_description", "album_description"} with the paths
-    written (None where nothing was written). Never raises."""
-    from mlo import artistdata
-    from server import discovery
-    from server import integrations as intg
-
-    cfg = cfg or load_config()
-    out = {"artist_image": None, "artist_description": None, "album_description": None}
-    artist, album = album_identity(album_dir, cfg)
-    if not artist:
-        return out
-    folder = artistdata.artist_dir(cfg, artist)
-
-    if folder and cfg.get("artist_image_enabled", True) and not artistdata.has_image(folder):
-        hit = discovery.artist_image(artist, mbid=artistdata.folder_mbid(folder), cfg=cfg)
-        if hit and hit.get("url"):
-            try:
-                data, _ctype = intg.fetch_image_bytes(hit["url"])
-                out["artist_image"] = artistdata.save_image(
-                    folder, data, cfg, source=hit.get("source") or "auto",
-                    source_url=hit.get("url"), kind="artist",
-                    label=hit.get("label"))
-            except Exception:
-                traceback.print_exc()
-
-    if folder and cfg.get("artist_description_enabled", True) and not artistdata.has_description(folder):
-        found = discovery.artist_description(artist, mbid=artistdata.folder_mbid(folder), cfg=cfg)
-        if found and str(found.get("text") or "").strip():
-            out["artist_description"] = artistdata.write_description(
-                folder, found["text"], cfg=cfg, source=found.get("source"),
-                source_url=found.get("source_url"), kind="artist")
-            artistdata.write_provenance(folder, {
-                "description_source": found.get("source"),
-                "description_source_url": found.get("source_url"),
-                "description_title": found.get("title")}, kind="artist", cfg=cfg)
-
-    if (album and cfg.get("album_description_enabled", True)
-            and not artistdata.has_description(album_dir)):
-        found = discovery.album_description(artist, album, cfg=cfg)
-        if found and str(found.get("text") or "").strip():
-            out["album_description"] = artistdata.write_description(
-                album_dir, found["text"], cfg=cfg, source=found.get("source"),
-                source_url=found.get("source_url"), kind="album")
-            artistdata.write_provenance(album_dir, {
-                "description_source": found.get("source"),
-                "description_source_url": found.get("source_url"),
-                "description_title": found.get("title")}, kind="album", cfg=cfg)
-
-    if any(out.values()):
-        # The album it wrote, and the artist folder when it filled one: the
-        # artist image and the description are cached art like an album's, so a
-        # write there is scoped the same way (spec R155).
-        _invalidate_caches(album_dir, folder)
-    return out
 
 
-def run_metadata_step(album_dir, cfg=None):
-    """The import chain's metadata step (metadata_auto_fetch / metadata_review).
 
-    auto-fetch off → nothing happens. On with review ON → the candidates are
-    staged for the user and nothing is written until their apply call. On with
-    review off → the best candidate is saved now. Never fatal."""
-    from server import discovery
 
-    cfg = cfg or load_config()
-    if not cfg.get("metadata_auto_fetch", True):
-        return {"staged": False, "applied": {}}
-    if cfg.get("metadata_review", False):
-        artist, album = album_identity(album_dir, cfg)
-        if _staged_metadata_held(album_dir, cfg, artist, album):
-            # The ADD ran this same candidate fetch for the SAME artist and
-            # album and staged the result for the user to pick from (spec
-            # R154): fetching it again would replace one identical record with
-            # another. The staged entry stands, and the pick screen the user
-            # already has is the answer this step would produce.
-            return {"staged": True, "applied": {}}
-        try:
-            candidates = discovery.metadata_candidates(artist, album, cfg=cfg)
-        except Exception:
-            traceback.print_exc()
-            return {"staged": False, "applied": {}}
-        stage_metadata(album_dir, {"artist": artist, "album": album,
-                                   "candidates": candidates}, cfg)
-        return {"staged": True, "applied": {}}
-    try:
-        return {"staged": False, "applied": apply_metadata(album_dir, cfg)}
-    except Exception:
-        traceback.print_exc()
-        return {"staged": False, "applied": {}}
 
 
 # Cover auto-fetch: which album this is decides who is asked. A release-group
@@ -2693,23 +2588,7 @@ def cover_candidates(album_dir, cfg=None, *, limit=None):
     return payload
 
 
-def _staged_metadata_held(album_dir, cfg, artist, album):
-    """Whether the ADD's staged METADATA candidates already answer this album.
 
-    With `metadata_review` on, the add staged the artist/description candidates
-    for the user to pick from (`discovery.metadata_candidates` — the image
-    chain plus the description chain, 3.0-5.3 s measured) and the import used to
-    fetch the same thing again. The staged entry IS that answer, so the step
-    only fetches again when the entry does not describe THIS album: the artist
-    and album the candidates were fetched for must be the ones this album has.
-    """
-    entry = staged_metadata(album_dir, cfg) or {}
-    if not (entry.get("candidates") or {}):
-        return False
-    have = (str(entry.get("artist") or "").strip().lower(),
-            str(entry.get("album") or "").strip().lower())
-    want = (str(artist or "").strip().lower(), str(album or "").strip().lower())
-    return have == want and any(have)
 
 
 def stage_cover_candidates(album_dir, payload, cfg=None):
@@ -2722,7 +2601,7 @@ def stage_cover_candidates(album_dir, payload, cfg=None):
     The identity the candidates were checked against is recorded too, so the
     screen can say what a candidate had to be (and why a karaoke or
     other-album row sits at the bottom with its rejection). Other keys of a
-    staged entry (the metadata step's own candidates) are kept.
+    staged entry are kept.
     """
     cfg = cfg or load_config()
     ranked = payload.get("candidates") or []
@@ -2777,7 +2656,7 @@ def run_cover_step(album_dir, cfg=None):
 
     With `cover_review` on the ranked candidates are STAGED instead (the import
     writes the winner when it is off, which is the shipped default) —
-    under ``entry["covers"]`` in the same review file the metadata step uses,
+    under ``entry["covers"]`` in the album's review record,
     other keys of the album's entry kept — and NOTHING is written; the user
     picks one and the UI writes it through ``POST /api/cover/fromurl``. With it
     off the winner is applied here, exactly as before.
@@ -2804,8 +2683,8 @@ def run_cover_step(album_dir, cfg=None):
 
     Never fatal, and never silent about a cover it could not get: the result is
     ``{"fetched", "applied", "source", "note", "staged", "candidates",
-    "choice", "notes"}`` — the same shape `run_metadata_step` hands back to
-    `finish_album`, ``note`` the line a caller can show (it names the source
+    "choice", "notes"}`` — the same shape `finish_album` records, ``note`` the
+    line a caller can show (it names the source
     and why it won), ``staged``/``candidates`` how many options the user was
     handed instead of a written file, ``choice`` the winning candidate with its
     reasons, and ``notes`` every source's own outcome.
@@ -2875,7 +2754,7 @@ def run_cover_step(album_dir, cfg=None):
         album = payload.get("album") or ""
         rg = payload.get("release_group") or ""
         # main.py imports this module, so the cover writer is reached back into
-        # lazily — exactly how server.api_discovery reaches `_in_music_folder`.
+        # lazily to avoid an import cycle.
         from server.api_cover import _cover_url_bytes, _write_cover_bytes, _sniff_image_ext
 
         # `substitute=False`: the policy chose THIS candidate for the album, so
@@ -2992,20 +2871,18 @@ def prefetch_album(album_dir, cfg=None):
     "Add to library" already creates the folder, its release manifest and a
     placeholder cover; this is the rest of what the album's page shows, fetched
     the moment the album is asked for rather than when the download lands: its
-    RateYourMusic links, its metadata (the ARTIST image, the artist and album
-    descriptions — `metadata_review` staging them instead when that is on) and
-    the ranked cover candidates with the policy's winner marked.
+    RateYourMusic links and the ranked cover candidates with the policy's
+    winner marked.
 
     Every step is the import chain's own function and its own switch
-    (`rym_links_auto`, `metadata_auto_fetch`, `cover_auto_fetch`), so nothing
-    here is a second fetcher and nothing is fetched that the import would not
-    have fetched anyway. Never fatal: the folder is already a real library
-    album, and a provider that refuses must not fail the add. The album's
-    identity comes from the marker when there is no audio to read tags from
-    (`album_identity`).
+    (`rym_links_auto`, `cover_auto_fetch`), so nothing here is a second fetcher
+    and nothing is fetched that the import would not have fetched anyway. Never
+    fatal: the folder is already a real library album, and a provider that
+    refuses must not fail the add. The album's identity comes from the marker
+    when there is no audio to read tags from (`album_identity`).
     """
     cfg = cfg or load_config()
-    out = {"links": None, "metadata": None, "cover": None}
+    out = {"links": None, "cover": None}
     # The same effective config the import chain runs under, so a family the
     # user kept for themselves is not decided here either.
     try:
@@ -3016,10 +2893,6 @@ def prefetch_album(album_dir, cfg=None):
         run_cfg = cfg
     try:
         out["links"] = prefetch_links(album_dir, run_cfg)
-    except Exception:
-        traceback.print_exc()
-    try:
-        out["metadata"] = run_metadata_step(album_dir, run_cfg)
     except Exception:
         traceback.print_exc()
     try:
@@ -3039,13 +2912,9 @@ def prefetch_album(album_dir, cfg=None):
     # and leave a finished album reading PENDING.
     try:
         from server import pending_albums
-        applied = (out.get("metadata") or {}).get("applied") or {}
         chosen = (out.get("cover") or {}).get("choice") or {}
         pending_albums.update_marker(album_dir, {"prefetched": {
             "at": time.time(),
-            "artist_image": applied.get("artist_image"),
-            "artist_description": applied.get("artist_description"),
-            "album_description": applied.get("album_description"),
             "cover_candidates": int((out.get("cover") or {}).get("candidates") or 0),
             "cover_pick": chosen.get("big"),
             "cover_source": chosen.get("source"),
@@ -4109,8 +3978,8 @@ def settle_digital_lyrics(album_dir, cfg=None, *, chain=None, dry=False):
 
 
 def settle_digital_import(album_dir, cfg=None, *, release=None, provider="",
-                          value="", chain=None, metadata=False, dry=False):
-    """The THREE things a digital release's import settles beyond the chain.
+                          value="", chain=None, dry=False):
+    """The two things a digital release's import settles beyond the chain.
 
     ONE entry point, called by the pipeline (``_finish_album``) and by the
     wizard's own route, so a manual import and an unattended one cannot settle
@@ -4121,12 +3990,7 @@ def settle_digital_import(album_dir, cfg=None, *, release=None, provider="",
       about (never an invented one);
     * **the lyrics it cannot use** — `settle_digital_lyrics`, i.e. an arrived
       untimed lyric when this install requires synced ones and the fetch will
-      run;
-    * **the album description** (*metadata*) — `run_metadata_step`, the
-      import's own artist/album description step, i.e. the same machinery the
-      album page's fetch uses. Only the wizard's route asks for it here: the
-      pipeline runs that step in its own file pool, in parallel with the
-      lookups above.
+      run.
 
     Never raises: each half reports its own state.
     """
@@ -4144,12 +4008,6 @@ def settle_digital_import(album_dir, cfg=None, *, release=None, provider="",
     except Exception:
         traceback.print_exc()
         out["lyrics"] = {"state": "failed"}
-    if metadata:
-        try:
-            out["metadata"] = run_metadata_step(album_dir, cfg)
-        except Exception:
-            traceback.print_exc()
-            out["metadata"] = {"staged": False, "applied": {}}
     return out
 
 # --------------------------------------------------------------------------- #

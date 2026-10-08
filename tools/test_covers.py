@@ -1363,19 +1363,18 @@ for line in lp.__doc__.splitlines():
     line = line.strip()
     if line.startswith("* ``") and "``" in line[4:]:
         DOC_RANK.append(line[4:].split("``")[0])
-assert DOC_RANK == ["lrclib", "netease", "qq", "kuwo", "kugou", "youtube"], DOC_RANK
+assert DOC_RANK == ["lrclib", "netease", "qq", "kuwo", "kugou"], DOC_RANK
 assert lp.SOURCES == DOC_RANK, (lp.SOURCES, DOC_RANK)
 
 listed = lp.available_sources()
 assert [s["id"] for s in listed] == lp.SOURCES, listed
-assert [s["rank"] for s in listed] == [1, 2, 3, 4, 5, 6], listed
+assert [s["rank"] for s in listed] == [1, 2, 3, 4, 5], listed
 assert lp.available_sources() == listed, "the catalogue must be stable"
 # each row says what it is good at, and every caveat that exists is stated
 for src in listed:
     assert src["notes"].strip() and "synced" in src["notes"].lower(), src
 for pid in ("netease", "qq", "kuwo", "kugou"):
     assert "unofficial api" in lp.SOURCE_NOTES[pid].lower(), lp.SOURCE_NOTES[pid]
-assert "auto-generated" in lp.SOURCE_NOTES["youtube"].lower(), lp.SOURCE_NOTES["youtube"]
 assert "best global coverage" in lp.SOURCE_NOTES["lrclib"], lp.SOURCE_NOTES["lrclib"]
 assert "CJK" in lp.SOURCE_NOTES["netease"], lp.SOURCE_NOTES["netease"]
 
@@ -1383,7 +1382,6 @@ assert "CJK" in lp.SOURCE_NOTES["netease"], lp.SOURCE_NOTES["netease"]
 assert lp.provider_order({}) == lp.SOURCES
 assert lp.provider_order({"lyrics_sources": []}) == lp.SOURCES
 assert lp.provider_order({"lyrics_sources": ["kuwo", "lrclib"]}) == ["kuwo", "lrclib"]
-assert lp.provider_order({"lyrics_sources": ["youtube"]}) == ["youtube"]
 assert lp.provider_order({"lyrics_sources": ["nope", "kugou"]}) == ["kugou"]
 # rank describes the DEFAULT chain, so a user order does not renumber it
 assert [s["rank"] for s in lp.available_sources()][:2] == [1, 2]

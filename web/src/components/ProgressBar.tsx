@@ -47,7 +47,7 @@ function ProgressRow({
       {/* The label and the description are the two parts that may go: the bar
           and the readout are the bar's own facts, but the description is the
           producer's sentence and 180 px of it does not fit beside them on a
-          phone — the top bar's free space, the player bar and a toast are all
+          phone — the top bar's free space and a toast are all
           narrower than the 320 px this row is allowed to shrink into. So the
           description drops below `sm` (the label still says which job it is),
           the label caps at 5rem, and the bar keeps a 32 px stub rather than

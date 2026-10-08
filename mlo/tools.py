@@ -14,7 +14,7 @@ from .paths import tools_dirs
 # name (or demanding `<name>/__init__.py`) made a finished install invisible to
 # the detector AND, in the installer's own landed check, a failure that DELETED
 # it — see tools.pip_import_present.
-PIP_IMPORT_NAMES = {"yt-dlp": "yt_dlp", "eac-logchecker": "eac_logchecker"}
+PIP_IMPORT_NAMES = {"eac-logchecker": "eac_logchecker"}
 
 
 def _parse_version(s):
@@ -195,7 +195,6 @@ _VERSION_ARGS = {
     "rsgain": ("--version",),
     "ffmpeg": ("-version",),
     "chromaprint": ("-version",),    # fpcalc
-    "yt-dlp": ("--version",),
     "php": ("-v",),                  # "PHP 8.4.11 (cli) …"
 }
 
@@ -305,20 +304,6 @@ def _detect_system_tools():
                 "phar_path": phar,
                 "php_exe": tools.get("php", {}).get("php_exe"),
             }
-
-    # yt-dlp: on Linux the vendored pip package (fetchdeps installs it with
-    # `pip --target`, see PIP_ON_LINUX) or a distro/pip install on PATH. There
-    # is no Linux binary to point at, so ytdlp_exe stays None for the vendored
-    # package - server/youtube.py imports the module instead.
-    vendored_ytdlp = python_pkg_path("yt-dlp")
-    if vendored_ytdlp:
-        tools["yt-dlp"] = {"version": python_pkg_version("yt-dlp"),
-                           "ytdlp_exe": None,
-                           "python_path": vendored_ytdlp}
-    else:
-        ytdlp = shutil.which("yt-dlp")
-        if ytdlp:
-            tools["yt-dlp"] = _system_entry("yt-dlp", ytdlp_exe=ytdlp)
 
     # A native install in a tools folder LAST, so it wins over a copy on
     # PATH: it is the versioned one the Dependencies page reports and updates,
@@ -495,15 +480,6 @@ def detect_all_tools():
                 "php_exe": os.path.join(d, "php.exe"),
             }
 
-    yv, yf, deps_root = _detect_tool_dirs("yt-dlp")
-    if yf:
-        d = os.path.join(deps_root, yf)
-        if os.path.isfile(os.path.join(d, "yt-dlp.exe")):
-            tools["yt-dlp"] = {
-                "version": yv,
-                "ytdlp_exe": os.path.join(d, "yt-dlp.exe"),
-            }
-
     # fpcalc: the AcoustID fingerprinter. The Windows installer has always
     # put it in the tools folder, but only the PATH scan could see it — so the
     # Dependencies table said "ready" while every AcoustID lookup reported the
@@ -572,7 +548,7 @@ def detect_all_tools():
     # category resolves even when no tool has been downloaded yet.
     system = _detect_system_tools()
     for key in ("flac", "libjxl", "libjpeg_turbo", "oxipng", "ffmpeg",
-                "rsgain", "chromaprint", "yt-dlp", "php", "logchecker"):
+                "rsgain", "chromaprint", "php", "logchecker"):
         if key not in tools and key in system:
             tools[key] = system[key]
 
@@ -590,7 +566,7 @@ def _pkg_dist_version(folder, pkg):
     """
     if not os.path.isdir(folder):
         return None
-    # Distribution names are normalised ("yt-dlp" -> "yt_dlp") and lowercased.
+    # Distribution names are normalised (a `-` becomes `_`) and lowercased.
     norm = re.sub(r"[-_.]+", "_", pkg).lower()
     rx = re.compile(rf"^{re.escape(norm)}-(.+)\.dist-info$")
     try:
@@ -764,11 +740,11 @@ def _pip_pkg_dirs(pkg):
 
 
 def python_pkg_path(pkg):
-    """Vendored pip-package dir for *pkg* ('librosa', 'beets', 'yt-dlp').
+    """Vendored pip-package dir for *pkg* ('librosa', 'beets').
 
     Layout is '<tools folder>/<pkg> vX.Y' (see fetchdeps.PIP_PACKAGES); the
-    import name can differ from the pip name (yt-dlp -> yt_dlp), hence
-    PIP_IMPORT_NAMES.
+    import name can differ from the pip name (eac-logchecker -> eac_logchecker),
+    hence PIP_IMPORT_NAMES.
 
     The NEWEST version wins, across every tools folder an install may hold one
     in (mlo.paths.tools_dirs — the pre-move folder is still read). An update

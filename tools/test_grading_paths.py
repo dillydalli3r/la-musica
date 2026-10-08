@@ -142,8 +142,7 @@ ISO_CFG = {
     "grade_check_mb_links": False,
     "grade_check_rym_links": False,
     # Checks added after this file was written: off here (the fixtures carry
-    # no MOOD / ReplayGain tags and no description.txt) and switched on in
-    # the dedicated cases below.
+    # no MOOD / ReplayGain tags) and switched on in the dedicated cases below.
     "grade_check_mood": False,
     "grade_check_energy": False,
     # The Genre COUNT check compares a track against mb_genre_count, whose
@@ -152,7 +151,6 @@ ISO_CFG = {
     "grade_check_genre_count": False,
     "grade_check_replaygain": False,
     "grade_check_acoustid": False,
-    "grade_check_album_description": False,
     # Tag-value CASE: every fixture here spells its GENRE the way the
     # vocabulary publishes it ("shoegaze"), and the GENRE half of this check
     # now cares — a tag is stored in the capitalization the writers produce.
@@ -967,41 +965,6 @@ ok(res["pass_count"] == res["total_checks"]
    f"({res['pass_count']}/{res['total_checks']})")
 set_tags(flac, dict(NO_MOOD, MOOD="melancholic"))
 del_tags(flac, ["COMMENT"])
-
-# ----------------------------------------------------------------------
-# Album description (grade_check_album_description)
-# ----------------------------------------------------------------------
-print("== album description ==")
-desc_cfg = dict(cfg, grade_check_album_description=True)
-res = _grade_album(album, "EMBEDDED", desc_cfg)
-ok(any("Album description missing" in i for i in res["issues"]),
-   f"an album without description.txt fails the check (got {res['issues']})")
-ok(res["total_checks"] - res["pass_count"] == 1,
-   f"the missing description costs one grade point "
-   f"({res['pass_count']}/{res['total_checks']})")
-desc = os.path.join(album, "description.txt")
-with open(desc, "w", encoding="utf-8") as fh:
-    fh.write("Recorded in a shed, 1997.\n")
-res = _grade_album(album, "EMBEDDED", desc_cfg)
-ok(res["pass_count"] == res["total_checks"],
-   f"a non-blank description.txt passes ({res['pass_count']}/{res['total_checks']})")
-with open(desc, "w", encoding="utf-8") as fh:
-    fh.write("   \n\n")
-res = _grade_album(album, "EMBEDDED", desc_cfg)
-ok(res["total_checks"] - res["pass_count"] == 1,
-   "a blank description.txt does not count as a description")
-with open(desc, "w", encoding="utf-8") as fh:
-    fh.write("Recorded in a shed, 1997.\n")
-# ... and the file itself is legitimate library content, not a stray
-strict_cfg = dict(cfg, grade_check_album_description=True,
-                  grade_check_disallowed=True, grade_check_extra_images=True)
-res = _grade_album(album, "EMBEDDED", strict_cfg)
-ok(not any("Disallowed" in i for i in res["issues"]),
-   f"description.txt is not a disallowed file type (got {res['issues']})")
-ok(not any("Extra artwork" in i for i in res["issues"]),
-   f"and not stray artwork either (got {res['issues']})")
-ok(res["pass_count"] == res["total_checks"],
-   f"description.txt costs no grade points ({res['pass_count']}/{res['total_checks']})")
 
 # ----------------------------------------------------------------------
 # Release type: absent tag, spelling variants (no live MusicBrainz call)

@@ -17,10 +17,10 @@ config validator, the wizard and the notification all need the same answer:
 * **manual counterparts** — every family entry carries the options a person
   uses instead (`manual_options`), one row per thing the step decides, each
   naming the route it calls, the entry point both halves share and the tags and
-  sidecars it owns. The pipeline's own steps that no family owns (the artist's
-  image, the two descriptions, the instrumental pass) are in `OTHER_STEPS`, in
-  the same shape. The audit test reads that table: it is what keeps "an import
-  can do it" and "a person can do it" from drifting apart.
+  sidecars it owns. The pipeline's own steps that no family owns (the
+  instrumental pass) are in `OTHER_STEPS`, in the same shape. The audit test
+  reads that table: it is what keeps "an import can do it" and "a person can
+  do it" from drifting apart.
 * **gaps** — what an album is still missing once the pipeline has done all it
   can. Read off `mlo.grader`'s own checks — a gap here IS a grading failure,
   never a second opinion — plus the two families the grader deliberately does
@@ -223,33 +223,6 @@ FAMILIES = (
 # by hand — the same row shape as a family's `manual` tuple, and the same way of
 # saying which tags it owns.
 OTHER_STEPS = (
-    {"id": "artist-image",
-     "family": None,
-     "surface": ("wizard", "artist-page", "tag-actions"),
-     "route": "/api/artist/image",
-     "method": "POST",
-     "auto": "server.imports:apply_metadata",
-     "service": "server.api_discovery:artist_image_save",
-     "tags": (),
-     "files": ("artist.jpg", "artist.png")},
-    {"id": "artist-description",
-     "family": None,
-     "surface": ("wizard", "artist-page", "tag-actions"),
-     "route": "/api/artist/description",
-     "method": "POST",
-     "auto": "server.imports:apply_metadata",
-     "service": "server.api_discovery:artist_description_save",
-     "tags": (),
-     "files": ("description.txt",)},
-    {"id": "album-description",
-     "family": None,
-     "surface": ("wizard", "album-page", "tag-actions"),
-     "route": "/api/album/description",
-     "method": "POST",
-     "auto": "server.imports:apply_metadata",
-     "service": "server.api_discovery:album_description_save",
-     "tags": (),
-     "files": ("description.txt",)},
     {"id": "instrumental",
      "family": None,
      "surface": ("wizard", "tag-actions"),

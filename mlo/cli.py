@@ -13,7 +13,6 @@ import importlib
 import os
 import traceback
 
-from .artistdata import run_optimize_artist_images
 from .audit import run_audit_library
 from .autotag import run_auto_tagging
 from .cue import run_format_cues
@@ -517,9 +516,9 @@ def build_script_runners():
     not have, and mlo.cli is on the import path of the whole CLI).
 
     EVERY id SCRIPTS declares is wired: the menu and the runner map are two
-    halves of one promise, and 15 and 19 both spent time missing from this map
-    — the CLI could list them, and Run All answered "Skipping unknown script
-    id" while the menu kept advertising them. A script with no runner here is
+    halves of one promise, and 15 spent time missing from this map
+    — the CLI could list it, and Run All answered "Skipping unknown script
+    id" while the menu kept advertising it. A script with no runner here is
     therefore an error, not a skipped step, and tools/test_script_menus.py
     asserts the coverage so the next id cannot be added to the menu alone.
     """
@@ -541,7 +540,6 @@ def build_script_runners():
         15: ("server.script_runners", "run_release_tracklist"),
         16: ("mlo.moods", "run_detect_mood_energy"),
         17: ("mlo.lyrics_xlit", "run_lyrics_xlit"),
-        19: run_optimize_artist_images,
         20: run_optimize_layout,
         # 21 writes ACOUSTID_* tags, so it is resolved on first use like the
         # other tag-writing scripts (and it is not re-exported by mlo itself).
@@ -553,10 +551,6 @@ def build_script_runners():
         # 23 deletes tags through the same stripper script 10 uses, so it is
         # resolved on first use like every other pass that opens a container.
         23: ("mlo.taghygiene", "run_tag_hygiene"),
-        # 24 downloads from the public rating sources, so its fetchers live
-        # with the rest of the network code (server.integrations) and the
-        # module is resolved on first use like every other fetching script.
-        24: ("mlo.web_ratings", "run_web_ratings"),
     }
     runners = {}
     for sid, name, _desc in SCRIPTS:

@@ -205,7 +205,7 @@ finally:
 # --------------------------------------------------------------------------- #
 # 6. A pip tool behind its upstream release actually updates
 # --------------------------------------------------------------------------- #
-# librosa/beets/yt-dlp could never move: _install_pip_package returned "already
+# librosa/beets could never move: _install_pip_package returned "already
 # installed" whenever a folder existed at all, installed the hardcoded pin when
 # one did not, and installed_versions() reported the pin for any folder — so the
 # row said Update, the press answered "nothing to do", and a successful install
@@ -989,8 +989,8 @@ with tempfile.TemporaryDirectory() as tmp:
 # --------------------------------------------------------------------------- #
 # 14. A landed package is an install, whatever pip's exit status says
 # --------------------------------------------------------------------------- #
-# "Also dependency installs work, but yt-dlp succeeds with an 'error'" (the
-# owner's report, on the Docker image, where yt-dlp IS installed by this pip
+# "Also dependency installs work, but the package succeeds with an 'error'"
+# (the owner's report, on the Docker image, where it IS installed by this pip
 # path). Two checks in the pip installer could say "failed" about an install
 # that worked, and the first of them also DELETED it:
 #
@@ -1010,12 +1010,12 @@ with tempfile.TemporaryDirectory() as tmp:
 with tempfile.TemporaryDirectory() as tmp:
     import shutil  # noqa: E402  (this section's own import, like the others)
     real = (sandbox_deps(tmp), fetchdeps._api_json, fetchdeps.run_tool)
-    release_tag = "2026.08.19"
+    release_tag = "2.14.1"
     seen = {}
 
     def _api(url, headers=None):
-        if url == "https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest":
-            return {"tag_name": release_tag}
+        if url == "https://pypi.org/pypi/beets/json":
+            return {"info": {"version": release_tag}}
         raise AssertionError(f"unexpected URL {url}")
 
     def _pip_landed_then_failed(cmd, **kw):
@@ -1023,17 +1023,17 @@ with tempfile.TemporaryDirectory() as tmp:
         and a non-zero exit after all of it, which is the shape of the owner's
         error on a host where the last step (the script) is what fails."""
         seen["cmd"] = list(cmd)
-        vendor_pip_pkg(tmp, "yt-dlp", list(cmd)[-1].split("==")[-1])
+        vendor_pip_pkg(tmp, "beets", list(cmd)[-1].split("==")[-1])
         return SimpleNamespace(
             returncode=1, stdout="",
-            stderr=("WARNING: The script yt-dlp is installed in '...' which is "
+            stderr=("WARNING: The script beet is installed in '...' which is "
                     "not on PATH.\nERROR: Could not install packages due to an "
-                    "OSError: [Errno 5] Input/output error: '.../bin/yt-dlp'"))
+                    "OSError: [Errno 5] Input/output error: '.../bin/beet'"))
 
     def _pip_landed_nothing(cmd, **kw):
         return SimpleNamespace(
             returncode=1, stdout="",
-            stderr="ERROR: No matching distribution found for yt-dlp==2026.8.19")
+            stderr="ERROR: No matching distribution found for beets==2.14.1")
 
     def _unreadable_tools_folder(prefix, keep_dir):
         raise OSError(5, "Input/output error", tmp)
@@ -1044,23 +1044,23 @@ with tempfile.TemporaryDirectory() as tmp:
         landed_err = None
         try:
             with linux_host(), upstream_cache({}):
-                got = fetchdeps.install_dependency("yt-dlp", log=lambda m: None)
+                got = fetchdeps.install_dependency("beets", log=lambda m: None)
         except Exception as e:              # noqa: BLE001 — reported, not raised
             landed_err, got = e, None
-        dest = os.path.join(tmp, "yt-dlp v2026.8.19")
+        dest = os.path.join(tmp, "beets v2.14.1")
         check(f"a pip run that wrote the package then exited 1 is an install "
               f"(got {got!r}"
               + (f", raised {landed_err}" if landed_err else "") + ")",
-              got == "2026.8.19")
+              got == "2.14.1")
         check("...its install is kept, not deleted as a failure",
-              os.path.isfile(os.path.join(dest, "yt_dlp", "__init__.py")))
+              os.path.isfile(os.path.join(dest, "beets", "__init__.py")))
         check(f"...and the app reads the version pip wrote "
-              f"({tools_mod.python_pkg_version('yt-dlp')!r})",
-              tools_mod.python_pkg_version("yt-dlp") == "2026.8.19")
-        row = next(r for r in fetchdeps.dependency_rows() if r["key"] == "yt-dlp")
+              f"({tools_mod.python_pkg_version('beets')!r})",
+              tools_mod.python_pkg_version("beets") == "2.14.1")
+        row = next(r for r in fetchdeps.dependency_rows() if r["key"] == "beets")
         check(f"...so the row is Ready at it (state {row['state']}, "
               f"installed {row['installed_version']})",
-              row["state"] == "ok" and row["installed_version"] == "2026.8.19")
+              row["state"] == "ok" and row["installed_version"] == "2.14.1")
 
         # A prune that cannot read the tools folder is housekeeping failing, not
         # the install: the folder verified above IS the install.
@@ -1071,15 +1071,15 @@ with tempfile.TemporaryDirectory() as tmp:
             prune_err = None
             try:
                 with linux_host(), upstream_cache({}):
-                    got = fetchdeps.install_dependency("yt-dlp", log=lambda m: None)
+                    got = fetchdeps.install_dependency("beets", log=lambda m: None)
             except Exception as e:          # noqa: BLE001 — reported, not raised
                 prune_err, got = e, None
             check(f"a prune that cannot read the tools folder does not fail the "
                   f"install (got {got!r}"
                   + (f", raised {prune_err}" if prune_err else "") + ")",
-                  got == "2026.8.19")
+                  got == "2.14.1")
             check("...and the install is still there",
-                  os.path.isfile(os.path.join(dest, "yt_dlp", "__init__.py")))
+                  os.path.isfile(os.path.join(dest, "beets", "__init__.py")))
         finally:
             fetchdeps._remove_older_versions = real_prune
 
@@ -1089,7 +1089,7 @@ with tempfile.TemporaryDirectory() as tmp:
         fetchdeps.run_tool = _pip_landed_nothing
         try:
             with linux_host(), upstream_cache({}):
-                fetchdeps.install_dependency("yt-dlp", log=lambda m: None)
+                fetchdeps.install_dependency("beets", log=lambda m: None)
             check("a pip run that landed nothing is refused", False)
         except RuntimeError as e:
             check(f"a pip run that landed nothing is refused ({e})",
@@ -1107,7 +1107,7 @@ with tempfile.TemporaryDirectory() as tmp:
               tools_mod.python_pkg_version("eac-logchecker") == "0.8.1"
               and tools_mod.pip_import_present(mod, "eac-logchecker"))
         check("...and a folder that is not there is not 'landed'",
-              not tools_mod.pip_import_present(dest, "yt-dlp"))
+              not tools_mod.pip_import_present(dest, "beets"))
     finally:
         fetchdeps._api_json, fetchdeps.run_tool = real[1], real[2]
         restore_deps(real[0])
@@ -1168,14 +1168,14 @@ with tempfile.TemporaryDirectory() as tmp:
         # at all), a wheel that belongs to every host, and the stable ABI —
         # `cp3x-abi3` runs on every newer CPython, so a working install must
         # never be read as another host's.
-        plain = vendor_pip_pkg(tmp, "yt-dlp", "2026.8.19")
+        plain = vendor_pip_pkg(tmp, "mutagen", "1.47.0")
         pure = vendor_pip_pkg(tmp, "beets", "2.4.0", tags=["py3-none-any"])
         abi3 = vendor_pip_pkg(
             tmp, "eac-logchecker", "0.8.1",
             tags=[f"cp{sys.version_info.major}{max(sys.version_info.minor - 1, 0)}"
                   f"-abi3-{NATIVE_PLATFORM}"])
         check("a folder with no WHEEL at all is never hidden",
-              tools_mod.python_pkg_path("yt-dlp") == plain)
+              tools_mod.python_pkg_path("mutagen") == plain)
         check("a pure-python wheel belongs to every host",
               tools_mod.python_pkg_path("beets") == pure)
         check("an abi3 wheel of an older CPython is this host's",

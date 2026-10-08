@@ -178,7 +178,7 @@ from mlo import lyrics_providers as lp  # noqa: E402
 _orig = lp._PROVIDERS["lrclib"]
 # title exact, artist unknown to the provider → 0.65 + 0.35*0.4 = 0.79
 lp._PROVIDERS["lrclib"] = (
-    lambda artist, title, album, duration, cfg, yt:
+    lambda artist, title, album, duration, cfg:
     lp._hit("[00:01.00]Hello", "Hello", None, title, None, None))
 try:
     loose = lp.fetch_lyrics({"lyrics_sources": ["lrclib"]}, "Artist", "Song")

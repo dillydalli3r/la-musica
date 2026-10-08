@@ -60,13 +60,12 @@ export function resetClientSetup() {
 
 /** The wizard's steps, in order. `STEP_LABELS` keeps the rail and the step
  *  headings reading the same translated string. */
-export const STEP_IDS = ["server", "account", "notifications", "done"] as const;
+export const STEP_IDS = ["server", "account", "done"] as const;
 export type StepId = (typeof STEP_IDS)[number];
 
 export const STEP_LABELS: Record<StepId, MessageKey> = {
   server: "client.step_server",
   account: "client.step_account",
-  notifications: "client.step_notifications",
   done: "client.step_done",
 };
 

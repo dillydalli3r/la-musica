@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Check, Download, Headphones, Loader2, Plus, RotateCcw, Save, Sliders, Trash2, Upload, Waves, X,
+  Download, Headphones, Loader2, Plus, RotateCcw, Save, Trash2, Upload, X,
 } from "lucide-react";
 import { api, type EqBand, type ExportEqProfile } from "../api";
 import PageHeader from "../components/PageHeader";
@@ -10,9 +10,8 @@ import EqProfileModal from "../components/EqProfileModal";
 import EqAutoEqDialog from "../components/EqAutoEqDialog";
 import ConfirmButton from "../components/ConfirmButton";
 import { PageLoading } from "../components/Badges";
-import { applyEq } from "../lib/analyser";
 import {
-  EQ_GAIN_LIMIT, EQ_NEW_BAND, EQ_PREAMP_LIMIT, EQ_TYPES, eqApplyRefusal, eqToApoText, eqType,
+  EQ_GAIN_LIMIT, EQ_NEW_BAND, EQ_PREAMP_LIMIT, EQ_TYPES, eqToApoText, eqType,
 } from "../lib/eqNodes";
 import { toast } from "../store";
 
@@ -39,10 +38,10 @@ const num = (v: unknown, digits = 1): string => {
   return String(Number(n.toFixed(digits)));
 };
 
-/** A typeable number box with a unit, committed on Enter or blur — the pattern
- *  the player's volume box uses (components/VolumePct). Typing "50" must not be
- *  read as 5 mid-keystroke, and a value that lands outside the range is clamped
- *  to the range the server and the renderer both honour rather than refused. */
+/** A typeable number box with a unit, committed on Enter or blur. Typing "50"
+ *  must not be read as 5 mid-keystroke, and a value that lands outside the range
+ *  is clamped to the range the server and the renderer both honour rather than
+ *  refused. */
 function NumField({
   value, onCommit, min, max, digits = 1, suffix, disabled, title, width = "w-16",
 }: {
@@ -110,25 +109,17 @@ function NumField({
   );
 }
 
-/** The Equalizer: pick or build an Equalizer APO / Peace profile, see it, hear
- *  it, and choose whether the player applies it.
+/** The Equalizer: pick or build an Equalizer APO / Peace profile and edit its
+ *  curve — a configuration surface for the Export page's EQ bake.
  *
- *  Three things are deliberately ONE store. The profiles here are the profiles
- *  the Export page bakes into a transcode and the profiles this page applies to
- *  playback (`playback_eq_profile`) — one parser (mlo.eq), one set of files in
- *  `<music>/.mlo/data/eq`, so a curve the listener likes can be exported without
- *  being retyped, and an AutoEq import or a pasted Peace file is available to
- *  both. Nothing on this page writes a second kind of profile.
- *
- *  Editing PREVIEWS through the player's own WebAudio chain (lib/analyser →
- *  lib/eqNodes): the curve on screen and the sound in the speakers are built
- *  from the same bands by the same code, and the preview is live — a band drag
- *  is audible without saving anything. Only Save stores; leaving the page puts
- *  the configured profile back. */
+ *  The profiles here are the profiles the Export page bakes into a transcode —
+ *  one parser (mlo.eq), one set of files in `<music>/.mlo/data/eq`, so a curve
+ *  the listener likes can be exported without being retyped, and an AutoEq
+ *  import or a pasted Peace file is stored the same way. Nothing on this page
+ *  writes a second kind of profile. */
 export default function EqualizerPage() {
   const qc = useQueryClient();
   const catalog = useQuery({ queryKey: ["exportEq"], queryFn: api.exportEq });
-  const cfg = useQuery({ queryKey: ["config"], queryFn: api.config });
 
   const [draft, setDraft] = useState<Draft | null>(null);
   const [selected, setSelected] = useState<number | null>(null);
@@ -142,9 +133,7 @@ export default function EqualizerPage() {
 
   const presets = catalog.data?.presets ?? NO_PROFILES;
   const profiles = catalog.data?.profiles ?? NO_PROFILES;
-  const playId = String(cfg.data?.playback_eq_profile ?? "");
   const all = useMemo(() => [...presets, ...profiles], [presets, profiles]);
-  const playRow = all.find((p) => p.id === playId) ?? null;
 
   const load = useCallback((row: ExportEqProfile) => {
     setDraft({
@@ -163,36 +152,12 @@ export default function EqualizerPage() {
     setSaveAsName(row.label);
   }, []);
 
-  // Open on whatever the player is applying, else the first preset: the page
-  // should never open empty when the app already has a curve installed.
+  // Open on the first entry: the page should never open empty when the app
+  // already has profiles installed.
   useEffect(() => {
     if (draft || !all.length) return;
-    load(playRow ?? all[0]);
-  }, [all, draft, load, playRow]);
-
-  // LIVE preview while the page is open (see the doc comment). Re-applying the
-  // configured profile on the way out is what makes the preview a preview —
-  // and the unmount effect below reads the two values that were true when it
-  // unmounts, through refs kept in step by an effect (never written during
-  // render: a ref read/written while rendering is not a value React can
-  // reconcile).
-  useEffect(() => {
-    if (!draft) return;
-    applyEq(draft.filters, draft.preampDb);
-  }, [draft]);
-  const playIdRef = useRef(playId);
-  const allRef = useRef(all);
-  useEffect(() => {
-    playIdRef.current = playId;
-    allRef.current = all;
-  }, [playId, all]);
-  useEffect(() => () => {
-    const row = allRef.current.find((p) => p.id === playIdRef.current);
-    // The same refusal as PlayerBar's install: leaving the editor puts the
-    // CONFIGURED curve back, and a profile that parsed with errors does not
-    // play anywhere (R219).
-    applyEq(row && !eqApplyRefusal(row) ? (row.filters ?? []) : [], row?.preamp_db ?? 0);
-  }, []);
+    load(all[0]);
+  }, [all, draft, load]);
 
   const saved = all.find((p) => p.id === draft?.sourceId) ?? null;
   const isPreset = !!saved && presets.some((p) => p.id === saved.id);
@@ -231,27 +196,10 @@ export default function EqualizerPage() {
     }
   };
 
-  const applyToPlayer = async (id: string) => {
-    setBusy(true);
-    try {
-      // The whole config is written back, as every other settings surface does
-      // (SettingsPage, the genre tray): the payload IS the app's config, so
-      // round-tripping the server's own values is what keeps the other keys.
-      await api.saveConfig({ ...(cfg.data ?? {}), playback_eq_profile: id });
-      await qc.invalidateQueries({ queryKey: ["config"] });
-      toast.success(id ? `Player EQ: ${all.find((p) => p.id === id)?.label ?? id}` : "Player EQ off");
-    } catch (e) {
-      toast.error(String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
   const removeProfile = async (id: string) => {
     try {
       await api.exportEqDelete(id);
       await qc.invalidateQueries({ queryKey: ["exportEq"] });
-      if (playId === id) await applyToPlayer("");
       if (draft?.sourceId === id) setDraft(null);
       toast.success("Profile deleted");
     } catch (e) {
@@ -265,43 +213,12 @@ export default function EqualizerPage() {
     <div className="p-4 md:p-6 space-y-4">
       <PageHeader
         title="Equalizer"
-        subtitle="Equalizer APO / Peace profiles — presets, AutoEq headphone corrections and your own curves, applied to what the player plays."
+        subtitle="Equalizer APO / Peace profiles — presets, AutoEq headphone corrections and your own curves, baked into an export."
       />
 
       <div className="grid gap-4 lg:grid-cols-[19rem_minmax(0,1fr)]">
         {/* ---- profile rail ------------------------------------------------ */}
         <aside className="space-y-3">
-          <section className="rounded-lg border border-border bg-panel/50 p-3 space-y-2">
-            <div className="text-[10px] uppercase tracking-wider text-zinc-500">Applied to playback</div>
-            <select
-              className="w-full rounded-md border border-border bg-panel px-2 py-1.5 text-xs"
-              value={playId}
-              disabled={busy}
-              onChange={(e) => void applyToPlayer(e.target.value)}
-              aria-label="Profile the player applies"
-            >
-              <option value="">Off — no equalizer</option>
-              {presets.length > 0 && (
-                <optgroup label="Presets">
-                  {presets.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
-                </optgroup>
-              )}
-              {profiles.length > 0 && (
-                <optgroup label="Profiles">
-                  {profiles.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
-                </optgroup>
-              )}
-            </select>
-            <p className="text-[11px] text-zinc-500">
-              {playRow
-                ? `${playRow.filters?.length ?? 0} band(s) · preamp ${num(playRow.preamp_db)} dB. Every client of this server applies it.`
-                : "The player passes the audio through untouched."}
-              {playId && !playRow
-                ? " The profile this names is gone — pick another, or import it again."
-                : ""}
-            </p>
-          </section>
-
           <section className="rounded-lg border border-border bg-panel/50 p-3 space-y-2">
             <div className="flex items-center justify-between">
               <div className="text-[10px] uppercase tracking-wider text-zinc-500">Profiles</div>
@@ -331,9 +248,6 @@ export default function EqualizerPage() {
                         {isPresetRow ? " · preset" : ""}
                       </div>
                     </button>
-                    {playId === row.id && (
-                      <Check className="h-3.5 w-3.5 text-accent shrink-0" aria-label="Applied to playback" />
-                    )}
                     {!isPresetRow && (
                       <ConfirmButton
                         className="p-1 rounded text-zinc-500 hover:text-red-300 hover:bg-raise shrink-0"
@@ -375,7 +289,7 @@ export default function EqualizerPage() {
                     {!editable && !isPreset && <span className="text-[10px] text-zinc-500"> · unsaved curve</span>}
                   </div>
                   <div className="text-[11px] text-zinc-500">
-                    Editing previews in the player live — nothing is stored until you save.
+                    Edit the curve — nothing is stored until you save.
                   </div>
                 </div>
                 <div className="ml-auto flex flex-wrap items-center gap-1.5">
@@ -595,28 +509,7 @@ export default function EqualizerPage() {
                 >
                   <Download className="h-3.5 w-3.5" /> Save as
                 </button>
-                <button
-                  className="btn-ghost !py-1.5 text-xs"
-                  disabled={busy || !draft.filters.length}
-                  onClick={() => {
-                    // The hand-off to the Export page's own control: applying
-                    // and exporting are the same profile, and this is the one
-                    // place the pairing is not obvious.
-                    void applyToPlayer(draft.sourceId || saveAsName.trim());
-                  }}
-                  title="Apply this profile to playback"
-                >
-                  <Waves className="h-3.5 w-3.5" /> Apply to player
-                </button>
               </div>
-
-              <p className="text-[11px] text-zinc-500 flex items-start gap-1.5">
-                <Sliders className="h-3.5 w-3.5 mt-0.5 shrink-0" />
-                The curve is what a listener hears, so it is applied by the browser's own biquad
-                filters — a peaking band, a pass and a notch are the same filter the export uses; a
-                SHELF's width is not (Equalizer APO's custom slope has no equivalent in a WebAudio
-                shelf). The frequencies, the gains and the band order are identical.
-              </p>
             </>
           )}
         </section>

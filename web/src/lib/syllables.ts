@@ -151,8 +151,3 @@ export function syllabifyLine(line: string): SylPiece[] {
   });
   return out;
 }
-
-/** The line text a set of syllable pieces reassembles into. */
-export function sylPiecesText(pieces: SylPiece[]): string {
-  return pieces.map((p) => p.text + (p.wordEnd ? " " : "")).join("").replace(/\s+/g, " ").trim();
-}

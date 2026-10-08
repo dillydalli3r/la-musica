@@ -59,7 +59,7 @@ export interface TrackTags {
   DATE?: string | null;
   /** The ORIGINAL release date (ID3 TORY / Vorbis ORIGINALDATE / MP4
    *  originaldate): a remaster keeps the year the work was first released, so
-   *  the player bar shows THIS in preference to `DATE` (lib/fmt.originalYear).
+   *  album rows show THIS in preference to `DATE` (lib/fmt.originalYear).
    *  Written only when the tagger set it — an untagged file falls back to
    *  `DATE`. */
   ORIGINALDATE?: string | null;
@@ -87,30 +87,12 @@ export interface TrackTags {
   CATALOGNUMBER?: string | null;
   LABEL?: string | null;
   RELEASETYPE?: string | null;
-  /** The podcast identity (server.library reads it off the album's files):
-   *  the MusicBrainz SERIES an episode's release group is `part of`, its
-   *  series id, and the episode number MusicBrainz states. Absent on every
-   *  release that is not an episode — which is every music album. */
-  PODCASTSERIES?: string | null;
-  PODCASTSERIESMBID?: string | null;
-  PODCASTEPISODE?: string | null;
   RELEASECOUNTRY?: string | null;
   COMPOSER?: string | null;
   LYRICIST?: string | null;
   REMIXER?: string | null;
   COPYRIGHT?: string | null;
   ISRC?: string | null;
-  /** What the "Web ratings" script (id 24) fetched and wrote, on Picard's own
-   *  0-100 scale — the same scale the file's `RATING` tag uses, which this app
-   *  never reads (its rating lives in its own store, lib/ratings). `WEBRATING`
-   *  is the TRACK's; `ALBUMWEBRATING` is the ALBUM's, written to every file of
-   *  the album; each carries the names of the sources that contributed beside
-   *  it. Absent on every file the script has not touched — an absence is not a
-   *  rating of zero, which is what a surface has to be able to tell apart. */
-  WEBRATING?: string | null;
-  WEBRATING_SOURCE?: string | null;
-  ALBUMWEBRATING?: string | null;
-  ALBUMWEBRATING_SOURCE?: string | null;
 }
 
 export interface Track {
@@ -147,40 +129,8 @@ export interface Track {
   cover_file?: string | null;
   sidecar_cover?: boolean;
   sidecar_cover_file?: string | null;
-  /** Music-video container (MKV/MP4/VOB/…) — plays with <video>. */
+  /** Music-video container (MKV/MP4/VOB/…). */
   is_video?: boolean;
-}
-
-/** The podcast identity of ONE album (server.library.podcast_info). */
-export interface PodcastInfo {
-  /** The series NAME a reader sees — MusicBrainz's disambiguation in
-   *  parentheses when it states one, which is what keeps two same-named shows
-   *  apart (it is also the key the series page is asked by). */
-  series: string;
-  /** The MusicBrainz series id, when the tag chain recorded one. */
-  series_mbid?: string | null;
-  /** MusicBrainz's own episode number for this release group, when stated. */
-  episode?: number | null;
-}
-
-/** One Home shelf row of the Podcasts shelf: the newest episode's OWN library
- *  row, plus the series facts the card shows instead of an artist. */
-export type HomePodcast = HomeAlbum & {
-  podcast_series: string;
-  podcast_series_mbid?: string | null;
-  /** How many episodes of this series the library holds (not the whole show:
-   *  the app lists what is on disk). */
-  podcast_episode_count: number;
-};
-
-/** `GET /api/podcasts?series=…`: one series and every episode the library
- *  holds, newest first. `episode_count` counts the EPISODES in `episodes`,
- *  each of which is a library album row the shared card draws. */
-export interface PodcastSeries {
-  series: string;
-  series_mbid?: string | null;
-  episode_count: number;
-  episodes: HomeAlbum[];
 }
 
 /** What an import could not supply for an album, if anything — one shape for
@@ -205,14 +155,6 @@ export interface Album {
   path: string;
   error?: string;
   meta?: AlbumMeta;
-  /** The podcast identity of this album, or absent (server.library's
-   *  `podcast_info`). A podcast in MusicBrainz is a SERIES of type Podcast —
-   *  there is no Podcast release-group type — so an episode is recognised by
-   *  the series its release group is `part of`, never by RELEASETYPE (which
-   *  stays what MusicBrainz says: "Broadcast"). `series` is the name a reader
-   *  sees, disambiguation included; `episode` is MusicBrainz's own episode
-   *  number when it states one. */
-  podcast?: PodcastInfo | null;
   /** Set when an import could not supply a family for this album (see
    *  `NeedsWarning`). The album is IN the library either way. */
   needs?: NeedsWarning;
@@ -269,22 +211,15 @@ issues?: Record<string, string[]>;
   /** What the album is waiting for (the server's own sentence). */
   pending_reason?: string;
   /** What "Add to library" already fetched for this folder before its audio
-   *  existed: the artist image / descriptions and the album description it
-   *  wrote (their paths), the links it resolved and the cover candidates it
-   *  ranked, with the winner it picked. */
+   *  existed: the cover candidates it ranked and the winner it picked, plus
+   *  the links it resolved. */
   prefetched?: AlbumPrefetch | null;
-  /** The album folder's stored description (see mlo/artistdata). The library
-   *  payload only reports whether one exists; the album page carries the text. */
-  artwork?: AlbumArtwork;
 }
 
 /** What "Add to library" pre-fetched for a folder whose audio has not arrived
  *  (`server/imports.prefetch_album`, recorded in the framework marker). */
 export interface AlbumPrefetch {
   at: number;
-  artist_image: string | null;
-  artist_description: string | null;
-  album_description: string | null;
   cover_candidates: number;
   cover_pick: string | null;
   cover_source: string | null;
@@ -504,12 +439,6 @@ export interface Artist {
   disambiguation?: string | null;
   albums: Album[];
   aggregate: Aggregate;
-  /** Whether an `artist.*` image is stored in the artist folder — read from
-   *  the same helper Home's shelf and the artist page ask (`mlo.artistdata`),
-   *  so `api.artistImageUrl(path)` is only requested when it can answer. */
-  has_image?: boolean;
-  /** Artist image + description stored in the artist folder. */
-  artwork?: ArtistArtworkFields;
   /** Artist-level grading: only the checks that apply to an artist folder.
    *  The artist page computes it for the folder it opened, and every
    *  `/api/library` row carries its own (`server.library`), so the dot beside
@@ -640,119 +569,10 @@ export interface CoverInfo {
   megapixels: number | null;
 }
 
-/** Per-track cover state the tagging wizard reads off `Album.tracks`:
- *  `cover_file` is the image actually serving that track (per-track manifest
- *  or sidecar — identical to `Album.cover_file` when the track just uses the
- *  album cover). Feed it to `api.coverInfo(album, cover_file)` for dimensions,
- *  and to `api.coverUrl(album, cover_file)` for the thumbnail. */
-export type TrackCoverState = Pick<
-  Track,
-  "file" | "cover_file" | "sidecar_cover" | "sidecar_cover_file"
->;
-
-export interface Playlist {
-  id: number;
-  name: string;
-  kind: "manual" | "smart";
-  filter: { conditions: FilterCondition[]; match: "all" | "any" } | null;
-  track_count: number;
-  tracks?: string[];
-  created?: number;
-  updated?: number;
-  /** Where the playlist came from: the streaming service id it was imported
-   *  from ("deezer" | "spotify" | "youtube" | "apple"), "" for one made here. */
-  origin?: string;
-  /** That service's own playlist URL, when `origin` is set. */
-  origin_url?: string;
-}
-
-/** One row of a streaming import report: what the service listed, whether the
- *  library has it, and — when it does not — why not. */
-export interface StreamingImportRow {
-  index: number;
-  title: string;
-  artist: string;
-  album: string;
-  duration?: number;
-  isrc?: string;
-  url?: string;
-  matched: boolean;
-  /** Library path (forward slashes — the form the library payload uses). */
-  path: string | null;
-  library_title: string;
-  library_artist: string;
-  library_album: string;
-  mbid: string;
-  /** A later row in the same playlist already holds this path. */
-  duplicate: boolean;
-  /** Why it did not match ("" when it did). */
-  reason: string;
-  /** What this row queued ("album" | "track") when it queued something,
-   *  "" otherwise. */
-  queued: string;
-}
-
-/** One queue attempt an import made (an album, or an unmatched track). */
-export interface StreamingQueueRow {
-  kind: "album" | "track";
-  title: string;
-  artist: string;
-  album?: string;
-  queued: boolean;
-  matched: boolean;
-  by_name: boolean;
-  mbid: string;
-  note: string;
-  error: string;
-  reason?: string;
-}
-
-export interface StreamingImportReport {
-  service: string;
-  service_label: string;
-  source_url: string;
-  /** The service's own playlist title (used when the import named none). */
-  title: string;
-  total: number;
-  matched: number;
-  unmatched: number;
-  duplicates: number;
-  tracks: StreamingImportRow[];
-  parent_albums: { enabled: boolean; queued: StreamingQueueRow[] };
-  unmatched_tracks: { mode: string; queued: StreamingQueueRow[] };
-  note: string;
-}
-
-export interface StreamingImportResult {
-  ok: boolean;
-  report: StreamingImportReport;
-  /** The created playlist (null for a check, or when nothing was created). */
-  playlist: Playlist | null;
-  created: boolean;
-  dry_run: boolean;
-}
-
-export interface FilterCondition {
-  field: string;
-  op: string;
-  value?: string | number | boolean;
-}
-
 export interface Progress {
   done: number;
   total: number;
   desc: string;
-}
-
-export interface GradeResult {
-  path: string;
-  pass_count: number;
-  total_checks: number;
-  grade_pct: number | null;
-  pass: boolean;
-  audit_summary: string | null;
-  tracks: Track[];
-  issues?: Record<string, string[]>;
 }
 
 export interface MBPerson {
@@ -1079,157 +899,6 @@ export interface GenreCascade {
   levels: { track: boolean; release: boolean; release_group: boolean; artist: boolean };
 }
 
-/** Home page payload: library highlights. */
-export interface HomeData {
-  stats: {
-    artists: number;
-    albums: number;
-    tracks: number;
-    playlists: number;
-    grade_pct: number | null;
-  };
-  recent: HomeAlbum[];
-  top_rated: HomeAlbum[];
-  /** The user's own rated releases, highest rating first. The row carries the
-   *  stored rating in HALF-STARS — the API's own unit (0-10), which
-   *  `lib/ratings.ts` is the one place to turn into the 0-5 a reader sees — so
-   *  the shelf's order and the stars on its cards come from one number. */
-  rated?: (HomeAlbum & { rating: number })[];
-  favorites: HomeAlbum[];
-  discover: HomeAlbum[];
-  top_artists: HomeArtist[];
-  /** One row per podcast SERIES the library holds, its newest episode on it.
-   *  Empty (and so the shelf is not drawn) unless the library has a podcast:
-   *  the identity comes from the episodes' own tags, never from MusicBrainz. */
-  podcasts?: HomePodcast[];
-  needs_attention: HomeAlbum[];
-  /** Every album added but not downloaded yet, newest first — the one shelf a
-   *  user can read to see everything still waiting. */
-  pending?: HomeAlbum[];
-  /** Whether the library passes its grading checks, and what fails — the SAME
-   *  object `/api/grades/summary` serves, so the strip on Home and the one on
-   *  the Library page cannot disagree about the library's own verdict. */
-  grade_warning?: GradeWarning;
-}
-
-export interface HomeArtist {
-  path: string;
-  artist: string;
-  /** MusicBrainz's disambiguation comment for this artist, or absent — the
-   *  same field the Library's artist rows carry, passed through by
-   *  `server.recommendations._top_artists`. */
-  disambiguation?: string | null;
-  album_count: number;
-  track_count: number;
-  grade_pct: number | null;
-  cover_path: string;
-  cover: string | null;
-  /** Whether an artist picture is stored for this folder, i.e. whether
-   *  `/api/artist/image` has bytes to answer with. The shelf draws the picture
-   *  when it is true and the cover when it is not: the endpoint 404s for a
-   *  folder without one, and a request that 404s paints the browser's broken
-   *  image before the fallback can replace it. Absent means the same as false
-   *  — never assume a picture is there. */
-  has_image?: boolean;
-  /** The artist's OWN grade (`mlo.grader.grade_artist`: the artist folder's
-   *  image and description), passed through from the library row this shelf is
-   *  built from — the same object the artist page holds, so the dot beside the
-   *  name here and there is one verdict. Absent on a row that was never
-   *  graded: no dot, never a guess. */
-  grade?: ArtistGrade;
-}
-
-/** One Home shelf row: the LIBRARY's own album row plus the shelf's reason for
- *  listing it (`server.recommendations._owned_row`). Home draws the shared
- *  album card — the same card the Library grid draws — so the row IS the
- *  library row: the card reads its tracks, `meta`, media, grade and audit off
- *  it, and the framework album's marker rides along as it does in the library
- *  payload.
- *
- *  A row the library does NOT hold (`owned: false` — a favourite whose folder
- *  moved away) carries identity only: the title, artist
- *  and year it is known by in `meta`, an empty track list, and nothing that
- *  reads as a grade. The card draws those without a status dot, a play button
- *  or a link. */
-export type HomeAlbum = Album & {
-  /** Why this shelf lists it ("Recently added", "Rediscover", …). */
-  reason?: string;
-  /** False for a release the library does not hold (see above). Absent on the
-   *  shelves' library rows. */
-  owned?: boolean;
-  /** The shelf's own artist display name (ALBUMARTIST → album_artist →
-   *  ARTIST), the field the Library's flattened rows carry too. */
-  artist?: string;
-  mbid?: string | null;
-  /** MusicBrainz entity type behind `mbid` — "rg" (release group) or "release". */
-  mb_kind?: string;
-};
-
-/* ---------------------------------------------------------------------- *
- * Discovery — provider chain (server/discovery.py)                        *
- * ---------------------------------------------------------------------- */
-
-/** One selectable provider, as reported by `/api/discovery/sources`. */
-export interface DiscoverySource {
-  id: string;
-  label: string;
-  notes: string;
-}
-
-/** Provider catalogue + the per-feature orders the settings page edits. */
-export interface DiscoveryCatalog {
-  sources: DiscoverySource[];
-  /** Built-in order per feature: artist_image_sources, description_sources. */
-  defaults: Record<string, string[]>;
-  enabled: boolean;
-  /** The user's saved orders (empty = built-in). */
-  saved: Record<string, string[]>;
-  mb_search_source: "auto" | "discovery" | "musicbrainz";
-}
-
-/** Candidate artist image for the picker. */
-export interface DiscoveryImageRow {
-  url: string;
-  source: string;
-  label: string;
-  kind: "photo" | "wide" | "album_art";
-}
-
-/* ---------------------------------------------------------------------- *
- * Artist artwork + descriptions (mlo/artistdata.py, /api/artist/artwork)  *
- * ---------------------------------------------------------------------- */
-
-export interface ArtistArtworkImage {
-  present: boolean;
-  file: string | null;
-  /** `/api/artist/image?artist=…` — present only when an image exists. */
-  url: string | null;
-  source: string | null;
-  label: string | null;
-  source_url: string | null;
-  fetched: string | null;
-  updated: string | null;
-}
-
-export interface ArtistArtworkDescription {
-  present: boolean;
-  text: string | null;
-  source: string | null;
-  source_url: string | null;
-  fetched: string | null;
-}
-
-/** Artist payload's stored artwork (same shape minus the grade). */
-export interface ArtistArtworkFields {
-  image: boolean;
-  image_file: string | null;
-  image_url: string | null;
-  description: string | null;
-  description_source: string | null;
-  description_url: string | null;
-  provenance?: Record<string, string | null>;
-}
-
 export interface ArtistGradeIssue {
   code: string;
   label: string;
@@ -1239,8 +908,8 @@ export interface ArtistGradeIssue {
   reason?: string;
 }
 
-/** Artist-level grading: only what applies to an artist folder (image and
- *  description), never the album checks. */
+/** Artist-level grading: only what applies to an artist folder (that it
+ *  holds albums at all), never the album checks. */
 export interface ArtistGrade {
   path?: string;
   checks?: number;
@@ -1249,34 +918,10 @@ export interface ArtistGrade {
   pct?: number | null;
   pass?: boolean;
   issues?: ArtistGradeIssue[];
-  /** Informational only — an artist image below the configured target size is
-   *  accepted, so it is reported here and never fails the check. */
+  /** Informational only — an item the check reported without failing. */
   notes?: ArtistGradeIssue[];
-  artwork?: { image: boolean; image_file: string | null; description: boolean };
   error?: string;
 }
-
-export interface ArtistArtwork {
-  artist: string;
-  path: string;
-  image: ArtistArtworkImage;
-  description: ArtistArtworkDescription;
-  provenance: Record<string, string | null>;
-  grade: ArtistGrade;
-}
-
-/** Album folder description metadata (server/library.py → build_album). */
-export interface AlbumArtwork {
-  description: boolean;
-  /** Null in the library payload (presence only) — the album page has the text. */
-  description_text: string | null;
-  description_source: string | null;
-  description_url: string | null;
-}
-
-/* ---------------------------------------------------------------------- *
- * Lyrics chain (/api/lyrics/providers, /api/lyrics/auto)                  *
- * ---------------------------------------------------------------------- */
 
 export interface LyricsProvider {
   id: string;
@@ -1595,13 +1240,11 @@ export interface ImportLyricsSettle {
 }
 
 /** What `POST /api/import/settle` answers — the wizard's Finish step shows it
- *  before it runs the ticked scripts. `metadata` is the import's own metadata
- *  step (`run_metadata_step`), i.e. the album/artist descriptions and image. */
+ *  before it runs the ticked scripts. */
 export interface ImportSettleResult {
   path: string;
   source: ImportSourceResult;
   lyrics: ImportLyricsSettle;
-  metadata?: { staged: boolean; applied: Record<string, string | null> };
 }
 
 /** One family an import could not finish by itself — the wizard's own steps
@@ -1698,9 +1341,8 @@ export interface ScriptRunResult {
 
 /** The entity a details menu is mounted on — what its selection IS, which is
  *  what decides the scripts it may offer (`server/script_menu.py`). A track row
- *  and a playlist hold FILES; an album, an artist and the library hold
- *  FOLDERs. */
-export type EntityKind = "album" | "track" | "artist" | "playlist" | "library";
+ *  holds FILES; an album, an artist and the library hold FOLDERs. */
+export type EntityKind = "album" | "track" | "artist" | "library";
 
 /** One script of `/api/script-menu`.
  *

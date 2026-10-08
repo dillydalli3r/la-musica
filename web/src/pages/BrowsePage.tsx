@@ -4,36 +4,29 @@
  *  clicks values into that same spec, and the sheet below is the engine's own
  *  answer to it — the count in the builder, the total in the toolbar and the
  *  rows on screen all come from `/api/library/query`, so the page can never
- *  disagree with itself. "Save as smart playlist" hands the SAME spec to
- *  `POST /api/playlists` (kind "smart"): a saved playlist is that query, and
- *  evaluation later runs the very same code.
+ *  disagree with itself.
  *
  *  The rows are drawn in the library page's own row language — the shared badge
  *  components, formatters and table classes, and the same sortable headers —
  *  because the engine returns the library's row shape on purpose. */
 
 import { Fragment, useMemo, useState } from "react";
-import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, useNavigate } from "react-router-dom";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
+import { Link } from "react-router-dom";
 import {
-  ArrowDown, ArrowUp, ChevronDown, ChevronRight, Layers, Save, SlidersHorizontal,
+  ArrowDown, ArrowUp, ChevronDown, ChevronRight, Layers, SlidersHorizontal,
 } from "lucide-react";
 import { api } from "../api";
 import type { LibraryCondition } from "../api";
-import { toast, useStore } from "../store";
-import type { QueueTrack } from "../store";
 import type { Album, Library, Track } from "../types";
 import PageHeader from "../components/PageHeader";
 import QueryBuilder, {
   NO_VALUE_OPS, fieldIndex, filterSpec, runnableConditions, useDebounced, useLibraryFields,
 } from "../components/QueryBuilder";
 import FacetRail from "../components/FacetRail";
-import { ratingOf, useRatings } from "../lib/ratings";
 import Segmented from "../components/Segmented";
-import Modal from "../components/Modal";
-import { AdvisoryMark, CachedMark, EmptyState, GradeBadge, MediaChip, PageLoading, PendingMark, pendingSummary } from "../components/Badges";
+import { AdvisoryMark, EmptyState, GradeBadge, MediaChip, PageLoading, PendingMark } from "../components/Badges";
 import { TrackCover } from "../components/CoverImg";
-import FavHeart from "../components/FavHeart";
 import { TrackActionsMenu } from "../components/TagActionsMenu";
 import { ExportButton } from "../components/ExportDialog";
 import { SortHeader, toggleSort } from "../lib/sort.tsx";
@@ -41,7 +34,7 @@ import type { SortState } from "../lib/sort.tsx";
 import { TABLE_FIT } from "../lib/columns";
 import { fmtDateCell, fmtDuration, fmtTech } from "../lib/fmt";
 import { useI18n } from "../lib/i18n";
-import { albumRef, entityLinkClick, trackRef } from "../lib/refs";
+import { albumRef, trackRef } from "../lib/refs";
 
 type Target = "tracks" | "albums";
 
@@ -56,7 +49,6 @@ const GROUPS: { id: string; label: string }[] = [
   { id: "album", label: "Album" },
   { id: "genre", label: "Genre" },
   { id: "year", label: "Year" },
-  { id: "rating", label: "Rating" },
 ];
 
 interface ResultCol {
@@ -79,7 +71,6 @@ const TRACK_RESULT_COLS: ResultCol[] = [
   { id: "genre", label: "Genre", sortKey: "tags.GENRE", width: "w-24", hideOnPhone: true },
   { id: "duration", label: "Duration", sortKey: "tech.length", width: "w-[84px]", hideOnPhone: true },
   { id: "bitrate", label: "Bitrate", sortKey: "tech.bitrate", width: "w-[124px]", hideOnPhone: true },
-  { id: "rating", label: "Rating", sortKey: "rating", width: "w-[68px]" },
   { id: "grade", label: "Grade", sortKey: "grade_pass", width: "w-20" },
 ];
 
@@ -122,16 +113,12 @@ function sliceGroups(items: Record<string, any>[], counts: Map<string, number>):
 
 /** One track row's per-album facts, from the library payload. The engine
  *  stamps `artist`/`album` on a track row already; this map is what fills in
- *  the album's cover and the advisory mark, and what keeps play/queue entries
- *  complete for both targets. */
+ *  the album's cover and the track's length. */
 interface TrackMeta {
   artist: string;
   album: string;
   albumPath: string;
   albumCover: string | null;
-  title: string;
-  coverFile: string | null;
-  advisory: string | null;
   dur: number;
 }
 
@@ -149,9 +136,6 @@ function trackMetaOf(lib: Library | undefined): Map<string, TrackMeta> {
           album: al.meta?.ALBUM || al.path.split("/").pop() || "",
           albumPath: al.path,
           albumCover: al.cover_file,
-          title: t.tags.TITLE ?? t.file,
-          coverFile: t.cover_file ?? null,
-          advisory: t.tags.ITUNESADVISORY ?? null,
           dur: t.tech?.length ?? 0,
         });
       }
@@ -160,43 +144,10 @@ function trackMetaOf(lib: Library | undefined): Map<string, TrackMeta> {
   return map;
 }
 
-function queueEntry(meta: TrackMeta | undefined, path: string): QueueTrack {
-  const file = path.split("/").pop() ?? path;
-  return {
-    path,
-    file,
-    albumPath: meta?.albumPath ?? path.split("/").slice(0, -1).join("/"),
-    artist: meta?.artist,
-    album: meta?.album,
-    title: meta?.title,
-    coverFile: meta?.coverFile ?? null,
-    albumCover: meta?.albumCover ?? null,
-    advisory: meta?.advisory ?? null,
-  };
-}
-
-/** Rating in the UI's own 0-5 scale: the engine stamps half-star steps on the
- *  row (falling back to the RATING tag). 0 is "unrated", never "no stars". */
-function ratingText(v: unknown): string {
-  const n = typeof v === "number" ? v : Number(v);
-  return Number.isFinite(n) && n > 0 ? (Math.round(n * 2) / 2).toFixed(1).replace(/\.0$/, "") : "—";
-}
-
 export default function BrowsePage() {
   const { t } = useI18n();
-  const qc = useQueryClient();
-  const navigate = useNavigate();
-  const { playNow } = useStore();
   const { data: catalogue } = useLibraryFields();
   const { data: lib } = useQuery({ queryKey: ["library"], queryFn: () => api.library() });
-  // The app's OWN ratings (UI 0-5) — the same store every other row in the app
-  // draws. The sheet used to read `tr.rating`, a key the query engine never
-  // stamps, and then fell through to the file's Picard RATING tag, which is
-  // 0-100: a rated file printed "100" in a column headed 0-5, and a rating
-  // given in the app printed "—". `server.api_query.rating_source` is where
-  // the two live apart; display is the store's, as everywhere else.
-  const { data: ratingsData } = useRatings();
-  const ratings = ratingsData?.ratings;
 
   const [conditions, setConditions] = useState<LibraryCondition[]>([]);
   const [match, setMatch] = useState<"all" | "any">("all");
@@ -205,8 +156,6 @@ export default function BrowsePage() {
   const [group, setGroup] = useState("");
   const [page, setPage] = useState(0);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
-  const [saveOpen, setSaveOpen] = useState(false);
-  const [name, setName] = useState("");
 
   const fields = useMemo(() => fieldIndex(catalogue), [catalogue]);
   /** Every key the engine will sort by: the catalogue's own sortable fields.
@@ -302,13 +251,6 @@ export default function BrowsePage() {
   );
   const truncated = items.length < total;
 
-  const play = (from: string) => {
-    if (!loadedTracks.length) return;
-    const queue = loadedTracks.map((t) => queueEntry(meta.get(t.path.replace(/\\/g, "/")), t.path));
-    const i = Math.max(0, loadedTracks.findIndex((t) => t.path === from));
-    playNow(queue, i);
-  };
-
   /** A facet's selection becomes ONE condition (eq + list = "is any of"),
    *  replacing EVERY value condition that field had: the values of one field
    *  are an OR group, and a group spread over several rows would be AND-ed
@@ -328,21 +270,6 @@ export default function BrowsePage() {
     });
   };
 
-  const save = useMutation({
-    mutationFn: (playlistName: string) => api.createPlaylist(playlistName, "smart", spec),
-    onSuccess: (pl) => {
-      qc.invalidateQueries({ queryKey: ["playlists"] });
-      setSaveOpen(false);
-      setName("");
-      toast(`Smart playlist "${pl.name}" saved — ${total.toLocaleString()} matching ${target}`);
-      // Straight to the playlist: its own page evaluates the saved filter with
-      // the same engine, which is where a user checks it saved what they built.
-      navigate(`/playlist/${pl.id}`);
-    },
-    onError: (e) => toast.error(e instanceof Error ? e.message : String(e)),
-  });
-
-  const pending = conditions.length - runnableConditions(conditions).length;
   const errorText = error ? (error instanceof Error ? error.message : String(error)) : null;
 
   const sortControl = (
@@ -410,7 +337,7 @@ export default function BrowsePage() {
     const artist = m?.artist ?? (tr as Track & { artist?: string }).artist ?? "";
     const albumName = m?.album ?? (tr as Track & { album?: string }).album ?? "";
     return (
-      <tr key={tr.path} className="table-row group cursor-pointer" title="Click to play" onClick={() => play(tr.path)}>
+      <tr key={tr.path} className="table-row group">
         <td className={`td cell-nowrap text-zinc-600${PHONE_HIDE}`}>{tr.tracknumber ?? tr.tags.TRACKNUMBER ?? "—"}</td>
         <td className="td cell-cover pr-0">
           <TrackCover
@@ -425,16 +352,10 @@ export default function BrowsePage() {
             <Link
               to={trackRef(tr)}
               className="hover:text-accent-soft break-words flex-1 min-w-[8rem]"
-              title="Click to play · Ctrl-click to open track page"
-              onClick={(e) => entityLinkClick(e, () => navigate(trackRef(tr)))}
             >
               {tr.tags.TITLE ?? tr.file}
             </Link>
             <AdvisoryMark value={tr.tags.ITUNESADVISORY} />
-            <CachedMark path={tr.path} />
-            <span className="shrink-0" onClick={(e) => e.stopPropagation()}>
-              <FavHeart kind="track" id={tr.path} mbid={tr.tags.MUSICBRAINZ_TRACKID} iconClass="h-3.5 w-3.5" revealOnHover />
-            </span>
             <span className="row-hover shrink-0" onClick={(e) => e.stopPropagation()}>
               <TrackActionsMenu path={tr.path} releaseMbid={tr.tags.MUSICBRAINZ_ALBUMID} />
             </span>
@@ -448,9 +369,6 @@ export default function BrowsePage() {
         <td className={`td text-zinc-500 break-words${PHONE_HIDE}`}>{tr.tags.GENRE ?? "—"}</td>
         <td className={`td text-zinc-500${PHONE_HIDE}`}>{fmtDuration(tr.tech?.length)}</td>
         <td className={`td text-zinc-500${PHONE_HIDE}`}>{fmtTech(tr.tech) || "—"}</td>
-        <td className="td text-zinc-400 tabular-nums" title="Rating (0-5, half stars) — your own rating, stored by the app">
-          {ratingText(ratingOf(ratings, tr.path))}
-        </td>
         <td className="td">
           <GradeBadge pass={!!tr.grade_pass} score={null} size="sm" />
         </td>
@@ -461,26 +379,16 @@ export default function BrowsePage() {
   const renderAlbumRow = (al: Album) => {
     const artist = al.album_artist ?? "";
     const albumName = al.meta?.ALBUM ?? al.path.split("/").pop() ?? al.path;
-    // A framework album has no audio: the row is not a play button, and it
-    // says why instead of starting whatever else the page holds.
-    const pending = pendingSummary(al, t);
     return (
-      <tr
-        key={al.path}
-        className={`table-row group${pending ? "" : " cursor-pointer"}`}
-        title={pending ? pending.full : "Click to play the album"}
-        onClick={pending ? undefined : () => play(al.tracks?.[0]?.path ?? "")}
-      >
+      <tr key={al.path} className="table-row group">
         <td className="td">
           <div className="flex items-center gap-1.5 min-w-0">
             <Link
               to={albumRef(al)}
               className="hover:text-accent-soft break-words font-medium"
-              onClick={(e) => entityLinkClick(e, () => navigate(albumRef(al)))}
             >
               {albumName}
             </Link>
-            <FavHeart kind="album" id={al.path} iconClass="h-3.5 w-3.5" />
             {/* the same marker every other album-shaped surface carries */}
             <PendingMark album={al} />
           </div>
@@ -527,12 +435,9 @@ export default function BrowsePage() {
         icon={SlidersHorizontal}
         overline="Library"
         title="Browse"
-        subtitle="Build a query over tags, ratings, grades, technical facts and audio analysis — then keep it as a smart playlist."
+        subtitle="Build a query over tags, grades, technical facts and audio analysis — the sheet below is the engine's own answer to it."
         actions={
           <>
-            <button className="btn" disabled={pending > 0 && !conditions.length} onClick={() => setSaveOpen(true)} title="Store this query as a smart playlist">
-              <Save className="h-4 w-4" /> Save as smart playlist
-            </button>
             <ExportButton
               paths={exportPaths}
               seconds={exportSeconds}
@@ -686,49 +591,6 @@ export default function BrowsePage() {
           )}
         </div>
       </div>
-
-      {saveOpen && (
-        <Modal
-          onClose={() => setSaveOpen(false)}
-          icon={Save}
-          title="Save as smart playlist"
-          subtitle="The playlist stores this filter and is evaluated by the same engine, so it matches exactly these rows."
-          width="max-w-md"
-          footer={
-            <div className="flex justify-end gap-2">
-              <button className="btn-ghost" onClick={() => setSaveOpen(false)}>
-                Cancel
-              </button>
-              <button className="btn-primary" disabled={!name.trim() || save.isPending} onClick={() => save.mutate(name.trim())}>
-                {save.isPending ? "Saving…" : "Save playlist"}
-              </button>
-            </div>
-          }
-        >
-          <input
-            className="input"
-            placeholder="Playlist name"
-            autoFocus
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && name.trim() && !save.isPending) save.mutate(name.trim());
-            }}
-          />
-          <div className="mt-3 text-xs text-zinc-500 space-y-1">
-            <div>
-              {spec.conditions.length} condition{spec.conditions.length === 1 ? "" : "s"}, matching{" "}
-              {match === "all" ? "all of them" : "any of them"} — {total.toLocaleString()} {rowsTarget} right now.
-            </div>
-            {pending > 0 && (
-              <div className="text-amber-300/80">
-                {pending} incomplete condition{pending === 1 ? " is" : "s are"} not part of the query (a row needs a value),
-                so {pending === 1 ? "it" : "they"} will not be saved either.
-              </div>
-            )}
-          </div>
-        </Modal>
-      )}
     </div>
   );
 }

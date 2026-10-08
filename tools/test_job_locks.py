@@ -1426,14 +1426,13 @@ if mlo_main is not None:
             "rym": imports_mod.stamp_rym_links,
             "adv": imports_mod.fetch_advisories,
             "inst": imports_mod.fetch_instrumentals,
-            "meta": imports_mod.run_metadata_step,
             "cover": imports_mod.run_cover_step,
             "hook": getattr(mlo_stats, "progress_hook", None),
         }
         # The press runs the configured chain, so it is the suite's one stub
-        # script — and the import's own remote steps (links, metadata, cover
-        # art) are stubbed: those are /api/import's own test, what is pinned
-        # here is WHEN the press is answered and what the surfaces say.
+        # script — and the import's own remote steps (links, cover art) are
+        # stubbed: those are /api/import's own test, what is pinned here is
+        # WHEN the press is answered and what the surfaces say.
         press_cfg = lambda: {**_press["config"](), "music_folder": music,
                              "import_scripts": [3]}
         mlo_main.load_config = press_cfg
@@ -1444,8 +1443,6 @@ if mlo_main is not None:
             "updated": 0, "values": {}}
         imports_mod.fetch_instrumentals = lambda paths, cfg=None: {
             "updated": 0, "values": [], "evidence": {}}
-        imports_mod.run_metadata_step = lambda album_dir, cfg=None: {
-            "note": "", "staged": False, "applied": {}}
 
         # What the header bar (mlo.stats.progress_hook → the server's relay)
         # was told, in order — the surface the user watches at the top of the
@@ -1594,7 +1591,6 @@ if mlo_main is not None:
             imports_mod.stamp_rym_links = _press["rym"]
             imports_mod.fetch_advisories = _press["adv"]
             imports_mod.fetch_instrumentals = _press["inst"]
-            imports_mod.run_metadata_step = _press["meta"]
             imports_mod.run_cover_step = _press["cover"]
             mlo_stats.progress_hook = _press["hook"]
             script_runners.RUNNERS.clear()

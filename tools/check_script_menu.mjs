@@ -12,7 +12,7 @@
  *     single force flag;
  *   * a TRACK ROW offers the file-scoped scripts and NOTHING ELSE: an
  *     album-shaped script (a .cue rewrite, a per-album grade, the release
- *     manifest, the artist image, the subtree's layout) is never on a row that
+ *     manifest, the subtree's layout) is never on a row that
  *     holds one file;
  *   * each entry is handed what its scope needs: the selection's own paths for
  *     a file-scoped script, the album's folder for a folder-scoped one;
@@ -56,7 +56,7 @@ const check = (name, pass, detail = "") => {
 };
 
 /* ---- the payload's own contract ---------------------------------------- */
-const KINDS = ["album", "track", "artist", "playlist", "library"];
+const KINDS = ["album", "track", "artist", "library"];
 // Derived from the payload, never from the module: the ids are the registry's.
 const ALL = payload.scripts.map((s) => s.id).sort((a, b) => a - b);
 const FOLDER = payload.scripts.filter((s) => s.scope === "folder").map((s) => s.id);
@@ -263,13 +263,8 @@ try {
       .every((e) => JSON.stringify(e.targets) === JSON.stringify(["F:/Music/Artist/Album"])),
     JSON.stringify(entriesOf(noFolder).filter((e) => FOLDER.includes(e.id)).map((e) => e.targets)));
 
-  console.log("\n== a playlist selection (a list of files) ==");
-  const playlist = menu.scriptSections(payload, "playlist", {
-    paths: ["F:/Music/A/1.flac", "F:/Music/B/2.flac"],
-  });
-  check("a playlist shows what a file list can run",
-    JSON.stringify(entriesOf(playlist).map((e) => e.id).sort((a, b) => a - b)) === JSON.stringify([...FILE].sort((a, b) => a - b)));
-  check("a playlist's folders are deduplicated when a folder run derives them",
+  console.log("\n== a library selection (a list of files) ==");
+  check("a library selection's folders are deduplicated when a folder run derives them",
     entriesOf(menu.scriptSections(payload, "library", {
       paths: ["F:/Music/A/1.flac", "F:/Music/B/2.flac", "F:/Music/A/3.flac"],
     }))

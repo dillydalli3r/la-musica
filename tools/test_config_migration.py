@@ -91,7 +91,7 @@ def write_stub(folder):
 
 def sqlite_db(path, rows=()):
     """A real SQLite database (one table, *rows* in it) — stands in for the
-    app's playlists.db / beets-library.db."""
+    app's auth.db / beets-library.db."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     con = sqlite3.connect(path)
     try:
@@ -160,7 +160,7 @@ try:
     write(os.path.join(s1_old, "Data", "config.json"),
           json.dumps({"music_folder": s1_old, "seed": 1}, indent=2, sort_keys=True) + "\n")
     carried = {
-        "playlists.db": b"playlists",
+        "auth.db": b"auth",
         "beets-library.db": b"beets",
         os.path.join("lyrics_cache", "a.json"): b"{}",
     }
@@ -236,7 +236,7 @@ try:
     write(os.path.join(old_state, "config.json"),
           json.dumps({"music_folder": s4i, "locale": "ja"},
                      indent=2, sort_keys=True) + "\n")
-    sqlite_db(os.path.join(old_state, "playlists.db"), rows=("liked",))
+    sqlite_db(os.path.join(old_state, "auth.db"), rows=("liked",))
     write(os.path.join(old_state, "beets-config.yaml"), b"intermediate\n")
     write(os.path.join(old_state, "lyrics_cache", "a.json"), b"{}")
     migrate()
@@ -244,8 +244,8 @@ try:
     assert os.path.isfile(s4i_cfg), f"config.json not in {s4i_cfg}"
     assert read_json(s4i_cfg) == {"music_folder": s4i, "locale": "ja"}, \
         read_json(s4i_cfg)
-    assert db_rows(os.path.join(state(s4i), "playlists.db")) == ["liked"], \
-        "playlists.db lost its rows on the way out of .mlo_data"
+    assert db_rows(os.path.join(state(s4i), "auth.db")) == ["liked"], \
+        "auth.db lost its rows on the way out of .mlo_data"
     with open(os.path.join(state(s4i), "beets-config.yaml"), "rb") as f:
         assert f.read() == b"intermediate\n", "beets config arrived altered"
     assert os.path.isfile(os.path.join(state(s4i), "lyrics_cache", "a.json")), \
@@ -261,8 +261,8 @@ try:
     # ----------------------------------------------------------------------- #
     s4 = make_folder("S4Music")
     write_stub(s4)
-    sqlite_db(os.path.join(state(s4), "playlists.db"))
-    sqlite_db(os.path.join(s4, "Data", "playlists.db"), ["from-the-old-folder"])
+    sqlite_db(os.path.join(state(s4), "auth.db"))
+    sqlite_db(os.path.join(s4, "Data", "auth.db"), ["from-the-old-folder"])
     sqlite_db(os.path.join(state(s4), "beets-library.db"), ["destination"])
     sqlite_db(os.path.join(s4, "Data", "beets-library.db"), ["source"])
     write(os.path.join(state(s4), "beets-config.yaml"), b"destination")
@@ -274,9 +274,9 @@ try:
     write(os.path.join(bin_dir(s4), "Old", "01.flac"), b"destination")
     write(os.path.join(s4, ".mlo_trash", "Old", "01.flac"), b"source")
     migrate()
-    assert db_rows(os.path.join(state(s4), "playlists.db")) == ["from-the-old-folder"], \
+    assert db_rows(os.path.join(state(s4), "auth.db")) == ["from-the-old-folder"], \
         "an empty app-created destination DB blocked the user's real state"
-    assert not os.path.exists(os.path.join(s4, "Data", "playlists.db")), \
+    assert not os.path.exists(os.path.join(s4, "Data", "auth.db")), \
         "the superseded source DB was left behind"
     assert db_rows(os.path.join(state(s4), "beets-library.db")) == ["destination"], \
         "migration overwrote a destination DB that holds rows"
@@ -306,7 +306,7 @@ try:
     write_stub(s5)
     write(os.path.join(s5, "Data", "config.json"),
           json.dumps({"music_folder": s5}, indent=2, sort_keys=True) + "\n")
-    write(os.path.join(s5, "Data", "playlists.db"), b"p")
+    write(os.path.join(s5, "Data", "auth.db"), b"p")
     write(os.path.join(s5, ".mlo_downloads", ".incomplete", "u", "y.flac"), b"Y")
     write(os.path.join(s5, ".mlo_trash", "A", "01.flac"), b"T")
     write(os.path.join(s5, ".mlo_trash", ".mlo_manifest.json"), b"{\"version\": 1}")
@@ -316,7 +316,7 @@ try:
     assert files_under(s5) == first, "the second migration changed the tree"
     assert os.path.isfile(os.path.join(downloads(s5), ".incomplete", "u", "y.flac"))
     assert os.path.isfile(os.path.join(bin_dir(s5), "A", "01.flac"))
-    assert os.path.isfile(os.path.join(state(s5), "playlists.db"))
+    assert os.path.isfile(os.path.join(state(s5), "auth.db"))
     for old in (os.path.join(s5, "Data"), os.path.join(s5, ".mlo_downloads"),
                 os.path.join(s5, ".mlo_trash")):
         assert_empty(old, old)
@@ -330,7 +330,7 @@ try:
     write(os.path.join(s6_old, "Data", "config.json"),
           json.dumps({"music_folder": s6_old, "locale": "ja"},
                      indent=2, sort_keys=True) + "\n")
-    write(os.path.join(s6_old, "Data", "playlists.db"), b"playlists")
+    write(os.path.join(s6_old, "Data", "auth.db"), b"auth")
     write(os.path.join(s6_old, ".mlo_downloads", ".incomplete", "u", "z.flac"), b"Z")
     write(os.path.join(s6_old, ".mlo_trash", "A", "01.flac"), b"T")
     write(os.path.join(s6_old, ".mlo_trash", ".mlo_manifest.json"), b"{\"version\": 1}")
@@ -345,8 +345,8 @@ try:
         f"save clobbered the new folder: {read_json(s6_cfg)['music_folder']}"
     assert read_json(s6_cfg)["locale"] == "de", \
         f"saved values lost: {read_json(s6_cfg).get('beets_locale')}"
-    assert os.path.isfile(os.path.join(state(s6_new), "playlists.db")), \
-        "the playlists database did not follow the folder change"
+    assert os.path.isfile(os.path.join(state(s6_new), "auth.db")), \
+        "the state database did not follow the folder change"
     partial = os.path.join(downloads(s6_new), ".incomplete", "u", "z.flac")
     assert os.path.isfile(partial), f"partial download did not follow to {partial}"
     with open(partial, "rb") as f:
@@ -361,27 +361,17 @@ try:
         assert_empty(old, old)
 
     # ----------------------------------------------------------------------- #
-    # Scenario 8: importing the app must not create state files (an empty
-    # playlists.db planted at import time used to make the no-clobber move
-    # skip the user's real database), and a database that IS already empty
-    # at the destination must still give way to the real one.
+    # Scenario 8: a database that is already empty at the destination must
+    # still give way to the real one.
     # ----------------------------------------------------------------------- #
-    import importlib
-
     s7 = make_folder("S7Music")
     write_stub(s7)
     os.environ["MLO_MUSIC_FOLDER"] = s7
-    for name in ("server.playlists",):
-        sys.modules.pop(name, None)
-        importlib.import_module(name)
-    for name in ("playlists.db",):
-        assert not os.path.exists(os.path.join(state(s7), name)), \
-            f"importing the app created {name} before the migration ran"
     # a destination DB that already exists but holds nothing must not win
-    sqlite_db(os.path.join(state(s7), "playlists.db"))
-    sqlite_db(os.path.join(s7, "Data", "playlists.db"), rows=("real-1", "real-2"))
+    sqlite_db(os.path.join(state(s7), "auth.db"))
+    sqlite_db(os.path.join(s7, "Data", "auth.db"), rows=("real-1", "real-2"))
     migrate()
-    assert db_rows(os.path.join(state(s7), "playlists.db")) == ["real-1", "real-2"], \
+    assert db_rows(os.path.join(state(s7), "auth.db")) == ["real-1", "real-2"], \
         "an empty database at the destination blocked the user's real one"
     os.environ.pop("MLO_MUSIC_FOLDER", None)
 
@@ -398,7 +388,7 @@ try:
     write_stub(s8_other)
     write(os.path.join(state(s8_other), "config.json"),
           json.dumps({"music_folder": s8_other, "keep": True}, indent=2, sort_keys=True) + "\n")
-    sqlite_db(os.path.join(state(s8_other), "playlists.db"), rows=("liked",))
+    sqlite_db(os.path.join(state(s8_other), "auth.db"), rows=("liked",))
     sqlite_db(os.path.join(legacy_mlo_data(s8_other), "beets-library.db"), rows=("carried",))
     os.environ["MLO_MUSIC_FOLDER"] = s8_scope      # ...but run against the scope
     migrate()
@@ -406,14 +396,14 @@ try:
     assert os.path.isfile(carried), "other install's config did not carry into the scope"
     assert read_json(carried)["music_folder"] == s8_scope, read_json(carried)
     assert read_json(carried)["keep"] is True, "the carried config lost fields"
-    assert db_rows(os.path.join(state(s8_scope), "playlists.db")) == ["liked"], \
+    assert db_rows(os.path.join(state(s8_scope), "auth.db")) == ["liked"], \
         "the other install's .mlo/data did not carry into the scope"
     assert db_rows(os.path.join(state(s8_scope), "beets-library.db")) == ["carried"], \
         "the other install's .mlo_data did not carry into the scope"
     assert os.path.isfile(os.path.join(state(s8_other), "config.json")), \
         "the other install lost its config to the scope"
-    assert db_rows(os.path.join(state(s8_other), "playlists.db")) == ["liked"], \
-        "the other install lost its playlists to the scope"
+    assert db_rows(os.path.join(state(s8_other), "auth.db")) == ["liked"], \
+        "the other install lost its database to the scope"
     assert db_rows(os.path.join(legacy_mlo_data(s8_other), "beets-library.db")) == ["carried"], \
         "the other install's intermediate state was moved, not copied"
     # a legacy dir of the scope's OWN folder is still moved, not copied

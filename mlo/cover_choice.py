@@ -783,9 +783,7 @@ def _quality_level(row, size, ctx):
     the URL actually answers with:
 
     * an UPSCALE — the URL asks for 250px and the file decodes 1000x1000, so
-      its extra pixels were interpolated rather than photographed (the same
-      verdict `mlo.grader` reports as ARTIST_IMAGE_UPSCALED for an image this
-      app's own writer never enlarged);
+      its extra pixels were interpolated rather than photographed;
     * a thumbnail request well below the cover target — a re-compressed copy
       rather than the original, which loses to a full-size image every time.
     """

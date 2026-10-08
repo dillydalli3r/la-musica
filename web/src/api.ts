@@ -2,19 +2,16 @@ import type {
   AcoustidAlbumMatch,
   AcoustidMatch,
   AcoustidSubmitResult,
-  ArtistArtwork,
-  ArtistArtworkDescription,
-  ArtistArtworkImage,
-  CoverChoicePolicy,
+  Album,
+  Artist,
   CoverInfo,
-  CoverResult,
   CoverSearch,
   CoverSourceCatalog,
   CoverWriteResult,
-  DiscoveryCatalog,
-  DiscoveryImageRow,
+  CoverChoicePolicy,
+  CoverResult,
+  GenreCascade,
   GradeWarning,
-  HomeData,
   ImportAutonomy,
   ImportBulkJob,
   ImportBulkResult,
@@ -25,28 +22,28 @@ import type {
   ImportSourceResult,
   LayoutReport,
   LayoutSnapshot,
+  Library,
   LibraryAddResult,
   LyricsAutoResult,
   LyricsHit,
   LyricsProviders,
   LyricsXlitResult,
   LogReportPayload,
+  MatchSuggestion,
   MBArtistBrowse,
   MBRecordingBrowse,
+  MBRelease,
   MBReleaseChoicePayload,
   MBSearchFieldHelp,
   MBSearchRows,
-  PodcastSeries,
   ScriptRunResult,
   ScriptMenu,
   SourceHealth,
   SourceKind,
   SourcesHealth,
-  StreamingImportResult,
   UnpackedTree,
 } from "./types";
 import { toast } from "./store";
-import * as offline from "./lib/offlineCache";
 import { coverVersion, rememberCoverVersion } from "./lib/invalidate";
 import { coverSearchPath, type CoverQuery } from "./lib/coverSearch";
 
@@ -59,20 +56,6 @@ import { coverSearchPath, type CoverQuery } from "./lib/coverSearch";
 // `in` rather than a cast on `window`: Tauri injects this global into the
 // webview before any script runs, and its presence is the whole question.
 export const IN_TAURI = "__TAURI_INTERNALS__" in window;
-
-/** True inside the Tauri shell ON A PHONE OR TABLET.
- *
- *  The mobile builds register no Tauri commands at all (see
- *  desktop/src-tauri/capabilities/mobile.json): there is no native folder
- *  dialog to call, and `invoke("pick_folder")` would reject. Anything that
- *  asks the shell for a desktop-only capability must check this first.
- *  iPadOS reports itself as "Macintosh", so a touch-capable Mac is counted as
- *  a tablet — the same case, as far as a folder dialog goes. */
-export const IN_MOBILE_SHELL = IN_TAURI && (() => {
-  const ua = navigator.userAgent || "";
-  return /android|iphone|ipad|ipod/i.test(ua)
-    || (/macintosh/i.test(ua) && (navigator.maxTouchPoints || 0) > 1);
-})();
 
 const SERVER_KEY = "mlo.server";
 const TOKEN_KEY = "mlo.token";
@@ -142,10 +125,6 @@ let API = `${BASE}/api`;
 export function setServerUrl(url: string | null) {
   const clean = normalizeServerUrl(url || "");
   writeStore(SERVER_KEY, clean || null);
-  // The offline copy is keyed by endpoint, not by server: left in place, a
-  // client pointed at a second server would answer from the first one's
-  // library the moment the network is gone.
-  if (clean !== BASE) offline.clearAll();
   BASE = clean;
   API = `${BASE}/api`;
 }
@@ -223,125 +202,18 @@ function coverQuery(track?: string, tracks?: string[]): string {
  *  album page, the import wizard, the cover finder — goes through the two
  *  methods below, so no caller has to carry the token around.
  *
- *  The album's copy in the offline cache is dropped with it: that copy is
- *  painted IN PREFERENCE to the network one, so a replaced cover would
- *  otherwise keep showing the image it replaced. Imported lazily — the offline
- *  cache itself renders covers (it imports this module), and a write is the
- *  one moment the two need to meet. */
+ *  The remembered cover version is bumped so the album's art repaints in
+ *  preference to the version it replaced. */
 const noteCoverWrite =
   (albumPath: string) =>
   (res: CoverWriteResult): CoverWriteResult => {
     const file = res.path.split("/").pop() ?? null;
     rememberCoverVersion(albumPath, file, res.token);
-    void import("./lib/mediaCache").then((m) => m.forgetAlbumArtwork(albumPath, file));
     return res;
   };
 
-/** Set while what the app is showing came out of the offline copy (or out of
- *  the service worker's own) instead of from the server, so a banner can say
- *  "offline — showing what was saved". `at` is when that copy was written;
- *  null when a service worker served it and the write time depends on that
- *  cache's own lifetime. */
-export interface OfflineInfo {
-  /** The endpoint that could not be reached (path + query). */
-  key: string;
-  at: number | null;
-}
-type OfflineListener = (offline: OfflineInfo | null) => void;
-const offlineListeners = new Set<OfflineListener>();
-let offlineInfo: OfflineInfo | null = null;
-
-/** Watch the offline state. Called on every CHANGE, including the change back
- *  to online (with null); not called during registration — read `isOffline()`
- *  once for the first render. */
-export function onOfflineFallback(fn: OfflineListener): () => void {
-  offlineListeners.add(fn);
-  return () => offlineListeners.delete(fn);
-}
-
-/** True while the app is rendering cached answers. */
-export function isOffline(): boolean {
-  return offlineInfo !== null;
-}
-
-/** The offline fallback in force, if any — which endpoint's request got no
- *  answer, and when the copy that answered it was written. Read right after a
- *  request by a caller that has to say WHICH answer came off disk (the cover
- *  finder does): `null` means the server answered. */
-export function offlineFallback(): OfflineInfo | null {
-  return offlineInfo;
-}
-
-function setOffline(info: OfflineInfo | null) {
-  if ((offlineInfo === null) === (info === null)) {
-    // Same side of the line — a different endpoint, or the same one again.
-    // Remember the newest detail but do NOT ping the listeners: a page
-    // polling several endpoints while offline (or the service worker marking
-    // every GET) would otherwise re-render the banner once per endpoint per
-    // second, which on a phone reads as the app refreshing under your thumb.
-    offlineInfo = info;
-    return;
-  }
-  offlineInfo = info;
-  for (const fn of offlineListeners) {
-    try {
-      fn(info);
-    } catch {
-      /* a listener must never break the request that reported the state */
-    }
-  }
-}
-
-/** Endpoints whose answers are never kept on disk.
- *
- *  `/api/auth/*` and `/api/config` are session and secret material: the
- *  config carries API keys in clear, and an auth status answered from disk
- *  would show a signed-in app to nobody (or a signed-out one to somebody with
- *  a live session).
- *
- *  The rest are byte streams — one of them a range request in the middle of a
- *  download — so their bodies are not JSON, are per-position, and would be
- *  the largest thing in a 5 MB store.
- *
- *  The cover endpoint is listed as itself alone: /api/cover/info,
- *  /api/cover/search and /api/cover/sources are ordinary JSON and cache fine.
- *
- *  `/api/jobs/locks` is the "what is running right now" list: an answer from
- *  disk would show jobs that finished (or never started, after a restart) as
- *  still holding files, which is the one thing that page must never say. */
-const NEVER_CACHE_EXACT: Record<string, true> = {
-  "/api/config": true,
-  "/api/cover": true,
-  "/api/stream": true,
-  "/api/videos/stream": true,
-  "/api/videos/thumb": true,
-  "/api/videos/subtitle": true,
-  "/api/artist/image": true,
-  "/api/jobs/locks": true,
-  // The cookie jar's state is what the user is looking at RIGHT NOW while
-  // pasting a file in: an offline copy would say "4 cookies saved" over a jar
-  // that was just deleted.
-  "/api/youtube/cookies": true,
-  // Same reason for the RYM jar: names of a cookie that was just
-  // replaced or cleared must never come from an offline copy.
-  "/api/rym/cookies": true,
-};
-const NEVER_CACHE_PREFIX = ["/api/auth/"];
-
-/** The offline store key for a request, or null when its answer must not be
- *  kept. Only GETs are cacheable: a write's reply describes a change, not a
- *  state that can be re-read later. */
-function cacheable(url: string, init?: RequestInit): string | null {
-  if ((init?.method || "GET").toUpperCase() !== "GET") return null;
-  const path = offline.cacheKey(url);
-  const endpoint = path.split("?")[0];
-  if (NEVER_CACHE_EXACT[endpoint]) return null;
-  if (NEVER_CACHE_PREFIX.some((p) => endpoint.startsWith(p))) return null;
-  return path;
-}
-
-/** One place every request goes through: the deadline, the session token, the
- *  401 that means "sign in again", and the offline copy a GET falls back to.
+/** One place every request goes through: the deadline, the session token and
+ *  the 401 that means "sign in again".
  *
  *  `credentials: "include"` matters for the Tauri/mobile shells: the login
  *  response sets an HttpOnly cookie, and although a cross-site cookie is not
@@ -354,7 +226,6 @@ async function json<T>(url: string, init?: RequestInit, timeoutMs = 20000): Prom
   const token = getToken();
   const headers = new Headers(init?.headers);
   if (token) headers.set("Authorization", `Bearer ${token}`);
-  const key = cacheable(url, init);
   let r: Response;
   try {
     r = await fetch(url, { credentials: "include", ...init, headers, signal: ctrl.signal });
@@ -362,14 +233,7 @@ async function json<T>(url: string, init?: RequestInit, timeoutMs = 20000): Prom
     // No answer at all: the server is down, the network is gone, or the call
     // ran out of time. (An unreachable server's 4xx/5xx is an answer, and is
     // handled below exactly as before — a rejected request must not be turned
-    // into a successful one.) Serve the last answer this endpoint gave.
-    if (key) {
-      const cached = offline.get<T>(key);
-      if (cached !== null) {
-        setOffline({ key, at: offline.cachedAt(key) });
-        return cached;
-      }
-    }
+    // into a successful one.)
     // an aborted fetch is OUR timeout, not the network being down — say which
     if (ctrl.signal.aborted) throw new Error(`no answer within ${Math.round(timeoutMs / 1000)}s`);
     throw e;
@@ -399,14 +263,7 @@ async function json<T>(url: string, init?: RequestInit, timeoutMs = 20000): Prom
     }
     throw new Error(detail);
   }
-  const body = (await r.json()) as T;
-  if (key) offline.put(key, body);
-  // The service worker answers an offline API GET out of its own cache with
-  // this marker: the fetch succeeded, but the server never saw it, so the app
-  // is showing a stored answer all the same. (Readable same-origin, which is
-  // the only place that worker runs.)
-  setOffline(r.headers.get("X-MLO-Offline") === "1" ? { key: key ?? offline.cacheKey(url), at: null } : null);
-  return body;
+  return (await r.json()) as T;
 }
 
 /** Fields a tag-writing endpoint adds when the write re-emitted the file in
@@ -430,33 +287,6 @@ function noteContainerSwap<T extends ContainerSwap>(r: T): T {
     toast(`Container changed — ${swapped.length} files re-emitted as MKV: ${swapped.join(", ")}`);
   }
   return r;
-}
-
-/** The YouTube cookie jar (`server/api_youtube.py`): the settings that decide
- *  whether yt-dlp sends cookies, plus what the jar on disk actually holds.
- *  `warnings` are the server's own sentences about it (a jar with no
- *  youtube.com cookie cannot sign a download in), shown as-is. */
-export interface YoutubeCookies {
-  mode: "none" | "file" | "browser";
-  browser: string;
-  present: boolean;
-  path: string;
-  bytes: number;
-  /** COOKIE lines that parsed — a jar's comments are not cookies. */
-  lines: number;
-  sites: string[];
-  saved_at: string | null;
-  browsers: string[];
-  max_bytes: number;
-  warnings: string[];
-}
-
-/** What an import answers with: the same state, plus how many cookie lines the
- *  import LEFT OUT because YouTube is never sent them (a browser export is the
- *  whole profile), and — for a file with no youtube.com cookie in it — nothing
- *  at all: that file is refused (400) rather than stored. */
-export interface YoutubeCookiesSaveReply extends YoutubeCookies {
-  filtered: number;
 }
 
 /** The RateYourMusic credential (`server/api_rym.py`): what the stored
@@ -628,7 +458,7 @@ export interface ExportForm {
   embed_cover_resolution: number;
   id3v2: string;
   id3v1: boolean;
-  /** "off" | "tags" (write ReplayGain tags, the player applies them) |
+  /** "off" | "tags" (write ReplayGain tags, a compatible player applies them) |
    *  "apply" (bake the correction into the exported audio). */
   replaygain_mode: string;
   /** How lyrics travel: "embedded" (the LYRICS tag inside the file), "lrc"
@@ -639,7 +469,6 @@ export interface ExportForm {
   /** An equalizer preset or imported profile id; "" = none. */
   eq_profile: string;
   clean_tags: boolean;
-  playlists: boolean;
   /** The switch `copy_files` replaced (server.exporter.LEGACY_SIDECAR_FAMILIES
    *  when it is on). The form no longer writes it — the file selection below
    *  is what the run reads — but a saved default or a saved config from before
@@ -647,7 +476,7 @@ export interface ExportForm {
   sidecars: boolean;
   /** WHICH files the run writes: the family keys of server.exporter.
    *  FILE_FAMILIES — "audio" (the tracks themselves), "cover", "lyrics",
-   *  "cue", "log", "accurip", "description", "checksum", "text", "playlist",
+   *  "cue", "log", "accurip", "checksum", "text", "playlist",
    *  "other". An EMPTY list is refused by the server with a sentence (a run
    *  that copies nothing would write an empty folder), so the form must leave
    *  one ticked. */
@@ -672,8 +501,8 @@ export interface ExportZip {
 }
 
 /** One biquad band of an equalizer profile — the shape mlo.eq's parser emits
- *  (`type`/`fc`/`gain`/`q`/`on`) and the one the player's WebAudio chain and
- *  the editor both build. `type` is an Equalizer APO type (PK, LS, HS, LSC,
+ *  (`type`/`fc`/`gain`/`q`/`on`) and the one the editor's WebAudio response
+ *  maths builds (lib/eqNodes). `type` is an Equalizer APO type (PK, LS, HS, LSC,
  *  HSC, LP, HP, BP, NO); `fc` is Hz, `gain` dB, `q` the filter's width. */
 export interface EqBand {
   type: string;
@@ -801,55 +630,6 @@ export interface TrashDeleteResult {
   freed: number;
 }
 
-/** One candidate artist image from the metadata review flow. */
-export interface MetadataImageCandidate {
-  url: string;
-  source: string;
-  width?: number | null;
-  height?: number | null;
-}
-
-/** A description candidate with its provenance (which provider, fetched when). */
-export interface MetadataText {
-  text: string;
-  source: string;
-  fetched?: string | null;
-}
-
-export interface MetadataCandidates {
-  images: MetadataImageCandidate[];
-  artist_description: MetadataText | null;
-  album_description: MetadataText | null;
-  /** What the import chain STAGED for this album instead of applying, when
-   *  the review switches are on (`metadata_review`, `cover_review`). The cover
-   *  branch is the candidate set the album page offers as "Choose a cover". */
-  staged?: {
-    candidates?: unknown;
-    covers?: {
-      artist: string;
-      album: string;
-      release_group: string;
-      /** The release id the staged fetch was made for, so the entry is found
-       *  again after the import chain relocates the album. */
-      album_id?: string;
-      /** Who answered the staged fetch — the badge the picker shows. */
-      provider: string | null;
-      staged_at: string;
-      /** The candidates RANKED best-first by the one cover policy, each row
-       *  carrying the reasons that put it there. */
-      results: CoverResult[];
-      /** The policy's own pick (mlo/cover_choice) and its reasons — what the
-       *  picker shows as the default before the user overrides it. */
-      chosen?: CoverResult | null;
-      /** What every source did, including any that was skipped and why. */
-      notes?: string[];
-      /** The policy the ranking was made under (the minimum, the source order
-       *  and the rules). */
-      policy?: CoverChoicePolicy;
-    } | null;
-  };
-}
-
 /* ---------------------------------------------------------------------- *
  * Per-track checks — advisory (/api/mb/advisory/fetch) and instrumental   *
  * (/api/instrumental/fetch). Both WRITE the tag they check and hand back  *
@@ -944,23 +724,6 @@ export async function checkTrackValues(paths: string[]): Promise<{
     inst: inst instanceof Error ? null : inst,
     errors,
   };
-}
-
-/* ---------------------------------------------------------------------- *
- * Artist image / descriptions — the album metadata step. One call accounts *
- * for all three items an import is expected to carry.                     *
- * ---------------------------------------------------------------------- */
-
-/** The three artwork/text items `/api/album/metadata/fetch` accounts for. */
-export type MetadataItemKind = "artist_image" | "artist_description" | "album_description";
-
-/** One item's outcome: what happened, who answered, and why not.
- *  `present` = already stored, `fetched` = a provider answered now,
- *  `disabled` = switched off in Settings, `not-found` = no source has it. */
-export interface MetadataFetchItem {
-  state: "fetched" | "present" | "disabled" | "not-found" | "error" | string;
-  source?: string | null;
-  detail?: string | null;
 }
 
 /** `&staged=1` for the import wizard's own album folder.
@@ -1080,271 +843,19 @@ export interface JobLocksPayload {
   jobs: JobLock[];
 }
 
-/* ---------------------------------------------------------------------- *
- * Discover — browsing the library AND the online providers by genre       *
- * (server/api_discover.py), plus the online recommendation shelf.         *
- * ---------------------------------------------------------------------- */
-
-/** Which side of the line a Discover request reads: the library, the online
- *  providers, or both at once. */
-export type DiscoverScope = "library" | "online" | "all";
-
-/** What a Discover row IS — the three shapes every view asks for. */
-export type DiscoverKind = "albums" | "artists" | "tracks";
-
-/** What an ENTITY shelf is seeded by: the page it sits on. An artist page
- *  seeds by the artist's MusicBrainz id when its tags carry one (else by its
- *  name), an album page by its release-group/release id (else artist+title),
- *  a track page by its recording id (else artist+title). */
-export type DiscoverSeedKind = "artist" | "album" | "track";
-
-/** One row of the Discover genre / recommendation routes.
- *
- *  `owned` means the library holds THIS item (matched by MBID, then by
- *  normalized artist+title) and `path` is set exactly then — so an owned row
- *  links into the library and an unowned one offers the add action, never the
- *  other way round. `in_library` is the weaker statement: the library holds
- *  something by that artist, which is a hint and not ownership. `source` is the
- *  provider that stated the row (registry-first when several did) and
- *  `source_label` the name to print; `also_from` lists the other sources that
- *  named the same row. */
-export interface DiscoverItem {
-  kind: "album" | "artist" | "track";
-  title: string;
-  artist: string;
-  /** Release year as the provider stated it — "" when it stated none. */
-  year: string;
-  source: string;
-  source_label: string;
-  /** Provider artwork and page, both absolute URLs (the artwork is rendered
-   *  through `artUrl`, never straight from the provider). */
-  cover_url: string | null;
-  page_url: string | null;
-  mbid: string | null;
-  release_group_mbid: string | null;
-  /** Library path — present exactly when the library has this item. */
-  path: string | null;
-  /** The library holds this exact item. */
-  owned?: boolean;
-  /** The library holds something by this artist (not this item). */
-  in_library?: boolean;
-  /** The further sources that named the same row, primary excluded. */
-  also_from?: string[];
-  /** Library album rows: the track titles the folder holds. */
-  tracks?: string[];
-  /** The provider's OWN relevance for the row (Last.fm's match, Deezer's
-   *  fans/rank, ListenBrainz's score) — null when the provider states none.
-   *  The providers' scales are not comparable, so it orders rows within one
-   *  source and is not a cross-provider percentage. */
-  score?: number | null;
-  /** Why this row is here ("genre: shoegaze"). */
-  reason?: string;
-}
-
-/** Why a source said nothing: source id → the server's own words ("skipped:
- *  no lastfm_api_key"). A source absent from this map answered — or was never
- *  asked because no feed of its kind exists for the request (see
- *  `DiscoverNotApplicable`, which is information, not a silence).
- *
- *  Three keys are not failures: `recommended` is the recommendation shelf's own
- *  verdict on the seed (the one non-source key), and a note beginning
- *  "partial:" is a source answering with part of a long list. A source the
- *  server does not know is keyed by what was asked for, with "unknown source". */
-export type DiscoverNotes = Record<string, string>;
-
-/** A source an ENTITY shelf cannot use at all, with the provider's own reason
- *  (`GET /api/discover/recommended?seed_kind=…`): a similar-ARTISTS feed
- *  cannot be asked about an album, and a limit the provider publishes is not a
- *  failed request. `short` is the compact marker to print beside the source's
- *  name ("artist pages only", "no similar-entity feed") and `why` the full
- *  sentence for the tooltip — the label is short BY DESIGN, never a sentence
- *  cut off by the pill it sits in. */
-export interface DiscoverNotApplicable {
-  id: string;
-  label: string;
-  short: string;
-  why: string;
-}
-
-/** `GET /api/discover/genres` — the genre list of the requested scope, with
- *  the counts each side can state (library counts are tracks, albums and
- *  artists; online ones are what the providers reported). */
-export interface DiscoverGenres {
-  genres: {
-    name: string;
-    track_count: number;
-    album_count: number;
-    artist_count: number;
-    /** Which side(s) contributed this genre — "library", "musicbrainz", … */
-    sources: string[];
-  }[];
-  sources_asked: string[];
-  notes: DiscoverNotes;
-}
-
-/** `GET /api/discover/genre` — one page of rows. `next_offset` is the cursor
- *  for the next page, null/absent at the end. */
-export interface DiscoverItems {
-  genre: string;
-  kind: DiscoverKind;
-  source: string;
-  items: DiscoverItem[];
-  sources_asked: string[];
-  notes: DiscoverNotes;
-  next_offset: number | null;
-}
-
-/** `GET /api/discover/recommended` — an online shelf seeded by the whole
- *  library (`seed=library`) or by one genre. `basis` says what the rows were
- *  built from. The entity seed (`seed_kind`) also returns `not_applicable`:
- *  the sources whose feed cannot answer a page of this kind, reported as
- *  information rather than as a skip. */
-export interface DiscoverRecommended {
-  items: DiscoverItem[];
-  sources_asked: string[];
-  notes: DiscoverNotes;
-  basis: string;
-  not_applicable?: DiscoverNotApplicable[];
-}
-
-/** The four closed windows every chart can be asked for — the same vocabulary
- *  on both sides of the line: the library's own history (`/api/top`) and the
- *  providers' charts (`/api/discover/charts`). */
-export type ChartPeriod = "all" | "year" | "month" | "week";
-
-/** One provider's chart, as ONE row of `GET /api/discover/charts`: the shared
- *  Discover row (so it renders and adds exactly like a genre row) plus the
- *  provider's own rank and score. `rank` is its position in that provider's
- *  chart and `score_label` its own words ("1.2M listens") — null for a
- *  provider that states no number, never a made-up one. */
-export interface DiscoverChartItem extends DiscoverItem {
-  rank: number;
-  score: number | null;
-  score_label: string | null;
-}
-
-/** What one provider can chart HERE — the payload's own support matrix, so the
- *  page can say "this source does not publish this week" from the answer it
- *  already has instead of a second request. */
-export interface DiscoverChartSource {
-  id: string;
-  label: string;
-  /** The windows this source really publishes. */
-  periods: ChartPeriod[];
-  /** Whether THIS request's window is one of them. */
-  supports_period: boolean;
-  needs: string[];
-  missing: string[];
-  ready: boolean;
-}
-
-/** `GET /api/discover/charts` — what the online providers rank for one window
- *  and one kind. Rows keep each provider's own order (they are never merged
- *  across providers), `sources_asked` is who was asked in the order they were
- *  asked — RateYourMusic first for tracks — and `notes` carries every outcome
- *  that was not an answer: `skipped:` (no key), `unsupported:` (no such window)
- *  or `failed:` (the provider's own words). The one non-source key, `charts`,
- *  is the verdict when nobody had anything to rank. */
-export interface DiscoverCharts {
-  period: ChartPeriod;
-  kind: DiscoverKind;
-  source: string;
-  limit: number;
-  items: DiscoverChartItem[];
-  sources_asked: string[];
-  notes: DiscoverNotes;
-  sources: DiscoverChartSource[];
-}
-
-/** One row of `GET /api/top` — a track, an album or an artist from the USER'S
- *  own play history, with how many times it was played in the requested
- *  window. `path` is the library path and `in_library` whether the library
- *  still holds it (a play outlives a deleted file, so a row can be both). */
-export interface TopRow {
-  kind: "track" | "album" | "artist";
-  /** Track and album rows: the library path. */
-  path?: string;
-  /** Track and album rows. */
-  title?: string;
-  artist?: string;
-  album?: string;
-  album_path?: string;
-  /** Artist rows: the name, and the artist folder when the library has one. */
-  name?: string;
-  plays: number;
-  in_library: boolean;
-}
-
-/** `GET /api/top` — the library's own most-played rows for one window, with
- *  the window echoed back (`window.start`/`end` are epoch seconds, null when
- *  unbounded) and a `note` that explains an empty list. */
-export interface TopCharts {
-  period: ChartPeriod;
-  kind: DiscoverKind;
-  limit: number;
-  window: {
-    period: string;
-    start: number | null;
-    end: number | null;
-    start_iso: string | null;
-    end_iso: string | null;
-  };
-  items: TopRow[];
-  /** The WINDOW's own totals — every play it holds, not the page's rows.
-   *  `listened_seconds` sums the played tracks' own measured lengths (a play
-   *  records a start, so the track's length is the time behind it), and
-   *  `listened_unknown` counts the plays with no length to add (a file the
-   *  library no longer holds) rather than guessing one. */
-  plays_total: number;
-  listened_seconds: number;
-  listened_plays: number;
-  listened_unknown: number;
-  note: string;
-}
-
-/** The three entities a star can name: a track (a file), an album (its folder)
- *  and an artist (their folder). The scope is what makes one store hold three
- *  INDEPENDENT verdicts — an album rating is the user's verdict on the album,
- *  NOT the average of its tracks, and the album page draws both, labelled. */
-export type RatingsScope = "track" | "album" | "artist";
-
-/** `GET /api/ratings` — every rated entity of ONE scope, or the requested
- *  subset.
- *
- *  `ratings` maps a normalized path (a track's file, an album's or an artist's
- *  folder) to the rating in HALF-STARS as an integer 0-10 (0 = unrated, 1 = a
- *  half star … 10 = five stars) — the unit the app-owned SQLite table, the API
- *  and (for tracks only) the `RATING` file tag (0-100, one half-star = 10,
- *  Picard's convention) all agree on. The UI works in the familiar 0-5 scale
- *  and converts in exactly one place (lib/ratings.ts); nothing outside it
- *  should ever see these integers.
- *
- *  `counts` is how many rows of that scope sit at each value, keyed "1"…"10"
- *  (a value with no rows is absent) — it is what the library/genre surfaces
- *  show without walking the map. `scope` echoes what was asked for, so a
- *  client can never decorate a row with the wrong scope's value. */
-export interface RatingsPayload {
-  scope?: RatingsScope;
-  ratings: Record<string, number>;
-  counts: Record<string, number>;
-}
-
 /* ── the library query engine ──────────────────────────────────────────────
  *
  *  ONE engine answers every way of browsing the library (see mlo/query.py):
- *  the Browse page's ad-hoc builder, the facet rail, the live match count and
- *  a saved smart playlist all send the SAME filter spec
- *  (`{conditions:[{field,op,value}], match}`), so a saved playlist can never
- *  disagree with the browser it was saved from.
+ *  the Browse page's ad-hoc builder, the facet rail and the live match count
+ *  all send the SAME filter spec (`{conditions:[{field,op,value}], match}`).
  *
- *  `GET /api/library/fields` is the ONE field catalogue: the builder, the
- *  facet rail and the smart-playlist rule editor all render from it, so a
- *  field added on the server appears in every surface at once. */
+ *  `GET /api/library/fields` is the ONE field catalogue: the builder and the
+ *  facet rail render from it, so a field added on the server appears in every
+ *  surface at once. */
 
 /** One operator a field offers. `op` is the spec's vocabulary — the id the
- *  engine evaluates and a saved playlist stores; `label` is what the picker
- *  shows. Read them from the catalogue, never hardcode a list: the engine
- *  owns the set. */
+ *  engine evaluates; `label` is what the picker shows. Read them from the
+ *  catalogue, never hardcode a list: the engine owns the set. */
 export interface LibraryFieldOp {
   op: string;
   label: string;
@@ -1453,6 +964,32 @@ export interface LibraryQueryResponse {
   took_ms: number;
 }
 
+/** The cover candidate set the import chain STAGED for an album instead of
+ *  applying (the `cover_review` switch on, see mlo.imports.stage_cover_candidates).
+ *  It is what the album page offers as "Choose a cover" for a cover-less album:
+ *  the candidates ranked best-first by the one cover policy (mlo/cover_choice),
+ *  each row carrying the reasons that put it there. */
+export interface StagedCovers {
+  /** Who answered the staged fetch — the badge the picker shows. */
+  provider: string | null;
+  /** The ranked candidates, best first. */
+  results: CoverResult[];
+  /** The policy's own pick and its reasons — the picker's default before the
+   *  user overrides it. */
+  chosen?: CoverResult | null;
+  /** What every source did, including any that was skipped and why. */
+  notes?: string[];
+  /** The policy the ranking was made under (the minimum, the source order and
+   *  the rules). */
+  policy?: CoverChoicePolicy;
+}
+
+/** `/api/metadata/candidates` — only the cover branch the import staged; the
+ *  artist-image and description branches this reply used to carry are gone. */
+export interface MetadataCandidates {
+  staged?: { covers?: StagedCovers | null };
+}
+
 export const api = {
   health: () => json<{ status: string; version: string }>(`${API}/health`),
   /** The running server's version, checked against the latest GitHub release
@@ -1542,9 +1079,9 @@ export const api = {
    *  is built from and re-walk the music folder — what the page's Refresh
    *  button asks for; an ordinary call may answer from its TTL entry. */
   library: (refresh = false) =>
-    json<import("./types").Library>(`${API}/library${refresh ? "?refresh=1" : ""}`),
+    json<Library>(`${API}/library${refresh ? "?refresh=1" : ""}`),
   /** The ONE field catalogue every filter UI renders (the Browse builder, the
-   *  facet rail, the smart-playlist rule editor). Cached hard: it only changes
+   *  facet rail). Cached hard: it only changes
    *  when the server's own field list does. */
   libraryFields: () =>
     json<LibraryFields>(`${API}/library/fields`, undefined, 30000),
@@ -1569,8 +1106,8 @@ export const api = {
       body: JSON.stringify(req),
     }, timeoutMs),
   album: (path: string, staged = false) =>
-    json<import("./types").Album>(`${API}/album?path=${encodeURIComponent(path)}${stagedQ(staged)}`),
-  artist: (path: string) => json<import("./types").Artist>(`${API}/artist?path=${encodeURIComponent(path)}`),
+    json<Album>(`${API}/album?path=${encodeURIComponent(path)}${stagedQ(staged)}`),
+  artist: (path: string) => json<Artist>(`${API}/artist?path=${encodeURIComponent(path)}`),
   removeAlbum: (path: string) =>
     json<{ ok: boolean; trash: string }>(`${API}/album/remove`, {
       method: "POST",
@@ -1619,41 +1156,11 @@ export const api = {
    *  work. */
   jobLocks: () => json<JobLocksPayload>(`${API}/jobs/locks`),
 
-  streamUrl: (path: string) => media(`${API}/stream?path=${encodeURIComponent(path)}`),
-  /** Library music-video stream: direct bytes by default (?transcode=1 pipes
-   * MPEG-2/VC-1/etc. through ffmpeg into playable H.264/AAC MP4). */
-  videoStreamUrl: (path: string, transcode = false) =>
-    media(`${API}/videos/stream?path=${encodeURIComponent(path)}${transcode ? "&transcode=1" : ""}`),
-  /** Playback decision for a video: native (browser-decodable container +
-   * codecs) vs live transcode, plus ffprobe's real duration — fragmented
-   * live transcodes report Infinity on the media element, so this is the
-   * only reliable length source for those. */
-  videoMeta: (path: string) =>
-    json<{ native: boolean; reason: string | null; duration: number | null; video_codec: string | null; audio_codecs: string[] }>(
-      `${API}/videos/meta?path=${encodeURIComponent(path)}`
-    ),
-  subtitles: (path: string) =>
-    json<{ muxed: { n: number; codec: string; title: string }[]; sidecars: { file: string; name: string; language: string | null }[] }>(
-      `${API}/videos/subtitles?path=${encodeURIComponent(path)}`
-    ),
-  subtitleUrl: (path: string, sidecar?: string, n?: number) =>
-    media(`${API}/videos/subtitle?path=${encodeURIComponent(path)}${sidecar ? `&sidecar=${encodeURIComponent(sidecar)}` : ""}${typeof n === "number" && n >= 0 ? `&n=${n}` : ""}`),
   // Read-only tag view (tag writing was removed; grading scripts own writes).
   // `staged` reads a track of an album the import wizard is editing before it
   // is in the library.
   tags: (path: string, staged = false) =>
     json<any>(`${API}/tags?path=${encodeURIComponent(path)}${stagedQ(staged)}`),
-  // ReplayGain for playback loudness matching. `mode` overrides the saved
-  // replaygain_mode for one call (track/album/off); `analyzed` is true when
-  // the gain had to be measured on the fly because the tags were missing.
-  // `pending` is true while that on-demand measurement is still decoding, so
-  // a null `gain` is temporary and asking again is worth it; `album` is true
-  // only when the number really is the album gain (false in album mode =
-  // this album has none, per-track values were used).
-  replaygain: (path: string, mode?: "track" | "album" | "off") =>
-    json<{ path: string; gain: number | null; peak: number | null; mode: string; source: string | null; analyzed: boolean; pending: boolean; album: boolean }>(
-      `${API}/replaygain?path=${encodeURIComponent(path)}${mode ? `&mode=${mode}` : ""}`
-    ),
   lyricsEmbed: (path: string, lyrics: string, staged = false) =>
     json<{ ok: boolean }>(`${API}/lyrics/embed`, {
       method: "POST",
@@ -1699,84 +1206,8 @@ export const api = {
    *  runs its ids through the same /api/run above. */
   scriptMenu: () => json<ScriptMenu>(`${API}/script-menu`),
 
-  // playlists
-  playlists: () => json<import("./types").Playlist[]>(`${API}/playlists`),
-  playlist: (id: number) => json<import("./types").Playlist>(`${API}/playlists/${id}`),
-  createPlaylist: (name: string, kind: "manual" | "smart", filter?: unknown) =>
-    json<import("./types").Playlist>(`${API}/playlists`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, kind, filter }),
-    }),
-  /** Partial update (currently: rename). */
-  playlistUpdate: (id: number, patch: { name?: string }) =>
-    json<import("./types").Playlist>(`${API}/playlists/${id}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(patch),
-    }),
-  deletePlaylist: (id: number) => json<{ ok: boolean }>(`${API}/playlists/${id}`, { method: "DELETE" }),
-  playlistAdd: (id: number, paths: string[], position?: number) =>
-    json<{ added: number }>(`${API}/playlists/${id}/tracks`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ paths, position }),
-    }),
-  playlistOrder: (id: number, paths: string[]) =>
-    json<{ ok: boolean }>(`${API}/playlists/${id}/tracks`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ paths }),
-    }),
-  playlistRemove: (id: number, paths: string[]) =>
-    json<{ ok: boolean }>(`${API}/playlists/${id}/tracks`, {
-      method: "DELETE",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ paths }),
-    }),
-  playlistFilter: (id: number, filter: unknown) =>
-    json<import("./types").Playlist>(`${API}/playlists/${id}/filter`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ filter }),
-    }),
-  playlistEvaluate: (id: number) => json<{ paths: string[] }>(`${API}/playlists/${id}/evaluate`, { method: "POST" }),
-  playlistExportUrl: (id: number) => media(`${API}/playlists/${id}/export`),
-  playlistImport: (name: string, file: File) => {
-    const fd = new FormData();
-    fd.append("file", file);
-    return json<import("./types").Playlist>(`${API}/playlists/import?name=${encodeURIComponent(name)}`, {
-      method: "POST",
-      body: fd,
-    });
-  },
-  /** Import a playlist from a streaming service (Deezer, Spotify, YouTube
-   *  Music, Apple Music). The answer carries the report first — every row,
-   *  matched or not, with the reason — and the created playlist second.
-   *  `dryRun` is the same read and match with no write: what "Check" asks for.
-   *  A refused URL, a missing credential or a service that did not answer
-   *  comes back as the service's own sentence. */
-  playlistImportStreaming: (req: {
-    url: string;
-    name?: string;
-    service?: string;
-    parentAlbums?: boolean;
-    dryRun?: boolean;
-  }) =>
-    json<StreamingImportResult>(`${API}/playlists/import/streaming`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        url: req.url,
-        name: req.name ?? "",
-        service: req.service ?? "",
-        parent_albums: req.parentAlbums,
-        dry_run: req.dryRun ?? false,
-      }),
-    }, 180000),
-
   // integrations
-  mbRelease: (id: string) => json<import("./types").MBRelease>(`${API}/mb/release?mbid=${encodeURIComponent(id)}`),
+  mbRelease: (id: string) => json<MBRelease>(`${API}/mb/release?mbid=${encodeURIComponent(id)}`),
   /** Credits / performers for one track (`path`) or a whole album (`album`):
    *  a role-grouped MusicBrainz answer, or the files' own credit tags
    *  (`source: "tags"`) when MB has nothing. At most one MB request (cached
@@ -1788,7 +1219,7 @@ export const api = {
     return json<Credits>(`${API}/credits?${q}`, undefined, 60000);
   },
   mbGenres: (id: string, limit?: number) =>
-    json<import("./types").GenreCascade>(
+    json<GenreCascade>(
       `${API}/mb/release-genres?mbid=${encodeURIComponent(id)}${limit ? `&limit=${limit}` : ""}`
     ),
   mbSearchReleases: (q: string, mode: "release" | "track" | "catno" | "barcode" = "release") =>
@@ -1858,7 +1289,7 @@ export const api = {
   mbIdentify: (id: string) =>
     json<{ type: string; id: string; title: string }>(`${API}/mb/detect/${id}`),
   mbMatch: (albumPath: string, releaseId: string, staged = false) =>
-    json<{ release: import("./types").MBRelease; suggestions: import("./types").MatchSuggestion[] }>(
+    json<{ release: MBRelease; suggestions: MatchSuggestion[] }>(
       `${API}/mb/match`,
       {
         method: "POST",
@@ -1923,9 +1354,9 @@ export const api = {
    *  without it a replaced cover.jpg is the same URL — and neither the
    *  rendered `<img>` nor a browser cache would ever ask for the new bytes.
    *  Omitted, it falls back to the version this session wrote for that
-   *  album+file (see lib/invalidate), which is what keeps the grids, the
-   *  player bar and the ambient background on the freshly written image
-   *  without any of them knowing about the write.
+   *  album+file (see lib/invalidate), which is what keeps the grids and the
+   *  album's hero on the freshly written image without any of them knowing
+   *  about the write.
    *
    *  `staged` marks the import wizard's album — the folder the library does
    *  not list yet: the server serves its cover only to a request that carries
@@ -1934,19 +1365,16 @@ export const api = {
    *  written.
    *
    *  An explicit `token` — including `null` — wins over the remembered
-   *  version, which is how a caller names the version-less key the offline
-   *  cache stores (see mediaCache's forgetAlbumArtwork).
+   *  version.
    *
    *  `w` asks the server for the cover SHRUNK to that width (bucketed
-   *  server-side), which is what a surface that draws a 74 px bar thumb — or
-   *  a fullscreen picture and its blurred ambient layer — must ask for: the
-   *  master is 1200–3000 px, so fetching it put megabytes and a full-size
-   *  decode between "press play" and the artwork. The sized answer is
-   *  cacheable for minutes (a replaced cover's URL carries a new `v`, so the
-   *  app's own writes still refetch immediately), and two surfaces that ask
-   *  for the same width share ONE request. Omitted, the master is served
-   *  exactly as it always was — the offline warm (mediaCache.artworkUrls) and
-   *  anything that needs full resolution keep it. */
+   *  server-side), which is what a surface that draws a row's art must ask
+   *  for: the master is 1200–3000 px, so fetching it puts megabytes and a
+   *  full-size decode behind a 40 px cell. The sized answer is cacheable for
+   *  minutes (a replaced cover's URL carries a new `v`, so the app's own
+   *  writes still refetch immediately), and two surfaces that ask for the
+   *  same width share ONE request. Omitted, the master is served — anything
+   *  that needs full resolution keeps it. */
   coverUrl: (
     albumPath: string,
     coverFile?: string | null,
@@ -2246,6 +1674,15 @@ export const api = {
     json<CoverSearch>(`${API}${coverSearchPath(q)}`, undefined, 90000),
   /** Selectable cover sources + regions, plus the saved defaults. */
   coverSources: () => json<CoverSourceCatalog>(`${API}/cover/sources`),
+  /** The cover candidates the import chain staged for an album — the album
+   *  page's "Choose a cover" flow. `staged` opts into the wizard's album (a
+   *  folder the library does not list yet). */
+  metadataCandidates: (artist: string, albumPath?: string, staged = false) => {
+    const p = new URLSearchParams({ artist });
+    if (albumPath) p.set("album_path", albumPath);
+    if (staged) p.set("staged", "1");
+    return json<MetadataCandidates>(`${API}/metadata/candidates?${p}`, undefined, 90000);
+  },
   /** Apply a cover image from a URL; same track/tracks targeting as `cover`.
    *  For a provider URL, pass the identity the backend's fallback needs when
    *  the CDN itself refuses us (see `artUrl`). */
@@ -2286,76 +1723,9 @@ export const api = {
       3600000
     ),
 
-  trackDownloadUrl: (path: string) => media(`${API}/track/download?path=${encodeURIComponent(path)}`),
   trackExportUrl: (path: string, codec: string, bitrate: number, level = 5) =>
     media(`${API}/track/export?path=${encodeURIComponent(path)}&codec=${encodeURIComponent(codec)}&bitrate=${bitrate}&level=${level}`),
 
-  likes: () => json<{ paths: string[] }>(`${API}/likes`),
-  likeToggle: (path: string, mbid?: string) =>
-    json<{ ok: boolean; liked: boolean }>(`${API}/likes/toggle`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ path, mbid: mbid ?? null }),
-    }),
-  favorites: () => json<{ albums: string[]; artists: string[]; playlists: string[] }>(`${API}/favorites`),
-  favoriteToggle: (kind: "album" | "artist" | "playlist", key: string, mbid?: string) =>
-    json<{ ok: boolean; fav: boolean }>(`${API}/favorites/toggle`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ kind, key, mbid: mbid ?? null }),
-    }),
-
-  /** Ratings of ONE scope (`track` by default, so every older caller is
-   *  unchanged). The `rating` argument on the write side is the half-star
-   *  INTEGER 0-10 the DB and (for tracks) the file tag speak — see
-   *  lib/ratings.ts, the one place the 0-5 UI value is converted to it. */
-  ratings: (paths?: string[], scope: RatingsScope = "track") =>
-    json<RatingsPayload>(
-      `${API}/ratings?scope=${scope}${paths?.length ? `&${paths.map((p) => `paths=${encodeURIComponent(p)}`).join("&")}` : ""}`
-    ),
-  /** Set one entity's rating; 0 clears it (row removed, and for a track the
-   *  `RATING` tag removed too). An album or artist rating names that entity's
-   *  FOLDER and reports `tag: null` — a folder has no file to tag, and the
-   *  store says so rather than pretending. For a track, `tag` reports the file
-   *  write: `written`/`skipped` and, when the file refused it, `error` — the
-   *  rating is STORED either way, so a tag failure is a warning, never a
-   *  rollback. */
-  setRating: (path: string, rating: number, scope: RatingsScope = "track") =>
-    json<{
-      ok: boolean;
-      scope: RatingsScope;
-      path: string;
-      rating: number;
-      tag: { rating100: number; written: boolean; skipped: boolean; error: string | null } | null;
-    }>(
-      `${API}/ratings`,
-      {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path, rating, scope }),
-      },
-      60000
-    ),
-  /** The same value onto many tracks at once (select-all → rate). One failed
-   *  file does not fail the call: `failed` is a rating that was NOT stored,
-   *  `tags_failed` a stored rating whose file could not be tagged (it still
-   *  counts in `updated`). */
-  bulkRating: (paths: string[], rating: number) =>
-    json<{
-      ok: boolean;
-      updated: number;
-      failed: { path: string; error: string }[];
-      tags_written: number;
-      tags_failed: { path: string; error: string }[];
-    }>(
-      `${API}/ratings/bulk`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ paths, rating }),
-      },
-      300000
-    ),
   // export to device
   exportDrives: () => json<{ drives: { letter: string; root: string; type: string; free: number | null; total: number | null }[] }>(`${API}/export/drives`),
   /** Codec specs come from the server (quality presets, custom ranges and
@@ -2445,7 +1815,7 @@ export const api = {
   exportRun: (body: ExportForm & { paths: string[] }, timeoutMs = 1800000) =>
     json<{
       ok: boolean; total: number; exported: number; skipped: number; failed: number;
-      bytes: number; sidecars: number; playlists: number; verified: number;
+      bytes: number; sidecars: number; verified: number;
       pruned: number; pruned_files: string[]; warnings: string[];
       error_count: number; errors: string[]; estimated_bytes: number | null;
       /** Present only for `target: "zip"` — what to hand the browser. */
@@ -2490,89 +1860,9 @@ export const api = {
         Object.entries(form).map(([k, v]) => [`export_${k}`, v]))),
     }),
 
-  // Home page (recommendations + highlights)
-  // `refresh` is the "Your library" card's button: the payload is TTL-cached
-  // server-side and built from the equally-cached library tree, so a plain
-  // refetch showed the same rows for minutes. The flag drops those caches.
-  home: (refresh = false) =>
-    json<HomeData>(`${API}/home${refresh ? "?refresh=1" : ""}`, undefined, 120000),
-
-  /** ONE podcast series and its episodes, newest first. `series` is the name
-   *  the Home shelf links by — the name the app stored on the episodes' files
-   *  (MusicBrainz's disambiguation included), which is also what keeps two
-   *  same-named shows apart. A series the library holds no episode of answers
-   *  404, which the page renders as "not in the library" rather than as an
-   *  empty show. */
-  podcastSeries: (series: string) =>
-    json<PodcastSeries>(`${API}/podcasts?series=${encodeURIComponent(series)}`, undefined, 60000),
-
-  // ----------------------------------------------------------------- //
-  // Discovery — the provider catalogue behind Settings' order editors. //
-  // ----------------------------------------------------------------- //
-  discoverySources: () => json<DiscoveryCatalog>(`${API}/discovery/sources`),
-
-  // ----------------------------------------------------------------- //
-  // Artist artwork + descriptions, album descriptions                  //
-  // ----------------------------------------------------------------- //
-  /** `artist` accepts the artist folder path (from the artist payload) or a
-   *  plain artist name. */
-  artistArtwork: (artist: string) =>
-    json<ArtistArtwork>(`${API}/artist/artwork?artist=${encodeURIComponent(artist)}`),
-  artistImageUrl: (artist: string) => media(`${API}/artist/image?artist=${encodeURIComponent(artist)}`),
-  artistImageCandidates: (artist: string) =>
-    json<{ artist: string; rows: DiscoveryImageRow[] }>(
-      `${API}/artist/image/candidates?artist=${encodeURIComponent(artist)}`, undefined, 45000
-    ),
-  artistImageSave: (artist: string, url = "", source = "") =>
-    json<{ ok: boolean; file: string; source: string; source_url: string; image: ArtistArtworkImage }>(
-      `${API}/artist/image`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ artist, url, source }),
-      },
-      60000
-    ),
-  artistImageUpload: (artist: string, file: File) => {
-    const fd = new FormData();
-    fd.append("artist", artist);
-    fd.append("file", file);
-    return json<{ ok: boolean; file: string; image: ArtistArtworkImage }>(
-      `${API}/artist/image/upload`,
-      { method: "POST", body: fd },
-      60000
-    );
-  },
-  artistImageClear: (artist: string) =>
-    json<{ ok: boolean }>(`${API}/artist/image?artist=${encodeURIComponent(artist)}`, { method: "DELETE" }),
-  artistDescriptionSave: (artist: string, text = "") =>
-    json<{ ok: boolean; source: string | null; text: string; description: ArtistArtworkDescription }>(
-      `${API}/artist/description`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ artist, text }),
-      },
-      45000
-    ),
-  artistDescriptionClear: (artist: string) =>
-    json<{ ok: boolean }>(`${API}/artist/description?artist=${encodeURIComponent(artist)}`, { method: "DELETE" }),
-  albumDescriptionSave: (path: string, text = "", artist = "", album = "") =>
-    json<{ ok: boolean; source: string | null; text: string }>(
-      `${API}/album/description`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path, text, artist, album }),
-      },
-      45000
-    ),
-  albumDescriptionClear: (path: string) =>
-    json<{ ok: boolean }>(`${API}/album/description?path=${encodeURIComponent(path)}`, { method: "DELETE" }),
-
   // ----------------------------------------------------------------- //
   // Lyrics — the synced provider chain (LRCLIB → NetEase → Kugou →    //
-  // QQ Music → Kuwo → YouTube captions); see Settings → Lyrics.       //
+  // QQ Music → Kuwo); see Settings → Lyrics.                          //
   // ----------------------------------------------------------------- //
   lyricsProviders: () => json<LyricsProviders>(`${API}/lyrics/providers`),
   /** Auto-import lyrics for one or more tracks through the provider chain.
@@ -2880,129 +2170,12 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ paths, limit, sources, staged }),
     }, 300000),
-  /** Fetch what an album's metadata step owes: the artist's image and
-   *  description, and the album's own description. Omit `items` for all
-   *  three, or send one per request to drive a bar per item (each call is
-   *  cheap once the content is stored). Per item: `{state, source, detail}` —
-   *  `state` is `fetched` / `present` / `disabled` (the Settings toggle) /
-   *  `not-found` / `error`, so a row can say why nothing arrived instead of
-   *  showing a dead button. `force=false` twice in a row is a no-op. */
-  albumMetadataFetch: (body: { path: string; items?: MetadataItemKind[]; force?: boolean; staged?: boolean }) =>
-    json<{ ok: boolean; path: string; items: Partial<Record<MetadataItemKind, MetadataFetchItem>> }>(
-      `${API}/album/metadata/fetch`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      },
-      300000
-    ),
   /** Genre browsing surface: every genre with its track count, plus the
    *  category cards that group them. */
   genresFacets: () =>
     json<{ genres: { name: string; count: number }[]; categories: { name: string; genres: string[] }[] }>(
       `${API}/genres/facets`
     ),
-
-  /** The genre list of one scope — the library's own genres, the online
-   *  providers' (MusicBrainz, Last.fm…), or both. 45 s: the online side walks
-   *  the provider chains, and the answer is TTL-cached server-side. */
-  discoverGenres: (scope: DiscoverScope = "all") =>
-    json<DiscoverGenres>(`${API}/discover/genres?scope=${scope}`, undefined, 45000),
-  /** One page of a genre's albums/artists/tracks from one source or all of
-   *  them. `offset` pages by the previous reply's `next_offset`. */
-  discoverGenre: (p: {
-    genre: string;
-    kind: DiscoverKind;
-    /** Source id, or "all" (the server asks everything it can). */
-    source?: string;
-    limit?: number;
-    offset?: number;
-  }) => {
-    const q = new URLSearchParams({ genre: p.genre, kind: p.kind });
-    if (p.source) q.set("source", p.source);
-    if (p.limit != null) q.set("limit", String(p.limit));
-    if (p.offset != null) q.set("offset", String(p.offset));
-    return json<DiscoverItems>(`${API}/discover/genre?${q}`, undefined, 60000);
-  },
-  /** Online recommendations for the whole library, for one genre, or — with
-   *  `seedKind` — for ONE ENTITY: the artist/album/track page the shelf sits
-   *  on, seeded by its MusicBrainz id when its tags carry one and by
-   *  artist+name when they do not. */
-  discoverRecommended: (p: {
-    seed?: string;
-    kind: DiscoverKind;
-    limit?: number;
-    seedKind?: DiscoverSeedKind;
-    seedMbid?: string;
-    seedName?: string;
-    seedArtist?: string;
-  }) => {
-    const q = new URLSearchParams({ seed: p.seed || "library", kind: p.kind });
-    if (p.limit != null) q.set("limit", String(p.limit));
-    if (p.seedKind) q.set("seed_kind", p.seedKind);
-    if (p.seedMbid) q.set("seed_mbid", p.seedMbid);
-    if (p.seedName) q.set("seed_name", p.seedName);
-    if (p.seedArtist) q.set("seed_artist", p.seedArtist);
-    return json<DiscoverRecommended>(`${API}/discover/recommended?${q}`, undefined, 60000);
-  },
-  /** What the online providers RANK for one window and one kind. Rows are not
-   *  merged across providers (a chart's rank is its data), so each row names
-   *  its provider, its rank and its own score — and `sources` says which
-   *  providers can answer THIS window at all. 90 s: a chart walks every source
-   *  (RateYourMusic's scrape included) and the answer is TTL-cached. */
-  discoverCharts: (p: { period: ChartPeriod; kind: DiscoverKind; source?: string; limit?: number }) => {
-    const q = new URLSearchParams({ period: p.period, kind: p.kind });
-    if (p.source) q.set("source", p.source);
-    if (p.limit != null) q.set("limit", String(p.limit));
-    return json<DiscoverCharts>(`${API}/discover/charts?${q}`, undefined, 90000);
-  },
-
-  /** The LIBRARY's own most-played rows for one window (`GET /api/top`) —
-   *  this user's play history, counted server-side, never a provider's chart.
-   *  An empty history answers with an empty list and the `note` that explains
-   *  when a play is recorded. */
-  topCharts: (p: { period: ChartPeriod; kind: DiscoverKind; limit?: number }) => {
-    const q = new URLSearchParams({ period: p.period, kind: p.kind });
-    if (p.limit != null) q.set("limit", String(p.limit));
-    return json<TopCharts>(`${API}/top?${q}`, undefined, 60000);
-  },
-  /** Record ONE playback start (`POST /api/plays`) — the one seam every client
-   *  reports a play to, called when a track actually starts (never on a seek
-   *  or a resume; a repeat is a play). Deliberately not awaited by the player:
-   *  the row is a statistic, and a slow server must not delay the audio. */
-  recordPlay: (path: string) =>
-    json<{ ok: boolean; path: string; album: string; started_at: number }>(
-      `${API}/plays`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path }),
-      },
-      20000
-    ),
-
-  /** Candidate artist images + descriptions for the metadata review modal. */
-  metadataCandidates: (artist: string, albumPath?: string, staged = false) => {
-    const p = new URLSearchParams({ artist });
-    if (albumPath) p.set("album_path", albumPath);
-    if (staged) p.set("staged", "1");
-    return json<MetadataCandidates>(`${API}/metadata/candidates?${p}`, undefined, 90000);
-  },
-  /** Apply one reviewed candidate: an artist image URL, or the artist/album
-   *  description text picked in the modal. */
-  metadataApply: (body: {
-    kind: "artist_image" | "artist_description" | "album_description";
-    artist?: string;
-    album_path?: string;
-    image_url?: string;
-    description?: string;
-  }) =>
-    json<{ ok: boolean; saved: string }>(`${API}/metadata/apply`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    }, 120000),
 
   // ----------------------------------------------------------------- //
   // Source health — every provider the app can talk to, with the       //
@@ -3029,36 +2202,6 @@ export const api = {
       60000
     ).then((r) => ("source" in r ? r.source : r)),
 
-  /** URL of one video frame (`GET /api/videos/thumb`): JPEG bytes for the
-   *  scrub preview. `t` is floored to whole seconds so repeated positions
-   *  reuse one cache entry; 404s for a non-video or a path outside the
-   *  music folder, which the caller swallows. */
-  videoThumbUrl: (path: string, t: number, w = 160) =>
-    media(`${API}/videos/thumb?path=${encodeURIComponent(path)}&t=${Math.max(0, Math.floor(t))}&w=${Math.round(w)}`),
-  /** Download a music video for one track from YouTube. A match is
-   *  downloaded and answers with `file`.
-   *  `ok: false` carries the server's reason in `error` (YouTube off, yt-dlp
-   *  missing, nothing on YouTube) rather than a bare failure. */
-  videosDownloadYoutube: (body: { path?: string; artist: string; title: string; duration?: number }) =>
-    json<{ ok: boolean; file?: string; source?: string; error?: string }>(`${API}/videos/download-youtube`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    }, 900000),
-  /** The YouTube cookie jar: which mode is on and what the file holds. */
-  youtubeCookies: () => json<YoutubeCookies>(`${API}/youtube/cookies`),
-  /** Save a pasted or dropped cookies.txt. The server validates it IS a
-   *  Netscape cookie file first, so junk comes back as a 400 with the reason
-   *  instead of replacing a jar that worked. */
-  youtubeCookiesSave: (text: string) =>
-    json<YoutubeCookiesSaveReply>(`${API}/youtube/cookies`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text }),
-    }, 60000),
-  /** Remove the jar (the mode setting is untouched). */
-  youtubeCookiesDelete: () =>
-    json<YoutubeCookies>(`${API}/youtube/cookies`, { method: "DELETE" }),
   /** The stored RateYourMusic credential: the cookie names it holds, in the
    *  order they are sent, no values. */
   rymCookies: () => json<RymCookies>(`${API}/rym/cookies`),
@@ -3074,18 +2217,17 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text }),
     }, 60000),
-  /** The cookies ONE cookie login stores, with each cookie's own comment —
-   *  `GET /api/cookies/{source}` (server/api_cookies.py). The same shape for
-   *  the yt-dlp jar (`youtube`) and the RYM credential (`rym`), so one panel
-   *  draws both. Never carries a cookie value. */
-  cookieList: (source: "youtube" | "rym") =>
+  /** The cookies the RateYourMusic credential stores, with each cookie's own
+   *  comment — `GET /api/cookies/rym` (server/api_cookies.py). Never carries a
+   *  cookie value. */
+  cookieList: (source: "rym") =>
     json<CookieList>(`${API}/cookies/${source}`),
   /** Write (or, with an empty `comment`, clear) one cookie's comment. The
    *  cookie is named by its IDENTITY — domain, path, name — so the note follows
    *  the cookie across a re-import instead of the line it sat on. Answers with
    *  the fresh list. */
   cookieComment: (
-    source: "youtube" | "rym",
+    source: "rym",
     body: { domain: string; path: string; name: string; comment: string }
   ) =>
     json<CookieList>(`${API}/cookies/${source}/comments`, {

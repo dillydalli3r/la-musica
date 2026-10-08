@@ -1,5 +1,4 @@
-"""Multi-source lyrics lookup: LRCLIB, NetEase, QQ Music, Kuwo, Kugou,
-YouTube captions.
+"""Multi-source lyrics lookup: LRCLIB, NetEase, QQ Music, Kuwo, Kugou.
 
 The built-in order below is a ranking, and each step of it is a reason:
 
@@ -9,8 +8,6 @@ The built-in order below is a ranking, and each step of it is a reason:
 * ``qq``      — synced + translations, strong mainstream coverage.
 * ``kuwo``    — synced + translations.
 * ``kugou``   — synced, weaker match quality than the four above.
-* ``youtube`` — auto-generated captions, last resort, only when a video id is
-  known (nothing is ever searched).
 
 The first provider that answers wins, so this order IS the policy; a saved
 ``lyrics_sources`` list replaces it wholesale (see ``provider_order``).
@@ -33,8 +30,7 @@ default), because a source that knows `宇多田ヒカル / 光` as `Hikaru Utad
 Hikari` — or the other way round — is a source the stored names cannot reach.
 
 Every source is free — no key, no paid tier anywhere — and stdlib urllib is all
-they need; the captions one additionally needs yt-dlp and a video id the file
-already carries. Every request is throttled to one per ``_MIN_GAP`` seconds
+they need. Every request is throttled to one per ``_MIN_GAP`` seconds
 PER HOST — the gap is politeness toward one server, so two providers on
 different hosts never queue behind each other — and retried on 429/5xx (these
 hosts throttle IPs), and each provider swallows its own failures, so the chain
@@ -82,19 +78,10 @@ keys stayed pinned instead of guessed:
   ``音乐查询失败`` — so a miss is normal and the chain walks on. Verified:
   Radiohead/Creep → MUSIC_1250107 with 80 cues (39 of them translation
   duplicates), while MUSIC_16996995 has none.
-* YouTube — captions of a KNOWN video id, converted to the same LRC shape the
-  other synced providers answer with. Nothing is ever searched: the id comes
-  from a tag on the file or from the caller (the video download writes it into
-  the file name, ``%(title)s [%(id)s].%(ext)s``, see ``server/youtube.py``),
-  so a track without one has no YouTube provider at all. yt-dlp is optional —
-  missing means one log line and a skip, never a failed fetch. Manual
-  subtitles are preferred; automatic captions are the fallback and can
-  mishear (that is stated in Settings, not hidden).
 """
 import base64
 import html
 import json
-import os
 import re
 import threading
 import time
@@ -152,14 +139,13 @@ last_http_error = None
 # The built-in RANKING — see the module docstring for why each step sits where
 # it does. `lyrics_sources` in config overrides it wholesale; this is the
 # default and the order the settings list shows.
-SOURCES = ["lrclib", "netease", "qq", "kuwo", "kugou", "youtube"]
+SOURCES = ["lrclib", "netease", "qq", "kuwo", "kugou"]
 SOURCE_LABELS = {
     "lrclib": "LRCLIB",
     "netease": "NetEase",
     "kugou": "Kugou",
     "qq": "QQ Music",
     "kuwo": "Kuwo",
-    "youtube": "YouTube captions",
 }
 # One honest line per provider for the settings list and the setup wizard: the
 # coverage it is good at, the caveats it comes with, and nothing else implied.
@@ -168,11 +154,11 @@ SOURCE_LABELS = {
 # stated rather than hidden.
 SOURCE_NOTES = {
     "lrclib": "Synced lyrics (timestamps) from the open, community-maintained "
-              "database; no key needed, best global coverage of the six. Its "
+              "database; no key needed, best global coverage of the five. Its "
               "untimed records are used too, when no source has timestamps "
               "for the track.",
     "netease": "Synced LRC (timestamps) with translations; a very large "
-               "catalogue and the strongest of the six for CJK releases. "
+               "catalogue and the strongest of the five for CJK releases. "
                "Unofficial API.",
     "qq": "Synced LRC (timestamps) with translations; strong mainstream "
           "coverage. Unofficial API, and a loose search — the match score "
@@ -182,33 +168,7 @@ SOURCE_NOTES = {
             "what is the track (originals only are written).",
     "kugou": "Synced LRC (timestamps); large catalogue but weaker match "
              "quality than the sources above. Unofficial API.",
-    "youtube": "Synced captions of a KNOWN video id, auto-generated ones "
-               "included — those can mishear. Only for tracks that carry a "
-               "YouTube id; needs yt-dlp.",
 }
-
-
-_LOGGED = set()
-_LOGGED_LOCK = threading.Lock()
-
-
-def _log_once(pid, message):
-    """One log line per provider per process.
-
-    Something that cannot run — yt-dlp missing, a video id the track does not
-    have — is a *skip*, not a failure, and it must be visible exactly once
-    rather than repeated for every track of a run. Logging failures are
-    swallowed: this is diagnostics, never load-bearing.
-    """
-    with _LOGGED_LOCK:
-        if pid in _LOGGED:
-            return
-        _LOGGED.add(pid)
-    try:
-        from .ui import log
-        log(f"{SOURCE_LABELS.get(pid, pid)}: {message}")
-    except Exception:
-        pass
 
 
 # --------------------------------------------------------------------------- #
@@ -425,7 +385,7 @@ def lrclib_fetch(artist, track, album=None, duration=None):
     return None
 
 
-def _lrclib(artist, title, album=None, duration=None, cfg=None, youtube_id=None):
+def _lrclib(artist, title, album=None, duration=None, cfg=None):
     rec = lrclib_fetch(artist, title, album, duration)
     if not isinstance(rec, dict):
         return None
@@ -434,7 +394,7 @@ def _lrclib(artist, title, album=None, duration=None, cfg=None, youtube_id=None)
                 rec.get("albumName") or album, rec.get("duration"))
 
 
-def _netease(artist, title, album=None, duration=None, cfg=None, youtube_id=None):
+def _netease(artist, title, album=None, duration=None, cfg=None):
     query = urllib.parse.urlencode(
         {"s": f"{artist} {title}".strip(), "type": 1, "limit": 8, "offset": 0})
     data = _get_json(f"{NETEASE_BASE}/search/get?{query}", headers=_NETEASE_HEADERS)
@@ -468,7 +428,7 @@ def _netease(artist, title, album=None, duration=None, cfg=None, youtube_id=None
     return None
 
 
-def _kugou(artist, title, album=None, duration=None, cfg=None, youtube_id=None):
+def _kugou(artist, title, album=None, duration=None, cfg=None):
     params = {"ver": 1, "man": "yes", "client": "mobi",
               "keyword": f"{artist} - {title}".strip()}
     if duration:
@@ -502,7 +462,7 @@ def _kugou(artist, title, album=None, duration=None, cfg=None, youtube_id=None):
     return None
 
 
-def _qq(artist, title, album=None, duration=None, cfg=None, youtube_id=None):
+def _qq(artist, title, album=None, duration=None, cfg=None):
     """QQ Music: search → lyric module. Synced LRC, free, no key."""
     query = urllib.parse.urlencode(
         {"w": f"{artist} {title}".strip(), "new_json": 1, "cr": 1, "p": 1,
@@ -598,7 +558,7 @@ def _kuwo_lrc(rows):
     return "\n".join(out)
 
 
-def _kuwo(artist, title, album=None, duration=None, cfg=None, youtube_id=None):
+def _kuwo(artist, title, album=None, duration=None, cfg=None):
     """Kuwo: search → ``songinfoandlrc``. Synced LRC, free, no key."""
     query = urllib.parse.urlencode(
         {"all": f"{artist} {title}".strip(), "ft": "music", "client": "kt",
@@ -626,197 +586,12 @@ def _kuwo(artist, title, album=None, duration=None, cfg=None, youtube_id=None):
     return None
 
 
-_YT_URL_RE = re.compile(
-    r"(?:youtube\.com/(?:watch\?(?:[^#]*&)?v=|embed/|shorts/|live/)|youtu\.be/)"
-    r"([A-Za-z0-9_-]{11})", re.I)
-_YT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
-# ponytail: the video download leaves "[<id>]" in the file name, so a bracketed
-# 11-char token is read as one — an unrelated tag of exactly that length would
-# cost one failed yt-dlp run, nothing worse.
-_YT_BRACKET_RE = re.compile(r"\[([A-Za-z0-9_-]{11})\]")
-# MM:SS.mmm / HH:MM:SS,mmm (VTT and SRT cues), at the start of a line.
-_CUE_TIME_RE = re.compile(r"^(?:(\d+):)?(\d{1,2}):(\d{2})[.,](\d{1,3})\s*-->")
-_CUE_TAG_RE = re.compile(r"<[^>]*>")
-_YT_CAPTION_TIMEOUT = 120
-
-
-def youtube_id_from(*values):
-    """The 11-char video id in a YouTube URL, a bare id, or ``[<id>]``, else None.
-
-    Values are checked in order. The bracket form is the one the app's own
-    video downloads leave in the file name (``%(title)s [%(id)s].%(ext)s``),
-    and anything else — a Bandcamp link in a URL tag, a shorter bracketed tag —
-    answers None instead of a hopeful guess.
-    """
-    for value in values:
-        text = str(value or "").strip()
-        if not text:
-            continue
-        for pattern in (_YT_URL_RE, _YT_BRACKET_RE):
-            match = pattern.search(text)
-            if match:
-                return match.group(1)
-        if _YT_ID_RE.match(text):
-            return text
-    return None
-
-
-def _cue_seconds(match):
-    hours = int(match.group(1) or 0)
-    milli = int(match.group(4).ljust(3, "0"))
-    return hours * 3600 + int(match.group(2)) * 60 + int(match.group(3)) + milli / 1000.0
-
-
-def _vtt_to_lrc(captions):
-    """Caption track (VTT or SRT) → LRC: ``[mm:ss.xx]text`` per cue.
-
-    The shape is the one NetEase and Kugou answer with, so the writer and the
-    ELRC path need no special case. Inline cue tags (``<c>``, karaoke timing)
-    and the ``align:``/``position:`` cue settings are dropped.
-
-    ponytail: repeated cue text is only dropped, never reconstructed — the
-    rolling windows of auto captions therefore stay as YouTube worded and
-    timed them, and nothing is invented from them.
-    """
-    cues, seen, start, lines = [], set(), None, []
-
-    def flush():
-        if start is None:
-            return
-        text = " ".join(" ".join(lines).split())
-        if text and text not in seen:
-            seen.add(text)
-            cues.append((start, text))
-
-    lines_in = (captions or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
-    for index, raw in enumerate(lines_in):
-        line = raw.strip()
-        match = _CUE_TIME_RE.match(line)
-        if match:
-            flush()
-            start, lines = _cue_seconds(match), []
-        elif start is not None and line and not line.startswith("NOTE"):
-            following = lines_in[index + 1].strip() if index + 1 < len(lines_in) else ""
-            if line.isdigit() and _CUE_TIME_RE.match(following):
-                continue          # the cue number SRT puts before its timing
-            # tags become spaces: karaoke cues separate their words with them
-            lines.append(_CUE_TAG_RE.sub(" ", line))
-        # everything before the first cue is the WEBVTT header / Kind / Language
-    flush()
-
-    out = []
-    for seconds, text in cues:
-        minutes, rest = divmod(seconds, 60)
-        out.append(f"[{int(minutes):02d}:{rest:05.2f}]{text}")
-    return "\n".join(out)
-
-
-def _caption_files(exe, video_id, tmpdir, flags):
-    """Run yt-dlp for one caption flavour; the files it wrote (often none)."""
-    from .subproc import run_tool
-    cmd = [exe, "--skip-download", "--no-playlist", "--no-warnings",
-           "--no-progress", "--sub-format", "vtt", "--sub-langs", "en.*,en",
-           "-o", os.path.join(tmpdir, "%(id)s"), *flags,
-           f"https://www.youtube.com/watch?v={video_id}"]
-    try:
-        run_tool(cmd, capture_output=True, text=True,
-                 timeout=_YT_CAPTION_TIMEOUT)
-    except Exception:
-        return []
-    try:
-        return sorted(os.path.join(tmpdir, name) for name in os.listdir(tmpdir)
-                      if name.lower().endswith((".vtt", ".srt")))
-    except Exception:
-        return []
-
-
-def _youtube_captions(exe, video_id, cookie_flags=()):
-    """Time-synced captions for one video id, or None.
-
-    Manual subtitles first — those are the ones a person typed; automatic ones
-    are the (often misheard) fallback. yt-dlp writes into a temp dir that is
-    removed again, so a fetch leaves nothing behind.
-
-    *cookie_flags* are yt-dlp's own `--cookies …` arguments when the user
-    configured a jar (see `_cookie_flags`): a video old enough to be age-gated
-    has captions too, and yt-dlp will not see them without the same cookies the
-    video download needs.
-    """
-    import tempfile
-    with tempfile.TemporaryDirectory(prefix="mlo-yt-captions-") as tmp:
-        paths = _caption_files(exe, video_id, tmp,
-                               ("--write-subs", *cookie_flags))
-        if not paths:
-            paths = _caption_files(exe, video_id, tmp,
-                                   ("--write-subs", "--write-auto-subs",
-                                    *cookie_flags))
-        for path in sorted(paths,
-                           key=lambda p: (".en." not in os.path.basename(p).lower(), p)):
-            try:
-                with open(path, "r", encoding="utf-8", errors="replace") as fh:
-                    lrc = _vtt_to_lrc(fh.read())
-            except Exception:
-                continue
-            if lrc:
-                return lrc
-    return None
-
-
-def _cookie_flags(cfg):
-    """yt-dlp's `--cookies …` arguments for *cfg*, or [] when none is set.
-
-    The captions fetch is the THIRD yt-dlp call site — the search and the video
-    download live in `server/youtube.py`, which owns the setting — and it needs
-    the same jar for the same reason: an age-gated video is exactly the kind
-    that has captions and no anonymous access. Imported lazily because `mlo/`
-    runs without `server/` in the CLI; a checkout that never configured cookies
-    loses nothing by that import failing.
-    """
-    try:
-        from server.youtube import cookie_args
-        return list(cookie_args(cfg or {}))
-    except Exception:
-        return []
-
-
-def _youtube(artist, title, album=None, duration=None, cfg=None, youtube_id=None):
-    """Captions of a KNOWN YouTube video, as synced LRC.
-
-    ``youtube_id`` is the only way in: a blind YouTube search would happily
-    attach a stranger's captions to the file. Callers pass the id the download
-    recorded (a tag, or the ``[<id>]`` in the file name the app itself writes),
-    so a track without one simply has no YouTube provider.
-    """
-    if not youtube_id:
-        return None
-    if not bool((cfg or {}).get("lyrics_youtube_captions", True)):
-        return None
-    exe = _ytdlp_exe()
-    if not exe:
-        _log_once("youtube", "yt-dlp is not installed — skipped")
-        return None
-    synced = _youtube_captions(exe, youtube_id, _cookie_flags(cfg))
-    if not synced:
-        return None
-    return _hit(synced, _lrc_to_plain(synced), artist, title, None, None)
-
-
-def _ytdlp_exe():
-    """The yt-dlp executable (vendored .dependencies first, then PATH) or None."""
-    try:
-        from .tools import detect_all_tools
-        return (detect_all_tools().get("yt-dlp") or {}).get("ytdlp_exe")
-    except Exception:
-        return None
-
-
 _PROVIDERS = {
     "lrclib": _lrclib,
     "netease": _netease,
     "kugou": _kugou,
     "qq": _qq,
     "kuwo": _kuwo,
-    "youtube": _youtube,
 }
 
 
@@ -846,8 +621,7 @@ def available_sources():
     Every entry is self-describing, and every one of them is true by
     construction: all of these sources answer with timestamps (``synced``),
     all of them are free with no paid tier (``free``), and ``needs`` lists the
-    config keys a provider requires — empty for every one of them today (the
-    captions provider needs yt-dlp *installed*, not configured).
+    config keys a provider requires — empty for every one of them today.
 
     ``rank`` is 1-based over ``SOURCES``: the built-in preference order, which
     is what the settings list shows as "#1 preferred". A saved
@@ -862,7 +636,7 @@ def available_sources():
 
 
 # The one fixed sample every probe uses, so two runs are comparable. Radiohead
-# / Creep is on all six sources (verified live), duration in seconds.
+# / Creep is on all five sources (verified live), duration in seconds.
 PROBE_SAMPLE = ("Radiohead", "Creep", "Pablo Honey", 238.0)
 
 
@@ -872,9 +646,9 @@ def probe_source(pid, cfg=None):
     ``status``: "ok" when lyrics came back — with timestamps, or untimed text
     the chain writes when nothing better is found (which *detail* says, so a
     "plain only" source is not read as a full one), "skipped" when this machine
-    cannot run the provider at all (yt-dlp missing, no video id to probe, the
-    host refusing us), "fail" when it ran and had nothing. Never raises and
-    never writes anything — the wizard calls it once per provider.
+    cannot run the provider at all (the host refusing us), "fail" when it ran
+    and had nothing. Never raises and never writes anything — the wizard calls
+    it once per provider.
     """
     global last_http_error
     result = {"id": pid, "kind": "lyrics", "status": "fail", "detail": "",
@@ -885,19 +659,9 @@ def probe_source(pid, cfg=None):
         return result
     started = time.time()
     try:
-        if pid == "youtube":
-            # Captions are per-track by design: there is no sample to probe
-            # without a video id, and nothing here ever searches YouTube.
-            if not _ytdlp_exe():
-                result.update(status="skipped",
-                              detail="yt-dlp is not installed")
-            else:
-                result.update(status="skipped",
-                              detail="needs a track's YouTube id")
-            return result
         last_http_error = None
         artist, title, album, duration = PROBE_SAMPLE
-        hit = provider(artist, title, album, duration, cfg or {}, None)
+        hit = provider(artist, title, album, duration, cfg or {})
     except Exception as e:
         hit = None
         result.update(detail=f"raised: {e}")
@@ -998,7 +762,7 @@ def _alias_queries(artist, title, album, aliases):
     return tuple(out[:_MAX_ALIAS_QUERIES])
 
 
-def _search_chain(cfg, order, artist, title, album, duration, youtube_id, floor):
+def _search_chain(cfg, order, artist, title, album, duration, floor):
     """ONE walk of the provider chain, under the names it is given.
 
     Returns ``(synced_hit, plain_hit)``: the FIRST synced answer — the walk
@@ -1015,8 +779,7 @@ def _search_chain(cfg, order, artist, title, album, duration, youtube_id, floor)
     synced = plain = None
     for pid in order:
         try:
-            hit = _PROVIDERS[pid](artist, title, album, duration, cfg,
-                                  youtube_id)
+            hit = _PROVIDERS[pid](artist, title, album, duration, cfg)
         except Exception:
             hit = None
         if not _accept(hit):
@@ -1042,7 +805,7 @@ def _search_chain(cfg, order, artist, title, album, duration, youtube_id, floor)
 
 
 def fetch_lyrics(cfg, artist, title, album=None, duration=None,
-                 youtube_id=None, min_score=None, aliases=None):
+                 min_score=None, aliases=None):
     """The chain's answer for a track, or None when none of them has it.
 
     SYNCED first, PLAIN as the fallback — the app's own rule: a track whose
@@ -1071,16 +834,15 @@ def fetch_lyrics(cfg, artist, title, album=None, duration=None,
     entity and the name that found it; acceptance is unchanged — the same
     variant guard, the same score floor, the same synced-before-plain rule.
 
-    ``youtube_id`` (optional) is the video the file came from — the only thing
-    that lets the YouTube provider answer, since it never searches. Providers
-    never raise — a failure, a timeout or a parse error is just a miss."""
+    Providers never raise — a failure, a timeout or a parse error is just a
+    miss."""
     cfg = cfg or {}
     if not (artist and title):
         return None
     floor = _MIN_SCORE if min_score is None else max(_MIN_SCORE, float(min_score))
     order = provider_order(cfg)
     synced, plain = _search_chain(cfg, order, artist, title, album, duration,
-                                  youtube_id, floor)
+                                  floor)
     if synced is not None:
         return synced
     if plain is not None:
@@ -1097,7 +859,7 @@ def fetch_lyrics(cfg, artist, title, album=None, duration=None,
     for a_name, t_name, al_name, entity, query in _alias_queries(
             artist, title, album, aliases):
         synced, found = _search_chain(cfg, order, a_name, t_name, al_name,
-                                      duration, youtube_id, floor)
+                                      duration, floor)
         if synced is not None:
             synced["alias_pass"] = {"used": True, "entity": entity,
                                     "query": query}

@@ -10,7 +10,7 @@ import type { Track } from "../types";
 import { fmtDuration, fmtTech } from "../lib/fmt";
 import { trackRef } from "../lib/refs";
 import { AuditBadge, GradeBadge, LyricsKindChip, advisoryLine, advisoryOutcome, allowPlainOf, instrumentalLine, isInstrumental } from "./Badges";
-import TrackDownloadExport from "./TrackDownloadExport";
+import TrackExport from "./TrackExport";
 import Modal from "./Modal";
 import LogReport from "./LogReport";
 import { tagLabel, tagTooltip, useTagRegistry } from "../lib/tags";
@@ -156,10 +156,10 @@ export default function TrackDetails({
     answerSources(replyFor(checked?.inst?.evidence, trackPath))
   );
   // The tag the app HIDES lyrics under: an instrumental's stored words are
-  // never shown (NowPlayingView's own state rule, `npLyricsMode`), so this
-  // panel may not grade the text the player refuses to show — a stored plain
-  // text on an instrumental read "✕ Plain … this track should hold a synced
-  // version", which is a demand no instrumental can satisfy (reported).
+  // never shown, so this panel may not grade the text the app refuses to show —
+  // a stored plain text on an instrumental read "✕ Plain … this track should
+  // hold a synced version", which is a demand no instrumental can satisfy
+  // (reported).
   const instrumentalTag = isInstrumental(track.tags);
   return (
     <Modal
@@ -241,7 +241,7 @@ export default function TrackDetails({
       </div>
 
       <div className="flex flex-wrap items-center gap-2">
-        <TrackDownloadExport path={track.path} title={track.tags?.TITLE ?? track.file} />
+        <TrackExport path={track.path} title={track.tags?.TITLE ?? track.file} />
         {/* The log this track's grading was read off — the same panel the album
             readout opens, at this track's own disc, so "score 60 is below the
             required 100" is one click from the file that says why. */}

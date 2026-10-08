@@ -2,23 +2,17 @@
 /* Sidebar/menu assertions against a running app — text evidence instead of
  * eyeballing screenshots. Run: node tools/check_menus.cjs [baseUrl]
  *
- * Four groups of checks, `--only=<group>` runs one of them:
+ * The groups of checks, `--only=<group>` runs one of them:
  *   nav      — the sidebar/menu battery: the rail's entries, every route, the
  *              PHONE DRAWER (open, tap each entry, active state, Esc, focus)
  *   cover    — the album cover "…" menu's flyout geometry (needs an album with
  *              cover art; skips itself when there is none)
- *   sheet    — a dialog on a phone (bottom sheet: full width, bottom-anchored,
- *              safe-area aware, reachable header/footer) and its unchanged
- *              desktop form
- *   pagemenu — the page-level menus (the downloads/trash sort lists)
+ *   pagemenu — the page-level menus (the trash sort list)
  *   flyout   — a flyout taller than the window (the Force menu) is clamped to
  *              it and scrolls, so its last row is reachable
- *   lyrics   — the lyrics pane's safe-area geometry between the top bar and
- *              the player bar
  *   trackmenu — the track-only entries of the details ("…") menu: "Open track
- *              page" lands on that track's own page, "Download music video"
- *              makes the request the album row's removed film button made, and
- *              a menu that is NOT on one track offers neither
+ *              page" lands on that track's own page, and a menu that is NOT on
+ *              one track does not offer it
  *   credits  — the Credits popout's identity header: its heading is the
  *              release's (or recording's) NAME and the facts the files state
  *              ride BELOW it, never a raw path in the title slot */
@@ -45,10 +39,9 @@ const GUTTER = 8;
 // sidebar lists, in order, and nothing else (the footer's outbound links and
 // the credits providers are not menu entries).
 const EXPECTED_NAV = [
-  "Home", "Library", "Browse", "Genres", "Trash", "Playlists", "Favorites",
-  "Downloads", "Discover", "Recommended", "Charts", "Import",
+  "Library", "Browse", "Genres", "Trash", "Import",
   "MusicBrainz", "Export", "Optimization", "Grading", "In progress",
-  "Checks & scripts", "Dependencies", "Equalizer", "Settings", "Donations",
+  "Checks & scripts", "Dependencies", "Equalizer", "Settings",
 ];
 
 /* ---- the album cover "…" menu -------------------------------------------
@@ -250,7 +243,7 @@ async function drawerChecks(browser, check, errs) {
       JSON.stringify(entries.map((e) => e.label)) === JSON.stringify(EXPECTED_NAV),
       JSON.stringify(entries.map((e) => e.label)));
 
-    // 24 entries do not fit a phone: the drawer has to scroll inside itself,
+    // A long nav does not fit a phone: the drawer has to scroll inside itself,
     // and its LAST entry has to come into view doing it.
     const scroll = await drawer.evaluate((el) => {
       const last = [...el.querySelectorAll("a")].pop();
@@ -283,10 +276,8 @@ async function drawerChecks(browser, check, errs) {
         JSON.stringify(box));
       await link().tap();
       await page.waitForTimeout(300);
-      // The SECTION, not the exact string: `nav.favorites` points at
-      // `/favorites`, which the router redirects to its default tab
-      // (`/favorites/tracks`) — the entry leads where it says, and the
-      // active-state check below is what proves the link owns the section.
+      // The entry's own href is the route it lands on; the active-state
+      // check below is what proves the link owns the page it opened.
       const landed = new URL(page.url()).pathname;
       check(`phone drawer: "${e.label}" → ${e.href} navigates`,
         landed === e.href || landed.startsWith(e.href + "/"), page.url());
@@ -321,161 +312,15 @@ async function drawerChecks(browser, check, errs) {
   }
 }
 
-/* ---- a dialog on a phone ------------------------------------------------
- * `Modal` keeps the desktop form (a centred panel) and gains a bottom-sheet
- * form below `sm`. What can go wrong there is geometry, so the sheet is
- * measured: full width, flush to the bottom, rounded only at the top, its
- * header/footer rows still hit-testable, the home-indicator inset inside the
- * panel, and the keyboard lift wired to the variables the component writes.
- * The subject is Browse's "Save as smart playlist" dialog — a real sheet with
- * a field and a two-button footer, reachable without any library data.
- * The desktop half opens the SAME dialog at 1440x900 and asserts it is still
- * the centred panel it was, which is the no-regression half of the change. */
-const panelState = (el) => {
-  const r = el.getBoundingClientRect();
-  const cs = getComputedStyle(el);
-  const overlay = getComputedStyle(el.parentElement);
-  const body = el.querySelector("[data-modal-body]");
-  const br = body?.getBoundingClientRect();
-  return {
-    box: { top: r.top, bottom: r.bottom, left: r.left, right: r.right, width: r.width, height: r.height },
-    radius: { top: cs.borderTopLeftRadius, bottom: cs.borderBottomLeftRadius },
-    padBottom: cs.paddingBottom,
-    lift: overlay.getPropertyValue("--mlo-vv-lift").trim(),
-    body: body
-      ? { overflowY: getComputedStyle(body).overflowY, top: br.top, bottom: br.bottom }
-      : null,
-    rows: [...el.querySelectorAll("button")].map((b) => {
-      const q = b.getBoundingClientRect();
-      const hit = document.elementFromPoint(Math.round(q.left + q.width / 2), Math.round(q.top + q.height / 2));
-      return {
-        label: (b.getAttribute("aria-label") || b.textContent || "").trim(),
-        top: q.top, bottom: q.bottom,
-        hit: !!hit && (hit === b || b.contains(hit)),
-      };
-    }),
-    vw: window.innerWidth,
-    vh: window.innerHeight,
-  };
-};
-
-async function sheetChecks(browser, page, check, errs) {
-  const SAVE = '.btn:has-text("Save as smart playlist")';
-  const near = (a, b, tol = 1) => Math.abs(a - b) <= tol;
-  const ctx = await browser.newContext({
-    viewport: { width: 390, height: 780 },
-    hasTouch: true,
-    isMobile: true,
-  });
-  const phone = await ctx.newPage();
-  phone.on("pageerror", (e) => errs.push("phone: " + e.message));
-  try {
-    await phone.goto(BASE + "/browse", { waitUntil: "networkidle" });
-    await phone.waitForTimeout(1200);
-    await phone.locator(SAVE).first().tap();
-    await phone.waitForTimeout(350);
-    const panel = phone.locator('[role="dialog"][aria-modal="true"]').first();
-    check("phone sheet: the dialog opens from its trigger", await panel.isVisible().catch(() => false));
-    // Name the playlist first: an empty field leaves the confirm button
-    // DISABLED, and a disabled button reports `pointer-events: none` — which
-    // is not what "unreachable behind another layer" looks like. The hit test
-    // below asks about a control the user can actually press.
-    await panel.locator("input").first().fill("Menus check");
-    await phone.waitForTimeout(200);
-    await panel.evaluate(settledRect);
-    let g = await panel.evaluate(panelState);
-
-    check("phone sheet: full device width, flush left", near(g.box.width, g.vw) && g.box.left <= 1,
-      `panel ${Math.round(g.box.left)}..${Math.round(g.box.right)} of ${g.vw}`);
-    check("phone sheet: anchored to the bottom edge", near(g.box.bottom, g.vh),
-      `panel.bottom ${Math.round(g.box.bottom)} of ${g.vh}`);
-    check("phone sheet: rounded at the top only",
-      g.radius.top === "12px" && g.radius.bottom === "0px", JSON.stringify(g.radius));
-    check("phone sheet: the keyboard hook is wired", g.lift === "0px", JSON.stringify(g.lift));
-    check("phone sheet: the body is the scrolling area", g.body?.overflowY === "auto");
-    const offscreen = g.rows.filter((r) => r.top < -1 || r.bottom > g.vh + 1);
-    check("phone sheet: every control is inside the sheet's rows", offscreen.length === 0,
-      JSON.stringify(offscreen));
-    const dead = g.rows.filter((r) => !r.hit);
-    check("phone sheet: close and confirm are hit-testable", g.rows.length >= 3 && dead.length === 0,
-      JSON.stringify(dead));
-
-    // The safe-area half: the sheet's own padding has to carry the home
-    // indicator, or the confirm row sits under it. The inset is injected with
-    // the app's own test hook (`--mlo-inset-*`, index.css) because env() is 0
-    // on every machine without a notch.
-    await phone.evaluate(() => {
-      document.documentElement.style.setProperty("--mlo-inset-bottom", "34px");
-      document.documentElement.style.setProperty("--mlo-inset-top", "47px");
-    });
-    await phone.waitForTimeout(120);
-    await panel.evaluate(settledRect);
-    g = await panel.evaluate(panelState);
-    check("phone sheet: the home indicator is the sheet's own bottom padding",
-      near(parseFloat(g.padBottom), 34), g.padBottom);
-    const under = g.rows.filter((r) => r.bottom > g.vh - 34 + 1);
-    check("phone sheet: no control sits under the home indicator", under.length === 0,
-      JSON.stringify(under));
-
-    // The keyboard half: the component's visualViewport measurement writes the
-    // lift and the visible height onto the overlay, and the recipe is what
-    // turns them into geometry. Injecting them is the only way to test a
-    // keyboard without one.
-    await phone.evaluate(() => {
-      const overlay = document.querySelector('[role="dialog"][aria-modal="true"]').parentElement;
-      overlay.style.setProperty("--mlo-vv-lift", "320px");
-      overlay.style.setProperty("--mlo-vv-h", "420px");
-    });
-    await phone.waitForTimeout(120);
-    await panel.evaluate(settledRect);
-    g = await panel.evaluate(panelState);
-    check("phone sheet: the keyboard lifts the sheet out of its way",
-      near(g.box.bottom, g.vh - 320), `panel.bottom ${Math.round(g.box.bottom)} of ${g.vh - 320}`);
-    check("phone sheet: and caps it to the visible strip", g.box.height <= 420 - 8 + 1,
-      String(Math.round(g.box.height)));
-
-    await phone.keyboard.press("Escape");
-    await phone.waitForTimeout(300);
-    check("phone sheet: Escape closes it", (await phone.locator('[role="dialog"]').count()) === 0);
-    check("phone sheet: focus returns to the trigger",
-      await phone.evaluate(() => (document.activeElement?.textContent || "").includes("Save as smart playlist")));
-  } finally {
-    await ctx.close();
-  }
-
-  // The same dialog on a desktop window: the centred panel, untouched.
-  await page.setViewportSize({ width: 1440, height: 900 });
-  await page.goto(BASE + "/browse", { waitUntil: "networkidle" });
-  await page.waitForTimeout(1000);
-  await page.locator(SAVE).first().click();
-  await page.waitForTimeout(300);
-  const deskPanel = page.locator('[role="dialog"][aria-modal="true"]').first();
-  await deskPanel.evaluate(settledRect);
-  const desk = await deskPanel.evaluate(panelState);
-  const middle = desk.box.top + desk.box.height / 2;
-  check("desktop dialog: the panel is still centred",
-    near(middle, desk.vh / 2, 2), `centre ${Math.round(middle)} of ${desk.vh}`);
-  check("desktop dialog: still the caller's max-width, not the window",
-    desk.box.width <= 449 && desk.box.width > 400, String(Math.round(desk.box.width)));
-  check("desktop dialog: still rounded on all four corners",
-    desk.radius.top === "12px" && desk.radius.bottom === "12px", JSON.stringify(desk.radius));
-  check("desktop dialog: not flush with the bottom edge", desk.box.bottom < desk.vh - 40,
-    `panel.bottom ${Math.round(desk.box.bottom)} of ${desk.vh}`);
-  await page.keyboard.press("Escape");
-  await page.waitForTimeout(250);
-  check("desktop dialog: Escape closes it", (await page.locator('[role="dialog"]').count()) === 0);
-}
-
 /* ---- the page-level menus ----------------------------------------------
- * The downloads and trash sort lists were hand-rolled: their own
- * full-viewport catcher, no Escape, no `role="menu"` — the one menu idiom in
- * the app but two implementations of it. They are Popovers now, and this pins
- * the behaviour a user notices: opens from its trigger, Escape closes it,
- * a press outside closes it, and picking a row sorts.
+ * The trash sort list was hand-rolled: its own full-viewport catcher, no
+ * Escape, no `role="menu"` — the one menu idiom in the app but two
+ * implementations of it. It is a Popover now, and this pins the behaviour a
+ * user notices: opens from its trigger, Escape closes it, a press outside
+ * closes it, and picking a row sorts.
  */
 async function pageMenuChecks(page, check) {
   const cases = [
-    { route: "/downloads", title: "Sort the downloads", row: "Artist" },
     { route: "/trash", title: "Sort the trash", row: "Name" },
   ];
   for (const c of cases) {
@@ -517,9 +362,9 @@ async function pageMenuChecks(page, check) {
   // A phone is where a dropdown falls off the screen: the non-fixed panel is
   // anchored inside the toolbar, so it must still fit the 390px viewport.
   await page.setViewportSize({ width: 390, height: 780 });
-  await page.goto(BASE + "/downloads", { waitUntil: "networkidle" });
+  await page.goto(BASE + "/trash", { waitUntil: "networkidle" });
   await page.waitForTimeout(900);
-  await page.locator('button[title="Sort the downloads"]').click();
+  await page.locator('button[title="Sort the trash"]').click();
   await page.waitForTimeout(250);
   await page.locator('[role="menu"]').evaluate(settledRect);
   const fit = await page.locator('[role="menu"]').evaluate((el) => {
@@ -657,57 +502,6 @@ async function flyoutChecks(page, check) {
   await page.setViewportSize({ width: 1440, height: 900 });
 }
 
-/* ---- the lyrics pane's own chrome ---------------------------------------
- * The pane is `fixed`, so it inherits nothing from `.safe-shell` and has to
- * repeat the insets its two anchors carry: the top bar (3rem, itself pushed
- * down by the notch) and the player bar (5.75rem, already lifted by the home
- * indicator). Measured from the viewport edge without them, the pane covered
- * the player bar's top row and hung under the home indicator.
- * The pane opens with nothing playing (it shows a hint), so no track is
- * needed, and the inset is injected with the app's `--mlo-inset-*` hook. */
-const lyricsGeometry = () => {
-  const pane = document.querySelector("aside.safe-lyrics");
-  if (!pane) return null;
-  const r = pane.getBoundingClientRect();
-  return {
-    top: Math.round(r.top), bottom: Math.round(r.bottom),
-    vh: window.innerHeight, vw: window.innerWidth,
-    close: !!pane.querySelector('[title="Close lyrics"]'),
-  };
-};
-
-async function lyricsChecks(page, check) {
-  await page.setViewportSize({ width: 1024, height: 700 });
-  await page.goto(BASE + "/", { waitUntil: "domcontentloaded" });
-  await page.waitForTimeout(1200);
-  await page.evaluate(() => {
-    document.documentElement.style.setProperty("--mlo-inset-top", "47px");
-    document.documentElement.style.setProperty("--mlo-inset-bottom", "34px");
-  });
-  const trigger = page.locator('[aria-label="Lyrics"]').first();
-  check("lyrics: the player bar carries its trigger", await trigger.isVisible().catch(() => false));
-  await trigger.click();
-  await page.waitForTimeout(400);
-  const g = await page.evaluate(lyricsGeometry);
-  check("lyrics: the pane opens", !!g);
-  if (g) {
-    // Under the top bar, above the player bar, both lifted by the notch and
-    // the home indicator: 3rem + 47 and 5.75rem + 34.
-    check("lyrics: clears the notch under the top bar", Math.abs(g.top - 95) <= 1, String(g.top));
-    check("lyrics: clears the home indicator above the player bar",
-      Math.abs(g.bottom - (700 - 126)) <= 1, String(g.bottom));
-    check("lyrics: the close control is on the pane", g.close);
-  }
-  await page.keyboard.press("Escape");
-  await page.waitForTimeout(300);
-  check("lyrics: Escape closes the pane", (await page.locator("aside.safe-lyrics").count()) === 0);
-  await page.evaluate(() => {
-    document.documentElement.style.removeProperty("--mlo-inset-top");
-    document.documentElement.style.removeProperty("--mlo-inset-bottom");
-  });
-  await page.setViewportSize({ width: 1440, height: 900 });
-}
-
 /* ---- reading a nav entry's ACTIVE paint ---------------------------------
  * `bg-accent` does not land in one frame: the active class swap goes through
  * the `.nav-link` `background-color` transition (index.css), so a single
@@ -794,20 +588,13 @@ const settledRect = async (el) => {
 };
 
 /* ---- the details ("…") menu's TRACK entries ----------------------------
- * Two owner-reported moves, measured on the real album page:
- *
- *   * "Open track page": the "…" a listed track wears opens that track's own
- *     page. The row's title link is the other way in (a plain click PLAYS the
- *     track — lib/refs' entityLinkClick), so the menu is the deliberate one;
- *   * the per-row FILM button is gone from the album tracklist. It was a
- *     flyout holding a single entry ("Download music video"), which read as a
- *     mark of the FILE beside the title's advisory badges. The action lives in
- *     that same "…" now, and what it asks the server for must still be what
- *     the row's button asked: this pass CATCHES the request rather than
- *     watching a download.
+ * An owner-reported move, measured on the real album page: "Open track page" —
+ * the "…" a listed track wears opens that track's own page. The row's title
+ * link is the other way in (a plain click PLAYS the track — lib/refs'
+ * entityLinkClick), so the menu is the deliberate one.
  *
  * The negative is here too: the album header's own tag menu is on the whole
- * release, so neither entry may appear there — a menu on several paths must
+ * release, so the entry may not appear there — a menu on several paths must
  * not pick one track out of them. */
 
 /** `/album/<path>` — the page for an album the library payload gave us. */
@@ -819,23 +606,14 @@ function albumRoute(al) {
 async function trackMenuChecks(page, check) {
   await page.setViewportSize({ width: 1440, height: 900 });
   const lib = await (await fetch(`${BASE}/api/library`)).json();
-  let any = null;
-  let digital = null;
-  for (const ar of lib.artists ?? []) {
-    for (const al of ar.albums ?? []) {
-      if (!(al.tracks ?? []).length) continue;
-      if (!any) any = al;
-      if (/digital|web|download/i.test(`${al.media ?? ""} ${al.meta?.MEDIA ?? ""}`)) { digital = al; break; }
-    }
-    if (digital) break;
-  }
-  const album = digital ?? any;
+  const album = (lib.artists ?? [])
+    .flatMap((a) => a.albums ?? [])
+    .find((al) => (al.tracks ?? []).length);
   if (!album) {
     console.log("  note: no album with tracks in this library — the track menu cannot be measured");
     return;
   }
-  // The track the pass works on, and the ROW that carries it: a music file (a
-  // video row's own "…" would search for the video's own title) found by the
+  // The track the pass works on, and the ROW that carries it: found by the
   // title its row shows, so the read of the DOM and the payload cannot point
   // at two different rows.
   const track = album.tracks.find((t) => !t.is_video) ?? album.tracks[0];
@@ -856,24 +634,13 @@ async function trackMenuChecks(page, check) {
     `${await rowMatches.count()} of ${rowCount} rows match`);
   const row = rowMatches.first();
 
-  // ---- the row's film button is gone --------------------------------------
-  const filmInRows = await page.locator("table tbody tr svg.lucide-film").count();
-  check("no track row carries a film-download button any more",
-    filmInRows === 0, `${filmInRows} film glyph(s) inside the tracklist`);
-  if (digital) {
-    // The control: the glyph IS found where it belongs, so the zero above is
-    // the ROW's and not a page that failed to draw its video actions at all.
-    const headerFilm = await page.locator('button[aria-label="Download missing music videos"] svg.lucide-film').count();
-    check("the release-wide film button is still there (so the zero above is the row's)",
-      headerFilm === 1, `${headerFilm} in the album header`);
-  }
   // The trigger is the row's own "…" (TrackActionsMenu): `^=` because its
   // title carries the longer sentence the page-level tag menu does not.
   const triggers = await row.locator('button[title^="Track actions"]').count();
   check("a row carries exactly ONE actions trigger, the \"…\"",
     triggers === 1, `${triggers} triggers in the row`);
 
-  // ---- the "…" opens that track's page and offers the video download ------
+  // ---- the "…" opens that track's own page --------------------------------
   await row.hover(); // the row's own controls are revealed on hover
   await row.locator('button[title^="Track actions"]').first().click();
   await page.waitForTimeout(350);
@@ -881,8 +648,6 @@ async function trackMenuChecks(page, check) {
   const labels = items.map((s) => s.trim());
   check("the row's \"…\" offers \"Open track page\"",
     labels.includes("Open track page"), JSON.stringify(labels.slice(0, 14)));
-  check("the row's \"…\" offers the video download",
-    labels.includes("Download music video"), JSON.stringify(labels.slice(0, 14)));
   await page.locator('[role="menu"] [role="menuitem"]', { hasText: /^Open track page$/ }).first().click();
   await page.waitForTimeout(1500);
   const landed = decodeURIComponent(new URL(page.url()).pathname);
@@ -891,44 +656,14 @@ async function trackMenuChecks(page, check) {
     landed === `/track/${track.path}` && heading.includes(track.tags.TITLE ?? track.file),
     `${page.url()} h1 ${JSON.stringify(heading)} vs ${JSON.stringify(track.tags.TITLE)}`);
 
-  // ---- the video download asks for what the row's button asked ------------
-  await open();
-  let asked = null;
-  await page.route("**/api/videos/download-youtube", async (route) => {
-    asked = route.request().postDataJSON();
-    // Answered, not performed: this check pins the REQUEST. The server's own
-    // answer is what the toast must carry, so it says so.
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({ ok: false, error: "stubbed by tools/check_menus.cjs" }),
-    });
-  });
-  await row.hover();
-  await row.locator('button[title^="Track actions"]').first().click();
-  await page.waitForTimeout(350);
-  await page.locator('[role="menu"] [role="menuitem"]', { hasText: /^Download music video$/ }).first().click();
-  await page.waitForTimeout(2000);
-  check("the video entry asks for THIS track's video (path, artist, title)",
-    !!asked && asked.path === track.path && asked.title === track.tags.TITLE &&
-      asked.artist === (track.tags.ARTIST ?? track.tags.ALBUMARTIST ?? album.album_artist),
-    JSON.stringify(asked));
-  check("the search gets the track's length (the candidate window)",
-    !!asked && asked.duration === Math.round(track.tech?.length ?? 0),
-    `duration ${asked?.duration} vs ${track.tech?.length}`);
-  const toasted = await page.locator("text=No music video: stubbed by tools/check_menus.cjs").count();
-  check("the server's answer reaches the user (the row's button's own feedback)",
-    toasted > 0, `${toasted} toast(s) with the server's reason`);
-  await page.unroute("**/api/videos/download-youtube");
-
-  // ---- a menu on the whole release offers neither -------------------------
+  // ---- a menu on the whole release does not offer it ----------------------
   await open();
   await albumMenu().click();
   await page.waitForTimeout(350);
   const albumItems = (await page.locator('[role="menu"] [role="menuitem"]').allInnerTexts())
     .map((s) => s.trim());
   check("a menu on the whole album offers no track-only entry",
-    !albumItems.some((t) => t === "Open track page" || t === "Download music video"),
+    !albumItems.includes("Open track page"),
     `${albumItems.length} entries, ${JSON.stringify(albumItems.slice(0, 8))}`);
   await page.keyboard.press("Escape");
   await page.waitForTimeout(250);
@@ -1164,8 +899,6 @@ async function creditsChecks(page, check) {
 
   if (want("cover")) await coverMenuChecks(page, check);
   if (want("flyout")) await flyoutChecks(page, check);
-  if (want("lyrics")) await lyricsChecks(page, check);
-  if (want("sheet")) await sheetChecks(browser, page, check, errs);
   if (want("pagemenu")) await pageMenuChecks(page, check);
   if (want("credits")) await creditsChecks(page, check);
   if (want("trackmenu")) { await trackMenuChecks(page, check); return finish(); }
@@ -1212,15 +945,9 @@ async function creditsChecks(page, check) {
     if (!href || /^[a-z]+:/i.test(href)) continue; // outbound / mailto / tel
     // PRESS it, rather than `goto` the same URL: the menu's job is the click,
     // and a route that answers to a full page load can still be unreachable in
-    // the router (or land somewhere else entirely, as `/favorites` does — it
-    // redirects to its default tab, so the section, not the exact string, is
-    // what this asserts).
-    //
-    // `domcontentloaded` on the presses below is not `networkidle`: several
-    // pages poll (the progress socket, Discover's shelves), so "no network in
-    // flight for 500ms" never arrives and the walk died on /discover — an
-    // unreadable failure that was neither the menu's nor the server's. The
-    // heading is what the walk is really asserting, so it waits for that.
+    // the router. The heading is what the walk is really asserting, so it waits
+    // for that rather than for `networkidle`: several pages poll (the progress
+    // socket among them), so "no network in flight for 500ms" may never arrive.
     await page.locator(`aside a[href="${href}"]`).first().click();
     const h1 = await page.locator("h1").first().innerText({ timeout: 10000 }).catch(() => "");
     const landed = new URL(page.url()).pathname;

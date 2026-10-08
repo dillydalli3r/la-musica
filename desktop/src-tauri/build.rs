@@ -14,8 +14,8 @@
 //! the backend it spawned on loopback. That refusal is exactly what "the
 //! window won't move and none of the controls work" looked like: dragging,
 //! minimize, maximize and close are all `plugin:window` commands, but the
-//! updater, the folder picker, the shell's own state and the iOS bridge are
-//! app commands, and they were dead on that page too.
+//! updater, the folder picker and the shell's own state are app commands, and
+//! they were dead on that page too.
 //!
 //! Naming the commands here generates `allow-<command>` / `deny-<command>`
 //! permissions, which `capabilities/default.json` then grants to the origins
@@ -32,10 +32,6 @@ fn main() {
                 "open_external",
                 "update_check",
                 "update_install",
-                "set_now_playing_liked",
-                "set_playback_active",
-                "set_now_playing",
-                "ios_audio_state",
                 "shell_backend_choice",
                 "choose_backend",
             ]),

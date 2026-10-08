@@ -3,13 +3,13 @@ name: CI
 # Runs on every push and pull request. Three jobs, no third-party actions:
 #   python  — installs server/requirements.txt and runs the non-networked
 #             tools/test_*.py suites (each exits non-zero on failure, 2 to
-#             skip). The browser checks (check_menus.cjs, check_lyrscroll.cjs,
-#             check_player_state.cjs, check_sidebar.cjs, check_trash.cjs) and
-#             smoke_api.py need a live backend and are not run here.
+#             skip). The browser checks (check_menus.cjs, check_sidebar.cjs,
+#             check_trash.cjs) and smoke_api.py need a live backend and are
+#             not run here.
 #   web     — lints and builds the React app, and uploads the built tree as
-#             the `web-dist` artifact: the desktop and mobile legs and
-#             release.yml's source zip download that rather than building the
-#             same frontend again for the same commit.
+#             the `web-dist` artifact: the desktop leg and release.yml's
+#             source zip download that rather than building the same frontend
+#             again for the same commit.
 #   desktop — compiles the Tauri shell (cargo check) and installs its npm
 #             dependencies, so the Rust crate graph cannot rot unnoticed.
 # release.yml calls this workflow (workflow_call) and only publishes when it
@@ -156,18 +156,6 @@ jobs:
         with:
           name: web-dist
           path: web/dist
-
-      - name: Lyrics-pane auto-scroll checks
-        # web/src/lib/lyrScroll.ts against a fake scroller — the retarget that
-        # used to freeze the pane mid-track, and the frame loop that used to
-        # outlive an unmounted pane.
-        run: node tools/check_lyrscroll.cjs
-
-      - name: The lyric clock's audible correction (R266)
-        # `audibleLatencySec` against hand-built contexts: the graph's
-        # baseLatency + outputLatency, zero without a graph, and the cap that
-        # keeps a nonsense reading from skewing the words.
-        run: node tools/check_lyric_clock.mjs
 
   desktop:
     runs-on: ubuntu-latest

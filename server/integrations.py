@@ -1124,8 +1124,6 @@ def recording_isrcs(recording_mbid):
 #   itunes-song    iTunes song search, exact title only  (last resort)
 #   discogs-parental  Discogs edition format/description (token only, WEAK,
 #                  album level — explicit-only, ranks last)
-#   youtube-age    yt-dlp `age_limit` >= 18 for the track's OWN video id
-#                  (explicit-only, last, never a blind per-track search)
 #
 # ISRC path: the two ISRC sources are asked for every ISRC the track has —
 # the file's own tag, or every ISRC MusicBrainz holds for its recording.
@@ -1161,8 +1159,7 @@ def recording_isrcs(recording_mbid):
 # Every value a route may report as `source`. A caller may only write a value
 # it can attribute to one of these.
 ADVISORY_SOURCES = frozenset({"deezer-isrc", "spotify-isrc", "apple-album",
-                              "itunes-song", "discogs-parental",
-                              "youtube-age"})
+                              "itunes-song", "discogs-parental"})
 
 _ITUNES_LOOKUP = "https://itunes.apple.com"
 _DEEZER_TRACK_ISRC = "https://api.deezer.com/track/isrc:"
@@ -1815,70 +1812,6 @@ def _discogs_parental_advisory(artist, album, cfg=None):
     return (1, "discogs-parental") if flagged else None
 
 
-# The tags a track's own video origin is recorded in: the video pipeline
-# writes SOURCE, and YOUTUBEID/VIDEOID are the explicit spellings.
-_YOUTUBE_TAG_KEYS = ("YOUTUBEID", "YOUTUBE_ID", "VIDEOID", "SOURCE")
-_YOUTUBE_ID_RX = re.compile(r"[A-Za-z0-9_-]{11}")
-
-
-def youtube_video_id(tags):
-    """The YouTube id a track's OWN tags record, or "".
-
-    Only a recorded origin counts: an `11`-character id, or a URL carrying
-    `v=`/`/shorts/`/`youtu.be/`. Nothing here searches YouTube — a search's
-    first hit is not this track, and rating the wrong video is precisely the
-    failure this rule exists to prevent.
-    """
-    if not isinstance(tags, dict):
-        return ""
-    for key in _YOUTUBE_TAG_KEYS:
-        value = str(tags.get(key) or "").strip()
-        if not value:
-            continue
-        if "youtube.com" in value or "youtu.be" in value:
-            match = re.search(r"(?:v=|/shorts/|youtu\.be/)([A-Za-z0-9_-]{11})",
-                              value)
-            if match:
-                return match.group(1)
-            continue
-        if _YOUTUBE_ID_RX.fullmatch(value):
-            return value
-    return ""
-
-
-def youtube_age_advisory(video_id, cfg=None):
-    """(1, "youtube-age") when YouTube itself flags the video 18+, else None.
-
-    Only asked about a video the caller already knows belongs to this track
-    (see `youtube_video_id`) or passes itself. `age_limit >= 18` states
-    explicit; anything else — a normal video, an unavailable one, yt-dlp not
-    installed, YouTube disabled — states NOTHING, because "no age gate" is not
-    a statement about the music.
-    """
-    from server import youtube
-
-    ident = str(video_id or "").strip()
-    if not _YOUTUBE_ID_RX.fullmatch(ident):
-        return None
-    if not youtube.enabled(cfg):
-        return None
-    module = youtube._load_ytdlp()
-    if module is None:
-        return None
-    try:
-        with module.YoutubeDL(youtube._ydl_opts(cfg)) as ydl:
-            info = ydl.extract_info(youtube._watch_url(ident), download=False)
-    except Exception:
-        return None
-    if not isinstance(info, dict):
-        return None
-    try:
-        limit = int(info.get("age_limit") or 0)
-    except (TypeError, ValueError):
-        return None
-    return (1, "youtube-age") if limit >= 18 else None
-
-
 def _isrc_codes(isrc):
     """Every ISRC the caller named, in ask order, deduplicated.
 
@@ -1968,7 +1901,7 @@ def _advisory_alias_queries(artist, title, album, recording_mbid, tags, cfg):
 
 def resolve_advisory_route(isrc="", recording_mbid="", title="", artist="",
                            album="", disc=None, track=None, track_count=None,
-                           cfg=None, youtube_id="", tags=None):
+                           cfg=None, tags=None):
     """{"value": 0|1|2|None, "source": key|None, "checked": [key, ...],
         "answers": {key: 0|1}}.
 
@@ -1985,9 +1918,8 @@ def resolve_advisory_route(isrc="", recording_mbid="", title="", artist="",
          edition → track (disc/track, then a title match);
       4. Apple's song search — title match only;
       5. Discogs' edition (`format`/`description` "Parental Advisory", token
-         only) and 6. YouTube's 18+ gate for a video the track records — two
-         LAST, explicit-only, album/edition-level signals that never clear a
-         track and stay silent when their input is absent.
+         only) — LAST, explicit-only, album/edition-level, never clears a
+         track and stays silent when its input is absent.
 
     When every one of them states NOTHING under the track's stored names, the
     NAME-based routes (3, 4 and 5) are asked again under MusicBrainz's alias
@@ -2069,18 +2001,6 @@ def resolve_advisory_route(isrc="", recording_mbid="", title="", artist="",
                 _record_advisory(answers, answer)
 
     _ask_names(artist, album, title)
-    # The last one is an extra EXPLICIT-only signal, album/edition level and
-    # silent when its input is missing: YouTube's own 18+ gate for a video the
-    # track already records. It cannot clear a track, and it is named by the
-    # video, not by the track's names — so it is asked once here, outside the
-    # name-based half.
-    video = str(youtube_id or "").strip() or youtube_video_id(tags)
-    if video:
-        checked.append("youtube-age")
-        answer = _advisory_cached(("youtube-age", video),
-                                  lambda: youtube_age_advisory(video, cfg))
-        if answer is not None:
-            _record_advisory(answers, answer)
     value = merge_advisory(answers)
     if value is None:
         # The ORIGINAL names stated nothing anywhere: consult MusicBrainz's
@@ -2193,25 +2113,7 @@ def recording_genres(recording_mbid):
         return []
 
 
-def release_group_rating(rg_mbid):
-    """The release GROUP's own rating node, or None.
 
-    The ALBUM-level MusicBrainz source the owner asked for: a release group is
-    what "the album" means to MusicBrainz, and its rating is the community's
-    score for the record rather than for one pressing (a release is an
-    edition; `inc=ratings` on the release itself states nothing). VERIFIED
-    live: `release-group/f5093c06…` answers
-    ``{"rating": {"value": 4.75, "votes-count": 105}, "genres": [...]}``.
-
-    The whole NODE is returned, not a number: ``mlo.web_ratings`` owns the
-    interpretation (the 0-5 to 0-100 conversion and the vote-count weight), and
-    one payload shape — MusicBrainz's own — keeps that parser identical for the
-    album and the track. Through `mb_get_cached`, so the rating, the genres and
-    any other reader of the same group share the one request.
-    """
-    if not rg_mbid:
-        return None
-    return mb_get_cached(f"release-group/{rg_mbid}", {"inc": "ratings", "fmt": "json"})
 
 
 def _recording_with_work(recording_mbid):
@@ -3463,36 +3365,16 @@ def _rym_album_answer(html, url, archive=None):
     is recorded in the answer, and the URL it reports is the snapshot's, because
     a caller that shows the user where a genre came from must not point them at
     a live page that refused to serve it.
-
-    `rating` is the release's own community average — the same schema.org
-    microdata the page publishes for the genres' readers
-    (`mlo.web_ratings.rym_rating_from_html`, the ONE parser, so a live page and
-    an archived snapshot are read identically: VERIFIED live as
-    ``<meta itemprop="ratingValue" content="4.18" />`` beside
-    ``<meta itemprop="ratingCount" content="49366" />``). It is read from the
-    page with the TRACK ROWS REMOVED, for the same reason the genres are: a
-    row's own score must never be promoted to the release. A page that states
-    a rating but no classification is an answer too — before this, the whole
-    page was discarded and the rating with it.
     """
     rows = _rym_tracks_from(html)
     head = _RYM_TRACK_ROW_RE.sub("", html or "")
     genres = _rym_genres_from(head)
     descriptors = [] if genres else _rym_labels(_RYM_DESCRIPTOR_RE, head)
-    rating = None
-    try:
-        from mlo.web_ratings import rym_rating_from_html
-        rating = rym_rating_from_html(head)
-    except Exception:
-        rating = None
-    if (not genres and not descriptors and not rating
-            and not any(r.get("genres") for r in rows)):
+    if not genres and not descriptors and not any(r.get("genres") for r in rows):
         return None
     out = {"genres": genres or descriptors, "descriptors": descriptors,
            "level": "album", "tracks": rows,
            "source_url": f"{RYM_BASE}{url}", "source": "rym"}
-    if rating:
-        out["rating"] = rating
     if archive:
         out["archive"] = dict(archive)
         out["source_url"] = archive.get("url") or out["source_url"]
@@ -3690,310 +3572,6 @@ def rym_artist_genres(artist, cfg=None, archive=False):
 
 
 # --------------------------------------------------------------------------- #
-# Web ratings — the payloads `mlo.web_ratings` asks for
-# --------------------------------------------------------------------------- #
-# The rating layer lives in `mlo.web_ratings` (parsers, aggregation, writer,
-# script 24) and never imports this module: it is handed ONE callable —
-# `web_rating_fetchers()` — and calls it per source. Everything below is the
-# network half of that contract, and every function returns the source's RAW
-# payload (or None) so the interpretation stays in the one place that owns the
-# 0-100 scale.
-def rym_album_rating(artist, album, cfg=None, album_url="", rg_mbid=""):
-    """The RYM release answer for an album — its average rating and its other
-    album-level facts — or None when RYM cannot answer.
-
-    This is `rym_genres` on the album the caller names, and it answers the
-    rating question for free: the release page is the SAME page the genre chain
-    reads (`_rym_album_answer` now carries `rating`), so a run that asks both
-    pays one request, one cache entry and one refusal latch — never a second
-    HTTP path. The page MusicBrainz itself states is tried first when the
-    caller hands over the release-group id (`_mb_rym_links`, one cached MB
-    request), because an identity beats any guessed slug.
-
-    The dict carries `{"rating": {"value", "count"}}` when the page states its
-    community average, plus whatever it stated about the genres and the track
-    list.
-    """
-    artist = str(artist or "").strip()
-    album = str(album or "").strip()
-    if not artist or not album:
-        return None
-    stated = ""
-    if rg_mbid:
-        try:
-            stated = str((_mb_rym_links(artist, album, rg_mbid) or {}).get("album")
-                         or "")
-        except Exception:
-            stated = ""
-    return rym_genres(artist, album, cfg, album_url or stated, archive=True)
-
-
-# A RYM RELEASE page publishes no per-track community average at all: the only
-# per-track numbers on it are the reader's OWN "Track ratings" widget and the
-# per-reviewer scores (VERIFIED against the archived OK Computer release page —
-# every `track_rating` hit belongs to one of those). The per-track average
-# lives on RYM's SONG page instead, one page per song:
-#
-#     /song/<artist-slug>/<title-slug>/
-#
-# whose artist segment is the artist-page spelling (`_rym_slug` — "Earth, Wind
-# & Fire" → `earth-wind-and-fire`) and whose title segment is the SAME
-# generator applied to the title — VERIFIED live against song pages: "Lady
-# Godiva's Operation" → `lady-godivas-operation`, "Ain't It Funny" →
-# `aint-it-funny`, "N'mistiu" → `nmistiu`, "Sweet / I Thought You Wanted to
-# Dance" → `sweet-i-thought-you-wanted-to-dance`, "Exit Music (For a Film)" →
-# `exit-music-for-a-film`. Apostrophes go and `&` becomes "and", exactly as on
-# an artist or release page; everything else collapses to one dash.
-#
-# A slug is only ever TRIED: the page that comes back must be the song's own
-# (`_rym_song_matches`, which reads the page's `<title>`) before its score is
-# read, so a page for another song is a MISS, never a wrong answer. RYM appends
-# `-1`, `-2`… to the SECOND song that takes a slug (VERIFIED: OK Computer's
-# `subterranean-homesick-alien-1` and `electioneering-1`), so the numbered
-# spellings are tried after the bare one and the walk stops at the first
-# confirmed hit.
-#
-# THE WALK IS DELIBERATELY SHORT (`RYM_SONG_TRIES`): a track's rating is ONE
-# datapoint, and a song RYM has no page for is the COMMON case on an album
-# nobody rates per track — so a miss must stay cheap. At RYM's 1 req/s every
-# extra candidate is a second of the user's run. The album-level readers
-# already pay the full release ladder for the same record; this walk does not.
-# The archive leg is one request per candidate too (`_rym_archive_newest`, the
-# newest capture only), never the release readers' indexed-capture ladder.
-RYM_SONG_SUFFIXES = ("", "-1", "-2")
-RYM_SONG_TRIES = 2
-
-
-_RYM_TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.I | re.S)
-
-
-def _rym_song_paths(artist, title):
-    """The `/song/<artist>/<title>/` paths to try, best first (see above)."""
-    who, what = _rym_slug(artist), _rym_slug(title)
-    if not who or not what:
-        return []
-    return [f"/song/{who}/{what}{suffix}/"
-            for suffix in RYM_SONG_SUFFIXES[:RYM_SONG_TRIES]]
-
-
-def _rym_song_matches(page, artist, title):
-    """Whether *page* IS that song's page — read off the page's own `<title>`.
-
-    NOT off the page's whole text, deliberately: a song page carries the
-    album's track list (the rating widget and the JS payload behind it name
-    every other song on the record) and the lists the song appears in, so "is
-    the asked title somewhere in these bytes?" answers YES on pages that are
-    about another song entirely (VERIFIED: asking the archived "Paranoid
-    Android" page for "Let Down" — a sibling track, named by the same page's
-    track-list widget — passed a whole-text check). The `<title>` is the
-    page's own statement of what it is (VERIFIED: "Radiohead - Paranoid
-    Android - Lyrics and ratings - Rate Your Music"), and both names are
-    compared case- and punctuation-insensitively (`_rym_mentions` → `_rym_ref`),
-    so the artist's accents and the title's punctuation do not matter. A page
-    with no `<title>` at all is a MISS.
-    """
-    hit = _RYM_TITLE_RE.search(page or "")
-    if not hit:
-        return False
-    return _rym_mentions(hit.group(1), artist, title)
-
-
-def _rym_song_page(path, cfg, artist, title):
-    """The page at *path* when it IS that song, or None — one polite GET.
-
-    The GET is `_rym_get`, the module's ONE client: the 1 req/s throttle, the
-    module request lock, the 30-day disk cache with its negative beside it, the
-    browser-like headers and the refusal latch. `expect` is the path itself, so
-    a slug RYM does not know (a 404, or the 200 redirect to search/home it
-    serves instead) is the miss it is, not an answer.
-    """
-    page = _rym_get(path, cfg=cfg, expect=path)
-    if not page or not _rym_song_matches(page, artist, title):
-        return None
-    return page
-
-
-def _rym_live_song_answer(artist, title, cfg):
-    """The LIVE RYM song pages, in `_rym_song_paths` order, or None.
-
-    Every candidate goes through `_rym_song_page`, so the walk inherits
-    everything the release ladder has and adds nothing of its own. A refusal,
-    or the wall-clock budget (`RYM_MAX_WALL`), ends it: a page RYM will not
-    serve is not made likelier by the next slug.
-    """
-    started = time.time()
-    for path in _rym_song_paths(artist, title):
-        page = _rym_song_page(path, cfg, artist, title)
-        if page:
-            return page
-        if _rym_expired(started) or _rym_blocked(cfg):
-            return None
-    return None
-
-
-def _rym_archive_newest(path, cfg=None):
-    """The NEWEST archived capture of one RYM page, or None — ONE request.
-
-    The release readers fall back to `_rym_archive_get`, which tries the newest
-    capture and then walks the capture INDEX for up to `RYM_ARCHIVE_TRIES`
-    older ones — a ladder an album-level answer earns (one read serves the
-    whole record) and a single track's rating does not: on an album nobody
-    rates per track a song page is usually absent, so the song walk asks the
-    `2id_` form ONCE per candidate and gives up.
-
-    Everything else is the release route's, unchanged: the same magic URL
-    shape, the same 1 req/s throttle and module lock (it goes through
-    `_rym_archive_fetch` → `_rym_fetch`), and the same 30-day disk cache with
-    the negative included, so a miss is paid once and not once per run. The
-    negative is cached under a key of ITS OWN (`wayback-newest-…`): "the newest
-    capture is not this page" must never answer for the release readers, whose
-    ladder may still find an older capture. The release readers' own cached
-    copy IS read when one exists — a capture they already paid for answers this
-    question too.
-    """
-    if not path or not _rym_archive_on(cfg):
-        return None
-    target = f"{RYM_BASE}{path}"
-    digest = hashlib.sha1(target.encode("utf-8")).hexdigest()
-    key = "wayback-" + digest
-    cached = _rym_cache_read(key, RYM_CACHE_TTL)
-    if cached is None:
-        key = "wayback-newest-" + digest
-        cached = _rym_cache_read(key, RYM_CACHE_TTL)
-    if cached is not None:
-        html, archive = _rym_archive_unpack(cached)
-        if not html:
-            return None
-        _rym_route.update({"route": "archive", "cached": True,
-                           "url": archive.get("url") or "",
-                           "snapshot": archive.get("snapshot") or ""})
-        return html
-    text, final, _answered = _rym_archive_fetch(
-        f"{RYM_ARCHIVE_BASE}/{RYM_ARCHIVE_LATEST}/{target}")
-    if not text:
-        _rym_cache_write(key, _rym_archive_pack("", {}))
-        return None
-    archive = _rym_archive_snapshot(final)
-    _rym_cache_write(key, _rym_archive_pack(text, archive))
-    _rym_route.update({"route": "archive", "cached": False,
-                       "url": archive.get("url") or "",
-                       "snapshot": archive.get("snapshot") or ""})
-    return text
-
-
-def _rym_archived_song_answer(artist, title, cfg):
-    """The ARCHIVED copy of the RYM song page, or None.
-
-    The Wayback route, one newest-capture request per candidate
-    (`_rym_archive_newest` — see there for why a track does not get the release
-    readers' capture ladder), under the same identity rule: only a capture that
-    IS this song answers.
-    """
-    started = time.time()
-    for path in _rym_song_paths(artist, title):
-        html = _rym_archive_newest(path, cfg)
-        if html and _rym_song_matches(html, artist, title):
-            return html
-        if _rym_expired(started):
-            break
-    return None
-
-
-def rym_song_rating(artist, title, cfg=None):
-    """A TRACK's RYM answer — the SONG page's community average — or None.
-
-    `mlo.web_ratings` asks a track-level source for a value and the source's
-    own vote count, and that is exactly what a song page states: the answer is
-    ``{"rating": {"value", "count"}}``, the same shape `rym_album_rating`
-    returns and `mlo.web_ratings.parse_rateyourmusic` reads.
-
-    Which route is asked is settled the way `rym_genres` settles it: the live
-    site needs a `rym_cookie` whose `cf_clearance` matches `rym_user_agent`, so
-    without one the live ladder is not walked at all and the archived snapshot
-    answers instead (`rym_archive_fallback` still vetoes that route). A song
-    page that states no rating, and a song RYM cannot be reached for, are both
-    MISSES: nothing is guessed, and no release score is ever promoted to a
-    track.
-    """
-    artist = str(artist or "").strip()
-    title = str(title or "").strip()
-    if not artist or not title:
-        return None
-    archive = _rym_archive_on(cfg)
-    page = None
-    if bool(_rym_cookie(cfg)) or not archive:
-        page = _rym_live_song_answer(artist, title, cfg)
-    if not page and archive:
-        page = _rym_archived_song_answer(artist, title, cfg)
-    if not page:
-        return None
-    from mlo.web_ratings import rym_rating_from_html
-    parsed = rym_rating_from_html(page)
-    if not parsed or parsed.get("value") is None:
-        return None
-    return {"rating": {"value": parsed["value"], "count": parsed.get("count")}}
-
-
-def discogs_album_rating(artist, album, cfg=None):
-    """The Discogs release detail for an album, or None without a token.
-
-    Discogs' community rating lives on the release detail
-    (``community.rating = {"average": 4.72, "count": 3809}``, VERIFIED live on
-    release 1174296), which is the same document `server.discovery` already
-    fetches for the genre chain and the parental advisory — one cached pair of
-    requests, three readers. Without a `discogs_token` it answers None and this
-    source is skipped cleanly, exactly like the genre chain's.
-    """
-    if not str((cfg or {}).get("discogs_token") or "").strip():
-        return None
-    if not (artist or album):
-        return None
-    from server import discovery
-
-    return discovery._discogs_release(artist, album, cfg=cfg)
-
-
-def web_rating_fetchers():
-    """The ONE callable `mlo.web_ratings` drives: ``fetch(source, kind,
-    ident, cfg)``.
-
-    `ident` is the entity the source is asked about — ``{"artist", "album",
-    "mbid"}`` for an album, ``{"artist", "title", "mbid"}`` for a track — and
-    the answer is that source's raw payload or None. Every branch is a
-    best-effort call to machinery this module already has; a source with no
-    identity to work with (no MBID, no names) answers None WITHOUT a request.
-    """
-    def fetch(source, kind=None, ident=None, cfg=None):
-        source = str(source or "").strip().lower()
-        ident = ident or {}
-        mbid = str(ident.get("mbid") or "").strip()
-        if source == "musicbrainz":
-            if not mbid:
-                return None
-            if str(kind or "album") == "track":
-                return _recording_with_work(mbid)
-            return release_group_rating(mbid)
-        if source == "rateyourmusic":
-            if str(kind or "album") == "track":
-                return rym_song_rating(ident.get("artist"), ident.get("title"),
-                                       cfg)
-            return rym_album_rating(ident.get("artist"), ident.get("album"),
-                                    cfg, str(ident.get("url") or ""), mbid)
-        if source == "albumoftheyear":
-            if str(kind or "album") != "album":
-                return None
-            return aoty_album_page(ident.get("artist"), ident.get("album"), cfg)
-        if source == "discogs":
-            if str(kind or "album") != "album":
-                return None
-            return discogs_album_rating(ident.get("artist"), ident.get("album"),
-                                        cfg)
-        return None
-
-    return fetch
-
-
-# --------------------------------------------------------------------------- #
 # Album of the Year (scraped — no API, and Cloudflare refuses automated clients)
 # --------------------------------------------------------------------------- #
 # VERIFIED, 2026-10-01: albumoftheyear.org answers Cloudflare's JS challenge to
@@ -4024,24 +3602,6 @@ _AOTY_INDEX_ROWS = 5
 # would give only the two headline ones.
 _AOTY_GENRE_RE = re.compile(
     r'href="/genre/[^"]*"[^>]*>\s*(?:<div[^>]*>\s*)?([^<]+?)\s*<', re.I)
-
-
-def _aoty_archive_on(cfg=None):
-    """Whether the archived-capture route may be used (`aoty_archive_fallback`).
-
-    The same contract as `_rym_archive_on`: the key ships True in
-    `mlo.config.DEFAULT_CONFIG`, is read live so unticking it takes effect on
-    the next run, and a cfg that OMITS it is read as OFF — such a caller can
-    only mean "ask the source and see", and for this source that would be a
-    request the site is known to refuse.
-    """
-    try:
-        if cfg is None:
-            from mlo.config import load_config
-            cfg = load_config()
-        return bool((cfg or {}).get("aoty_archive_fallback"))
-    except Exception:
-        return False
 
 
 def _aoty_index_rows(params):
@@ -5031,12 +4591,6 @@ def _genre_source_skip(source, cfg):
             return ("skipped: RateYourMusic refused this cookie — set a fresh "
                     "rym_cookie in Settings → Discovery")
         return None
-    if source == "albumoftheyear" and not _aoty_archive_on(cfg):
-        # The live site is a known refusal, so with the archived route switched
-        # off there is nothing left to ask: reported as a SKIP (a setting the
-        # user can turn on), never as "no data".
-        return ("skipped: aoty_archive_fallback is off — Album of the Year "
-                "refuses an automated client without it")
     if source == "lastfm" and not str(cfg.get("lastfm_api_key") or "").strip():
         return "skipped: no lastfm_api_key in Settings → Discovery"
     if source == "discogs" and not str(cfg.get("discogs_token") or "").strip():

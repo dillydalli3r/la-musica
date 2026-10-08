@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Menu-consistency gate: every surface that lists the 23 scripts must agree.
+"""Menu-consistency gate: every surface that lists the 21 scripts must agree.
 
 Sources checked:
   * ``EXPECTED_SCRIPTS`` below — the frozen expected registry (number + name)
@@ -47,10 +47,6 @@ EXPECTED_SCRIPTS = {
     # 17 is the AI pass: the lyric transliteration / translation script the
     # no-AI core removed, back under a fresh id (15 stayed with the tracklist).
     17: "Lyrics transliterate (AI)",
-    # 19 re-fits the artist images already in the library to the configured
-    # aspect and size — the remedy for the codes grade_check_artist_image
-    # raises (mlo/artistdata.py run_optimize_artist_images).
-    19: "Optimize artist images",
     # 20 reports the shape of the whole music folder (mlo/layout.py) and
     # stores that report under <music>/.mlo/data, which is what the Library
     # page warns from. Read-only: it is the one script that changes no file.
@@ -70,10 +66,6 @@ EXPECTED_SCRIPTS = {
     # track menus offer it, and an import runs it with the rest of the chain.
     # It only DELETES — a file with nothing excess is not written at all.
     23: "Optimize tags",
-    # 24 fills the four web-rating tags (mlo/web_ratings.py): the album's
-    # public score on every track and each track's own, from the configured
-    # sources. Album-scoped, fill-only, and gated on `web_ratings_enabled`.
-    24: "Web ratings",
 }
 
 
@@ -396,20 +388,6 @@ def check_apply_force(check):
     scoped6 = apply({"audit": True}, sid=6)
     check("...and applies it for the script that owns it",
           scoped6["force_audit"] is True, str(scoped6))
-    # Script 24 joined the force tables late (it was config-only): pin its own
-    # key, both spellings, and that the authoritative clear reaches it.
-    check("script 24 maps to force_web_ratings in _FORCE_KEYS",
-          sr._FORCE_KEYS.get(24) == ("force_web_ratings",),
-          str(sr._FORCE_KEYS.get(24)))
-    web = apply({"web_ratings": True})
-    check("the web_ratings alias sets force_web_ratings",
-          web["force_web_ratings"] is True and sum(web.values()) == 1, str(web))
-    web_by_id = apply({"24": True})
-    check("script id 24 sets the same flag as the web_ratings alias",
-          web_by_id == web, f"id={web_by_id}")
-    cleared = apply({})
-    check("an empty dict clears force_web_ratings first",
-          cleared["force_web_ratings"] is False, str(cleared))
 
 
 def import_paths_do_not_send_an_empty_force():
@@ -471,7 +449,7 @@ def check_run_all_migration(check):
     check("the stale script-15 entry is shed and 15 is re-anchored after beets",
           got.count(15) == 1 and got.index(15) == got.index(14) + 1, str(got))
     check("every script lands exactly once in a normalized order",
-          sorted(got) == [i for i in range(1, 25) if i not in (18, 22)], str(sorted(got)))
+          sorted(got) == [i for i in range(1, 24) if i not in (18, 19, 22)], str(sorted(got)))
     # 17 was never in a saved order before it existed; the same shed-and-anchor
     # rule has to place it after the fetch it reads from.
     check("17 (AI transforms) lands after 13 (fetch lyrics) in a normalized order",
@@ -491,11 +469,6 @@ def check_run_all_migration(check):
           got.count(23) == 1 and got.index(23) == got.index(10) + 1
           and got.index(23) < got.index(20) and got.index(21) == got.index(20) + 1,
           str(got))
-    # 24 (web ratings) joins the same way: the shipped order puts it right
-    # behind 8 (Auto tagging), and an install upgrading into it is anchored
-    # there rather than having the script pushed to the end of its own chain.
-    check("24 (web ratings) lands right behind 8 for an existing install",
-          got.count(24) == 1 and got.index(24) == got.index(8) + 1, str(got))
     # ...and on a later load they are KEPT where the user put them: unlike 15,
     # their ids never meant anything else, so a saved position is a real choice
     # and re-anchoring them would silently undo the drag.
@@ -506,7 +479,7 @@ def check_run_all_migration(check):
 
     junk = cfg.normalize_config({"music_folder": "X", "run_all_order": [99, "a", 4, 4, -1]})
     check("unknown / duplicate run-all ids are dropped",
-          all(1 <= n <= 24 for n in junk["run_all_order"]) and len(set(junk["run_all_order"])) == len(junk["run_all_order"]),
+          all(1 <= n <= 23 for n in junk["run_all_order"]) and len(set(junk["run_all_order"])) == len(junk["run_all_order"]),
           str(junk["run_all_order"]))
 
     twice = cfg.normalize_config(cfg.normalize_config({"music_folder": "X"}))
@@ -604,9 +577,9 @@ def main():
     check("the web and the server declare the same opt-in scripts",
           opt_in_py == opt_in_web and bool(opt_in_py),
           f"server={sorted(opt_in_py)} web={sorted(opt_in_web)}")
-    check("canonical registry has 23 scripts", len(canon) == 23, str(sorted(canon)))
-    check("canonical numbers are 1..24 less the retired 18",
-          sorted(canon) == [i for i in range(1, 25) if i != 18])
+    check("canonical registry has 21 scripts", len(canon) == 21, str(sorted(canon)))
+    check("canonical numbers are 1..23 less the retired 18 and 19",
+          sorted(canon) == [i for i in range(1, 24) if i not in (18, 19)])
     check("every opt-in script is a real script", opt_in_py <= set(canon),
           f"unknown={sorted(opt_in_py - set(canon))}")
     check("server RUNNERS == canonical numbers", runners == set(canon), f"server={sorted(runners)}")
@@ -650,10 +623,6 @@ def main():
     check("Settings' master force list covers every mapped force config key",
           mapped_config <= set(settings_keys),
           f"missing={sorted(mapped_config - set(settings_keys))} extra={sorted(set(settings_keys) - mapped_config)}")
-    check("the Force menu offers 24 · Web ratings re-fetch",
-          '{ key: "web_ratings", label: "24 · Web ratings re-fetch" }' in read("web/src/lib/force.ts"))
-    check("the Settings master list offers force_web_ratings",
-          '{ k: "force_web_ratings", label: "24 · Web ratings re-fetch" }' in read("web/src/pages/SettingsPage.tsx"))
     fallbacks, wrong = force_defaults_are_false()
     check("one-shot force treats unselected keys as off",
           not fallbacks and not wrong,

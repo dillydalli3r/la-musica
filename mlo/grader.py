@@ -50,7 +50,7 @@ from .cue import canonical_cue_text
 from .naming import (DEFAULT_NAMING_SCRIPT, UNKNOWN_RELEASE_TYPE,
                      cue_ref_names, lookup_style_release_type,
                      mb_style_release_type, name_key)
-from .paths import (ALBUM_SIDECAR_NAMES, AUDIO_EXTS, IMAGE_EXTS,
+from .paths import (AUDIO_EXTS, IMAGE_EXTS,
                     LIB_AUDIO_EXTS, LIB_VIDEO_EXTS, get_track_cover,
                     library_root, load_expected_tracks, load_pending,
                     load_track_covers)
@@ -944,8 +944,7 @@ SIDECAR_TYPES = {
 # Category -> config key deciding whether files of that kind are allowed.
 # 'other' is opt-in (extra files fail grading by default). Videos — remuxed
 # MKV and raw VOB/AVI/... — are their own allowed-by-default category; raw
-# videos still fail the dedicated un-remuxed-video check. 'description' is
-# the app's own description.txt: it may not be called a stray file.
+# videos still fail the dedicated un-remuxed-video check.
 CATEGORY_INCLUDE_KEYS = {
     "music": "grade_include_music",
     "cover": "grade_include_cover",
@@ -954,7 +953,6 @@ CATEGORY_INCLUDE_KEYS = {
     "lrc": "grade_include_lrc",
     "accurip": "grade_include_accurip",
     "video": "grade_include_video",
-    "description": "grade_include_description",
     "other": "grade_include_other",
 }
 
@@ -986,7 +984,7 @@ def _video_category_exts():
 
 def _classify_file(f):
     """Category of a filename: music / cover / cue / log / lrc / accurip /
-    video / description / other."""
+    video / other."""
     low = f.lower()
     if low.endswith(_video_category_exts()):
         # Video containers FIRST: LIB_AUDIO_EXTS is AUDIO_EXTS +
@@ -1008,10 +1006,6 @@ def _classify_file(f):
         return "lrc"
     if low.endswith(".accurip"):
         return "accurip"
-    if low in ALBUM_SIDECAR_NAMES:
-        # The album/artist description the app writes itself — a legitimate
-        # library file, allowed by default like the cover art next to it.
-        return "description"
     return "other"
 
 
@@ -1072,18 +1066,13 @@ def _extra_images(album_dir, all_files, audio_files):
     ("01 - Song.jpg", extended stems like "01 - Song.front.jpg" count too —
     the same convention the organizer's sidecar pass follows), nor an image
     listed in the per-track cover manifest (a shared image is named after one
-    track only, so its stem says nothing about the other tracks that use it),
-    nor the artist's own artist.jpg / artist.png (stored at artist level by
-    mlo.artistdata — never stray album art)."""
-    from .artistdata import ARTIST_IMAGE_STEMS
+    track only, so its stem says nothing about the other tracks that use it)."""
     track_stems = {os.path.splitext(f)[0].lower() for f in audio_files}
     mapped = {v.lower() for v in load_track_covers(album_dir).values()}
     out = []
     for f in sorted(all_files):
         low = f.lower()
         if not low.endswith(IMAGE_EXTS) or low in COVER_NAMES:
-            continue
-        if os.path.splitext(low)[0] in ARTIST_IMAGE_STEMS:
             continue
         full = os.path.join(album_dir, f)
         if _skip_grading_file(full):
@@ -1762,7 +1751,6 @@ def _ambiguous_lrc_stems(filenames):
 _PODCAST_MUSIC_ONLY_CHECKS = (
     "grade_check_lyrics",
     "grade_check_rym_links",
-    "grade_check_album_description",
     "grade_check_genre",
     "grade_check_genre_count",
     "grade_check_genre_order",
@@ -1836,8 +1824,7 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
     tracks = []
     issues = {}
     # Informational lines for this album: they say what was NOT checked,
-    # never that something failed. The artist grade has carried the same
-    # channel since the image checks (_artist_image_issues).
+    # never that something failed.
     notes = []
 
     album_tag_values = {}
@@ -4395,17 +4382,6 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                 shown += f" (+{len(extra_imgs) - 4} more)"
             add_issue(f"Extra artwork not tied to any track: {shown}", "album")
 
-    # Album description (the album page's "fetch description" feature):
-    # <album>/description.txt must exist and be non-blank. Lazy import — the
-    # grader is imported from contexts that must not pull in the image stack.
-    if cfg.get("grade_check_album_description", True):
-        from .artistdata import has_description as _has_description
-        total_checks += 1
-        if not _has_description(album_dir):
-            failed_checks += 1
-            add_issue("Album description missing — fetch one on the album page",
-                      "album")
-
     # File extensions must be lowercase ("01 - Song.FLAC" fails). organize
     # lowercases every extension it touches.
     if cfg.get("grade_check_ext_case", True):
@@ -4647,141 +4623,21 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
     }
 
 
-# Artist-level checks (the artist folder, not an album): the image and the
-# text the artist page fetches into the library. Order is display order; the
-# labels are what the UI shows for each row.
-ARTIST_CHECKS = [
-    {"key": "grade_check_artist_image", "label": "Artist image",
-     "description": "The artist folder must hold an artist.jpg / artist.png "
-                    "whose size, aspect and format match the configured "
-                    "artist-image policy."},
-    {"key": "grade_check_artist_description", "label": "Artist description",
-     "description": "The artist folder must hold a non-blank description.txt."},
-]
-
-# Issue codes per artist check, and the artwork key each one reports on. The
-# image check raises several: its size, its shape, its container and its
-# decodability are four different verdicts on one file, and each one names the
-# numbers it judged. ARTIST_IMAGE_UNDERSIZED is the informational one — the
-# result carries it in `notes`, never in `issues`, because nothing here upscales
-# and failing an image below the target would fail the folder forever.
-_ARTIST_CHECK_ISSUES = {
-    "grade_check_artist_image": (("ARTIST_IMAGE_MISSING", "ARTIST_IMAGE_CORRUPT",
-                                  "ARTIST_IMAGE_FORMAT", "ARTIST_IMAGE_OVERSIZED",
-                                  "ARTIST_IMAGE_ASPECT", "ARTIST_IMAGE_UPSCALED",
-                                  "ARTIST_IMAGE_UNDERSIZED"), "image"),
-    "grade_check_artist_description": (("ARTIST_DESCRIPTION_MISSING",),
-                                       "description"),
-}
-
-
-def _artist_image_issues(folder, image_file, cfg, where):
-    """(issues, notes) for an artist folder's image.
-
-    Judged on the decoded file — Pillow reads the pixels, never the name or the
-    suffix — and every reason names the numbers behind it. An image this app
-    wrote is also compared with the size it recorded writing it: anything larger
-    on disk had pixels invented for it afterwards, which is worth saying because
-    a resized-up photo looks detailed at a glance.
-
-    The policy (aspect, tolerance, target, ceiling) comes from mlo.artistdata, so
-    this check and script 19, which fixes what it reports, cannot judge by
-    different numbers."""
-    from .artistdata import (ARTIST_IMAGE_EXTS, DEFAULT_ASPECT,
-                             aspect_deviation, decode_size, image_policy,
-                             recorded_size, unsupported_image)
-
-    label = "Artist image"
-
-    def issue(code, reason):
-        return {"code": code, "label": label, "where": where, "reason": reason}
-
-    if not image_file:
-        other = unsupported_image(folder)
-        if other:
-            exts = " / ".join(ARTIST_IMAGE_EXTS)
-            return ([issue("ARTIST_IMAGE_FORMAT",
-                           f"{os.path.basename(other)} is not an artist image "
-                           f"this app reads ({exts}) — script 19 converts it")], [])
-        return ([issue("ARTIST_IMAGE_MISSING",
-                       "no artist.jpg / artist.png in the folder — fetch one from "
-                       "the artist page (script 19 can only re-fit an image that "
-                       "is there)")], [])
-
-    name = os.path.basename(image_file)
-    size = decode_size(image_file)
-    if size is None:
-        try:
-            nbytes = os.path.getsize(image_file)
-        except OSError:
-            nbytes = 0
-        return ([issue("ARTIST_IMAGE_CORRUPT",
-                       f"{name} does not decode ({nbytes} bytes) — re-fetch it; "
-                       f"script 19 cannot repair bytes that are not an image")], [])
-
-    width, height = size
-    longest = max(width, height)
-    aspect, tolerance, target, max_side = image_policy(cfg)
-    issues, notes = [], []
-
-    if longest > max_side:
-        expected = (f"the configured artist_image_target_size {target}px"
-                    if target > 0 else
-                    f"the {max_side}px artist-image ceiling "
-                    f"(artist_image_target_size is 0 = keep the native size)")
-        issues.append(issue(
-            "ARTIST_IMAGE_OVERSIZED",
-            f"{width}x{height}: longest side {longest}px, {longest - max_side}px "
-            f"over {expected} (script 19 downscales it)"))
-    elif target > 0 and longest < target:
-        notes.append(issue(
-            "ARTIST_IMAGE_UNDERSIZED",
-            f"{width}x{height} is below the configured {target}px target "
-            f"({target - longest}px short) — accepted, and never upscaled: an "
-            f"enlarged photo would be invented detail"))
-
-    if aspect:
-        deviation = aspect_deviation(size, aspect)
-        if deviation > tolerance:
-            configured = str(cfg.get("artist_image_aspect") or DEFAULT_ASPECT)
-            issues.append(issue(
-                "ARTIST_IMAGE_ASPECT",
-                f"{width}x{height} is {width / float(height):.3f}:1, not the "
-                f"configured {configured} ({aspect:.3f}:1) — {deviation:.1%} off, "
-                f"tolerance {tolerance:.0%} — script 19 crops it to {configured}"))
-
-    recorded = recorded_size(folder, cfg)
-    if recorded and longest > max(recorded):
-        issues.append(issue(
-            "ARTIST_IMAGE_UPSCALED",
-            f"{width}x{height} on disk, {recorded[0]}x{recorded[1]} when this app "
-            f"wrote it — {longest / float(max(recorded)):.2f}x larger, so its "
-            f"extra detail is interpolated or came from outside the app (script 19 "
-            f"restores the stored size)"))
-
-    return issues, notes
-
-
 def grade_artist(artist_dir, cfg=None) -> dict:
-    """Grade an artist folder on the things that apply to it: its image, its
-    description (ARTIST_CHECKS), and that it holds an album at all. Album-level
-    checks — tags, logs, covers — never run here.
+    """Grade an artist folder on the one thing still left to it: that it holds
+    an album at all. Album-level checks — tags, logs, covers — never run here,
+    and the artist artwork/text checks are gone with the features that fetched
+    them.
 
-    The image check is judged on the decoded file (the configured aspect and
-    size, the format, decodability, and whether the pixels were enlarged after
-    this app wrote them); *issues* fail it, *notes* inform without failing —
-    an undersized image is perfectly acceptable here. Every issue carries a
-    `reason` naming the numbers behind it.
+    Two folder-level verdicts never go through the check arithmetic — an
+    unreadable/absent folder (ARTIST_FOLDER_MISSING) and a folder holding no
+    album at all (ARTIST_EMPTY) each report one issue and invent no checks,
+    because neither is a folder this app can grade whatever the settings say.
 
-    *pct* is 100 with both checks disabled: nothing graded is nothing failed,
-    so *pass* is True there (the album rule reports the same 100% for an album
-    whose checks are all switched off). Two folder-level verdicts never go
-    through that arithmetic — an unreadable/absent folder
-    (ARTIST_FOLDER_MISSING) and a folder holding no album at all
-    (ARTIST_EMPTY) each report one issue and invent no checks, because neither
-    is a folder this app can grade whatever the settings say.
+    *pct* is 100 with nothing graded: nothing graded is nothing failed, so
+    *pass* is True (the album rule reports the same 100% for an album whose
+    checks are all switched off).
     """
-    cfg = cfg or {}
     folder = str(artist_dir or "")
     where = os.path.basename(folder.replace("\\", "/").rstrip("/")) or folder
     out = {
@@ -4793,7 +4649,6 @@ def grade_artist(artist_dir, cfg=None) -> dict:
         "pass": False,
         "issues": [],
         "notes": [],
-        "artwork": {"image": False, "image_file": None, "description": False},
     }
     if not folder or not os.path.isdir(folder):
         out["issues"].append({
@@ -4802,25 +4657,15 @@ def grade_artist(artist_dir, cfg=None) -> dict:
         })
         return out
 
-    from .artistdata import has_description, image_path
     # The album-folder question is mlo.layout's (the scanner reports the same
     # folder as `empty_artist`), so the grade and the scan answer it alike.
     from .layout import artist_album_folders
-    image_file = image_path(folder)
-    out["artwork"] = {
-        "image": bool(image_file),
-        "image_file": image_file,
-        "description": has_description(folder),
-    }
 
     # An artist folder holding no album folder at all is not a graded artist:
-    # its image and description are the artist's own cover, nothing under it
-    # can be graded as music, and the library still lists it as an artist. It
-    # fails the way an absent folder does — one issue, no checks invented —
-    # because the artefact checks describe a folder that can hold an album, and
-    # reporting image/description grades for one that cannot would be a score
-    # for the wrong question. `mlo.layout` reports the same folder as
-    # `empty_artist`, and the removal the panel offers goes through the Trash.
+    # nothing under it can be graded as music, and the library still lists it
+    # as an artist. It fails the way an absent folder does — one issue, no
+    # checks invented. `mlo.layout` reports the same folder as `empty_artist`,
+    # and the removal the panel offers goes through the Trash.
     if not artist_album_folders(folder):
         out["issues"].append({
             "code": "ARTIST_EMPTY", "label": "Artist albums", "where": where,
@@ -4831,28 +4676,9 @@ def grade_artist(artist_dir, cfg=None) -> dict:
         })
         return out
 
-    for check in ARTIST_CHECKS:
-        if not cfg.get(check["key"], True):
-            # Toggle off: the artefact is neither required nor counted.
-            continue
-        out["checks"] += 1
-        codes, art_key = _ARTIST_CHECK_ISSUES[check["key"]]
-        if check["key"] == "grade_check_artist_image":
-            found, notes = _artist_image_issues(folder, image_file, cfg, where)
-            out["notes"].extend(notes)
-        elif out["artwork"][art_key]:
-            found = []
-        else:
-            found = [{"code": codes[0], "label": check["label"], "where": where,
-                      "reason": "no description.txt (or it is blank)"}]
-        if found:
-            out["failed_checks"] += 1
-            out["issues"].extend(found)
-
-    out["pass_count"] = out["checks"] - out["failed_checks"]
     # Nothing graded is nothing failed, exactly like an album with every check
-    # switched off (format_grade_report reads it as 100%): a 0 here contradicted
-    # that and showed a passing artist folder as "0%".
+    # switched off (format_grade_report reads it as 100%).
+    out["pass_count"] = out["checks"] - out["failed_checks"]
     out["pct"] = (100.0 if not out["checks"]
                   else 100.0 * out["pass_count"] / out["checks"])
     out["pass"] = out["failed_checks"] == 0

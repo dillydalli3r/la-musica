@@ -15,15 +15,9 @@ export interface Shortcut {
  *  (the lyrics stamping editor's configurable map, the modal Escape) are named
  *  with their `where` instead of being spelled out key by key. */
 export const SHORTCUTS: Shortcut[] = [
-  { keys: ["Space"], label: "Play / pause", where: "player" },
-  { keys: ["←", "→"], label: "Seek 5 seconds", where: "player" },
-  { keys: ["Ctrl", "Z"], label: "Undo the last jump inside this track", where: "player" },
-  { keys: ["[", "]"], label: "Playback speed down / up", where: "player" },
-  { keys: ["0"], label: "Reset playback speed", where: "player" },
-  { keys: ["F"], label: "Fullscreen viewer", where: "anywhere" },
   { keys: ["/"], label: "Jump to search", where: "anywhere" },
   { keys: ["?"], label: "This shortcut sheet", where: "anywhere" },
-  { keys: ["Esc"], label: "Close a dialog, menu or the viewer", where: "anywhere" },
+  { keys: ["Esc"], label: "Close a dialog or menu", where: "anywhere" },
 ];
 
 /** The shortcut sheet, on the shared dialog shell (backdrop click, Escape,
@@ -38,7 +32,7 @@ export default function ShortcutsOverlay({ onClose }: { onClose: () => void }) {
       bodyClass="px-0 py-1"
       footer={
         <p className="text-[10px] text-zinc-600">
-          The lyrics editor has its own stamping keys (editable in Settings → Playback).
+          The lyrics editor has its own stamping keys.
           Shortcuts never fire while you are typing in a field.
         </p>
       }

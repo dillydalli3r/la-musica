@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { IN_MOBILE_SHELL, IN_TAURI } from "../api";
+import { IN_TAURI } from "../api";
 import { t } from "./i18n";
 import { ingestDerived } from "./notifications";
 import { toast } from "../store";
@@ -50,10 +50,9 @@ function setState(next: Partial<UpdateState>) {
 
 /** Whether THIS client can install an update itself: the desktop shell, and
  *  nothing else. A browser is served by the server it talks to, so its update
- *  is that install's business (the Docker image updates itself), and a phone
- *  updates from whichever store or sideload shipped it. */
+ *  is that install's business (the Docker image updates itself). */
 export function updateSupported(): boolean {
-  return IN_TAURI && !IN_MOBILE_SHELL;
+  return IN_TAURI;
 }
 
 /** The state the surface draws (`useSyncExternalStore` getter). */

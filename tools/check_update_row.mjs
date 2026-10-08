@@ -43,7 +43,7 @@ const { createServer } = await import(
   `file://${path.join(webDir, "node_modules/vite/dist/node/index.js").replace(/\\/g, "/")}`);
 
 // Tailwind resolves its `content` globs against the process cwd (see the note in
-// check_rating_alignment.mjs): without this the page arrives unstyled.
+// check_library_az.mjs): without this the page arrives unstyled.
 process.chdir(webDir);
 
 const vite = await createServer({

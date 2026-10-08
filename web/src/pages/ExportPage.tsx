@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { FileVideo, HardDriveDownload, Library, Search } from "lucide-react";
@@ -9,9 +9,6 @@ import Segmented from "../components/Segmented";
 import PageHeader from "../components/PageHeader";
 import { EmptyState, MediaChip } from "../components/Badges";
 import { ExportOptionsPanel, useExportOptions } from "../components/ExportDialog";
-import TrackTitleCell from "../components/TrackTitleCell";
-import StarRating from "../components/StarRating";
-import { ratingOf, useRatings, useSetRating, trackWebRating, webStarProps } from "../lib/ratings";
 import {
   TABLE_FIT, TRACK_COLS, TRACK_COL_W, TRACK_PHONE_CLS, PHONE_HIDE, phoneHide,
   ColFloorHolder, TRACK_TITLE_FLOOR, type Col,
@@ -19,7 +16,6 @@ import {
 import type { Artist, Track } from "../types";
 
 const SOURCE_KINDS = [
-  { id: "playlist", label: "Playlist" },
   { id: "albums", label: "Albums" },
   { id: "artists", label: "Artists" },
   { id: "tracks", label: "Tracks" },
@@ -27,12 +23,11 @@ const SOURCE_KINDS = [
 ] as const;
 type SourceKind = (typeof SOURCE_KINDS)[number]["id"];
 
-/** The tabs where the user TICKS rows. The other two are a whole playlist and
- *  the whole library: their selection is the entity itself, so they have
- *  nothing to tick and nothing to select-all. */
+/** The tabs where the user TICKS rows. "Entire library" is the other kind: its
+ *  selection is the entity itself, so it has nothing to tick and nothing to
+ *  select-all. */
 const PICK_KINDS = ["albums", "artists", "tracks"] as const;
 type PickKind = (typeof PICK_KINDS)[number];
-type ListTab = PickKind | "playlist";
 
 /** The plural noun each picker tab counts by, so its counts read as sentences
  *  ("12 of 34 albums match") instead of "12 of 34". */
@@ -45,22 +40,14 @@ const PREVIEW_ROWS = 200;
 
 /** The preview's columns: the library's track table, minus the opt-in credit
  *  columns — the same set the library's own column prefs show by default.
- *  Rating is not a column in either table: it rides in the title cell's fixed
- *  trailing slot (`TrackTitleCell`), which is what keeps it at one x per row,
- *  and the same `TRACK_COL_W` floors put both tables on the same grid. */
+ *  The same `TRACK_COL_W` floors put the preview and the library on the same
+ *  grid. */
 const PREVIEW_COLS = TRACK_COLS.filter((c) => !c.defHidden);
 
 /** The picker tables' columns: what each tab lists, in render order. `sel` and
  *  `cover` are labelled through `sr-only` headers — a checkbox and a thumbnail
  *  have no header text of their own. */
-const PICK_COLS: Record<ListTab, Col[]> = {
-  playlist: [
-    { id: "cover", label: "Cover", sortKey: "" },
-    { id: "name", label: "Title", sortKey: "" },
-    { id: "artist", label: "Artist", sortKey: "" },
-    { id: "album", label: "Album", sortKey: "" },
-    { id: "dur", label: "Dur", sortKey: "" },
-  ],
+const PICK_COLS: Record<PickKind, Col[]> = {
   albums: [
     { id: "sel", label: "Select", sortKey: "" },
     { id: "cover", label: "Cover", sortKey: "" },
@@ -218,8 +205,8 @@ function PickTable({ cols, rows, emptyNote }: {
   );
 }
 
-/** Export any slice of the library — playlists, albums, artists, single
- * tracks or everything — to a target drive with a codec / bitrate
+/** Export any slice of the library — albums, artists, single tracks or
+ * everything — to a target drive with a codec / bitrate
  * configurator and folder-structure choices. The "put music on my MP3
  * player" feature.
  *
@@ -234,10 +221,8 @@ function PickTable({ cols, rows, emptyNote }: {
  * table is a selection you cannot check. */
 export default function ExportPage() {
   const { data: lib } = useQuery({ queryKey: ["library"], queryFn: () => api.library() });
-  const { data: playlists } = useQuery({ queryKey: ["playlists"], queryFn: api.playlists });
 
-  const [sourceKind, setSourceKind] = useState<SourceKind>("playlist");
-  const [playlistId, setPlaylistId] = useState<number | null>(null);
+  const [sourceKind, setSourceKind] = useState<SourceKind>("albums");
   const [albumPaths, setAlbumPaths] = useState<Set<string>>(new Set());
   const [artistPaths, setArtistPaths] = useState<Set<string>>(new Set());
   const [trackPaths, setTrackPaths] = useState<Set<string>>(new Set());
@@ -253,12 +238,6 @@ export default function ExportPage() {
 
   const artists = useMemo<Artist[]>(() => lib?.artists ?? [], [lib]);
   const albums = useMemo(() => artists.flatMap((a) => a.albums ?? []), [artists]);
-
-  // The preview's rating is the library's: same scope, same half-star scale,
-  // the same store the Tracks view writes. One GET per scope, from cache.
-  const { data: ratingsData } = useRatings();
-  const { setRating, pending } = useSetRating();
-  const ratings = ratingsData?.ratings;
 
   // One flat track metadata table for every source kind / the preview.
   const trackRows = useMemo<TrackRow[]>(() => {
@@ -304,36 +283,6 @@ export default function ExportPage() {
   );
   const filteredTracks = useMemo(() => trackRows.filter((t) => !q || t.hay.includes(q)), [trackRows, q]);
 
-  const { data: playlistDetail, error: playlistError } = useQuery({
-    queryKey: ["playlist", playlistId],
-    queryFn: () => api.playlist(playlistId!),
-    enabled: sourceKind === "playlist" && playlistId !== null,
-  });
-
-  // The playlist the select is on, resolved against the loaded list: a
-  // playlist deleted or renamed away elsewhere leaves `playlistId` naming
-  // nothing, and a stale id drew one name in the select while the query 404'd
-  // and the preview reported the playlist that no longer exists.
-  const playlist = useMemo(
-    () => (playlists ?? []).find((pl) => pl.id === playlistId) ?? null,
-    [playlists, playlistId]
-  );
-  useEffect(() => {
-    if (playlistId !== null && playlists && !playlists.some((pl) => pl.id === playlistId)) {
-      setPlaylistId(null);
-    }
-  }, [playlistId, playlists]);
-
-  // The playlist's own rows, in playlist order, resolved to their library
-  // metadata (a path the payload no longer holds keeps its file name instead
-  // of vanishing — it is still what this playlist would export).
-  const playlistList = useMemo(
-    () => (playlistDetail?.tracks ?? [])
-      .map((p) => ({ path: p, row: trackByPath.get(p) ?? null }))
-      .filter(({ path, row }) => !q || (row?.hay ?? path.toLowerCase()).includes(q)),
-    [playlistDetail, trackByPath, q]
-  );
-
   // Bulk selection over the FILTERED list: "All" means "everything the filter
   // shows", the only reading that cannot surprise after a search.
   const pick: PickKind | null = PICK_KINDS.find((k) => k === sourceKind) ?? null;
@@ -373,7 +322,6 @@ export default function ExportPage() {
   // answer to "what will be exported": the preview, the duration and the
   // options panel all read it, so none of them can claim a different set.
   const paths = useMemo(() => {
-    if (sourceKind === "playlist") return playlistDetail?.tracks ?? [];
     if (sourceKind === "library") return trackRows.map((t) => t.path);
     if (sourceKind === "albums") {
       const out: string[] = [];
@@ -386,7 +334,7 @@ export default function ExportPage() {
       return out;
     }
     return trackRows.filter((t) => trackPaths.has(t.path)).map((t) => t.path);
-  }, [sourceKind, playlistDetail, albums, albumPaths, artists, artistPaths, trackPaths, trackRows]);
+  }, [sourceKind, albums, albumPaths, artists, artistPaths, trackPaths, trackRows]);
 
   const totalSeconds = useMemo(
     () => paths.reduce((sum, p) => sum + (trackByPath.get(p)?.tech.length ?? 0), 0),
@@ -416,18 +364,12 @@ export default function ExportPage() {
         onAction={{ label: "Clear the filter", onClick: () => setFilter("") }}
       />;
 
-  // The same question for the preview, answered per tab: nothing picked,
-  // nothing in the playlist, nothing in the library. An empty table with no
-  // reason was the state this page used to show.
-  const previewWhy = sourceKind === "playlist"
-    ? playlistId === null
-      ? "Choose a playlist above — its tracks are what this tab exports."
-      : playlistError
-        ? `Could not load that playlist: ${String(playlistError)}`
-        : `${playlist?.name ?? "That playlist"} holds no tracks.`
-    : sourceKind === "library"
-      ? "The library holds no tracks yet."
-      : `Nothing selected yet — tick ${noun} above, or use Select all.`;
+  // The same question for the preview, answered per tab: nothing picked or
+  // nothing in the library. An empty table with no reason was the state this
+  // page used to show.
+  const previewWhy = sourceKind === "library"
+    ? "The library holds no tracks yet."
+    : `Nothing selected yet — tick ${noun} above, or use Select all.`;
 
   const filterBox = (placeholder: string) => (
     <div className="relative mb-2">
@@ -452,7 +394,7 @@ export default function ExportPage() {
       <PageHeader
         icon={HardDriveDownload}
         title="Export"
-        subtitle="Copy or convert any part of the library — playlists, albums, artists, single tracks or everything — onto a drive. Tags and artwork ride along; already-exported tracks are skipped on re-runs."
+        subtitle="Copy or convert any part of the library — albums, artists, single tracks or everything — onto a drive. Tags and artwork ride along; already-exported tracks are skipped on re-runs."
       />
 
       {/* Two panels side by side only from `xl`: at `lg` a 1024 px window
@@ -470,73 +412,11 @@ export default function ExportPage() {
             PickTable). */}
         <div className="panel min-w-0 flex flex-col">
           <div className="text-xs font-bold text-zinc-300 mb-2">Source</div>
-          {/* Five options are wider than a phone: the strip scrolls in its own
+          {/* Four options are wider than a phone: the strip scrolls in its own
               box instead of pushing the page sideways. */}
           <div className="overflow-x-auto">
             <Segmented value={sourceKind} onChange={setSourceKind} options={SOURCE_KINDS} className="mb-3" />
           </div>
-
-          {sourceKind === "playlist" && (
-            <>
-              <select
-                className="input !py-1 text-xs w-full min-w-0 tap"
-                value={playlistId ?? ""}
-                onChange={(ev) => setPlaylistId(ev.target.value ? Number(ev.target.value) : null)}
-              >
-                <option value="">Choose a playlist…</option>
-                {(playlists ?? []).map((pl) => (
-                  <option key={pl.id} value={pl.id}>
-                    {pl.name} ({pl.track_count})
-                  </option>
-                ))}
-              </select>
-              {playlistId !== null && (
-                <>
-                  {filterBox("Filter this playlist's tracks…")}
-                  {/* The filter narrows the LIST, never the playlist: this tab
-                      exports the playlist the user chose, and saying so is the
-                      difference between a narrowed view and a narrowed
-                      export. */}
-                  <div className="text-[11px] text-zinc-500 mb-2">
-                    {q
-                      ? `${playlistList.length} of ${playlistDetail?.tracks?.length ?? 0} tracks match “${filter.trim()}” — the filter narrows this list only; the whole playlist is exported`
-                      : `${playlistDetail?.tracks?.length ?? 0} tracks from ${playlist?.name ?? "this playlist"}`}
-                  </div>
-                  <PickTable
-                    cols={PICK_COLS.playlist}
-                    rows={playlistList.map(({ path, row }) => ({
-                      key: path,
-                      cover: (
-                        <TrackCover
-                          albumPath={row?.albumPath ?? path.split(/[\\/]/).slice(0, -1).join("/")}
-                          trackCover={row?.coverFile}
-                          albumCover={row?.albumCover}
-                          wrapperClass="h-9 w-9 rounded bg-raise overflow-hidden shrink-0"
-                        />
-                      ),
-                      cells: {
-                        name: <span className="break-words min-w-0">{row?.title ?? path.split(/[\\/]/).pop()}</span>,
-                        artist: row?.artist,
-                        album: row?.album,
-                        dur: row ? fmtDuration(row.tech.length) : "—",
-                      },
-                    }))}
-                    emptyNote={
-                      playlistError
-                        ? <EmptyState title="Could not load that playlist" hint={String(playlistError)} />
-                        : (playlistDetail?.tracks?.length ?? 0) === 0
-                          ? <EmptyState title="That playlist is empty" hint={`${playlist?.name ?? "It"} holds no tracks to export.`} />
-                          : <EmptyState
-                              title="Nothing matches"
-                              hint={`No track of this playlist matches “${filter.trim()}”.`}
-                              onAction={{ label: "Clear the filter", onClick: () => setFilter("") }}
-                            />
-                    }
-                  />
-                </>
-              )}
-            </>
-          )}
 
           {sourceKind === "library" && (
             <div className="flex items-start gap-2 text-xs text-zinc-400 border border-border rounded-md p-3 bg-panel/50">
@@ -691,8 +571,8 @@ export default function ExportPage() {
                             /* `cell-nowrap`, not just the column floor: the
                                floor says how wide the cell may be, this says
                                the number is never broken across two lines.
-                               Untagged rows fall back to their position, which
-                               is the playlist's own order. */
+                               Untagged rows fall back to their position in
+                               the resolved selection. */
                             return <td key={c.id} className={`td cell-nowrap text-zinc-600${cls}`}>{m?.num || i + 1}</td>;
                           case "cover":
                             return (
@@ -708,22 +588,7 @@ export default function ExportPage() {
                           case "title":
                             return (
                               <td key={c.id} className="td">
-                                <TrackTitleCell
-                                  trailing={
-                                    <span className="shrink-0" onClick={(ev) => ev.stopPropagation()}>
-                                      <StarRating
-                                        size="sm"
-                                        webReadout="slot"
-                                        value={ratingOf(ratings, p)}
-                                        onChange={(v) => setRating(p, v)}
-                                        pending={pending(p)}
-                                        {...webStarProps(trackWebRating(m?.tags))}
-                                      />
-                                    </span>
-                                  }
-                                >
-                                  <span className="break-words min-w-0">{m?.title ?? p.split(/[\\/]/).pop()}</span>
-                                </TrackTitleCell>
+                                <span className="break-words min-w-0">{m?.title ?? p.split(/[\\/]/).pop()}</span>
                               </td>
                             );
                           case "artist":

@@ -40,7 +40,7 @@ cannot perform is refused with that reason instead of downloading something that
 cannot run, and the Dependencies rows carry the same answer so the UI never
 shows an Install button for a tool that cannot be installed here.
 
-The vendored pip packages (librosa, beets, yt-dlp) are platform-independent.
+The vendored pip packages (librosa, beets) are platform-independent.
 Each archive's LICENSE/COPYING/README is copied next to the installed binaries
 (_copy_licence_files).
 
@@ -88,7 +88,6 @@ DISPLAY_NAMES = {
     "librosa": "librosa",
     "beets": "beets",
     "chromaprint": "Chromaprint (fpcalc)",
-    "yt-dlp": "yt-dlp",
 }
 
 REPOS = {
@@ -102,7 +101,6 @@ REPOS = {
     "logchecker": "OPSnet/Logchecker",
     "cuetools": "gchudov/cuetools.net",
     "chromaprint": "acoustid/chromaprint",
-    "yt-dlp": "yt-dlp/yt-dlp",
 }
 
 # Ordered asset-name preferences (regex, matched case-insensitively).
@@ -120,9 +118,6 @@ ASSET_PATTERNS = {
     "logchecker": [r"^logchecker\.phar$"],
     "cuetools": [r"^CUETools\.zip$", r"^cuetools.*\.zip$"],
     "chromaprint": [r"^chromaprint-fpcalc-[\d.]+-windows-x86_64\.zip$"],
-    # The release also ships extensionless POSIX builds and a tarball; the
-    # Windows binary is the bare .exe (SINGLE_EXE_TOOLS).
-    "yt-dlp": [r"^yt-dlp\.exe$"],
 }
 
 INSTALL_PREFIX = {
@@ -139,7 +134,6 @@ INSTALL_PREFIX = {
     "librosa": "librosa",
     "beets": "beets",
     "chromaprint": "chromaprint",
-    "yt-dlp": "yt-dlp",
 }
 
 # Tools whose upstream releases ship a NATIVE Linux build, mapped to the asset
@@ -266,7 +260,7 @@ LINUX_RUNNERS = {
 # Tools whose install is the same download on every platform this app supports
 # (a pip package, or a phar a runtime elsewhere executes — the Logchecker phar
 # is PHP), so no platform table decides anything about them.
-PLATFORM_INDEPENDENT = {"librosa", "beets", "yt-dlp", "logchecker"}
+PLATFORM_INDEPENDENT = {"librosa", "beets", "logchecker"}
 
 # Tools with no build this app fetches, mapped to the distro package providing
 # the same tool (None = no packaged equivalent). MARKER_EXES can only check that
@@ -326,7 +320,6 @@ BREW_PACKAGES = {
 PIP_PACKAGES = {
     "librosa": "librosa",
     "beets": "beets",
-    "yt-dlp": "yt-dlp",
     # The EAC rip-log checksum verifier. Logchecker's PHP shells out to its
     # console script for `Checksum:`, and mlo.discs imports the package itself:
     # without it a log whose bytes changed after EAC signed it reads as valid
@@ -336,16 +329,9 @@ PIP_PACKAGES = {
 }
 
 # Pip packages whose releases GitHub does not carry, so their newest version
-# comes from PyPI's JSON API instead (yt-dlp IS in REPOS and stays a GitHub
-# check). Derived, never a second list to keep in sync with the one above.
+# comes from PyPI's JSON API instead. Derived, never a second list to keep in
+# sync with the one above.
 PYPI_PROBES = {key for key in PIP_PACKAGES if key not in REPOS}
-
-# Tools of which only the Windows build is vendored as a binary: on Linux the
-# same program is installed as the pip package above (yt-dlp has no Linux
-# release asset at all, and its pip package is the upstream-supported install).
-# They are deliberately NOT in LINUX_PACKAGES - _require_installable() would
-# refuse the download instead of using pip.
-PIP_ON_LINUX = {"yt-dlp"}
 
 
 # --------------------------------------------------------------------------- #
@@ -674,11 +660,10 @@ MARKER_EXES = {
     "php": ("php.exe",),
     "cuetools": ("CUETools.exe",),
     "chromaprint": ("fpcalc.exe",),
-    "yt-dlp": ("yt-dlp.exe",),
 }
 
 # Tools whose release asset is a single bare exe - no archive to extract.
-SINGLE_EXE_TOOLS = {"audioauditor", "logchecker", "yt-dlp"}
+SINGLE_EXE_TOOLS = {"audioauditor", "logchecker"}
 
 # Exact, pinned dependency versions. Every tool is downloaded from a specific
 # GitHub release tag (never "latest") so installs and CI builds are fully
@@ -749,11 +734,6 @@ PINNED = {
         "tag": "v1.6.1",
         "asset": "chromaprint-fpcalc-1.6.1-windows-x86_64.zip",
         "version": "1.6.1",
-    },
-    "yt-dlp": {
-        "tag": "2026.08.19",
-        "asset": "yt-dlp.exe",
-        "version": "2026.8.19",
     },
 }
 
@@ -936,7 +916,7 @@ def _version_label(version):
       * GitHub tags carry the `v`/`V` prefix the pinned labels drop
       * ffmpeg's rolling releases are tagged `autobuild-<date>-<time>` while
         PINNED labels that same build by its date
-      * yt-dlp's tag is zero-padded (`2026.08.19`) where its label is not
+      * a zero-padded numeric component (`2026.08.19`) where its label is not
         (`2026.8.19`)
     """
     if not version:
@@ -1765,17 +1745,16 @@ def _install_pip_package(key, log=print, progress=None):
     installs) and mirrors the versioned-folder layout of binary tools.
 
     The version installed is the newest release this app can see (PyPI for
-    beets/librosa, GitHub for yt-dlp — see _install_target), and the reviewed
-    pin only when nothing can be seen. The old code installed the pin and
-    returned "already installed" whenever a folder existed at all, so a pip
-    tool could never update: the row said Update, the press said nothing to do,
-    and the version never moved.
+    beets/librosa — see _install_target), and the reviewed pin only when
+    nothing can be seen. The old code installed the pin and returned "already
+    installed" whenever a folder existed at all, so a pip tool could never
+    update: the row said Update, the press said nothing to do, and the version
+    never moved.
 
     What the install is VERIFIED against is written below the pip call, and it
     is the app's own detector — never pip's exit status and never a guess at
-    the import name. "Also dependency installs work, but yt-dlp succeeds with
-    an 'error'" (the owner's report, on the Docker image, where yt-dlp IS this
-    pip path) is exactly that class: a working install reported as a failure.
+    the import name. A working install reported as a failure (a pip tool that
+    succeeds with an "error" on a Docker image) is exactly that class.
     """
     name = PIP_PACKAGES[key]
     display = DISPLAY_NAMES[key]
@@ -1962,11 +1941,9 @@ def _install_one(key, log=print, progress=None):
     """The install itself, with the per-tool lock already held."""
     if key == "php":
         return _install_php(log=log, progress=progress)
-    # Vendored pip packages — plus the tools whose Linux install IS the pip
-    # package (PIP_ON_LINUX): on Windows those take the pinned .exe below.
-    # Both carry their own target/version handling (see _install_target).
-    if key in PIP_PACKAGES and (key not in PIP_ON_LINUX
-                                or host_platform() != "windows"):
+    # Vendored pip packages carry their own target/version handling (see
+    # _install_target).
+    if key in PIP_PACKAGES:
         return _install_pip_package(key, log=log, progress=progress)
 
     # An installed copy takes the NEWEST release; only a tool that is not there

@@ -1,45 +1,35 @@
 #!/usr/bin/env python3
-"""On-demand per-file ReplayGain contract (mlo.loudness).
+"""ReplayGain measurement contract (mlo.loudness) — what script 7 uses.
 
-The player asks for one track's gain while a batch run may be tagging a
-whole folder — so the on-demand path must (a) trust the four tags when they
-are all there, (b) measure with ffmpeg's EBU R128 filter when they are not,
-(c) never raise, (d) cache a measurement so replaying a track costs one
-stat(), and (e) bound the wait for that measurement on a playback request,
-which is the one caller that cannot afford to hold a track at the click.
+Script 7 (Calculate DR & ReplayGain) tags a library by shelling out to rsgain;
+the parts of mlo.loudness it leans on are pinned here:
 
-Two things about the measurement itself are pinned too, because they are the
-ones that decide whether an on-demand value and the tag script 7 writes
-through rsgain are the same number:
-
-  * the peak is the SAMPLE peak, not the true peak. rsgain writes sample
-    peaks into REPLAYGAIN_*_PEAK unless asked otherwise, so a true peak here
-    disagreed with the file's own tag by up to 30%. The fixture is a
-    45°-phase sine at fs/4, whose samples all land on ±0.7071 of its
-    amplitude: sample peak 11585/32768 = 0.3535, true peak 0.5, so a
-    true-peak measurement misses by 41%;
-  * a file with nothing to measure — silent, undecodable — answers None
-    rather than a number. The gain rsgain itself reports is the oracle for
-    the rest, when rsgain is installed.
+  * parse_ebur128 reads ffmpeg's ebur128/astats log into integrated loudness
+    (LUFS) and a LINEAR peak — the unit the REPLAYGAIN_*_PEAK tags are written
+    in. The peak is the SAMPLE peak, not the true peak: rsgain writes sample
+    peaks, so a true peak here disagreed with the file's own tag by up to 30%.
+    The fixture is a 45°-phase sine at fs/4, whose samples all land on ±0.7071
+    of its amplitude: sample peak 11585/32768 = 0.3535, true peak 0.5.
+  * analyze_file answers ONE file: its four tags when they are all there (no
+    decode), else a fresh ffmpeg measurement, else None. Never raises; a file
+    with nothing to measure — silent, undecodable — answers None, not a number.
+    The gain rsgain itself reports is the oracle for the rest, when rsgain is
+    installed.
 
 Run:  python tools/test_replaygain.py
 """
 import array
-import json
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
-import threading
-import time
 import wave
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from mlo import loudness
 from mlo.tools import detect_all_tools
-from mlo.config import DEFAULT_CONFIG
 
 # ----------------------------------------------------------------------
 # A real ffmpeg 7 ebur128 log (1 kHz lavfi sine, 3 s), verbatim: progress
@@ -147,302 +137,13 @@ try:
     _FakeAudioFile.tags = {"REPLAYGAIN_TRACK_GAIN": "-3.21 dB"}
     assert loudness.analyze_file("some/track.flac") is None
 
-    # ---- replaygain_for_path: mode / preamp / album / clip ---------------
-    _FakeAudioFile.tags = {
-        "REPLAYGAIN_TRACK_GAIN": "-3.21 dB",
-        "REPLAYGAIN_TRACK_PEAK": "0.987",
-        "REPLAYGAIN_ALBUM_GAIN": "-2.50 dB",
-        "REPLAYGAIN_ALBUM_PEAK": "1.002",
-    }
-    cfg = dict(DEFAULT_CONFIG)
-    cfg["music_folder"] = tempfile.gettempdir()
-    cfg["replaygain_analyze_missing"] = False  # no measuring in these cases
-
-    off = loudness.replaygain_for_path(cfg, "t.flac", mode="off")
-    assert off == {"gain": None, "peak": None, "mode": "off",
-                   "source": None, "analyzed": False,
-                   "pending": False, "album": False}, off
-
-    track = loudness.replaygain_for_path(cfg, "t.flac", clip_protection=False)
-    assert track["gain"] == -3.21 and track["mode"] == "track", track
-    assert track["source"] == "tags" and track["analyzed"] is False, track
-
-    album = loudness.replaygain_for_path(cfg, "t.flac", mode="album",
-                                         clip_protection=False)
-    assert album["gain"] == -2.50, album       # album gain wins in album mode
-    assert album["peak"] == 1.002, album
-    assert album["album"] is True, album       # ...and it IS the album gain
-
-    pre = loudness.replaygain_for_path(cfg, "t.flac", preamp_db=3.0,
-                                       clip_protection=False)
-    assert abs(pre["gain"] - (-0.21)) < 1e-9, pre
-
-    # Album mode falls back to the track value when the album tags are gone —
-    # and says so, so the player can report per-track normalisation instead of
-    # implying the album was matched as an album.
-    _FakeAudioFile.tags = {"REPLAYGAIN_TRACK_GAIN": "-3.21 dB",
-                           "REPLAYGAIN_TRACK_PEAK": "0.5"}
-    fallback = loudness.replaygain_for_path(cfg, "t.flac", mode="album",
-                                            clip_protection=False)
-    assert fallback["gain"] == -3.21 and fallback["peak"] == 0.5, fallback
-    assert fallback["album"] is False, fallback
-
-    # Clip protection clamps to the ceiling for the peak: 0 dBFS is the
-    # loudest a peak of 0.5 can be scaled to, i.e. -20*log10(0.5) = +6.02 dB
-    # of headroom. A +6 dB gain is still under it, so it is left alone...
-    _FakeAudioFile.tags = {"REPLAYGAIN_TRACK_GAIN": "6.00 dB",
-                           "REPLAYGAIN_TRACK_PEAK": "0.5"}
-    under = loudness.replaygain_for_path(cfg, "t.flac", preamp_db=0.0)
-    assert abs(under["gain"] - 6.0) < 1e-9, under
-    assert under["source"] == "tags", under
-
-    # ...while a hot master that IS above the ceiling gets cut to it, and the
-    # returned source says so. (Peak 2.0: -20*log10(2.0) = -6.0206 dB.)
-    _FakeAudioFile.tags = {"REPLAYGAIN_TRACK_GAIN": "6.00 dB",
-                           "REPLAYGAIN_TRACK_PEAK": "2.0"}
-    clamped = loudness.replaygain_for_path(cfg, "t.flac", preamp_db=0.0)
-    assert abs(clamped["gain"] - (-20 * __import__("math").log10(2.0))) < 1e-9, clamped
-    assert abs(clamped["gain"] - (-6.0206)) < 1e-4, clamped
-    assert clamped["source"] == "tags+clamp", clamped
-
-    # Clip protection off leaves the same hot gain alone.
-    hot = loudness.replaygain_for_path(cfg, "t.flac", clip_protection=False)
-    assert hot["gain"] == 6.0 and hot["source"] == "tags", hot
-
-    # A tagless file with analyze_missing off has nothing to report.
+    # A file with no tags at all and no decoder has nothing to answer: the
+    # caller gets None, never a fabricated unity gain.
     _FakeAudioFile.tags = {}
-    assert loudness.replaygain_for_path(cfg, "t.flac")["gain"] is None
+    assert loudness.analyze_file("some/track.flac") is None
 finally:
     loudness.AudioFile = _real_af
     loudness._FFMPEG_CACHE.update(_real_ffmpeg)
-
-
-# ----------------------------------------------------------------------
-# Cache: <music>/.mlo/data/replaygain.json, invalidated by size/mtime.
-# ----------------------------------------------------------------------
-root = tempfile.mkdtemp(prefix="mlo_rg_")
-try:
-    cache_cfg = dict(DEFAULT_CONFIG)
-    cache_cfg["music_folder"] = root
-    cache_file = os.path.join(root, ".mlo", "data", "replaygain.json")
-    track_path = os.path.join(root, "Artist", "Album", "01 track.flac")
-    os.makedirs(os.path.dirname(track_path))
-    with open(track_path, "wb") as f:
-        f.write(b"x" * 32)
-
-    assert loudness.cached_analysis(cache_cfg, track_path) is None
-    loudness.store_analysis(cache_cfg, track_path, {
-        "gain_db": 1.5, "peak": 0.75, "lufs": -19.5,
-        "analyzed": True, "source": "ffmpeg",
-        "album_gain_db": None, "album_peak_db": None,
-    })
-    # The store answers the very next read from MEMORY, and the FILE follows on
-    # its own quiet window (loudness._WRITE_DEBOUNCE_S) — a scan's hundreds of
-    # measurements must not be hundreds of whole-file rewrites + fsyncs.
-    entry = loudness.cached_analysis(cache_cfg, track_path)
-    assert entry["gain_db"] == 1.5 and entry["peak"] == 0.75, entry
-    assert not os.path.isfile(cache_file), cache_file
-    assert loudness._flush_now() is True
-    assert os.path.isfile(cache_file), cache_file
-    entry = loudness.cached_analysis(cache_cfg, track_path)
-    assert entry["lufs"] == -19.5 and entry["source"] == "ffmpeg", entry
-    assert entry["analyzed"] is True, entry
-    assert entry["size"] == 32 and entry["mtime"] == os.stat(track_path).st_mtime, entry
-    assert entry["ts"] > 0, entry
-    assert "album_gain_db" not in entry, entry   # stored shape is the spec's
-
-    # Rewritten file (size changed) is a different file: re-measure.
-    with open(track_path, "ab") as f:
-        f.write(b"yy")
-    assert loudness.cached_analysis(cache_cfg, track_path) is None
-
-    # Same bytes, newer mtime (re-tag, re-download) also invalidates.
-    loudness.store_analysis(cache_cfg, track_path, {
-        "gain_db": -2.0, "peak": 0.9, "lufs": -16.0,
-        "analyzed": True, "source": "ffmpeg"})
-    entry = loudness.cached_analysis(cache_cfg, track_path)
-    assert entry["gain_db"] == -2.0, entry
-    later = entry["mtime"] + 10
-    os.utime(track_path, (later, later))
-    assert loudness.cached_analysis(cache_cfg, track_path) is None
-
-    # A corrupt cache file reads as empty and the next store starts fresh.
-    with open(cache_file, "w", encoding="utf-8") as f:
-        f.write('{"Artist\\\\Album": {"gain_db"')
-    assert loudness.cached_analysis(cache_cfg, track_path) is None
-    loudness.store_analysis(cache_cfg, track_path, {
-        "gain_db": 0.25, "peak": 1.0, "lufs": -18.25,
-        "analyzed": True, "source": "ffmpeg"})
-    entry = loudness.cached_analysis(cache_cfg, track_path)
-    assert entry["gain_db"] == 0.25, entry
-    assert len(list(os.listdir(os.path.dirname(cache_file)))) == 1, \
-        os.listdir(os.path.dirname(cache_file))   # no temp litter
-
-    # ---- the burst is ONE write, and reads do not re-parse the file ------
-    # Both are what made a scan quadratic: a whole-file rewrite per store, and
-    # a whole-file parse per read. Counted, not timed.
-    burst = []
-    for i in range(5):
-        p_i = os.path.join(root, "Artist", "Album", f"burst {i}.flac")
-        with open(p_i, "wb") as f:
-            f.write(b"b" * (16 + i))
-        burst.append(p_i)
-    writes, reads = [], []
-    _real_write = loudness._write_cache
-    _real_read = loudness._read_cache
-    _real_debounce = loudness._WRITE_DEBOUNCE_S
-    loudness._WRITE_DEBOUNCE_S = 3600.0     # no quiet window closes in this case
-    loudness._write_cache = lambda target, data: (
-        writes.append(len(data)), _real_write(target, data))[1]
-    loudness._read_cache = lambda target: (reads.append(target),
-                                          _real_read(target))[1]
-    try:
-        for p_i in burst:
-            loudness.store_analysis(cache_cfg, p_i, {
-                "gain_db": -3.0, "peak": 0.5, "lufs": -17.0,
-                "analyzed": True, "source": "ffmpeg"})
-        assert writes == [], writes        # not one rewrite per measurement...
-        for p_i in burst:                  # ...and every one reads back NOW
-            assert (loudness.cached_analysis(cache_cfg, p_i) or {}).get("gain_db") == -3.0
-        for _ in range(20):                # 20 lookups: zero file parses
-            loudness.cached_analysis(cache_cfg, burst[0])
-        assert reads == [], reads
-        assert loudness._flush_now() is True
-        assert writes == [6], writes       # one write, all six entries in it
-        assert reads == [], reads          # our own write is not a foreign one
-        with open(cache_file, "r", encoding="utf-8") as f:
-            on_disk = json.load(f)
-        assert len(on_disk) == 6, sorted(on_disk)
-    finally:
-        loudness._write_cache = _real_write
-        loudness._read_cache = _real_read
-        loudness._WRITE_DEBOUNCE_S = _real_debounce
-
-    # Another process rewriting the file is NOTICED (its stamp changed), so the
-    # memory map is not a stale copy of the file this process last held.
-    with open(cache_file, "w", encoding="utf-8") as f:
-        json.dump({}, f)
-    assert loudness.cached_analysis(cache_cfg, burst[0]) is None
-    assert loudness.cached_analysis(cache_cfg, track_path) is None
-
-    # A path that does not exist is simply not cached (never raises).
-    loudness.store_analysis(cache_cfg, os.path.join(root, "gone.flac"), entry)
-    assert loudness.cached_analysis(cache_cfg, os.path.join(root, "gone.flac")) is None
-
-    # ---- analyze_missing wiring: measure once, then serve from the cache --
-    # (A fresh file: the one above still has a valid cache entry.)
-    track2 = os.path.join(root, "Artist", "Album", "02 track.flac")
-    with open(track2, "wb") as f:
-        f.write(b"z" * 16)
-    calls = []
-    _real_analyze = loudness.analyze_file
-    loudness.analyze_file = lambda p, cfg=None, force=False: (
-        calls.append(p) or {"gain_db": 4.0, "peak": 0.5, "lufs": -22.0,
-                            "album_gain_db": None, "album_peak_db": None,
-                            "analyzed": True, "source": "ffmpeg"})
-    try:
-        cfg2 = dict(DEFAULT_CONFIG)
-        cfg2["music_folder"] = root
-        first = loudness.replaygain_for_path(cfg2, track2,
-                                             mode="track", preamp_db=0.0,
-                                             clip_protection=False)
-        assert first == {"gain": 4.0, "peak": 0.5, "mode": "track",
-                         "source": "ffmpeg", "analyzed": True,
-                         "pending": False, "album": False}, first
-        second = loudness.replaygain_for_path(cfg2, track2,
-                                              mode="track", preamp_db=0.0,
-                                              clip_protection=False)
-        assert second == first, second
-        assert calls == [track2], calls   # second call hit the cache
-    finally:
-        loudness.analyze_file = _real_analyze
-finally:
-    shutil.rmtree(root, ignore_errors=True)
-
-
-# ----------------------------------------------------------------------
-# Playback budget: the player installs a track's gain BEFORE it starts the
-# element, so its request must never wait for a whole decode to answer.
-# wait_s bounds that wait; the decode finishes in the background and its
-# value is cached, so the next request is a cache read.
-# ----------------------------------------------------------------------
-assert 0 < loudness.PLAYBACK_WAIT_S <= 2.0, loudness.PLAYBACK_WAIT_S
-
-root = tempfile.mkdtemp(prefix="mlo_rg_wait_")
-try:
-    cfg = dict(DEFAULT_CONFIG)
-    cfg["music_folder"] = root
-    cfg["replaygain_analyze_missing"] = True
-    slow = os.path.join(root, "slow.flac")
-    with open(slow, "wb") as f:
-        f.write(b"s" * 8)
-
-    calls = []
-    started = threading.Event()
-    release = threading.Event()
-    _real_analyze = loudness.analyze_file
-
-    def _slow_analyze(p, cfg=None, force=False):
-        calls.append(p)
-        started.set()
-        release.wait(30)
-        return {"gain_db": -5.0, "peak": 0.8, "lufs": -13.0,
-                "album_gain_db": None, "album_peak_db": None,
-                "analyzed": True, "source": "ffmpeg"}
-
-    loudness.analyze_file = _slow_analyze
-    try:
-        # A decode that outlives the budget answers unity long before the
-        # decode itself would: the request is not held for the measurement.
-        t0 = time.monotonic()
-        first = loudness.replaygain_for_path(
-            cfg, slow, mode="track", preamp_db=0.0, clip_protection=False,
-            wait_s=loudness.PLAYBACK_WAIT_S)
-        waited = time.monotonic() - t0
-        assert first["gain"] is None and first["analyzed"] is False, first
-        # ...and it says the decode is still running, which is what makes the
-        # player ask again instead of keeping this unity for the whole track.
-        assert first["pending"] is True, first
-        assert waited < 2.0, waited
-        assert started.wait(10), "the measurement never started"
-        assert loudness.cached_analysis(cfg, slow) is None
-
-        # A request that arrives while that run is going joins it instead of
-        # starting a second decode of the same file.
-        second = loudness.replaygain_for_path(
-            cfg, slow, mode="track", preamp_db=0.0, clip_protection=False,
-            wait_s=0.0)
-        assert second["gain"] is None and second["pending"] is True, second
-        assert calls == [slow], calls
-
-        # Once it lands, playback is answered from the cache — one decode.
-        release.set()
-        deadline = time.monotonic() + 10
-        while (loudness.cached_analysis(cfg, slow) is None
-               and time.monotonic() < deadline):
-            time.sleep(0.02)
-        settled = loudness.replaygain_for_path(
-            cfg, slow, mode="track", preamp_db=0.0, clip_protection=False,
-            wait_s=loudness.PLAYBACK_WAIT_S)
-        assert settled == {"gain": -5.0, "peak": 0.8, "mode": "track",
-                           "source": "ffmpeg", "analyzed": True,
-                           "pending": False, "album": False}, settled
-        assert calls == [slow], calls
-
-        # wait_s=None — the batch callers — still waits for the decode.
-        other = os.path.join(root, "other.flac")
-        with open(other, "wb") as f:
-            f.write(b"o" * 8)
-        blocked = loudness.replaygain_for_path(cfg, other, mode="track",
-                                               preamp_db=0.0,
-                                               clip_protection=False)
-        assert blocked["gain"] == -5.0, blocked
-        assert loudness.cached_analysis(cfg, other) is not None
-    finally:
-        release.set()
-        loudness.analyze_file = _real_analyze
-finally:
-    shutil.rmtree(root, ignore_errors=True)
 
 
 # ----------------------------------------------------------------------

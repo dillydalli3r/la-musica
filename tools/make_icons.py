@@ -10,13 +10,13 @@ script writes from it:
   browser favicon (``web/index.html``), the sidebar brand and the home-screen
   icon the manifest points at.
 - everything else — the desktop set (``icons/*.png``, ``icon.ico``,
-  ``icon.icns``, the Windows Store logos), ``icons/ios/**`` and
-  ``icons/android/**`` — is left to ``tools/make_tauri_icons.py``, which
-  drives the Tauri CLI pinned in ``desktop/package-lock.json``. That CLI is
-  the only *producer* of those files, so there is no second drawing code here
-  to drift from it. The one thing this script touches afterwards is the order
-  of the ICNS element blocks, which the CLI writes out of a ``HashMap`` — see
-  ``ordered_icns``, it moves no pixel.
+  ``icon.icns``, the Windows Store logos) — is left to
+  ``tools/make_tauri_icons.py``, which drives the Tauri CLI pinned in
+  ``desktop/package-lock.json``. That CLI is the only *producer* of those
+  files, so there is no second drawing code here to drift from it. The one
+  thing this script touches afterwards is the order of the ICNS element
+  blocks, which the CLI writes out of a ``HashMap`` — see ``ordered_icns``,
+  it moves no pixel.
 
 Run: python tools/make_icons.py
 """

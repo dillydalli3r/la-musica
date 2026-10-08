@@ -57,14 +57,6 @@
         "uninstallerIcon": "icons/icon.ico",
         "installerHooks": "installer-hooks.nsh"
       }
-    },
-    "iOS": {
-      "minimumSystemVersion": "14.0",
-      "bundleVersion": "5.5.0",
-      "infoPlist": "Info.plist"
-    },
-    "android": {
-      "minSdkVersion": 24
     }
   }
 }

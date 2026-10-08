@@ -28,7 +28,8 @@ header implies (`/`), and the cookie's name. One identity per stored pair, and
 a re-import leaves the comments exactly where they were.
 
 The file format, the strictness and the sentences are the SHARED ones
-(server/cookies.py, `parse_cookies`) — the same file the yt-dlp jar accepts.
+(server/cookies.py, `parse_cookies`) — the Netscape cookies.txt format every
+browser extension writes.
 
 No route here ever returns, logs or toasts a cookie VALUE: a session cookie is
 a live credential, so the settings panel is told names, counts and sentences.
@@ -40,9 +41,9 @@ from typing import List, Tuple
 from fastapi import APIRouter, HTTPException
 
 from mlo.config import load_config, save_config
-# One Netscape parser and one request model for the whole app: the yt-dlp jar
-# and this credential accept the same file, so the file-or-junk rules (and the
-# sentences that explain them) are the ones already proven on `/api/youtube`.
+# One Netscape parser and one request model for the whole app: the credential
+# accepts the same file a browser export produces, so the file-or-junk rules
+# (and the sentences that explain them) live with the parser.
 from server.cookies import (MAX_COOKIE_BYTES, CookieUpload, cookie_key,
                             cookie_row, expired_warning, hosts_match,
                             notes_for, parse_cookies, set_note)
@@ -60,7 +61,7 @@ RYM_HOST = "rateyourmusic.com"
 CONFIG_KEY = "rym_cookie"
 
 # The shared per-cookie notes store, and which slice of it is this credential's
-# (server/cookies.py; the same key holds the yt-dlp jar's notes).
+# (server/cookies.py; the same key that holds every other cookie source's notes).
 NOTES_KEY = "cookie_notes"
 SOURCE = "rym"
 
@@ -286,8 +287,8 @@ def rym_cookies_get():
 def rym_cookies_post(req: CookieUpload):
     """Save a pasted or dropped cookies.txt — its rateyourmusic.com cookies.
 
-    The text is validated as a Netscape cookie file FIRST, exactly as the
-    yt-dlp jar is (`server.cookies.parse_cookies`): junk is refused with the
+    The text is validated as a Netscape cookie file FIRST, as
+    `server.cookies.parse_cookies` requires: junk is refused with the
     reason instead of replacing a credential that works, and the body is
     refused BY SIZE before anything is parsed. A well-formed export that holds
     no rateyourmusic.com cookie replaces NOTHING — a signed-out tab's export
@@ -310,7 +311,7 @@ def rym_cookies_post(req: CookieUpload):
                  "\"cookies.txt\" extension writes it), then paste it here")
     size = len(text.encode("utf-8", errors="replace"))
     if size > MAX_COOKIE_BYTES:
-        # Rounded UP, as the yt-dlp jar is: the user is being told their file
+        # Rounded UP, as the size limit always is: the user is being told their file
         # is over the line, not shown a figure that matches it.
         raise HTTPException(
             413,

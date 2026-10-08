@@ -1,14 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { CloudDownload, PenLine, Play, Square, Plus, Trash2, Undo2, Keyboard } from "lucide-react";
-import { api, isOffline } from "../api";
-import { toast, useStore } from "../store";
+import { CloudDownload, PenLine, Plus, Trash2, Undo2, Keyboard } from "lucide-react";
+import { api } from "../api";
+import { toast } from "../store";
 import { LyricsKindChip } from "./Badges";
-import { playbackSource } from "../lib/mediaCache";
-import { fmtDuration } from "../lib/fmt";
 import Popover from "./Popover";
-import { nextSpeed, fmtSpeed } from "../lib/playback";
-import { useLyricsFollow } from "../lib/lyrScroll";
 import {
   loadLyricsKeys, saveLyricsKeys, resetLyricsKeys,
   keyLabel, matchKey, LYRICS_ACTIONS, LYRICS_KEY_DEFAULTS,
@@ -164,132 +160,6 @@ export function parseLrc(lrc: string, shiftMs = 0): LrcLine[] {
   });
 }
 
-/** parseLrc plus the clickable [00:00.00] leader: LRC parsing drops blank
- * lines, which leaves songs with an instrumental intro no top target —
- * synthesize one whenever the first real line arrives late. Both players'
- * lines and stored-transform seeding go through this, so their line
- * indexes always stay aligned. */
-export function parsePlayerLrc(text: string, shiftMs = 0): LrcLine[] {
-  const parsed = parseLrc(text, shiftMs);
-  if (parsed.length && parsed[0].time > 0.35) {
-    parsed.unshift({ ts: "[00:00.00]", time: 0, text: "" });
-  }
-  return parsed;
-}
-
-/** Seed stored xlit/trans arrays so index `i` matches main `displayLines[i]`:
- * synced transforms parse WITHOUT the time-0 leader (parseLrc, not
- * parsePlayerLrc), then take the main's leader when it has one — a plain
- * branch adds none either. Both panes share this, so no leader-shift. */
-export function splitStoredLines(s: string, withLeader = false): string[] {
-  // honey: blank-leader pad keeps xlit/trans 1:1; per-line realign if sources diverge.
-  const out = /\[\d{1,2}:\d{1,2}/.test(s)
-    ? parseLrc(s).map((l) => l.text)
-    : s.split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
-  if (withLeader && out.length) out.unshift("");
-  return out;
-}
-
-/** The active line range, background vocals included: lines stamped at the
- * SAME moment (duets, backing vocals — within 50 ms) form one cluster and
- * are sung simultaneously, so they all highlight together. Returns
- * [first, last] indexes of the current cluster, [-1, -1] before the first
- * line. */
-export function activeLineRange(lines: LrcLine[], t: number): [number, number] {
-  let end = -1;
-  for (let i = 0; i < lines.length; i++) {
-    if (lines[i].time <= t + 0.02) end = i;
-    else break;
-  }
-  if (end < 0) return [-1, -1];
-  let start = end;
-  while (start > 0 && lines[start - 1].time >= lines[end].time - 0.05) start--;
-  return [start, end];
-}
-
-/** Animated word/syllable karaoke sweep, shared by the fullscreen player,
- * the editor preview and the inline editor: the piece being sung pops
- * slightly with a soft glow, already-sung pieces stay lit, upcoming ones
- * stay dim. Each piece eases between states (color + transform), so the
- * sweep reads as motion instead of a hard swap. Works per word or per
- * syllable — the pieces carry their own granularity.
- *
- * Pieces are grouped into words first and each word is one unbreakable
- * inline-block: without that, a line break could land BETWEEN the
- * inline-block syllables of a single word and cut the word apart. */
-export function KaraokeWords({
-  words,
-  time,
-  currentClass = "text-accent scale-110 [text-shadow:0_0_16px_rgba(255,255,255,0.4)]",
-  sungClass = "text-white",
-  upcomingClass = "text-white/45",
-}: {
-  words: LrcWord[];
-  time: number;
-  currentClass?: string;
-  sungClass?: string;
-  upcomingClass?: string;
-}) {
-  // group the piece stream into words at the whitespace boundaries
-  const wordGroups: LrcWord[][] = [];
-  for (const w of words) {
-    const last = wordGroups[wordGroups.length - 1];
-    if (last && !/\s$/.test(last[last.length - 1].text)) last.push(w);
-    else wordGroups.push([w]);
-  }
-  return (
-    <>
-      {wordGroups.map((group, gi) => {
-        const trailing = /\s$/.test(group[group.length - 1].text);
-        return (
-          <span key={gi}>
-            <span className="inline-block whitespace-nowrap">
-              {group.map((w, wi) => {
-                const sung = w.time <= time + 0.04;
-                const nextT = wi < group.length - 1
-                  ? group[wi + 1].time
-                  : (wordGroups[gi + 1]?.[0]?.time ?? Infinity);
-                const current = sung && nextT > time + 0.04;
-                return (
-                  <span
-                    key={wi}
-                    className={`inline-block transition-[color,transform,text-shadow] duration-200 ease-out ${
-                      current ? currentClass : sung ? sungClass : upcomingClass
-                    }`}
-                    style={{ transformOrigin: "50% 75%" }}
-                  >
-                    {w.text.trimEnd()}
-                  </span>
-                );
-              })}
-            </span>
-            {trailing ? " " : null}
-          </span>
-        );
-      })}
-    </>
-  );
-}
-
-/** The app's own playback, handed in by a surface that ALREADY owns it — the
- *  fullscreen player. An editor embedded there must drive the SONG: this pane
- *  used to load its own copy, so it played a second audio beside the one the
- *  player was on (the owner's report), and "Preview" meant "start this other
- *  copy". With this, Preview, the space bar's stamps, the seek and the speed
- *  all act on the track the app is playing. */
-export interface LyricsPlayer {
-  /** Seconds into the track. */
-  getTime: () => number | undefined;
-  playing: boolean;
-  /** Whole-track length, when the surface knows one. */
-  duration?: number;
-  seek: (seconds: number) => void;
-  setPlaying: (on: boolean) => void;
-  /** Playback rate, when the surface exposes one (the player bar does). */
-  rate?: number;
-  setRate?: (rate: number) => void;
-}
-
 export function serializeLrc(lines: LrcLine[], decimals = 2): string {
   return lines
     .map((l) => {
@@ -319,7 +189,6 @@ export default function LyricsViewer({
   staged = false,
   allowPlain,
   onEnhancedEditor,
-  player,
 }: {
   path: string;
   initialLyrics: string;
@@ -337,26 +206,12 @@ export default function LyricsViewer({
    *  failing mark (the same rule the track's own payload kind follows).
    *  Undefined while the config is unread — the neutral chip, no failure. */
   allowPlain?: boolean;
-  /** Opens the full-screen enhanced editor (syllable tap-sync, playback
-   *  speed) when provided. */
+  /** Opens the full-screen enhanced editor when provided. */
   onEnhancedEditor?: () => void;
-  /** The song's own playback, when the host owns it (the fullscreen player).
-   *  Given, this pane drives THAT and loads nothing itself — see
-   *  `LyricsPlayer`. Absent, it is standalone (the track page) and runs its
-   *  own preview element. */
-  player?: LyricsPlayer;
 }) {
   const [lines, setLines] = useState<LrcLine[]>(() => parseLrc(initialLyrics));
   const [rawMode, setRawMode] = useState(false);
   const [raw, setRaw] = useState(initialLyrics);
-  const [playing, setPlaying] = useState(false);
-  const [playTime, setPlayTime] = useState(0);
-  const [speed, setSpeed] = useState(1);
-  // Field selector, not `useStore()`: a selector-less call re-rendered this
-  // whole pane — the scroller and every lyric row — on every store write,
-  // volume drag steps included.
-  const vol = useStore((s) => s.vol);
-  const [dur, setDur] = useState(duration ?? 0);
   const [selIdx, setSelIdx] = useState(0);
   const [loading, setLoading] = useState(false);
   const [keysMenu, setKeysMenu] = useState(false);
@@ -372,53 +227,7 @@ export default function LyricsViewer({
     return v === 2 || v === 3 ? v : decimals;
   });
   const historyRef = useRef<LrcLine[][]>([]);
-  const pendingWords = useRef<{ idx: number; parts: string[]; times: number[]; done: number } | null>(null);
   const [searchHits, setSearchHits] = useState<{ id: number; artist: string; track: string; duration?: number }[] | null>(null);
-  const audioRef = useRef<HTMLAudioElement>(null);
-  /** Embedded in a surface that already plays the song (the fullscreen
-   *  player): the pane then drives THAT playback, and the preview element
-   *  below is not rendered at all. */
-  const embedded = !!player;
-  // The tick below reads the LIVE accessor without resubscribing on every
-  // parent render (a new object each render would cancel and re-request the
-  // frame every time).
-  const playerRef = useRef(player);
-  playerRef.current = player;
-  const nowTime = () => {
-    if (player) {
-      const t = player.getTime();
-      return typeof t === "number" && isFinite(t) && t >= 0 ? t : 0;
-    }
-    return audioRef.current?.currentTime ?? 0;
-  };
-  // The pane's own `playing`/`playTime` stay the one vocabulary the rest of
-  // the code reads; embedded, they mirror the player's transport.
-  useEffect(() => {
-    if (player) setPlaying(!!player.playing);
-  }, [player, player?.playing]);
-  useEffect(() => {
-    if (!player) return;
-    let raf = 0;
-    let last = 0;
-    const tick = (now: number) => {
-      // 4 Hz: enough for the readout and a stamp, and nothing like the 60 fps
-      // follow clock a few hundred lines down (which reads the same source).
-      if (now - last > 250) {
-        last = now;
-        const t = playerRef.current?.getTime();
-        setPlayTime(typeof t === "number" && isFinite(t) && t >= 0 ? t : 0);
-      }
-      raf = requestAnimationFrame(tick);
-    };
-    raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
-  }, [player]);
-  // The track the preview element's source was last (or is being) resolved
-  // for: a cache lookup that lands after a track change must not overwrite
-  // the newer one's src.
-  const previewPath = useRef<string | null>(null);
-  const listRef = useRef<HTMLDivElement>(null);
-  const lineRefs = useRef<Record<number, HTMLDivElement | null>>({});
 
   // The host round-trips the text back in through this prop on every edit
   // (commit -> onChange -> parent state -> new initialLyrics), so resetting
@@ -445,7 +254,7 @@ export default function LyricsViewer({
   // the flags, not the text), so an empty initialLyrics means "ask the file".
   // Without this the panel announced "No lyrics yet" for a track whose lyrics
   // the chip next to it had just reported as present. Shares the ["tags", path]
-  // cache entry with the player bar / track page, so this is one request.
+  // cache entry with the track page, so this is one request.
   // A FAILED read is an error with its reason — never an empty pane that reads
   // as "this file has no lyrics".
   const { data: stored, isPending: storedPending, error: storedError } = useQuery({
@@ -467,45 +276,6 @@ export default function LyricsViewer({
     if (!parsed.length) setRawMode(true);
     historyRef.current = [];
   }, [stored, initialLyrics]);
-
-  // Active line derived from playback time (never conflated with the index).
-  const activeLine = useMemo(() => {
-    let idx = -1;
-    for (let i = 0; i < lines.length; i++) {
-      if (lines[i].time <= playTime + 0.02) idx = i;
-      else break;
-    }
-    return idx;
-  }, [playTime, lines]);
-
-  // Follow the playing line. The pane scrolls ITSELF: scrollIntoView walks
-  // every scrollable ancestor, so the editor's list used to drag the whole
-  // page it sits in along with it. Centring (0.5) reads better than the
-  // player's upper-third anchor on a short editing list.
-  const { takeOver } = useLyricsFollow({
-    active: activeLine,
-    time: playTime,
-    playing,
-    scroll: listRef,
-    rows: lineRefs,
-    reset: path,
-    anchor: 0.5,
-  });
-
-  // The preview is a second decoder: the player bar's volume effect only
-  // reaches its own elements, so this one follows the shared app volume
-  // (and the speed bindings) itself.
-  useEffect(() => {
-    const a = audioRef.current;
-    if (!a || embedded) return;   // embedded: the player owns the song's volume
-    a.playbackRate = speed;
-    a.volume = vol;
-  }, [speed, vol, playing, embedded]);
-
-  // A track change abandons a source still resolving for the old one.
-  useEffect(() => {
-    previewPath.current = null;
-  }, [path]);
 
   const emit = (ls: LrcLine[]) => {
     const text = serializeLrc(ls, dec);
@@ -580,134 +350,6 @@ export default function LyricsViewer({
     toast(`${delta > 0 ? "+" : ""}${delta.toFixed(1)}s applied to all lines`);
   };
 
-  const togglePlay = () => {
-    if (player) {
-      // Embedded: this button is the SONG's transport. Starting it from the
-      // selected line is the editor's whole point ("play from here"), which is
-      // also what the sidebar's own preview does.
-      if (player.playing) {
-        player.setPlaying(false);
-        return;
-      }
-      const at = lines[Math.max(0, Math.min(selIdx, lines.length - 1))]?.time;
-      if (typeof at === "number" && at > 0) player.seek(Math.max(0, at - 0.15));
-      player.setPlaying(true);
-      return;
-    }
-    const audio = audioRef.current;
-    if (!audio) return;
-    if (playing) {
-      audio.pause();
-      setPlaying(false);
-    } else {
-      const p = path;
-      // The same resolution the player bar uses (lib/mediaCache): a downloaded
-      // track previews in a shell with no server, and `playback_source`
-      // decides which copy plays while both are available. The lookup is
-      // async, so the guard below keeps a slow one from pointing the element
-      // at the track we have since left.
-      previewPath.current = p;
-      void (async () => {
-        const source = await playbackSource(p);
-        if (previewPath.current !== p) return;
-        if (!source.cached && isOffline()) {
-          toast.error(`“${track || p}” isn’t downloaded — it needs the server to play.`);
-        }
-        audio.src = source.src;
-        audio.playbackRate = speed;
-        audio.volume = vol;
-        audio.play().catch(() => toast("Playback failed — audio format unsupported in browser"));
-      })();
-      setPlaying(true);
-    }
-  };
-
-  /** Step the playback rate — embedded, the SONG's rate (the same one the
-   *  player bar cycles), standalone the preview's. */
-  const stepSpeed = (dir: 1 | -1) => {
-    const next = nextSpeed(embedded && player?.rate ? player.rate : speed, dir);
-    if (embedded) {
-      player?.setRate?.(next);
-      toast(`Playback speed ${fmtSpeed(next)}`);
-      return;
-    }
-    setSpeed(next);
-    if (audioRef.current) audioRef.current.playbackRate = next;
-    toast(`Preview speed ${fmtSpeed(next)}`);
-  };
-
-  const seekTo = (time: number) => {
-    if (player) {
-      player.seek(time);
-      setPlayTime(time);
-      return;
-    }
-    const audio = audioRef.current;
-    if (!audio) return;
-    audio.currentTime = time;
-    setPlayTime(time);
-  };
-
-  // ---- ELRC word stamping ------------------------------------------------
-  // Word stamps accumulate in a ref while the line is being sung; the ELRC
-  // word list is only attached once every word has a timestamp, so partial
-  // stamping never serializes zeros into the saved lyrics.
-  const stampWord = () => {
-    if (!embedded && !audioRef.current) return;
-    if (!playing) {
-      toast("Press Play first, then stamp words while the song plays");
-      return;
-    }
-    const idx = Math.max(0, Math.min(selIdx, lines.length - 1));
-    const line = lines[idx];
-    if (!line) return;
-    const parts = line.text.trim().split(/\s+/).filter(Boolean);
-    if (!parts.length) {
-      toast("Type the lyric text first, then stamp its words");
-      return;
-    }
-    if (
-      !pendingWords.current ||
-      pendingWords.current.idx !== idx ||
-      pendingWords.current.parts.join("\u0000") !== parts.join("\u0000")
-    ) {
-      pendingWords.current = { idx, parts, times: parts.map(() => 0), done: 0 };
-    }
-    const pending = pendingWords.current;
-    if (pending.done >= parts.length) {
-      toast("All words stamped — select the next line");
-      return;
-    }
-    const t = Math.max(0, nowTime() - 0.05);
-    pending.times[pending.done] = t;
-    pending.done += 1;
-    setPlayTime(t);
-    if (pending.done >= parts.length) {
-      const next = lines.map((l, j) =>
-        j === idx ? { ...l, words: parts.map((text, wi) => ({ text, time: pending.times[wi] })) } : l
-      );
-      commit(next);
-      pendingWords.current = null;
-      toast("Line word-synced ✓ — select the next line");
-    } else {
-      toast(`Word ${pending.done}/${parts.length} stamped`);
-    }
-  };
-
-  const stampLine = () => {
-    if ((!embedded && !audioRef.current) || !playing) {
-      toast("Press Play first, then stamp each line's time");
-      return;
-    }
-    const t = Math.max(0, nowTime() - 0.05);
-    const target = activeLine >= 0 ? activeLine : selIdx;
-    const idx = Math.min(target, Math.max(0, lines.length - 1));
-    const next = lines.map((l, j) => (j === idx ? { ...l, time: t, ts: fmtTs(t, dec) } : l));
-    commit(next);
-    setSelIdx((s) => Math.min(s + 1, Math.max(0, lines.length - 1)));
-    setPlayTime(t);
-  };
-
   // ---- Customizable hotkeys ----------------------------------------------
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -744,22 +386,7 @@ export default function LyricsViewer({
         return;
       }
       if (isLyricTextInput || isOtherInput) return; // don't hijack typing
-      if (matchKey(e, keys, "stampLine")) {
-        e.preventDefault();
-        stampLine();
-      } else if (matchKey(e, keys, "stampWord")) {
-        e.preventDefault();
-        stampWord();
-      } else if (matchKey(e, keys, "playPause")) {
-        e.preventDefault();
-        togglePlay();
-      } else if (matchKey(e, keys, "seekBack")) {
-        e.preventDefault();
-        seekTo(Math.max(0, playTime - 2));
-      } else if (matchKey(e, keys, "seekForward")) {
-        e.preventDefault();
-        seekTo(playTime + 2);
-      } else if (matchKey(e, keys, "prevLine")) {
+      if (matchKey(e, keys, "prevLine")) {
         e.preventDefault();
         setSelIdx((s) => Math.max(0, s - 1));
       } else if (matchKey(e, keys, "nextLine")) {
@@ -768,18 +395,12 @@ export default function LyricsViewer({
       } else if (matchKey(e, keys, "undo")) {
         e.preventDefault();
         undo();
-      } else if (matchKey(e, keys, "speedSlower")) {
-        e.preventDefault();
-        stepSpeed(-1);
-      } else if (matchKey(e, keys, "speedFaster")) {
-        e.preventDefault();
-        stepSpeed(1);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [playing, selIdx, lines, activeLine, playTime, keys, capturing, onSave, speed]);
+  }, [selIdx, lines.length, keys, capturing, onSave]);
 
   // ---- provider import -----------------------------------------------------
   const importFromProviders = async () => {
@@ -818,7 +439,6 @@ export default function LyricsViewer({
     setRaw(lrc);
     emit(parsed);
     setSelIdx(0);
-    pendingWords.current = null;
     const wordCount = parsed.reduce((n, l) => n + (l.words?.length ? 1 : 0), 0);
     toast(
       wordCount
@@ -848,37 +468,19 @@ export default function LyricsViewer({
   return (
     <div
       data-lrc-editor
-      className={
-        embedded
-          // Embedded (the fullscreen player): the host's own pane IS the
-          // surface, so this draws none of its own — a second card inside the
-          // player's column was the "inconsistent" half of the owner's report.
-          ? "flex flex-col min-h-0 flex-1"
-          : "bg-card rounded-lg border border-border p-4 flex flex-col"
-      }
+      className="bg-card rounded-lg border border-border p-4 flex flex-col"
     >
       <div className="flex items-center justify-between mb-3 flex-wrap gap-1.5">
         <div className="flex items-center gap-2 min-w-0">
-          {!embedded && (
-            <div className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Lyrics</div>
-          )}
-          {/* Which KIND the text in this pane is — live, so stamping a line
-              turns it into "Synced" before anything is saved. The track's own
-              stored kind is the payload's (`lyrics_kind`), shown by the page
-              header and the rows; this one describes the words being edited. */}
+          <div className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Lyrics</div>
+          {/* Which KIND the text in this pane is — live, so entering a line's
+              timestamp turns it into "Synced" before anything is saved. The
+              track's own stored kind is the payload's (`lyrics_kind`), shown by
+              the page header and the rows; this one describes the words being
+              edited. */}
           <LyricsKindChip kind={lyricsKindOf(rawMode ? raw : serializeLrc(lines, dec))} allowPlain={allowPlain} size="sm" />
         </div>
         <div className="flex gap-1.5 flex-wrap">
-          <button
-            className={`btn-ghost !py-1 text-xs ${embedded ? "!py-1.5" : ""}`}
-            onClick={togglePlay}
-            title={embedded
-              ? "Play the song from the selected line (the same playback as the player below)"
-              : "Preview these lyrics against a copy of the track"}
-          >
-            {playing ? <Square className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
-            {playing ? "Stop" : embedded ? "Play from here" : "Preview"}
-          </button>
           <button className="btn-ghost !py-1 text-xs" onClick={importFromProviders} disabled={loading}>
             <CloudDownload className="h-3.5 w-3.5" /> Auto-import
           </button>
@@ -886,7 +488,7 @@ export default function LyricsViewer({
             <button
               className="btn-ghost !py-1 text-xs"
               onClick={onEnhancedEditor}
-              title="Full-screen enhanced editor — syllable tap-sync along the vocals, playback speed"
+              title="Full-screen enhanced editor — per-line timestamps, word/syllable splitting and auto-distribution"
             >
               <PenLine className="h-3.5 w-3.5" /> Enhanced
             </button>
@@ -970,18 +572,6 @@ export default function LyricsViewer({
         </div>
       </div>
 
-      {/* Standalone only: embedded in the player, the SONG is the audio and a
-          second element would be a second decoder of the same file. */}
-      {!embedded && (
-        <audio
-          ref={audioRef}
-          onTimeUpdate={(e) => setPlayTime(e.currentTarget.currentTime)}
-          onLoadedMetadata={(e) => setDur(e.currentTarget.duration || 0)}
-          onEnded={() => setPlaying(false)}
-          className="hidden"
-        />
-      )}
-
       {searchHits && (
         <div className="rounded-md border border-border bg-panel p-3 mb-2">
           <div className="text-[11px] text-zinc-400 mb-1.5">
@@ -1026,49 +616,23 @@ export default function LyricsViewer({
             </span>
           ) : (
             <>
-              No lyrics yet. Press <kbd className="chip bg-raise border border-border">Play</kbd>, then select a line and
-              press <kbd className="chip bg-raise border border-border">{keys.stampLine}</kbd> on each line to stamp its
-              timestamp — or auto-import lyrics from a provider.
+              No lyrics yet. Auto-import lyrics from a provider, or switch to the{" "}
+              <b>Raw</b> editor and type them.
             </>
           )}
         </div>
       ) : (
-        <div
-          ref={listRef}
-          className="flex-1 space-y-1 max-h-[420px] overflow-auto pr-1"
-          onWheel={(e) => {
-            if (e.deltaY !== 0) takeOver();
-          }}
-          onTouchStart={takeOver}
-        >
+        <div className="flex-1 space-y-1 max-h-[420px] overflow-auto pr-1">
           {lines.map((l, i) => (
             <div
               key={i}
-              ref={(el) => {
-                lineRefs.current[i] = el;
-              }}
               className={`group flex items-center gap-2 rounded-lg border px-2 py-1.5 transition-colors ${
-                i === activeLine && playing
-                  ? "border-accent/60 bg-accent/20"
-                  : i === selIdx
-                    ? "border-accent/30 bg-panel"
-                    : "border-transparent hover:border-border hover:bg-panel"
+                i === selIdx
+                  ? "border-accent/30 bg-panel"
+                  : "border-transparent hover:border-border hover:bg-panel"
               }`}
-              onClick={() => {
-                if (i !== selIdx) pendingWords.current = null;
-                setSelIdx(i);
-              }}
+              onClick={() => setSelIdx(i)}
             >
-              <button
-                className="p-0.5 text-zinc-600 hover:text-accent-soft shrink-0"
-                title={`Seek to ${l.ts}`}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  seekTo(l.time);
-                }}
-              >
-                <Play className="h-3 w-3" />
-              </button>
               <input
                 className="w-[86px] bg-transparent font-mono text-xs text-zinc-400 outline-none border border-transparent focus:border-accent rounded px-1 py-0.5"
                 value={l.ts}
@@ -1082,39 +646,27 @@ export default function LyricsViewer({
                   updateLine(i, { ts: e.target.value, time });
                 }}
               />
-              {i === activeLine && playing && l.words?.length ? (
-                <span className="flex-1 text-sm px-1">
-                  <KaraokeWords
-                    words={l.words}
-                    time={playTime}
-                    currentClass="text-accent font-semibold scale-110"
-                    sungClass="text-zinc-200"
-                    upcomingClass="text-zinc-500"
-                  />
-                </span>
-              ) : (
-                <div className="flex-1 flex items-center gap-1.5 min-w-0">
-                  <input
-                    data-lyrictext
-                    className="flex-1 bg-transparent text-sm text-zinc-200 outline-none border border-transparent focus:border-accent rounded px-1 py-0.5 min-w-0"
-                    value={l.text}
-                    placeholder="Lyric line…"
-                    onChange={(e) => updateLine(i, { text: e.target.value })}
-                  />
-                  {l.words?.length ? (
-                    <span
-                      className={`chip text-[9px] shrink-0 border ${
-                        l.syl
-                          ? "bg-accent/10 border-accent/25 text-accent-soft"
-                          : "bg-white/5 border-white/15 text-zinc-400"
-                      }`}
-                      title={l.syl ? "Syllable-synced (glued ELRC tags)" : "Word-synced (ELRC)"}
-                    >
-                      {l.words.length}{l.syl ? "s" : "w"}
-                    </span>
-                  ) : null}
-                </div>
-              )}
+              <div className="flex-1 flex items-center gap-1.5 min-w-0">
+                <input
+                  data-lyrictext
+                  className="flex-1 bg-transparent text-sm text-zinc-200 outline-none border border-transparent focus:border-accent rounded px-1 py-0.5 min-w-0"
+                  value={l.text}
+                  placeholder="Lyric line…"
+                  onChange={(e) => updateLine(i, { text: e.target.value })}
+                />
+                {l.words?.length ? (
+                  <span
+                    className={`chip text-[9px] shrink-0 border ${
+                      l.syl
+                        ? "bg-accent/10 border-accent/25 text-accent-soft"
+                        : "bg-white/5 border-white/15 text-zinc-400"
+                    }`}
+                    title={l.syl ? "Syllable-synced (glued ELRC tags)" : "Word-synced (ELRC)"}
+                  >
+                    {l.words.length}{l.syl ? "s" : "w"}
+                  </span>
+                ) : null}
+              </div>
               <div className="opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100 flex gap-1 transition-opacity shrink-0">
                 <button className="text-zinc-500 hover:text-accent-soft" onClick={(e) => { e.stopPropagation(); addLine(i); }} title="Add line after">
                   <Plus className="h-3.5 w-3.5" />
@@ -1128,22 +680,6 @@ export default function LyricsViewer({
         </div>
       )}
       <div className="mt-2 flex items-center gap-2">
-        {/* The readout beside the slider is the stamp the NEXT press writes, so
-            it carries the same digits the saved line will (`fmtStamp`, the one
-            formatter `serializeLrc` writes with) — a whole-second readout left
-            the reader guessing what "0:12" would become. */}
-        <span className="text-[10px] font-mono text-zinc-500 w-16 text-right shrink-0">{fmtStamp(playTime, dec)}</span>
-        <input
-          type="range"
-          min={0}
-          max={dur || 0}
-          step={0.05}
-          value={Math.min(playTime, dur || 0)}
-          onChange={(e) => seekTo(Number(e.target.value))}
-          className="flex-1 "
-          title="Seek within the track"
-        />
-        <span className="text-[10px] font-mono text-zinc-500 w-10 shrink-0">{fmtDuration(dur || 0)}</span>
         <div className="flex gap-1 shrink-0">
           <button className="btn-ghost !px-1.5 !py-0.5 text-[10px]" onClick={() => shiftAll(-0.1)} title="Shift all timestamps 0.1s earlier">−0.1s</button>
           <button className="btn-ghost !px-1.5 !py-0.5 text-[10px]" onClick={() => shiftAll(0.1)} title="Shift all timestamps 0.1s later">+0.1s</button>
@@ -1153,9 +689,8 @@ export default function LyricsViewer({
         </div>
       </div>
       <div className="mt-1.5 text-[10px] text-zinc-600">
-        {keys.stampLine} stamps the <b>line being sung</b> and advances · {keys.stampWord} stamps word-by-word (ELRC) ·
-        {" "}{keys.playPause} play/pause · {keys.seekBack}/{keys.seekForward} seek · click <Keyboard className="inline h-3 w-3" /> to rebind ·
-        ▶ seeks to a line · timestamps format to {dec} decimals on save
+        {keys.prevLine}/{keys.nextLine} move between lines · {keys.undo} undo · {keys.save} save · click{" "}
+        <Keyboard className="inline h-3 w-3" /> to rebind · timestamps format to {dec} decimals on save
       </div>
     </div>
   );

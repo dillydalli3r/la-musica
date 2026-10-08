@@ -35,11 +35,11 @@ export default function Popover({
   open: boolean;
   onClose: () => void;
   children: ReactNode;
-  /** `"top"` is for triggers pinned to the bottom of the window (the player
-   *  bar): a downward panel there would open off-screen. */
+  /** `"top"` is for triggers pinned near the bottom of the window: a downward
+   *  panel there would open off-screen. */
   placement?: "bottom" | "top";
   /** `"center"` centres the panel under a trigger that has no left or right
-   *  edge worth aligning to (the transport row's icon buttons). */
+   *  edge worth aligning to. */
   align?: "left" | "right" | "center";
   panelClass?: string;
   /** Off for popovers that live inside a dialog which already has its own
@@ -52,13 +52,12 @@ export default function Popover({
    *  edge AND painted under the sidebar: that is what made the notification
    *  tray unreadable. */
   fixed?: boolean;
-  /** Frosted panel for menus that float over the fullscreen player's artwork:
-   *  the blur-and-tint veil (`np-veil np-veil-dark np-veil-panel`,
-   *  index.css) instead of the opaque `bg-zinc-950` fill, so the cover stays
-   *  visible behind the panel. The tint is pinned to the DARK one whatever
-   *  cover is up: these rows are zinc-300, and a light-polarity veil would
-   *  invert them into unreadability. Every other caller keeps the solid panel
-   *  it was designed with. */
+  /** Frosted panel for menus that float over artwork: the blur-and-tint veil
+   *  (`np-veil np-veil-dark np-veil-panel`, index.css) instead of the opaque
+   *  `bg-zinc-950` fill, so the art stays visible behind the panel. The tint is
+   *  pinned to the DARK one: these rows are zinc-300, and a light-polarity veil
+   *  would invert them into unreadability. Every other caller keeps the solid
+   *  panel it was designed with. */
   frost?: boolean;
   /** Fixed mode only: pin the panel this many px from the VIEWPORT's right
    *  edge instead of aligning its right edge to the trigger's. For a panel

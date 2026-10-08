@@ -26,7 +26,7 @@ Every claim below is about the real code, not a copy of it:
   * nothing this module answers with ever contains a cookie VALUE: no route
     returns it, so no state a client can hold can leak it;
   * the shared Netscape parser (`server/cookies.py`) still
-    answers the yt-dlp jar with names only unless values are asked for.
+    answers a Netscape jar with names only unless values are asked for.
 
 Hermetic: the music folder is redirected to a temp dir (MLO_MUSIC_FOLDER) and
 mlo.config/mlo.paths' CONFIG_FILE to a temp stub, so the config under test is
@@ -112,11 +112,11 @@ JUNK = [
     ("just some words\nand more words\n", "not a Netscape cookie file"),
     ('{"cookies": [{"name": "session"}]}\n', "not a Netscape cookie file"),
     # 7 columns, but the flags are not booleans — the shared parser's own rule
-    # (yt-dlp's loader refuses the WHOLE file when they are broken).
+    # (a Netscape loader refuses the WHOLE file when they are broken).
     (".rateyourmusic.com\tMAYBE\t/\tTRUE\t1893456000\tsession\tx\n",
      "not a Netscape cookie file"),
     # A leading dot and a FALSE flag disagree: the shared parser rejects it,
-    # so a jar yt-dlp would refuse can never become this credential either.
+    # so a jar a Netscape loader would refuse can never become this credential either.
     (".rateyourmusic.com\tFALSE\t/\tTRUE\t1893456000\tsession\tx\n",
      "not a Netscape cookie file"),
 ]
@@ -170,7 +170,7 @@ try:
     assert error is None, error
     assert with_values[0] == ("rateyourmusic.com", "session", "S3SSION-VALUE"), \
         with_values[0]
-    # The yt-dlp jar's own answer is unchanged: names and domains only.
+    # The Netscape jar's own answer is unchanged: names and domains only.
     assert all(len(row) == 2 for row in plain), plain
 
     # The filter: RYM's own host and its subdomains, nothing else.

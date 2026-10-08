@@ -1,27 +1,22 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
-  Eraser, Keyboard, Loader2, Pause, Play, Plus, Save,
+  Eraser, Keyboard, Loader2, Plus, Save,
   Trash2, Undo2, Wand2,
 } from "lucide-react";
-import { api, isOffline } from "../api";
-import { toast, useStore } from "../store";
-import { playbackSource } from "../lib/mediaCache";
+import { api } from "../api";
+import { toast } from "../store";
 import {
-  parseLrc, serializeLrc, fmtStamp, KaraokeWords, type LrcLine, type LrcWord,
+  parseLrc, serializeLrc, fmtStamp, type LrcLine,
 } from "./LyricsViewer";
-import { fmtDuration } from "../lib/fmt";
 import {
   loadLyricsKeys, saveLyricsKeys, resetLyricsKeys,
   keyLabel, matchKey, LYRICS_ACTIONS, LYRICS_KEY_DEFAULTS,
   type LyricsAction,
 } from "../lib/lyricsKeys";
 import { syllabifyLine } from "../lib/syllables";
-import { SPEEDS, fmtSpeed } from "../lib/playback";
 import Modal from "./Modal";
 import Popover from "./Popover";
-
-type StampMode = "line" | "word" | "syllable";
 
 /** Parse stored lyrics into editor lines; plain text becomes untimed
  * lines ready for stamping. An untimed line carries NO stamp text: its row
@@ -37,26 +32,15 @@ function toLines(text: string): LrcLine[] {
     .map((text) => ({ ts: "", time: 0, text }));
 }
 
-/** The next syllable/word pending-stamp state: pieces + collected times,
- * committed to the line only once every piece has a time. */
-interface Pending {
-  idx: number;
-  key: string;
-  pieces: string[]; // text pieces incl. their trailing space
-  times: number[];
-  done: number;
-}
-
-/** Enhanced lyric editor / creator: stamp line, word and SYLLABLE times
- * along the vocals (at any playback speed), auto-distribute word/syllable
- * times inside stamped lines, and save into the LYRICS tag / .lrc
- * sidecar. */
+/** Enhanced lyric editor / creator: type or paste lyrics, enter each line's
+ *  start time by hand, split a line into words/syllables, auto-distribute
+ *  word/syllable times inside stamped lines, and save into the LYRICS tag /
+ *  .lrc sidecar. */
 export default function LyricsEditorModal({
   path,
   artist,
   track,
   album,
-  duration,
   initialLyrics,
   onClose,
   onSaved,
@@ -65,7 +49,6 @@ export default function LyricsEditorModal({
   artist?: string;
   track?: string;
   album?: string;
-  duration?: number;
   initialLyrics: string;
   onClose: () => void;
   onSaved?: () => void;
@@ -73,16 +56,6 @@ export default function LyricsEditorModal({
   const [lines, setLines] = useState<LrcLine[]>(() => toLines(initialLyrics));
   const [draft, setDraft] = useState("");
   const [selIdx, setSelIdx] = useState(0);
-  const [playing, setPlaying] = useState(false);
-  const [playTime, setPlayTime] = useState(0);
-  const [dur, setDur] = useState(duration ?? 0);  const [speed, setSpeed] = useState(1);
-  // The preview element is a second decoder — the player bar's volume effect
-  // never reaches it, so it follows the shared app volume itself.
-  // Field selector, not `useStore()`: the modal's line list is a big subtree
-  // and used to re-render on every unrelated store write, volume frames
-  // included.
-  const vol = useStore((s) => s.vol);
-  const [mode, setMode] = useState<StampMode>("line");
   const [busy, setBusy] = useState<string | null>(null);
   const [keysMenu, setKeysMenu] = useState(false);
   const [capturing, setCapturing] = useState<LyricsAction | null>(null);
@@ -95,55 +68,18 @@ export default function LyricsEditorModal({
     return v === 2 || v === 3 ? v : 2;
   });
   const historyRef = useRef<LrcLine[][]>([]);
-  const pendingRef = useRef<Pending | null>(null);
   const capturingRef = useRef<LyricsAction | null>(null);
-  const audioRef = useRef<HTMLAudioElement>(null);
-  // The track the preview element's source was resolved for — see togglePlay.
-  const previewPath = useRef<string | null>(null);
-  const listRef = useRef<HTMLDivElement>(null);
   const rowRefs = useRef<Record<number, HTMLDivElement | null>>({});
 
   useEffect(() => {
     setLines(toLines(initialLyrics));
     historyRef.current = [];
-    pendingRef.current = null;
   }, [initialLyrics]);
 
-  // Keep the selected row visible while navigating / stamping.
+  // Keep the selected row visible while navigating.
   useEffect(() => {
     rowRefs.current[selIdx]?.scrollIntoView({ block: "nearest" });
   }, [selIdx]);
-
-  // Playback rate follows the speed control (pitch preserved); volume
-  // follows the app-wide setting.
-  useEffect(() => {
-    const a = audioRef.current;
-    if (!a) return;
-    a.playbackRate = speed;
-    a.volume = vol;
-  }, [speed, vol, playing]);
-
-  // Smooth clock while playing.
-  useEffect(() => {
-    if (!playing) return;
-    let raf = 0;
-    const tick = () => {
-      const a = audioRef.current;
-      if (a) setPlayTime(a.currentTime);
-      raf = requestAnimationFrame(tick);
-    };
-    raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
-  }, [playing]);
-
-  const activeLine = useMemo(() => {
-    let idx = -1;
-    for (let i = 0; i < lines.length; i++) {
-      if (lines[i].time <= playTime + 0.02) idx = i;
-      else break;
-    }
-    return idx;
-  }, [lines, playTime]);
 
   const commit = (next: LrcLine[]) => {
     historyRef.current.push(lines);
@@ -157,132 +93,6 @@ export default function LyricsEditorModal({
       return;
     }
     setLines(prev);
-    pendingRef.current = null;
-  };
-
-  const audio = () => audioRef.current;
-
-  const togglePlay = () => {
-    const a = audio();
-    if (!a) return;
-    if (playing) {
-      a.pause();
-      setPlaying(false);
-    } else {
-      const p = path;
-      const start = () => {
-        a.playbackRate = speed;
-        a.volume = vol;
-        a.play().catch(() => toast("Playback failed — audio format unsupported in browser"));
-      };
-      if (a.src) {
-        start();
-      } else {
-        // Cache first, exactly like the player bar: a downloaded track
-        // previews in a shell with no server. The lookup is async, so a
-        // track change while it is in flight must win over the late result.
-        previewPath.current = p;
-        void (async () => {
-          const source = await playbackSource(p);
-          if (previewPath.current !== p) return;
-          if (!source.cached && isOffline()) {
-            toast.error(`“${track || p}” isn’t downloaded — it needs the server to play.`);
-          }
-          a.src = source.src;
-          start();
-        })();
-      }
-      setPlaying(true);
-    }
-  };
-
-  const seekTo = (t: number) => {
-    const a = audio();
-    if (!a) return;
-    a.currentTime = Math.max(0, t);
-    setPlayTime(a.currentTime);
-  };
-
-  const stepSpeed = (dir: 1 | -1) => {
-    const i = SPEEDS.indexOf(speed);
-    const next = SPEEDS[Math.min(SPEEDS.length - 1, Math.max(0, (i < 0 ? SPEEDS.indexOf(1) : i) + dir))];
-    setSpeed(next);
-  };
-
-  /** Start (or continue) a pending word/syllable stamp run for a line. */
-  const pendingFor = (idx: number, pieces: string[]): Pending => {
-    const p = pendingRef.current;
-    const key = pieces.join("\u0000");
-    if (p && p.idx === idx && p.key === key) return p;
-    const fresh: Pending = { idx, key, pieces, times: pieces.map(() => 0), done: 0 };
-    pendingRef.current = fresh;
-    return fresh;
-  };
-
-  const stampLine = () => {
-    const a = audio();
-    if (!a || !playing) {
-      toast("Press Play first, then stamp each line's time");
-      return;
-    }
-    if (!lines.length) {
-      toast("Add or paste lyric lines first");
-      return;
-    }
-    const t = Math.max(0, a.currentTime - 0.05);
-    const idx = Math.min(Math.max(selIdx, 0), lines.length - 1);
-    commit(lines.map((l, j) => (j === idx ? { ...l, time: t, ts: "" } : l)));
-    setSelIdx(Math.min(idx + 1, lines.length - 1));
-    setPlayTime(t);
-  };
-
-  /** Shared word/syllable tap-stamping: pieces carry their own spacing
-   * (a word-final piece ends with a space, glued syllables don't), so the
-   * committed word list re-serializes to canonical ELRC. */
-  const stampPieces = (kind: "word" | "syllable") => {
-    const a = audio();
-    if (!a || !playing) {
-      toast("Press Play first, then tap along with the vocals");
-      return;
-    }
-    const idx = Math.min(Math.max(selIdx, 0), lines.length - 1);
-    const line = lines[idx];
-    if (!line?.text.trim()) {
-      toast("Type the lyric text first, then stamp it");
-      return;
-    }
-    let pieces: string[];
-    if (kind === "syllable") {
-      pieces = syllabifyLine(line.text).map((s) => s.text + (s.wordEnd ? " " : ""));
-    } else {
-      pieces = line.text.trim().split(/\s+/).map((w, i, arr) => (i < arr.length - 1 ? `${w} ` : w));
-    }
-    if (!pieces.length) return;
-    const p = pendingFor(idx, pieces);
-    if (p.done >= p.pieces.length) {
-      toast(`${kind === "syllable" ? "Syllables" : "Words"} complete — select the next line`);
-      return;
-    }
-    const t = Math.max(0, a.currentTime - 0.05);
-    p.times[p.done] = t;
-    p.done += 1;
-    setPlayTime(t);
-    if (p.done >= p.pieces.length) {
-      const words: LrcWord[] = p.pieces.map((text, i) => ({ time: p.times[i], text }));
-      commit(lines.map((l, j) => (j === idx ? { ...l, words } : l)));
-      pendingRef.current = null;
-      toast(`${kind === "syllable" ? "Syllable" : "Word"}-synced ✓ — next line selected`);
-      setSelIdx(Math.min(idx + 1, lines.length - 1));
-    } else {
-      const total = p.pieces.length;
-      toast(`${kind === "syllable" ? "Syllable" : "Word"} ${p.done}/${total}`);
-    }
-  };
-
-  const stampForMode = () => {
-    if (mode === "line") stampLine();
-    else if (mode === "word") stampPieces("word");
-    else stampPieces("syllable");
   };
 
   const shiftAll = (delta: number) => {
@@ -304,8 +114,6 @@ export default function LyricsEditorModal({
 
   const updateLine = (i: number, patch: Partial<LrcLine>) => {
     const next = lines.map((l, j) => (j === i ? { ...l, ...patch } : l));
-    // Text edits invalidate half-stamped runs for that line.
-    if (pendingRef.current?.idx === i && "text" in patch) pendingRef.current = null;
     commit(next);
   };
 
@@ -404,25 +212,7 @@ export default function LyricsEditorModal({
         return;
       }
       if (isTextInput || isOtherInput) return; // don't hijack typing
-      if (matchKey(e, keys, "stampLine")) {
-        e.preventDefault();
-        stampForMode();
-      } else if (matchKey(e, keys, "stampSyllable")) {
-        e.preventDefault();
-        stampPieces("syllable");
-      } else if (matchKey(e, keys, "stampWord")) {
-        e.preventDefault();
-        stampPieces("word");
-      } else if (matchKey(e, keys, "playPause")) {
-        e.preventDefault();
-        togglePlay();
-      } else if (matchKey(e, keys, "seekBack")) {
-        e.preventDefault();
-        seekTo(playTime - 2);
-      } else if (matchKey(e, keys, "seekForward")) {
-        e.preventDefault();
-        seekTo(playTime + 2);
-      } else if (matchKey(e, keys, "prevLine")) {
+      if (matchKey(e, keys, "prevLine")) {
         e.preventDefault();
         setSelIdx((s) => Math.max(0, s - 1));
       } else if (matchKey(e, keys, "nextLine")) {
@@ -431,18 +221,12 @@ export default function LyricsEditorModal({
       } else if (matchKey(e, keys, "undo")) {
         e.preventDefault();
         undo();
-      } else if (matchKey(e, keys, "speedSlower")) {
-        e.preventDefault();
-        stepSpeed(-1);
-      } else if (matchKey(e, keys, "speedFaster")) {
-        e.preventDefault();
-        stepSpeed(1);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [playing, selIdx, lines, playTime, keys, capturing, mode, speed, saveTarget, dec]);
+  }, [selIdx, lines.length, keys, capturing, saveTarget, dec]);
 
   /** Backdrop, cross and Escape all land here. Rebinding a hotkey must not
    *  close the editor — the "press key…" capture is cancelled with Escape. */
@@ -510,47 +294,12 @@ export default function LyricsEditorModal({
         </div>
       }
     >
-      {/* the editor owns a private decoder so stamping never fights the
-          main player; playbackRate follows the speed control */}
-      <audio
-        ref={audioRef}
-        onTimeUpdate={(e) => setPlayTime(e.currentTarget.currentTime)}
-        onLoadedMetadata={(e) => setDur(e.currentTarget.duration || 0)}
-        onEnded={() => setPlaying(false)}
-        className="hidden"
-      />
-
       <div className="flex-1 min-h-0 flex flex-col lg:flex-row">
         {/* ---- lines ---- */}
         <div className="flex-1 min-w-0 min-h-0 flex flex-col">
-          {/* stamp mode + speed */}
+          {/* timing tools: shift all / nudge the selected line */}
           <div className="flex items-center gap-2 px-4 py-2 border-b border-white/10 flex-wrap shrink-0">
-            <span className="text-[10px] uppercase tracking-wider text-zinc-500">Stamp</span>
-            {(["line", "word", "syllable"] as StampMode[]).map((m) => (
-              <button
-                key={m}
-                className={`chip text-[10px] border capitalize ${mode === m ? "bg-accent on-accent border-accent" : "bg-white/5 border-white/15 text-zinc-400 hover:text-white"}`}
-                onClick={() => { setMode(m); pendingRef.current = null; }}
-                title={m === "line"
-                  ? `Space stamps the line's start time (${keys.stampLine})`
-                  : m === "word"
-                    ? `Space taps word by word (${keys.stampWord})`
-                    : `Space taps syllable by syllable (${keys.stampSyllable})`}
-              >
-                {m}
-              </button>
-            ))}
-            <span className="w-px h-5 bg-white/10 mx-1" />
-            {/* The step buttons and the reset between them share ONE box size
-                and centre their glyph by flex (the rule LyricZoom/LyricOffset
-                keep): a text `−` and `+` sit wherever their font's metrics put
-                them inside a padded button, so the pair reads unevenly beside
-                the value it steps. */}
-            <button className="btn-ghost !p-0 h-7 w-7 inline-flex items-center justify-center text-xs font-mono" onClick={() => stepSpeed(-1)} title={`Slower (${keys.speedSlower})`}>−</button>
-            <span className="text-xs font-mono text-zinc-300 min-w-[38px] text-center" title="Playback speed — timestamps always land in song time">{fmtSpeed(speed)}</span>
-            <button className="btn-ghost !p-0 h-7 w-7 inline-flex items-center justify-center text-xs font-mono" onClick={() => { setSpeed(1); }} title="Reset speed to 1×">1×</button>
-            <button className="btn-ghost !p-0 h-7 w-7 inline-flex items-center justify-center text-xs font-mono" onClick={() => stepSpeed(1)} title={`Faster (${keys.speedFaster})`}>+</button>
-            <span className="w-px h-5 bg-white/10 mx-1" />
+            <span className="text-[10px] uppercase tracking-wider text-zinc-500">Timing</span>
             <button className="btn-ghost !px-1.5 !py-0.5 text-[10px]" onClick={() => shiftAll(-0.1)} title="Shift ALL timestamps 0.1s earlier">−0.1s all</button>
             <button className="btn-ghost !px-1.5 !py-0.5 text-[10px]" onClick={() => shiftAll(0.1)} title="Shift ALL timestamps 0.1s later">+0.1s all</button>
             <button className="btn-ghost !px-1.5 !py-0.5 text-[10px]" onClick={() => nudgeLine(-0.05)} title="Nudge the selected line 0.05s earlier">sel −0.05</button>
@@ -575,39 +324,29 @@ export default function LyricsEditorModal({
               </button>
             </div>
           ) : (
-            <div ref={listRef} className="flex-1 min-h-0 overflow-auto px-4 py-2 space-y-1">
+            <div className="flex-1 min-h-0 overflow-auto px-4 py-2 space-y-1">
               {lines.map((l, i) => {
                 const isSel = i === selIdx;
-                const isActive = i === activeLine && playing;
-                const pieces = isSel && mode === "syllable" && !l.words ? syllabifyLine(l.text) : null;
-                const pending = pendingRef.current && pendingRef.current.idx === i ? pendingRef.current : null;
+                // How this line splits into syllables — the units the
+                // auto-distribute tool places timings on.
+                const pieces = isSel && !l.words ? syllabifyLine(l.text) : null;
                 // The field shows the stamp TEXT that was typed (or
-                // parsed); an empty one — freshly stamped — falls back to
-                // the line's time, at the SAME precision a save writes
-                // (`fmtStamp`), so the decimals are on screen from the first
-                // line of a sync on.
+                // parsed); an empty one falls back to the line's time, at
+                // the SAME precision a save writes (`fmtStamp`), so the
+                // decimals are on screen from the first line on.
                 const tsText = l.ts ? (l.ts.startsWith("[") ? l.ts.slice(1, -1) : l.ts) : fmtStamp(l.time, dec);
                 return (
                   <div
                     key={i}
                     ref={(el) => { rowRefs.current[i] = el; }}
                     className={`group rounded-lg border px-2 py-1.5 transition-colors ${
-                      isActive
-                        ? "border-accent/60 bg-accent/15"
-                        : isSel
-                          ? "border-accent/40 bg-white/[0.04]"
-                          : "border-transparent hover:border-white/10 hover:bg-white/[0.02]"
+                      isSel
+                        ? "border-accent/40 bg-white/[0.04]"
+                        : "border-transparent hover:border-white/10 hover:bg-white/[0.02]"
                     }`}
                     onClick={() => setSelIdx(i)}
                   >
                     <div className="flex items-center gap-2">
-                      <button
-                        className="p-0.5 text-zinc-600 hover:text-accent-soft shrink-0"
-                        title={`Play from ${fmtStamp(l.time, dec)}`}
-                        onClick={(e) => { e.stopPropagation(); seekTo(l.time); }}
-                      >
-                        <Play className="h-3 w-3" />
-                      </button>
                       <input
                         data-lyrictime
                         className="w-[58px] text-right font-mono text-[11px] text-zinc-400 outline-none border border-transparent focus:border-accent rounded px-1 py-0.5 shrink-0 tabular-nums"
@@ -657,56 +396,27 @@ export default function LyricsEditorModal({
                         </button>
                       </div>
                     </div>
-                    {isActive && l.words?.length && (
-                      <div className="text-sm px-1 mt-1">
-                        <KaraokeWords
-                          words={l.words}
-                          time={playTime}
-                          currentClass="text-accent font-semibold scale-110"
-                          sungClass="text-white"
-                          upcomingClass="text-zinc-500"
-                        />
-                      </div>
-                    )}
                     {isSel && l.words?.length ? (
-                      // stamped syllable chips: click one to seek to it
-                      <div className="flex flex-wrap gap-1 px-1 mt-1" title="Stamped syllables — click to seek">
-                        {l.words!.map((w, wi) => (
-                          <button
+                      // stamped word/syllable chips, each wearing its time
+                      <div className="flex flex-wrap gap-1 px-1 mt-1" title="Stamped word/syllable timings">
+                        {l.words.map((w, wi) => (
+                          <span
                             key={wi}
-                            className={`chip text-[9px] border ${w.time <= playTime ? "bg-accent/10 border-accent/25 text-accent-soft" : "bg-white/5 border-white/10 text-zinc-400"} hover:border-accent`}
-                            onClick={(e) => { e.stopPropagation(); seekTo(w.time); }}
-                            title={`Seek to ${fmtStamp(w.time, dec)}`}
+                            className="chip text-[9px] border bg-accent/10 border-accent/25 text-accent-soft"
+                            title={fmtStamp(w.time, dec)}
                           >
                             {w.text.trim() || "·"}
-                          </button>
+                          </span>
                         ))}
                       </div>
                     ) : null}
                     {pieces && pieces.length > 0 && (
-                      <div className="flex flex-wrap gap-1 px-1 mt-1 items-center" title="Syllable chips — each stamp assigns the next one">
-                        {pieces.map((s, si) => {
-                          const doneCount = pending && pending.idx === i ? pending.done : 0;
-                          const isNext = si === doneCount;
-                          const isDone = si < doneCount;
-                          return (
-                            <span
-                              key={si}
-                              className={`chip text-[9px] border ${
-                                isNext
-                                  ? "bg-accent/20 border-accent text-white"
-                                  : isDone
-                                    ? "bg-accent/5 border-accent/30 text-zinc-300"
-                                    : "bg-white/5 border-white/10 text-zinc-500"
-                              }`}
-                            >
-                              {s.text.trim() || "·"}
-                            </span>
-                          );
-                        })}
-                        {pending && pending.done > 0 && (
-                          <span className="text-[9px] text-zinc-500 ml-1">{pending.done}/{pieces.length}</span>
-                        )}
+                      <div className="flex flex-wrap gap-1 px-1 mt-1 items-center" title="Syllable split of this line — the units auto-distribute places timings on">
+                        {pieces.map((s, si) => (
+                          <span key={si} className="chip text-[9px] border bg-white/5 border-white/10 text-zinc-500">
+                            {s.text.trim() || "·"}
+                          </span>
+                        ))}
                       </div>
                     )}
                   </div>
@@ -715,28 +425,7 @@ export default function LyricsEditorModal({
             </div>
           )}
 
-          {/* transport */}
-          <div className="flex items-center gap-2 px-4 py-2.5 border-t border-white/10 shrink-0">
-            <button className={`p-2 rounded-lg ${playing ? "bg-accent on-accent" : "bg-white/10 hover:bg-white/20 text-white"}`} onClick={togglePlay} title={`Play / pause (${keys.playPause})`}>
-              {playing ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4 ml-0.5" />}
-            </button>
-            {/* The readout is the stamp the next press writes — the same digits
-                `serializeLrc` saves (`fmtStamp`), not a whole-second rounding
-                of them. */}
-            <span className="text-[10px] font-mono text-zinc-500 w-16 text-right tabular-nums">{fmtStamp(playTime, dec)}</span>
-            <input
-              type="range"
-              min={0}
-              max={dur || 0}
-              step={0.05}
-              value={Math.min(playTime, dur || 0)}
-              onChange={(e) => seekTo(Number(e.target.value))}
-              className="flex-1 min-w-0"
-              title="Seek within the track"
-            />
-            <span className="text-[10px] font-mono text-zinc-500 w-10 tabular-nums">{fmtDuration(dur || 0)}</span>
           </div>
-        </div>
 
         {/* ---- right rail ---- */}
         <div className="lg:w-80 shrink-0 border-t lg:border-t-0 lg:border-l border-white/10 flex flex-col min-h-0 overflow-auto">
@@ -788,13 +477,12 @@ export default function LyricsEditorModal({
             </div>
 
             <div className="pt-1 border-t border-white/10 text-[10px] text-zinc-600 leading-relaxed">
-              <div className="uppercase tracking-wider text-zinc-500 pb-1">How to sync</div>
-              Press <b>Play</b>, pick the <b>syllable</b> stamp mode, then tap{" "}
-              <kbd className="chip bg-raise border border-border px-1">{keys.stampLine}</kbd> (or{" "}
-              <kbd className="chip bg-raise border border-border px-1">{keys.stampSyllable}</kbd>) once per{" "}
-              syllable as it is sung — the line fills with syllable times and advances.
-              Line mode stamps whole lines. Slow the playback to 0.5× for fast passages —
-              timestamps always land in song time.
+              <div className="uppercase tracking-wider text-zinc-500 pb-1">How to edit</div>
+              Type or paste the lyrics, then set each line's start time in the field on its left
+              (<b>m:ss.xx</b>). Select a line to see how it splits into syllables, and click{" "}
+              <b>Auto-distribute timings</b> to spread word/syllable times across each line's slot.
+              <kbd className="chip bg-raise border border-border px-1 mx-1">{keys.prevLine}</kbd>/
+              <kbd className="chip bg-raise border border-border px-1">{keys.nextLine}</kbd> move between lines.
             </div>
           </div>
         </div>

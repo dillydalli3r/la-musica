@@ -3,7 +3,6 @@ import { useQuery } from "@tanstack/react-query";
 import { Check, Loader2, LogIn, LogOut, RefreshCw, Server, User } from "lucide-react";
 import { api, setToken } from "../api";
 import { useI18n } from "../lib/i18n";
-import { dropPush } from "../lib/notify";
 import Popover, { MenuItem } from "./Popover";
 import { toast } from "../store";
 
@@ -18,14 +17,13 @@ import { toast } from "../store";
  *
  *  The switch ends in `setToken(session.token)` followed by a reload — the same
  *  ending SecurityPanel uses for sign-out and password change, and for the same
- *  reason: every cached query, the player and the event socket are keyed on
+ *  reason: every cached query and the event socket are keyed on
  *  being signed in, so swapping the identity out from under them would leave
- *  another user's library, queue and history on screen.
+ *  another user's library and history on screen.
  *
  *  Three states are shown rather than hidden, because each has its own fix. The
- *  server's own account — the default/admin scope, where an unclaimed install's
- *  playlists, likes and favourites live — is NOT a row in the users table, so
- *  the list names it instead of leaving the current identity blank. A server
+ *  server's own account — the default/admin scope — is NOT a row in the users
+ *  table, so the list names it instead of leaving the current identity blank. A server
  *  with no users has nothing to switch TO, so the panel says that and points at
  *  Settings → Security, where users are made. A user list that could not be
  *  read is reported with a Retry: an empty list would read as "nobody can sign
@@ -119,8 +117,8 @@ export default function AccountMenu() {
       const session = await api.authLogin(password, target || undefined);
       setToken(session.token);
       toast.success(t("account.title", { user: session.username || label(target) }));
-      // Reload rather than swapping state by hand: every cached query, the
-      // player and the event socket are keyed on "being signed in", and the
+      // Reload rather than swapping state by hand: every cached query and
+      // the event socket are keyed on "being signed in", and the
       // shell renders the other user's data only from a clean start.
       window.location.reload();
     } catch (err) {
@@ -136,7 +134,6 @@ export default function AccountMenu() {
     if (busy) return;
     setBusy(true);
     try {
-      await dropPush(); // this device must stop being woken for whoever is signed out
       await api.authLogout();
       setToken(null);
       toast.success(t("auth.sign_out"));

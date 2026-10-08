@@ -2,9 +2,8 @@
 FastAPI backend for la musica v2 — localhost:8000.
 
 Wraps the mlo/* engine as REST + WebSocket for the React frontend:
-library (tag-rich, sortable), grading/auditing, tag editing, playback
-streaming, playlists (manual + smart, .m3u8), MusicBrainz/LRCLIB/RYM
-integrations, and album import.
+library (tag-rich, sortable), grading/auditing, tag editing,
+MusicBrainz/LRCLIB/RYM integrations, and album import.
 """
 import os
 import re
@@ -20,7 +19,6 @@ import pathlib
 import tempfile
 from contextlib import asynccontextmanager
 from typing import List, Optional
-from urllib.parse import quote
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -29,7 +27,7 @@ if str(ROOT) not in sys.path:
 from fastapi import FastAPI, HTTPException, Query, Request, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel
 
 from mlo import __version__ as APP_VERSION
@@ -44,37 +42,26 @@ from mlo import eq as eq_mod
 from server import library as lib_mod
 from server import events as events_mod
 from server import mbresolve
-from server import playlists as pl_mod
 from server import integrations as intg
 from server import tagcache
 from server import exporter
 from server import exportconfigs
-from server import api_discovery
-from server import api_discover
 from server import api_imports
 from server import api_lyrics
-from server import api_media
 from server import api_auth
 from server import api_jobs
 from server import api_query
-from server import api_ratings
-from server import api_plays
-from server import api_recommend
 from server import api_add
 from server import api_choice
 from server import api_stack
 from server import script_menu
 from server import api_storage
-from server import api_streaming
-from server import api_youtube
 from server import api_rym
 from server import api_cookies
 from server import api_run
 from server import api_export
-from server import api_playlists
 from server import api_mb
 from server import api_trash
-from server import api_push
 from server import ws as ws_mod
 from server import api_cover
 from server import api_common
@@ -83,16 +70,15 @@ from server.api_common import (_allow_staged, _guard_folder, _in_music_folder,
                                _skip_names, is_audio_file, re_safe_filename)
 from server.api_run import RunRequest, _announce_run, _invalidate_run, _run_scripts
 from server.api_mb import (_genre_names, _scan_album_tracks)
-from server.api_trash import _dir_stats
-from server.api_cover import _cover_url_bytes
+
 from server import auth as auth_mod
 from server import job_locks
 from server import discovery
 from server import artcache
 from server import version as version_mod
 from mlo.naming import sanitize_segment
-from mlo.paths import (AUDIO_EXTS, SKIP_DIRS, clear_track_covers, downloads_dir,
-                       is_video_file, library_root, load_track_covers, mlo_root,
+from mlo.paths import (AUDIO_EXTS, SKIP_DIRS, clear_track_covers,
+                       library_root, load_track_covers, mlo_root,
                        move_path, save_track_covers, set_track_covers, trash_dir,
                        trash_path)
 from mlo.subproc import tool_path
@@ -167,19 +153,6 @@ async def _lifespan(app: FastAPI):
         _warm_storage_snapshot()
     threading.Thread(target=_warm_library, daemon=True,
                      name="library-warm").start()
-    # …and the Home payload the landing page asks for: its build walks the
-    # library and every shelf, and a fresh process has no memo, so the first
-    # visit after a restart paid it IN the request — measured 187.5 s on the
-    # owner's install with "Loading your library…" in front of it. One thread,
-    # one walk, before anyone asks (server.recommendations.warm_home).
-    def _warm_home():
-        try:
-            from server import recommendations
-            recommendations.warm_home(load_config())
-        except Exception as e:
-            print(f"[mlo] home warm-up failed: {e}")
-    threading.Thread(target=_warm_home, daemon=True,
-                     name="home-warm").start()
     yield
     # Stop taking new work first (the cache-caps worker above is the app's own
     # source of new jobs), then the honest part: wait — bounded — for whatever
@@ -288,56 +261,12 @@ app.add_middleware(
         "tauri://localhost", "http://tauri.localhost", "https://tauri.localhost",
     ],
     # Dev servers pick arbitrary ports; any localhost origin may talk to the
-    # local backend. This also keeps <audio crossorigin> media loads working,
-    # which the playback visualizer's WebAudio graph requires.
+    # local backend.
     allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# The media routes answer CORS for ANY origin, and it has to be here rather than
-# in the allow-list above.
-#
-# A phone's <audio> element is fetched with `crossorigin="anonymous"` (the
-# playback visualizer, the equalizer and ReplayGain all read that stream through
-# a WebAudio graph, which a tainted element would silently zero out), so the
-# response MUST carry Access-Control-Allow-Origin for the origin the media
-# loader states. Which origin that is, is WebKit's business and not something
-# this server can enumerate: the page's own origin for the desktop shell, the
-# custom-scheme origin on iOS, and — because the bytes are pulled by the media
-# process rather than the page's fetch stack — possibly nothing at all, which
-# arrives as `Origin: null` and matches no allow-list entry. When it does not
-# match, WebKit refuses the load and the element errors: the app is completely
-# reachable, every API call works, and pressing play still does nothing.
-#
-# `*` is the safe answer for exactly these two paths and no others:
-#   * they are read-only and authenticated by the session TOKEN in the URL
-#     (`?token=`), not by the cookie — a cross-origin caller without the token
-#     gets a 401 whatever the CORS headers say, and one WITH the token does not
-#     need a browser to fetch the bytes;
-#   * `*` (as opposed to echoing the caller's origin) means a browser cannot
-#     pair the response with credentials, so nothing here can be turned into a
-#     credentialed read of a user's library by a page the user happens to visit.
-#
-# It only ever ADDS the header when the middleware above did not already state
-# one, so an allow-listed origin keeps its exact echo and no response ever
-# carries two Access-Control-Allow-Origin values (which is itself a CORS
-# failure). Registered after CORSMiddleware on purpose: Starlette applies the
-# most recently added middleware outermost, so this one sees the finished
-# response, headers included.
-_MEDIA_CORS_PATHS = ("/api/stream", "/api/videos/stream")
-
-
-@app.middleware("http")
-async def _media_cors(request: Request, call_next):
-    response = await call_next(request)
-    if (request.url.path in _MEDIA_CORS_PATHS
-            and request.headers.get("origin")
-            and "access-control-allow-origin" not in response.headers):
-        response.headers["access-control-allow-origin"] = "*"
-    return response
-
 
 # The /api/library payload is large (every track's tags + grading details);
 # gzip cuts it ~10x for a cheap first-paint win on big libraries.
@@ -374,32 +303,22 @@ async def _library_write_signal(request: Request, call_next):
 # so each provider layer stays independently testable; main.py only wires
 # them. They are included here, right after the middleware, before the rest
 # of the app's own routes.
-app.include_router(api_discovery.router)
 app.include_router(api_imports.router)
 app.include_router(api_lyrics.router)
 app.include_router(api_auth.router)
-app.include_router(api_recommend.router)
-app.include_router(api_ratings.router)
-app.include_router(api_plays.router)
 app.include_router(api_query.router)
-app.include_router(api_discover.router)
 app.include_router(api_add.router)
 app.include_router(api_choice.router)
 app.include_router(api_jobs.router)
-app.include_router(api_media.router)
 app.include_router(api_stack.router)
 app.include_router(script_menu.router)
 app.include_router(api_storage.router)
-app.include_router(api_streaming.router)
-app.include_router(api_youtube.router)
 app.include_router(api_rym.router)
 app.include_router(api_cookies.router)
 app.include_router(api_run.router)
 app.include_router(api_export.router)
-app.include_router(api_playlists.router)
 app.include_router(api_mb.router)
 app.include_router(api_trash.router)
-app.include_router(api_push.router)
 app.include_router(ws_mod.router)
 app.include_router(api_cover.router)
 
@@ -462,18 +381,6 @@ class ImportExpected(BaseModel):
     release_id: Optional[str] = None
     tracks: List[dict] = []
     staged: bool = False  # the wizard's album folder, wherever the user put it
-
-
-class DownloadsDelete(BaseModel):
-    """Basenames of <music>/.mlo/downloads entries to delete permanently."""
-    names: List[str] = []
-
-
-class DownloadsImport(BaseModel):
-    """Basenames of <music>/.mlo/downloads entries to move into the library."""
-    names: List[str] = []
-
-
 
 
 class AlbumRemove(BaseModel):
@@ -558,16 +465,11 @@ def set_config(cfg: dict):
     if not ok:
         reason = getattr(save_config, "last_error", "") or ""
         raise HTTPException(500, f"Failed to save config{(': ' + reason) if reason else ''}")
-    # A settings change can alter what the recommendation shelf and the
-    # discovery chains return (source order, counts, providers on/off), and
-    # the library payload carries grading results that depend on the grader
-    # toggles — drop both caches so the next read reflects the new config
-    # instead of up to 15 minutes of stale rows.
-    try:
-        from server import recommendations
-        recommendations.invalidate()
-    except Exception:
-        pass
+    # A settings change can alter what the discovery chains return (source
+    # order, counts, providers on/off), and the library payload carries
+    # grading results that depend on the grader toggles — drop the library
+    # cache so the next read reflects the new config instead of up to 15
+    # minutes of stale rows.
     tagcache.invalidate_all()
     # A settings save can change the auth gate itself (`auth_mode`,
     # `server_host`, the password hash). The gate's state is cached for a few
@@ -633,25 +535,20 @@ def ai_test(req: AiTestRequest):
 
 
 def _refresh_library_caches():
-    """Make the next library/home build re-walk the music folder.
+    """Make the next library build re-walk the music folder.
 
-    Both payloads are CACHED — the library tree in `tagcache`'s own entry
-    (`get_library`, TTL), Home's for 15 minutes — and Home is built FROM the
-    library, so a Refresh that only re-asked answered with the same rows for
-    minutes, which reads exactly like a dead button (the reason `/api/home`
-    grew its own `?refresh=1`). This is the one place that drops them, shared
-    by the Library's and Home's Refresh buttons so the two cannot drift:
+    The library tree is CACHED (`tagcache`'s own entry, `get_library`, TTL), so
+    a Refresh that only re-asked answered with the same rows for minutes, which
+    reads exactly like a dead button. This is the one place that drops it:
     `invalidate_library_payloads` drops the ASSEMBLED trees while keeping every
     cache keyed on the files themselves (tags by stat, indexed album payloads
     by folder signature), so the rebuild re-walks the folder and re-reads every
     stat the payload depends on — a file added, removed or retagged since is
     still seen — while unchanged files are not re-parsed and unchanged albums
-    are not re-graded. The identity and recommendation caches go with them.
+    are not re-graded. The identity cache goes with it.
     """
     tagcache.invalidate_library_payloads()
     mbresolve.invalidate()
-    from server import recommendations
-    recommendations.invalidate()
 
 
 @app.get("/api/library")
@@ -731,31 +628,6 @@ def log_report_route(path: str = Query(...), disc: Optional[int] = Query(None),
     out = log_report(p, timeout=int(timeout))
     out["siblings"] = siblings
     return out
-
-@app.get("/api/home")
-def home(request: Request, refresh: int = Query(0)):
-    """Home page: stats, recent additions, top grades, favorites, a random
-    rediscovery shelf, most-collected artists and albums failing
-    their checks.
-
-    Scoped by the session's user: the shelves carry that person's favourites
-    and playlist count, and the cache is keyed on the user for the same reason.
-
-    `?refresh=1` is Home's Refresh button (`_refresh_library_caches`): the
-    payload is cached for 15 minutes and is BUILT from the library payload,
-    which is cached again under its own key, so refetching the route alone
-    returned the same rows for a quarter of an hour — which reads exactly like
-    a dead button. One shared drop, the same one `/api/library?refresh=1`
-    performs, so the two buttons can never do different things.
-    """
-    if refresh:
-        _refresh_library_caches()
-    from server import recommendations
-    try:
-        return recommendations.build_home(load_config(), auth_mod.current_user(request))
-    except Exception as e:
-        raise HTTPException(502, f"home payload failed: {e}")
-
 
 @app.post("/api/naming/preview")
 def naming_preview(req: dict):
@@ -1021,35 +893,6 @@ def sources_health_source(source_id: str, kind: str = Query(None),
     return row
 
 
-@app.get("/api/videos/thumb")
-def videos_thumb(path: str = Query(...), t: float = Query(0.0),
-                 w: int = Query(320)):
-    """One JPEG frame of a library video at *t* seconds (scrub preview).
-
-    Seeking happens before `-i` (keyframe seek) and the frame is cached under
-    `<music>/.mlo/data/thumbs/`, keyed by path+mtime+width+whole second of
-    *t* — so dragging the scrubber re-encodes nothing. *t* is clamped to the
-    file's length when ffprobe knows it, and *w* to a sane range.
-    """
-    from server import thumbs
-
-    p = os.path.normpath(mbresolve.resolve_track(path) or path)
-    if not os.path.isfile(p):
-        raise HTTPException(404, "file not found")
-    if not _in_music_folder(p, _music_folder()):
-        raise HTTPException(400, "file outside music folder")
-    if not is_video_file(p):
-        raise HTTPException(400, "not a video file")
-    try:
-        fp = thumbs.thumb_file(p, t=t, w=w)
-    except thumbs.ThumbError as e:
-        raise HTTPException(e.status, str(e))
-    # Private, long-lived: the key already carries the file's mtime, so a
-    # changed file is a different URL as far as any cache is concerned.
-    return FileResponse(fp, media_type="image/jpeg",
-                        headers={"Cache-Control": "private, max-age=86400"})
-
-
 class DepsInstallRequest(BaseModel):
     keys: Optional[List[str]] = None
 
@@ -1246,27 +1089,6 @@ def get_album(path: str = Query(...), staged: bool = Query(False)):
     return tagcache.cached_payload("album", p, cfg, _build)
 
 
-@app.get("/api/podcasts")
-def podcast_series(series: str = Query(...)):
-    """ONE podcast series and every episode the library holds, newest first.
-
-    A podcast is a MusicBrainz SERIES of type Podcast whose episodes are
-    release groups linked `part of` it; the app records that series on each
-    episode's files (`mlo.autotag` writes the PODCASTSERIES tags), so this
-    answers from the library scan alone — no MusicBrainz request per page view.
-
-    `series` is the NAME a shelf row links by (the name the app stored, with
-    MusicBrainz's disambiguation when it stated one: that is what keeps two
-    same-named shows apart). A series the library holds no episode of is a
-    404, not an empty page — the same rule the album and artist pages follow.
-    """
-    from server import recommendations
-    payload = recommendations.podcast_series_payload(load_config(), series)
-    if payload is None:
-        raise HTTPException(404, f"no podcast series: {series}")
-    return payload
-
-
 @app.get("/api/artist")
 def get_artist(path: str = Query(...)):
     """Artist detail; `path` may be a real folder or an "mb:<artist MBID>"."""
@@ -1300,19 +1122,6 @@ def _artist_payload(p, cfg):
     # Display name: the tag-derived artist (folders carry an MBID suffix).
     display_name = next((a.get("album_artist") for a in albums_data
                          if a.get("album_artist")), None)
-    # Artwork the app itself stores for the artist (see mlo/artistdata):
-    # the image, the description, and the artist-level grade that watches
-    # for both. A failure here must not take the whole artist page down.
-    image_file = None
-    description = ""
-    provenance = {}
-    try:
-        from mlo import artistdata
-        description = artistdata.read_description(p) or ""
-        image_file = os.path.basename(artistdata.image_path(p) or "") or None
-        provenance = artistdata.read_provenance(p)
-    except Exception:
-        pass
     try:
         from mlo import grader
         grade = grader.grade_artist(p, cfg)
@@ -1332,248 +1141,13 @@ def _artist_payload(p, cfg):
         "disambiguation": lib_mod._artist_disambiguation(albums_data),
         "albums": albums_data,
         "aggregate": lib_mod._aggregate_albums(albums_data),
-        "artwork": {
-            "image": bool(image_file),
-            "image_file": image_file,
-            "image_url": (f"/api/artist/image?artist={quote(p.replace(chr(92), '/'))}"
-                          if image_file else None),
-            "description": description.strip() or None,
-            "description_source": provenance.get("description_source") or provenance.get("source"),
-            "description_url": provenance.get("description_source_url"),
-            "provenance": provenance,
-            # May the app fetch these on the user's behalf? (Settings →
-            # Artist images & descriptions.) The UI greys its Fetch actions
-            # when off rather than letting the request 403.
-            "auto_image": bool(cfg.get("artist_image_enabled", True)),
-            "auto_description": bool(cfg.get("artist_description_enabled", True)),
-        },
         "grade": grade,
     }
 
 
 # --------------------------------------------------------------------------- #
-# Streaming / tags
+# Tags
 # --------------------------------------------------------------------------- #
-_CTYPES = {
-    ".flac": "audio/flac", ".mp3": "audio/mpeg", ".m4a": "audio/mp4",
-    # Music videos: <video> elements need the video media types; matroska
-    # plays in Chromium-based webviews (WebView2 / Tauri) and browsers.
-    ".mp4": "video/mp4", ".m4v": "video/mp4", ".ogg": "audio/ogg",
-    ".opus": "audio/ogg", ".wav": "audio/wav", ".aac": "audio/aac",
-    ".mkv": "video/x-matroska", ".webm": "video/webm", ".mov": "video/quicktime",
-    ".avi": "video/x-msvideo", ".wmv": "video/x-ms-wmv", ".flv": "video/x-flv",
-    ".mpg": "video/mpeg", ".mpeg": "video/mpeg", ".vob": "video/mpeg",
-    ".m2v": "video/mpeg", ".ts": "video/mp2t", ".m2ts": "video/mp2t",
-    ".mts": "video/mp2t", ".3gp": "video/3gpp", ".ogv": "video/ogg",
-    ".mka": "audio/x-matroska",
-}
-
-
-def _refuse_locked(path: str) -> None:
-    """409 when a job in the registry holds *path* (or a folder above it).
-
-    Reading bytes OUT of a file a script is rewriting is the same race the
-    registry already refuses from the write side, seen from the other end: the
-    listener gets a torn read, and on Windows the script's temp-then-replace
-    fails outright while a stream still holds the file open. Raising
-    PathLocked puts this on the app's one handler for it, so the refusal names
-    the job and the fix in the registry's own words.
-    """
-    holder = job_locks.holder(path)
-    if holder:
-        raise job_locks.PathLocked(path, holder)
-
-
-@app.get("/api/stream")
-def stream(path: str = Query(...), download: int = Query(0)):
-    """Stream one library file.
-
-    `download=1` is the offline-download path: the WHOLE file as a single 200
-    body that refuses ranges, because the browser's offline cache (Cache
-    Storage) rejects a 206 outright — the download button used to fetch this
-    same URL and every track failed with "Cache got basic response with bad
-    status 206". See server/api_media.py. Without it, a player gets exactly
-    what it wants: byte ranges and a 206.
-
-    `download_codec` decides WHAT those downloaded bytes are: `copy` (the
-    default) is the file's own codec, any other value re-encodes the track
-    into the cache at `download_bitrate` — the library file is never touched,
-    and the rendition is served from here rather than from the bulk route
-    (see server/api_media.download_rendition). A player is unaffected either
-    way: `download` is the only flag that re-encodes.
-
-    A path a job holds right now is refused 409 (both modes) instead of
-    streaming a file that is being rewritten; the PLAYER does not change
-    otherwise — an unlocked file answers ranges exactly as before, and a stream
-    that is already open keeps its handle when a job claims the file (the
-    registry guards new reads, it does not cut live ones).
-    """
-    p = os.path.normpath(mbresolve.resolve_track(path) or path)
-    _refuse_locked(p)
-    if not os.path.isfile(p):
-        raise HTTPException(404, "file not found")
-    if not _in_music_folder(p, _music_folder()):
-        raise HTTPException(400, "file outside music folder")
-    ctype = _CTYPES.get(os.path.splitext(p)[1].lower(), "application/octet-stream")
-    if download:
-        from server import api_media
-        cfg = load_config()
-        codec = str(cfg.get("download_codec") or "copy").strip().lower()
-        if codec not in ("", "copy"):
-            return api_media.download_rendition(p, codec,
-                                                cfg.get("download_bitrate") or 0)
-        return api_media.full_body_response(p, ctype)
-    # ponytail: unknown extensions stream as octet-stream; add explicit
-    # mapping above when a supported player format is missing.
-    return FileResponse(p, media_type=ctype, headers={"Accept-Ranges": "bytes"})
-
-
-@app.get("/api/videos/stream")
-def videos_stream(path: str = Query(...), transcode: int = Query(0)):
-    """Playable stream for a library music video.
-
-    ?transcode=0 (default) serves the file bytes as-is (seekable, exact
-    quality). Codecs browsers cannot decode (MPEG-2 in VOB/MPG/M2TS/AVI,
-    VC-1, ...) fail in the <video> element — the player then retries with
-    ?transcode=1, which pipes the file through ffmpeg into a fragmented
-    MP4 (H.264/AAC) browsers always play. Transcoded streams are not
-    seekable; the picture/sound are identical in content. Files the
-    browser decodes natively never touch ffmpeg.
-
-    Refused 409 like /api/stream while a job holds the file: a transcode would
-    read the very bytes being rewritten.
-    """
-    p = os.path.normpath(mbresolve.resolve_track(path) or path)
-    _refuse_locked(p)
-    if not os.path.isfile(p):
-        raise HTTPException(404, "file not found")
-    if not _in_music_folder(p, _music_folder()):
-        raise HTTPException(400, "file outside music folder")
-    ext = os.path.splitext(p)[1].lower()
-
-    if not transcode and ext in _NATIVE_VIDEO_EXTS:
-        ctype = _CTYPES.get(ext, "application/octet-stream")
-        return FileResponse(p, media_type=ctype, headers={"Accept-Ranges": "bytes"})
-
-    from mlo.tools import detect_all_tools
-
-    ffmpeg = (detect_all_tools().get("ffmpeg") or {}).get("ffmpeg_exe")
-    if not ffmpeg:
-        raise HTTPException(503, "ffmpeg not installed — install it under Dependencies for video playback")
-    cmd = [
-        ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin",
-        "-i", tool_path(p),
-        "-map", "0:v:0", "-map", "0:a:0?",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-        "-vf", "scale=-2:min(720\\,ih)",
-        "-c:a", "aac", "-b:a", "160k", "-ac", "2",
-        "-movflags", "frag_keyframe+empty_moov+default_base_moof",
-        "-f", "mp4", "pipe:1",
-    ]
-    try:
-        import subprocess
-
-        # CREATE_NO_WINDOW: a piped ffmpeg still allocates a console on
-        # Windows unless suppressed — one flashed open per video otherwise.
-        # stderr goes to DEVNULL: a PIPE never drained blocks ffmpeg once
-        # full, hanging the stream.
-        proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            creationflags=0x08000000 if os.name == "nt" else 0)
-    except Exception as e:
-        raise HTTPException(500, f"ffmpeg failed to start: {e}")
-
-    from starlette.responses import StreamingResponse
-
-    def _gen():
-        try:
-            if proc.stdout is None:
-                return
-            while True:
-                chunk = proc.stdout.read(256 * 1024)
-                if not chunk:
-                    break
-                yield chunk
-        finally:
-            if proc.poll() is None:
-                proc.kill()
-            try:
-                if proc.stdout:
-                    proc.stdout.close()
-            except Exception:
-                pass
-
-    return StreamingResponse(_gen(), media_type="video/mp4")
-
-
-# Video/audio codecs Chromium-based webviews (WebView2/Tauri, Chrome, Firefox)
-# decode natively. Deliberately conservative: AC-3/E-AC-3/DTS decode in
-# Edge/WebView2 but NOT in plain Chrome (video plays with no sound and no
-# error), so those transcode to AAC; MPEG-4 Part 2 / VC-1 / WMV fail hard.
-_NATIVE_VIDEO_CODECS = {"h264", "vp8", "vp9", "av1", "hevc", "theora"}
-_NATIVE_AUDIO_CODECS = {"aac", "mp3", "opus", "vorbis", "flac", "alac",
-                        "pcm_u8", "pcm_s16le", "pcm_s24le", "pcm_s16be",
-                        "pcm_f32le"}
-_playback_meta_cache: dict = {}
-_PLAYBACK_META_MAX = 500  # honey: plain-dict LRU; probed once per file version
-
-
-@app.get("/api/videos/meta")
-def videos_meta(path: str = Query(...)):
-    """Playback decision for a music video: can the browser decode the file
-    natively (container + codec probe) and how long is it (seconds).
-
-    The player uses `native` to pick the stream URL upfront instead of
-    guessing and retrying on error — this also catches the silent case
-    (decodable video, undecodable audio) that never raises an error event.
-    `duration` is ffprobe's container length, which fragmented-MP4 live
-    transcodes cannot carry (the element reports Infinity there). Cached
-    per path+mtime; probes run once per file version."""
-    from mlo.remux import _stream_info
-    from mlo.tools import detect_all_tools
-
-    p = os.path.normpath(mbresolve.resolve_track(path) or path)
-    if not os.path.isfile(p):
-        raise HTTPException(404, "file not found")
-    if not _in_music_folder(p, _music_folder()):
-        raise HTTPException(400, "file outside music folder")
-    try:
-        mtime = os.path.getmtime(p)
-    except OSError:
-        raise HTTPException(404, "file not found")
-    hit = _playback_meta_cache.get(p)
-    if hit and hit[0] == mtime:
-        _playback_meta_cache.pop(p, None)
-        _playback_meta_cache[p] = hit
-        return {"path": p.replace("\\", "/"), **hit[1]}
-
-    ext = os.path.splitext(p)[1].lower()
-    ffprobe = (detect_all_tools().get("ffmpeg") or {}).get("ffprobe_exe")
-    info = _stream_info(p, ffprobe) if ffprobe else None
-    vcodec = info[0] if info else None
-    # Only the FIRST audio track matters: videos_stream maps 0:a:0, so the
-    # other tracks never reach the browser.
-    acodecs = info[1] if info else []
-    duration = info[3] if info else None
-    if info is None:
-        native, reason = False, "unreadable by ffprobe — live transcode"
-    elif ext not in _NATIVE_VIDEO_EXTS:
-        native, reason = False, f"{ext} container is always transcoded"
-    elif (vcodec or "").lower() not in _NATIVE_VIDEO_CODECS:
-        native, reason = False, f"{vcodec or 'unknown'} video codec"
-    elif acodecs and (acodecs[0] or "").lower() not in _NATIVE_AUDIO_CODECS:
-        native, reason = False, f"{acodecs[0]} audio codec"
-    else:
-        native, reason = True, None
-    meta = {"native": native, "reason": reason, "duration": duration,
-            "video_codec": vcodec, "audio_codecs": acodecs}
-    _playback_meta_cache.pop(p, None)  # refresh recency
-    while len(_playback_meta_cache) >= _PLAYBACK_META_MAX:
-        _playback_meta_cache.pop(next(iter(_playback_meta_cache)))
-    _playback_meta_cache[p] = (mtime, meta)
-    return {"path": p.replace("\\", "/"), **meta}
-
-
 @app.get("/api/tags/registry")
 def tags_registry():
     """What this app knows about every tag, in one payload.
@@ -1695,57 +1269,6 @@ def get_tags(path: str = Query(...), staged: bool = Query(False)):
             "lyrics_xlit": xlit, "lyrics_trans": trans}
 
 
-@app.get("/api/replaygain")
-def get_replaygain(path: str = Query(...), mode: str = Query("")):
-    """ReplayGain for one track: the gain the player should apply, in dB.
-
-    The player applies this in its WebAudio gain stage so loudness stays even
-    between tracks — it is playback metadata, deliberately not surfaced as a
-    column. `mode` (track/album/off) overrides the saved `replaygain_mode`
-    for one request; album mode prefers REPLAYGAIN_ALBUM_GAIN and falls back
-    to the track value. A file whose tags carry no ReplayGain is measured on
-    the spot (ffmpeg EBU R128) and cached under `.mlo/data/replaygain.json`,
-    so a library that was never run through script 7 still plays level. That
-    measurement is BOUNDED (`loudness.PLAYBACK_WAIT_S`): the player installs
-    the gain before the track starts, so this request must never sit on a
-    multi-second decode — a file that is not measured in time answers unity,
-    the decode finishes in the background and its value is cached for the
-    next request. That answer is not a verdict, so it also carries `pending`
-    (true while the decode is still running: ask again and the gain is there)
-    and `album` (false in album mode means the album carries no album gain and
-    the track value was used).
-    """
-    from mlo import loudness
-
-    p = os.path.normpath(mbresolve.resolve_track(path) or path)
-    if not os.path.isfile(p):
-        raise HTTPException(404, "file not found")
-    if not _in_music_folder(p, _music_folder()):
-        raise HTTPException(400, "file outside music folder")
-    cfg = load_config()
-    res = loudness.replaygain_for_path(cfg, p, mode=(mode or None),
-                                       wait_s=loudness.PLAYBACK_WAIT_S)
-    return {
-        "path": p.replace("\\", "/"),
-        "gain": res.get("gain"),
-        "peak": res.get("peak"),
-        "mode": res.get("mode"),
-        "source": res.get("source"),
-        "analyzed": bool(res.get("analyzed")),
-        # `pending`: the on-demand measurement this request started (or joined)
-        # is still decoding, so the unity above is TEMPORARY. The player asks
-        # again while this is true and, when the value lands, ramps it onto the
-        # element that is already playing — an untagged track used to keep that
-        # unity for its whole length.
-        "pending": bool(res.get("pending")),
-        # `album`: the number came from REPLAYGAIN_ALBUM_GAIN. False while
-        # `mode` is "album" says the album has no album gain, so per-track
-        # values were used — the player reports that instead of implying the
-        # album was normalised as an album.
-        "album": bool(res.get("album")),
-    }
-
-
 @app.get("/api/videos/scan")
 def videos_scan(path: str = Query(None)):
     """List video files (non-audio containers) under an album or the whole
@@ -1783,42 +1306,6 @@ def videos_scan(path: str = Query(None)):
                 "mp4_safe": info is not None,
             })
     return {"videos": out}
-
-
-@app.get("/api/videos/subtitles")
-def videos_subtitles(path: str = Query(...)):
-    """Subtitle sources for a video: streams muxed into the container plus
-    external .srt/.vtt sidecars next to the file."""
-    from server import subtitles as sub_mod
-
-    p = os.path.normpath(path)
-    if not os.path.isfile(p):
-        raise HTTPException(404, "video not found")
-    if not _in_music_folder(p, _music_folder()):
-        raise HTTPException(400, "path outside music folder")
-    try:
-        return sub_mod.list_subtitles(p)
-    except Exception as e:
-        raise HTTPException(500, f"subtitle probe failed: {e}")
-
-
-@app.get("/api/videos/subtitle")
-def videos_subtitle(path: str = Query(...), n: int = Query(None), sidecar: str = Query(None)):
-    """One subtitle as WebVTT (extracted / converted on demand)."""
-    from server import subtitles as sub_mod
-
-    p = os.path.normpath(path)
-    if not os.path.isfile(p):
-        raise HTTPException(404, "video not found")
-    if not _in_music_folder(p, _music_folder()):
-        raise HTTPException(400, "path outside music folder")
-    try:
-        data = sub_mod.vtt_for(p, muxed_n=n, sidecar=sidecar)
-        return Response(content=data, media_type="text/vtt; charset=utf-8")
-    except FileNotFoundError as e:
-        raise HTTPException(404, str(e))
-    except Exception as e:
-        raise HTTPException(500, f"subtitle extraction failed: {e}")
 
 
 class VideoTagRequest(BaseModel):
@@ -1869,88 +1356,6 @@ def videos_tag(req: VideoTagRequest):
     return {"ok": True, "path": final, "renamed": os.path.normcase(final) != os.path.normcase(p),
             "container_changed": bool(af.container_changed),
             "output_path": final, "tech": tech}
-
-
-class YoutubeDownloadRequest(BaseModel):
-    """Grab a music video from YouTube for an album.
-
-    `path` is the album folder to drop it into (or a track path whose folder
-    is used); without it the file lands in the app's downloads dir for
-    review. `duration` is the expected length in seconds — the candidate
-    search uses it to reject live/tribute/cover uploads."""
-    path: Optional[str] = None
-    artist: str
-    title: str
-    duration: Optional[int] = None
-
-
-@app.post("/api/videos/download-youtube")
-def videos_download_youtube(req: YoutubeDownloadRequest):
-    """Grab this artist+title's music video from YouTube.
-
-    The candidate is picked by server/youtube.py (duration window, lyric /
-    cover / tribute filtering) and downloaded here. When that is not available
-    — youtube_enabled off, yt-dlp missing, no acceptable candidate, or a
-    download it could not deliver — the request answers with the reason.
-
-    Returns {ok, file, candidate} for a download, or {ok: false,
-    candidate: null, error} naming why no video was fetched."""
-    from server import youtube
-
-    cfg = load_config()
-    artist = str(req.artist or "").strip()
-    title = str(req.title or "").strip()
-    if not artist or not title:
-        raise HTTPException(400, "artist and title are required")
-    # YouTube's own gates, and they are only YouTube's: a switch that is off —
-    # or a yt-dlp that is not installed — leaves the network as the source it
-    # always was, so neither of them ends the request. What they say is kept
-    # for the error below, which must not report "not on YouTube" about a
-    # lookup the app was never allowed (or able) to make.
-    yt_why = ""
-    if not youtube.ytdlp_available(cfg):
-        yt_why = "yt-dlp is not available — install it under Dependencies"
-    elif not youtube.enabled(cfg):
-        yt_why = "YouTube downloads are disabled in Settings → Videos"
-
-    dest = ""
-    if req.path:
-        p = os.path.normpath(req.path)
-        dest = p if os.path.isdir(p) else os.path.dirname(p)
-        if not os.path.isdir(dest):
-            raise HTTPException(404, "destination folder not found")
-        if not _in_music_folder(dest, _music_folder(cfg)):
-            raise HTTPException(400, "destination outside music folder")
-    else:
-        from mlo.paths import downloads_dir
-        dest = downloads_dir(str(cfg.get("music_folder") or "") or None) or ""
-        if not dest:
-            raise HTTPException(400, "music folder is not configured")
-        os.makedirs(dest, exist_ok=True)
-
-    candidate = None
-    if not yt_why:
-        candidate = youtube.best_candidate(artist, title,
-                                           want_seconds=req.duration,
-                                           config=cfg)
-        if not candidate:
-            yt_why = "no acceptable YouTube match found"
-    if candidate:
-        try:
-            got = youtube.download(candidate["url"], dest, cfg)
-        except Exception as e:
-            # The upload is there and could not be delivered: that is the same
-            # "YouTube cannot serve this one" the network is asked about
-            # below, so it does not end the request here.
-            yt_why = f"YouTube download failed: {e}"
-        else:
-            tagcache.invalidate_album(dest)
-            return {"ok": True, "file": str(got.get("path") or "").replace("\\", "/"),
-                    "candidate": candidate, "container": got.get("container"),
-                    "height": got.get("height"), "abr": got.get("abr")}
-
-    return {"ok": False, "candidate": None,
-            "error": yt_why or "no acceptable YouTube match found"}
 
 
 class VideoMatchAssignment(BaseModel):
@@ -2058,65 +1463,6 @@ def lyrics_embed(req: LyricsEmbedRequest):
         raise HTTPException(500, af.error or "lyrics write failed")
     tagcache.invalidate_path(p)
     return {"ok": True}
-
-
-class LikeToggleRequest(BaseModel):
-    path: str
-    mbid: Optional[str] = None  # MusicBrainz recording ID — keeps the like alive across moves
-
-
-@app.get("/api/likes")
-def likes_list(request: Request = None):
-    """Paths of all liked (hearted) tracks, newest first. Stored paths are
-    normalized to forward slashes and MBID-backed rows self-heal after
-    reorganization, so they always match the library payload."""
-    user = auth_mod.current_user(request)
-    return {"paths": [p.replace("\\", "/") for p in pl_mod.list_likes(user)]}
-
-
-@app.post("/api/likes/toggle")
-def likes_toggle(req: LikeToggleRequest, request: Request = None):
-    p = os.path.normpath(mbresolve.resolve_track(req.path) or req.path)
-    if not os.path.isfile(p):
-        raise HTTPException(404, "file not found")
-    # A like row for a path outside the library can never match a track again.
-    if not _in_music_folder(p, _music_folder()):
-        raise HTTPException(400, "file outside music folder")
-    p = p.replace("\\", "/")
-    try:
-        liked = pl_mod.toggle_like(p, mbid=req.mbid, user=auth_mod.current_user(request))
-    except ValueError as e:
-        raise HTTPException(400, str(e))
-    return {"ok": True, "liked": liked}
-
-
-class FavoriteToggleRequest(BaseModel):
-    kind: str  # "album" | "artist" | "playlist"
-    key: str
-    mbid: Optional[str] = None  # release/artist MBID — keeps the favorite stable across moves
-
-
-@app.get("/api/favorites")
-def favorites_list(request: Request = None):
-    """Favorite albums / artists / playlists, keyed by path (or playlist id),
-    newest first — powers the sidebar Favorites section. MBID-backed rows
-    self-heal when files move."""
-    return pl_mod.list_favorites(auth_mod.current_user(request))
-
-
-@app.post("/api/favorites/toggle")
-def favorites_toggle(req: FavoriteToggleRequest, request: Request = None):
-    # album/artist keys are library folders; "playlist" keys are playlist ids,
-    # not paths, so only the path-valued kinds get the containment guard.
-    if str(req.kind or "").strip().lower() in ("album", "artist"):
-        if not _in_music_folder(req.key, _music_folder()):
-            raise HTTPException(400, "folder outside music folder")
-    try:
-        fav = pl_mod.toggle_favorite(req.kind, req.key, mbid=req.mbid,
-                                     user=auth_mod.current_user(request))
-    except ValueError as e:
-        raise HTTPException(400, str(e))
-    return {"ok": True, "fav": fav}
 
 
 class LyricsWordsyncRequest(BaseModel):
@@ -2815,45 +2161,6 @@ def _import_one_album(album, cfg, chain_async=True, progress=None):
     return out
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-@app.get("/api/track/download")
-def track_download(path: str = Query(...)):
-    """Serve the original, untouched audio file as a browser download.
-
-    Same refusal as /api/stream: "untouched" is a promise a job mid-rewrite
-    cannot keep, and handing over a half-written file is worse than saying why.
-    """
-    p = os.path.normpath(mbresolve.resolve_track(path) or path)
-    _refuse_locked(p)
-    if not os.path.isfile(p):
-        raise HTTPException(404, "file not found")
-    if not _in_music_folder(p, _music_folder()):
-        raise HTTPException(400, "path is outside the music folder")
-    return FileResponse(p, media_type="application/octet-stream",
-                        filename=os.path.basename(p))
-
-
 _EXPORT_CODECS = {
     # codec: (ext, lossless, ffmpeg args template)
     "flac": (".flac", True, ["-c:a", "flac", "-compression_level", "{level}"]),
@@ -2883,12 +2190,11 @@ def track_export(path: str = Query(...), codec: str = Query("flac"),
     bitrate = max(64, min(500, int(bitrate)))
     level = max(0, min(8, int(level)))
     args = [a.format(bitrate=bitrate, level=level) for a in args_tpl]
-    # The encode-and-serve step is server.api_media's (it is what the offline
-    # download's own rendition uses); this route only owns its codec table and
-    # the save-dialog naming.
-    from server import api_media
-    return api_media.encoded_response(p, args, ext, "application/octet-stream",
-                                      attachment=True)
+    # The encode-and-serve step lives in server.exporter (the export wizard's
+    # own ffmpeg plumbing); this route only owns its codec table and the
+    # save-dialog naming.
+    return exporter.encoded_response(p, args, ext, "application/octet-stream",
+                                     attachment=True)
 
 
 class GenreImportRequest(BaseModel):
@@ -3331,165 +2637,6 @@ def instrumental_fetch(req: InstrumentalFetchRequest):
     return {"updated": int(result.get("updated") or 0),
             "values": result.get("values") or {},
             "evidence": result.get("evidence") or {}}
-
-
-def _metadata_album_identity(album_dir, artist=""):
-    """(artist, album) for a metadata request, from the folder's own tags."""
-    tracks = _scan_album_tracks(album_dir) or []
-    tags = (tracks[0].get("tags") if tracks else None) or {}
-    album = str(tags.get("ALBUM") or os.path.basename(os.path.normpath(album_dir))).strip()
-    return (artist or str(tags.get("ALBUMARTIST") or tags.get("ARTIST") or "").strip(),
-            album)
-
-
-@app.get("/api/metadata/candidates")
-def metadata_candidates_route(artist: str = Query(""), album_path: str = Query(""),
-                              staged: bool = Query(False)):
-    """Image / description candidates for an artist or an album folder.
-
-    Read-only: nothing is written. The list is composed by
-    `server.discovery.metadata_candidates` from the reliable providers (Deezer
-    photo, TheAudioDB, Apple artwork, Wikipedia) plus the configured image
-    chain's own pick, and the first description each configured description
-    source can give. With `metadata_review` on, an album also carries the
-    candidates the import chain STAGED for it (`staged`). The UI's pick is
-    written through POST /api/metadata/apply."""
-    from server import discovery, imports as imports_mod
-
-    cfg = load_config()
-    if not artist and not album_path:
-        raise HTTPException(400, "artist or album_path required")
-    album_dir = ""
-    album = ""
-    if album_path:
-        album_dir = os.path.normpath(album_path)
-        if not os.path.isdir(album_dir):
-            raise HTTPException(404, "album not found")
-        _guard_folder(album_dir, staged, "album", _music_folder(cfg))
-        artist, album = _metadata_album_identity(album_dir, artist)
-    try:
-        candidates = discovery.metadata_candidates(artist, album, cfg=cfg)
-    except Exception as e:
-        raise HTTPException(502, f"metadata lookup failed: {e}")
-    candidates["artist"] = artist
-    candidates["album"] = album
-    candidates["staged"] = imports_mod.staged_metadata(album_dir, cfg) if album_dir else {}
-    return candidates
-
-
-class MetadataApplyRequest(BaseModel):
-    """Apply one metadata choice (the user's pick, or an automatic one)."""
-    kind: str                                   # artist_image | artist_description | album_description
-    artist: Optional[str] = None                # artist name or folder path
-    album_path: Optional[str] = None            # album folder (album_description)
-    image_url: Optional[str] = None             # artist_image source
-    description: Optional[str] = None           # artist_description / album_description text
-
-
-@app.post("/api/metadata/apply")
-def metadata_apply(req: MetadataApplyRequest):
-    """Save one metadata choice: artist image (from a candidate URL), artist
-    description or album description (supplied text, or the best candidate
-    when the body carries none). Clears the album's staged review entry so a
-    reviewed album leaves the queue."""
-    from mlo import artistdata
-    from server import discovery, imports as imports_mod
-
-    cfg = load_config()
-    kind = (req.kind or "").strip().lower()
-    album_dir = ""
-    folder = ""
-    if req.album_path:
-        album_dir = os.path.normpath(req.album_path)
-        if not os.path.isdir(album_dir):
-            raise HTTPException(404, "album not found")
-        if not _in_music_folder(album_dir, _music_folder(cfg)):
-            raise HTTPException(400, "album outside music folder")
-
-    if kind == "artist_image":
-        artist = (req.artist or "").strip()
-        if not artist:
-            raise HTTPException(400, "artist is required")
-        folder = _metadata_artist_folder(artist, cfg)
-        url = (req.image_url or "").strip()
-        source = "manual"
-        label = None
-        if not url:
-            hit = discovery.artist_image(_metadata_artist_name(folder, artist), mbid=artistdata.folder_mbid(folder) or artistdata.folder_mbid(artist), cfg=cfg)
-            if not hit or not hit.get("url"):
-                raise HTTPException(404, "no artist image found in any configured source")
-            url, source, label = hit["url"], hit.get("source") or "auto", hit.get("label")
-        try:
-            # A provider URL goes through the art cache: its per-host headers
-            # and its fallback are what make a CDN that refuses the app still
-            # yield the artist image (see `_cover_url_bytes`).
-            data, _ctype = _cover_url_bytes(url, artist)
-        except Exception as e:
-            raise HTTPException(502, f"image download failed: {e}")
-        path = artistdata.save_image(folder, data, cfg, source=source,
-                                     source_url=url, kind="artist", label=label)
-        if not path:
-            raise HTTPException(400, "not a usable image")
-        saved = path
-
-    elif kind in ("artist_description", "album_description"):
-        text = str(req.description or "").strip()
-        source = source_url = title = None
-        if kind == "artist_description":
-            artist = (req.artist or "").strip()
-            if not artist:
-                raise HTTPException(400, "artist is required")
-            folder = _metadata_artist_folder(artist, cfg)
-            name = _metadata_artist_name(folder, artist)
-            if not text:
-                found = discovery.artist_description(name, mbid=artistdata.folder_mbid(folder) or artistdata.folder_mbid(artist), cfg=cfg)
-                if not found:
-                    raise HTTPException(404, "no description found in any configured source")
-                text, source = found["text"], found.get("source")
-                source_url, title = found.get("source_url"), found.get("title")
-            saved = artistdata.write_description(folder, text, cfg=cfg, source=source,
-                                                 source_url=source_url, kind="artist")
-        else:
-            if not album_dir:
-                raise HTTPException(400, "album_path is required")
-            artist, album = _metadata_album_identity(album_dir, (req.artist or "").strip())
-            if not text:
-                found = discovery.album_description(artist, album, cfg=cfg)
-                if not found:
-                    raise HTTPException(404, "no description found in any configured source")
-                text, source = found["text"], found.get("source")
-                source_url, title = found.get("source_url"), found.get("title")
-            saved = artistdata.write_description(album_dir, text, cfg=cfg, source=source,
-                                                 source_url=source_url, kind="album")
-        if not saved:
-            raise HTTPException(400, "description is empty")
-        if source:
-            target = folder if kind == "artist_description" else album_dir
-            artistdata.write_provenance(target, {
-                "description_source": source,
-                "description_source_url": source_url,
-                "description_title": title}, kind="artist" if kind == "artist_description" else "album",
-                cfg=cfg)
-    else:
-        raise HTTPException(400, "kind must be artist_image, artist_description or album_description")
-
-    if album_dir:
-        imports_mod.stage_metadata(album_dir, None, cfg)
-    tagcache.invalidate_album(album_dir, folder)
-    return {"ok": True, "saved": str(saved).replace("\\", "/")}
-
-
-def _metadata_artist_folder(artist, cfg):
-    """An artist folder from a path (inside the music folder) or a name —
-    the same resolution the artist-page routes use."""
-    from server.api_discovery import _artist_folder
-    return _artist_folder(artist, cfg)
-
-
-def _metadata_artist_name(folder, artist=""):
-    """The artist's *name* for provider lookups, given a library folder."""
-    from server.api_discovery import _artist_name
-    return _artist_name(folder, artist)
 
 
 def _rewrite_track_covers(old_root, new_root, renames):
@@ -4589,214 +3736,6 @@ def import_expected(req: ImportExpected):
 
 
 # --------------------------------------------------------------------------- #
-# .mlo/downloads — the download staging area
-# --------------------------------------------------------------------------- #
-def _downloads_dir(folder):
-    """<music>/.mlo/downloads, or None when no music folder is set."""
-    if not folder:
-        return None
-    try:
-        return downloads_dir(folder)
-    except Exception:
-        return None
-
-
-def _downloads_name_error(name, root):
-    """Why `name` may not be acted on inside the downloads dir, or None.
-
-    Names travel as basenames over the API, so anything that is not a single
-    plain path segment — or that resolves (symlinks included) outside the
-    directory — is refused before a byte is touched."""
-    if not name or name in (".", "..") or "/" in name or "\\" in name:
-        return "not a valid entry name"
-    try:
-        real = os.path.realpath(os.path.join(root, name))
-    except (OSError, ValueError):
-        return "unresolvable path"
-    if os.path.dirname(real) != root:
-        return "outside the downloads folder"
-    return None
-
-
-def _downloads_scan(path):
-    """(files, bytes, audio, images) under *path*, skipping hidden app dirs."""
-    from mlo.paths import LIB_AUDIO_EXTS, LIB_VIDEO_EXTS, IMAGE_EXTS
-    files = size = audio = images = 0
-    for root, dirs, names in os.walk(path):
-        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
-        for f in names:
-            files += 1
-            try:
-                size += os.path.getsize(os.path.join(root, f))
-            except OSError:
-                pass
-            ext = os.path.splitext(f)[1].lower()
-            if ext in LIB_AUDIO_EXTS or ext in LIB_VIDEO_EXTS:
-                audio += 1
-            elif ext in IMAGE_EXTS:
-                images += 1
-    return files, size, audio, images
-
-
-def _downloads_entry(root, name):
-    """One downloads entry: size, file counts and whether it is an album.
-
-    `album` is what the page keys the Import button off — a folder holding
-    audio. `partial` marks an in-flight transfer's leftovers, which must never
-    look like something safe to import or delete by accident."""
-    from mlo.paths import LIB_AUDIO_EXTS, LIB_VIDEO_EXTS, IMAGE_EXTS
-    p = os.path.join(root, name)
-    try:
-        mtime = os.path.getmtime(p)
-    except OSError:
-        return None
-    # In-flight transfers and scratch files are dot/underscore-prefixed or
-    # carry a partial suffix; they are not results to act on.
-    partial = name.startswith((".", "_")) or \
-        name.lower().endswith((".part", ".tmp", ".!ut", ".downloading"))
-    if os.path.isdir(p) and not os.path.islink(p):
-        files, size, audio, images = _downloads_scan(p)
-        return {"name": name, "dir": True, "bytes": size, "files": files,
-                "audio": audio, "images": images, "album": audio > 0,
-                "partial": partial, "_mtime": mtime}
-    try:
-        size = os.path.getsize(p)
-    except OSError:
-        size = 0
-    ext = os.path.splitext(name)[1].lower()
-    return {"name": name, "dir": False, "bytes": size, "files": 1,
-            "audio": 1 if (ext in LIB_AUDIO_EXTS or ext in LIB_VIDEO_EXTS) else 0,
-            "images": 1 if ext in IMAGE_EXTS else 0,
-            "album": False, "partial": partial, "_mtime": mtime}
-
-
-def _staging_listing(path):
-    """One staging folder as the page needs it: totals plus newest-first
-    entries, each in `_downloads_entry`'s shape minus its private `_mtime`.
-
-    A missing or unreadable folder is reported as empty and never as an
-    error: a transfer creates the roots on its own schedule, so the page polls
-    this and must not see a failure just because nothing is staged yet."""
-    out = {"folder": (os.path.abspath(path) if path else "").replace("\\", "/"),
-           "exists": False, "count": 0, "bytes": 0, "entries": []}
-    if not path or not os.path.isdir(path):
-        return out
-    root = os.path.realpath(path)
-    try:
-        names = os.listdir(root)
-    except OSError:
-        return out
-    entries = [e for e in (_downloads_entry(root, n) for n in names) if e]
-    entries.sort(key=lambda e: e["_mtime"], reverse=True)
-    for e in entries:
-        del e["_mtime"]
-    out.update(exists=True, count=len(entries), entries=entries,
-               bytes=sum(e["bytes"] for e in entries))
-    return out
-
-
-@app.get("/api/downloads")
-def downloads_list():
-    """Contents of <music_folder>/.mlo/downloads, newest first.
-
-    This is the download staging area: everything a download pulls down lands
-    here and stays until it is imported into the library or deleted. Enough is
-    reported per entry (size, file counts, whether it holds audio) for the page
-    to offer Import only where it is meaningful."""
-    folder = load_config().get("music_folder") or ""
-    out = _staging_listing(_downloads_dir(folder))
-    out["music_folder"] = folder.replace("\\", "/")
-    return out
-
-
-@app.post("/api/downloads/delete")
-def downloads_delete(req: DownloadsDelete = DownloadsDelete()):
-    """Permanently delete downloads entries by basename. Unknown and refused
-    names land in `failed`; nothing else is an error."""
-    import shutil
-    folder = load_config().get("music_folder") or ""
-    ddir = _downloads_dir(folder)
-    if not ddir or not os.path.isdir(ddir):
-        raise HTTPException(404, "downloads folder not found")
-    root = os.path.realpath(ddir)
-    deleted, failed, freed = [], [], 0
-    for name in req.names:
-        err = _downloads_name_error(name, root)
-        p = os.path.join(ddir, name) if err is None else ""
-        if err is None and not os.path.lexists(p):
-            err = "not found in downloads"
-        if err is None:
-            try:
-                # Size first: once rmtree has run the bytes are unrecoverable.
-                if os.path.islink(p):
-                    size = 0
-                    os.remove(p)
-                elif os.path.isdir(p):
-                    size = _dir_stats(p)[1]
-                    shutil.rmtree(p)
-                else:
-                    size = os.path.getsize(p)
-                    os.remove(p)
-                freed += size
-            except OSError as e:
-                err = str(e) or "delete failed"
-        if err:
-            failed.append({"name": name, "error": err})
-        else:
-            deleted.append(name)
-    if deleted:
-        tagcache.invalidate_album(ddir)
-    return {"deleted": deleted, "failed": failed, "freed": freed}
-
-
-@app.post("/api/downloads/import")
-def downloads_import(req: DownloadsImport = DownloadsImport()):
-    """Move downloads entries into the library as albums, clearing them from
-    the staging area.
-
-    Each entry keeps its name (deduplicated with " (2)" etc.) and is verified
-    to sit inside the downloads dir first. A per-entry failure lands in
-    `failed`; the rest of the batch still moves."""
-    folder = load_config().get("music_folder") or ""
-    ddir = _downloads_dir(folder)
-    if not ddir or not os.path.isdir(ddir):
-        raise HTTPException(404, "downloads folder not found")
-    if not folder or not os.path.isdir(folder):
-        raise HTTPException(400, "music_folder not set or not found")
-    root = os.path.realpath(ddir)
-    lib = library_root(folder)
-    moved, failed = [], []
-    for name in req.names:
-        err = _downloads_name_error(name, root)
-        src = os.path.join(ddir, name) if err is None else ""
-        if err is None and not os.path.lexists(src):
-            err = "not found in downloads"
-        if err is None:
-            safe = re_safe_filename(os.path.basename(name)) or "Download"
-            dest = os.path.normpath(os.path.join(lib, safe))
-            if not _in_music_folder(dest, folder):
-                err = "target outside music folder"
-            else:
-                n = 2
-                while err is None and os.path.exists(dest):
-                    dest = os.path.normpath(os.path.join(lib, f"{safe} ({n})"))
-                    n += 1
-                if err is None and not move_path(src, dest):
-                    # move_path retried every lock/sharing violation and
-                    # refuses to copy blindly: the source stays complete.
-                    err = ("could not import — a file inside it is still in "
-                           "use (stop playback and retry)")
-                elif err is None:
-                    moved.append({"name": name, "path": dest.replace("\\", "/")})
-        if err:
-            failed.append({"name": name, "error": str(err)})
-    if moved:
-        tagcache.invalidate_album(ddir, *[m["path"] for m in moved])
-        mbresolve.invalidate()
-    return {"moved": moved, "failed": failed}
-
-
-# --------------------------------------------------------------------------- #
 # Library layout — is the music folder shaped the way the app expects?
 # --------------------------------------------------------------------------- #
 # The walk itself lives in mlo.layout — the same one Run All runs as script 20
@@ -4849,12 +3788,11 @@ def grades_summary():
 
     Read-only: nothing is graded, re-graded or written. It reads the library
     payload the Library page already fetches and says which of its albums and
-    tracks came out below their checks (server.recommendations.grade_warning,
-    the same object `/api/home` carries as `grade_warning`). The Library page
-    has no Home payload, so without this route the two pages would each have
-    to count the library themselves and could disagree."""
-    from server import recommendations
-    return recommendations.grade_warning(lib_mod.build_library(load_config()))
+    tracks came out below their checks (server.grade_status.grade_warning). The
+    Library page builds the payload itself, so without this route a page would
+    have to count the library on its own and could disagree."""
+    from server import grade_status
+    return grade_status.grade_warning(lib_mod.build_library(load_config()))
 
 
 @app.post("/api/library/layout/remove-empty-artist")

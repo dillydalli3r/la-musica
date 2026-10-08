@@ -32,7 +32,7 @@ export type CfgField =
   | { k: string; label: string; type: "text"; pattern?: string; patternHelp?: string; help?: string }
   | { k: string; label: string; type: "password"; help?: string }
   /** Ordered provider preference list; an empty list means the built-in order. */
-  | { k: string; label: string; type: "list"; catalog: "discovery" | "lyrics" | "covers"; help?: string }
+  | { k: string; label: string; type: "list"; catalog: "lyrics" | "covers"; help?: string }
   /** Unordered set of values (a string list in config) shown as checkboxes. */
   | { k: string; label: string; type: "multi"; options: [string, string][]; optionsFrom?: "genres"; help?: string }
   /** Comma-separated list in one text input; kept in config as a string list. */
@@ -186,8 +186,7 @@ export const CONFIG_GROUPS: CfgGroup[] = [
         { k: "lyrics_sources", label: "Lyrics providers (order)", type: "list", catalog: "lyrics", help: "Providers are tried top to bottom when lyrics are fetched from an album, artist or track page. Providers left out of the list are never used." },
         { k: "lyrics_allow_plain", label: "Accept plain (unsynced) lyrics", type: "bool", help: "Off by default: the chain prefers synced lyrics and writes an untimed one only when no source states timestamps, and this install then fails that track's lyrics check (“Plain” on the track's own surfaces). Turn this on to accept untimed text — LRCLIB's plain records — as a good answer here." },
         { k: "lyrics_search_aliases", label: "Search lyrics under alias names", type: "bool", help: "When the first search for a track's lyrics finds nothing, search again under the artist/album/title's other names from MusicBrainz (aliases) — e.g. Hikaru Utada for 宇多田ヒカル. On by default." },
-                { k: "lyrics_youtube_captions", label: "Use YouTube captions (yt-dlp)", type: "bool", help: "Time-synced captions, but only for tracks that carry a YouTube id — the id the video download records — so this never searches YouTube for a track. Automatic captions are used when a video has no typed subtitles and can mishear; needs yt-dlp under Dependencies, otherwise the provider is skipped." },
-        { k: "lrc_timestamp_precision", label: "Timestamp precision (decimals)", type: "number", min: 2, max: 3 },
+                { k: "lrc_timestamp_precision", label: "Timestamp precision (decimals)", type: "number", min: 2, max: 3 },
         { k: "lrc_strip_metadata", label: "Strip metadata tags ([ti:], [ar:])", type: "bool" },
         { k: "lrc_collapse_blank_lines", label: "Collapse blank lines", type: "bool" },
         { k: "lrc_enhanced_enabled", label: "Enhanced LRC (word timestamps)", type: "bool" },
@@ -208,17 +207,7 @@ export const CONFIG_GROUPS: CfgGroup[] = [
       title: "DR / ReplayGain (script 7)",
       fields: [
         { k: "dr_replaygain_enabled", label: "Enabled", type: "bool" },
-        { k: "replaygain_mode", label: "Gain mode", type: "select", options: [["track","Track gain"],["album","Album gain"],["off","Off — no gain applied"]] },
-        { k: "replaygain_preamp_db", label: "Preamp (dB)", type: "number", min: -24, max: 24, step: 0.5 },
-        { k: "replaygain_analyze_missing", label: "Measure tracks without ReplayGain tags instead of playing them at unity", type: "bool" },
-        { k: "replaygain_clip_protection", label: "Clip protection", type: "bool" },
         { k: "replaygain_skip_existing", label: "Skip files that already have RG tags", type: "bool" },
-        // The player's equalizer, as the raw id — the EQ page (MAINTAIN →
-        // Equalizer) is where it is picked, edited and heard, and it writes
-        // this same key; this field is the escape hatch that shows what is
-        // stored (and clears it), the way the export's profile id has always
-        // been editable as text.
-        { k: "playback_eq_profile", label: "Player equalizer (preset or imported profile id, blank = off)", type: "text" },
       ],
     },
     {
@@ -286,10 +275,6 @@ export const CONFIG_GROUPS: CfgGroup[] = [
         { k: "write_log_grade", label: "Write LOG_GRADE scores", type: "bool" },
         { k: "write_replaygain_tags", label: "Write ReplayGain tags", type: "bool" },
         { k: "write_dynamic_range_tags", label: "Write DR tags", type: "bool" },
-        { k: "write_rating_tags", label: "Write RATING tags (your stars)", type: "bool",
-          help: "Rating a track also writes RATING (0-100, Picard's scale: one half-star = 10) into the file, "
-                + "and clearing a rating removes the tag. Off, ratings stay in the app only. Keeping it on is what "
-                + "makes an imported Picard-rated library and this app agree." },
         { k: "normalize_media_source", label: "Normalize MEDIA / SOURCE", type: "bool" },
         { k: "strip_source_on_cd", label: "Strip SOURCE on CD rips", type: "bool" },
         { k: "fill_empty_source", label: "Fill empty SOURCE on digital", type: "bool" },
@@ -320,7 +305,6 @@ export const CONFIG_GROUPS: CfgGroup[] = [
         { k: "grade_include_log", label: "Allow LOG files", type: "bool" },
         { k: "grade_include_lrc", label: "Allow LRC files", type: "bool" },
         { k: "grade_include_accurip", label: "Allow .accurip files", type: "bool" },
-        { k: "grade_include_description", label: "Allow album description files (description.txt)", type: "bool" },
         { k: "grade_include_video", label: "Allow remuxed videos (MKV)", type: "bool" },
         { k: "grade_include_other", label: "Allow other files", type: "bool" },
         { k: "grade_check_raw_video", label: "Fail un-remuxed videos (VOB/AVI...)", type: "bool" },
@@ -337,18 +321,6 @@ export const CONFIG_GROUPS: CfgGroup[] = [
       title: "Videos (script 11)",
       blurb: "Lossless remux: any video container → MKV with the video copied bit-exact and lossless audio converted to FLAC (level below); lossy audio (AC3/DTS/AAC) is copied rather than inflated into FLAC unless that is turned off. Captions/subtitles are always kept and verified — never removed. If the muxer refuses the video codec, H.264 is a last-resort fallback (off by default: it re-encodes the only copy). The original (e.g. the .VOB) is removed after a verified remux.",
       fields: [
-        { k: "youtube_enabled", label: "Fetch missing music videos from YouTube", type: "bool", help: "The master switch for every YouTube download: the album header's film button and a track's \"Download music video\" action both refuse to search while it is off. Script 11 itself never searches YouTube — it remuxes the video files that are already in the folder." },
-        { k: "youtube_max_height", label: "Maximum video height (px, 0 = best available)", type: "number", min: 0, max: 4320 },
-        {
-          k: "youtube_cookies_mode", label: "Cookies for YouTube", type: "select",
-          options: [["none", "None — anonymous"], ["file", "A cookies file saved below"], ["browser", "Read from a browser"]],
-          help: "Your own YouTube session is the only thing that opens an age-gated or members-only video — without it YouTube answers \"Sign in to confirm your age\" — and it stops the throttling a fresh IP gets. None: yt-dlp asks anonymously and no cookie is ever sent. A cookies file: yt-dlp reads the jar saved in the box below this field — paste it or drop a cookies.txt on it, in Netscape format (a browser-extension exporter like \"Get cookies.txt\" writes exactly that file). Read from a browser: yt-dlp opens that browser's own cookie store, which needs the browser on the same machine and signed in to YouTube — close it first if the store is locked.",
-        },
-        {
-          k: "youtube_cookies_browser", label: "Browser to read cookies from", type: "select",
-          options: [["chrome", "Chrome"], ["chromium", "Chromium"], ["edge", "Edge"], ["firefox", "Firefox"], ["brave", "Brave"], ["opera", "Opera"], ["safari", "Safari"], ["vivaldi", "Vivaldi"], ["whale", "Whale"]],
-          help: "Which browser \"Read from a browser\" opens. It reads the browser's DEFAULT profile, so pick the one you are signed in to YouTube with; a profile the app cannot decrypt (Chrome's cookie encryption on another OS user) simply yields no cookies and the download stays anonymous.",
-        },
         { k: "video_reencode_incompatible", label: "Allow H.264 video fallback (lossy re-encode, last resort)", type: "bool" },
         { k: "video_lossy_audio_copy", label: "Copy lossy audio streams instead of re-encoding to FLAC", type: "bool" },
         { k: "video_crf", label: "H.264 CRF (lower = better)", type: "number", min: 0, max: 51 },
@@ -393,65 +365,17 @@ export const CONFIG_GROUPS: CfgGroup[] = [
       ],
     },
     {
-      title: "Home",
-      blurb: "The Home section in the sidebar — its shelves are built from the library itself (recently added, best graded, top artists, favorites, needs attention) with nothing fetched online.",
-      fields: [
-        { k: "home_recent_count", label: "Recently-added albums shown", type: "number", min: 4, max: 60 },
-      ],
-    },
-    {
       title: "Discovery",
-      blurb: "Online providers (Deezer, ListenBrainz, MusicBrainz, Last.fm, Wikipedia…) used for artist images and album/artist descriptions. Each order list is tried top to bottom; the first provider with a usable answer wins. An empty list means the built-in order shown as the placeholder.",
+      blurb: "The credentials the link and advisory sources ask for: RateYourMusic's cookie and User-Agent, Spotify's ISRC advisory lookup, and the Discogs/Last.fm keys the genre chain reads. Each is optional — a source without its key is simply skipped.",
       fields: [
-        { k: "artist_image_sources", label: "Artist image sources (order)", type: "list", catalog: "discovery", help: "Used when fetching an artist image automatically; the picked image can still be overridden per artist." },
-        { k: "description_sources", label: "Description sources (order)", type: "list", catalog: "discovery", help: "Used for artist and album descriptions." },
-        { k: "discovery_timeout_s", label: "Request timeout (s)", type: "number", min: 3, max: 30 },
         { k: "rym_cookie", label: "RateYourMusic cookie", type: "password", help: "Only needed when RYM answers with a challenge. Two ways in: a cookies.txt in Netscape format — what a browser-extension exporter like \"Get cookies.txt\" writes — is imported by the cookie panel below (the same panel is on Settings' Sources and in this wizard) (paste it or drop the file on the box; only its rateyourmusic.com cookies are kept), or open the devtools route — sign in to rateyourmusic.com, press F12 → Network → reload → click any request to rateyourmusic.com → Headers → Request Headers → copy everything after \"Cookie:\" and paste it here (newlines and the \"Cookie:\" label are handled for you). The paste must include Cloudflare's `cf_clearance` — the pair its challenge hands the browser that solved it — and RYM honours it only alongside the matching `rym_user_agent` and network, so export from one signed-in tab and set that browser's User-Agent below if it is not the built-in Chrome one. RYM's `session` cookie is HttpOnly, so a browser extension's export is the only way to get it out of a browser at all. It is a session credential — do not share it, and paste a fresh one when RYM starts refusing, since signing out or clearing cookies invalidates it. Blank = RYM is skipped like any other unavailable source; MusicBrainz still resolves RYM links for well-known releases. Test it with the Sources panel's Test button." },
         { k: "rym_user_agent", label: "RateYourMusic User-Agent", type: "text", help: "The User-Agent RYM requests are sent with. Cloudflare binds its `cf_clearance` cookie to the exact User-Agent (and network) that passed its challenge, so the stored cookie only counts when this matches the browser it came from — copy that browser's User-Agent (devtools → Network → any request → Request Headers → User-Agent) and paste it here. Blank = the built-in Chrome User-Agent the app already sends." },
         { k: "rym_links_auto", label: "Auto-find RateYourMusic links", type: "bool", help: "Asks rateyourmusic.com for the album and artist pages during an import (and from the link editor's Auto-find button). An existing link is never overwritten, and when RYM refuses the request the import carries on untouched — the link is then left for you to paste by hand." },
         { k: "rym_archive_fallback", label: "Read archived RateYourMusic pages when the live site refuses", type: "bool", help: "With no cookie — or one RYM no longer accepts — the Wayback Machine is asked for the release page instead. An archived page can predate the release, so its genre list may be short; the live site is always tried first." },
-        { k: "web_ratings_enabled", label: "Web ratings (script 24)", type: "bool", help: "Asks the public sources below for an album's and each track's score and writes them beside your own stars, as WEBRATING / ALBUMWEBRATING (and the _SOURCE tags naming who answered). Your own RATING is never touched and the star field always prefers it; a web value is only ever FILLED IN, so nothing already on a file is overwritten unless force_web_ratings is set — by hand or through the Force menu (24 · Web ratings re-fetch)." },
-        { k: "web_ratings_sources", label: "Web rating sources — priority order, asked top to bottom", type: "multi", options: [["rateyourmusic", "RateYourMusic — answers for the album AND for each track (one song page per track); needs the rym_cookie, or an archived page"], ["musicbrainz", "MusicBrainz — the release group for the album, the recording (then its work) for a track"], ["albumoftheyear", "Album of the Year — the album only; the site publishes no track scores"], ["discogs", "Discogs — the release only; needs the discogs_token above"]], help: "Only these four ids are understood; anything else is ignored. All four ship, RateYourMusic first. RYM leads because it is the widest verdict the app can read — one score from tens of thousands of ratings — and it answers at BOTH levels: the release page for the album, and each track's own song page (found by slug and verified against the page's own title/artist before it is believed). MusicBrainz and RYM are the only two that rate a track; Album of the Year and Discogs are album-only. The archive-backed sources (RYM when its live page refuses, Album of the Year, Discogs) are cached 30 days, misses included, and RYM's per-track lookups are paced at one request per second, so a first pass over an album costs seconds rather than milliseconds — a first-run cost per album, not a per-run one. Each source's own vote count weights the average, so a score from 49,000 ratings counts for more than one from 16. A value is written only when at least one source answered, and the album's score and a track's are separate facts — neither is invented from the other." },
-        { k: "aoty_archive_fallback", label: "Read archived Album-of-the-Year pages", type: "bool", help: "On (the default), albumoftheyear.org is read from its newest archived capture — the site answers every automated client with a Cloudflare 403 (plain HTTP, headless and headed browsers alike), so the archive is the only route that works. Off, the source contributes nothing." },
         { k: "spotify_client_id", label: "Spotify client ID (optional)", type: "text", help: "Optional second advisory source (Spotify's ISRC lookup) behind Deezer and ahead of Apple. Empty = Spotify is skipped; an import never fails without it." },
         { k: "spotify_client_secret", label: "Spotify client secret (optional)", type: "password", help: "Pairs with the client ID above — both are needed before the Spotify lookup runs." },
         { k: "discogs_token", label: "Discogs token (optional)", type: "password", help: "A personal access token from discogs.com/settings/developers. Used to rate a release while a genre import runs; without it Discogs is skipped." },
         { k: "lastfm_api_key", label: "Last.fm API key (optional)", type: "password", help: "A free API key from last.fm/api. Only used by the discovery providers; without it Last.fm is skipped." },
-        { k: "discovery_enabled", label: "Use online discovery providers", type: "bool", help: "Off, the Home shelves and every artist/album lookup answer from the library and MusicBrainz alone: no Deezer, ListenBrainz, Last.fm or Wikipedia request leaves the server." },
-      ],
-    },
-    {
-      title: "Streaming playlist import",
-      blurb: "Playlists → “Import from a streaming service” reads one playlist URL per import: Deezer's public API (no key), Spotify's Web API (the client ID/secret from the Discovery tab — a public playlist needs nothing else), YouTube Music through the app's own yt-dlp, and Apple Music's playlist page (no public API without a developer token). Every track is matched against the library and the report says which ones did not match and why.",
-      fields: [
-        {
-          k: "playlist_import_parent_albums", label: "Queue the parent album of a track the library does not have", type: "bool",
-          help: "Off (the default), an import is informational: the playlist holds the matched paths and nothing is downloaded. On, every imported track whose album is not in the library queues its PARENT ALBUM through the same add-by-name path the Discover page uses (a MusicBrainz match) — albums, never single tracks. A track whose album is already in the library queues nothing. The import dialog can override this for one import.",
-        },
-        {
-          k: "playlist_import_unmatched", label: "Tracks the library does not have", type: "select",
-          options: [["skip", "Report them and leave them out (default)"]],
-          help: "An import always reports every unmatched track and the reason.",
-        },
-        {
-          k: "playlist_import_create_empty", label: "Still create the playlist when no track matched", type: "bool",
-          help: "Off, an import that matched nothing writes no playlist and the report says so. On (the default), the empty playlist is created so the attempt is visible in the playlists list.",
-        },
-      ],
-    },
-    {
-      title: "Artist images & descriptions",
-      blurb: "Artwork and text that live next to the audio: artist photos stored with the artist, and descriptions stored in non-destructive tags. Grading can require them (see the Grading tab).",
-      fields: [
-        { k: "metadata_auto_fetch", label: "Fetch artist image / descriptions on import", type: "bool" },
-        { k: "metadata_review", label: "Review metadata candidates before writing them", type: "bool" },
-        { k: "artist_image_enabled", label: "Fetch artist images", type: "bool" },
-        { k: "artist_image_crop", label: "Crop artist images to the configured aspect", type: "bool", help: "Off keeps whatever shape the provider served. The aspect below is judged and cropped only while this is on and covers are configured with an aspect at all (cover_crop_enabled)." },
-        { k: "artist_image_aspect", label: "Artist image aspect (W:H)", type: "text", pattern: "^\\s*\\d+(\\.\\d+)?\\s*[:x/×]\\s*\\d+(\\.\\d+)?\\s*$", patternHelp: "width:height, e.g. 1:1 (square), 4:5, 16:9", help: "The shape artist images are stored in, e.g. 1:1. The fetch crops to it, grading fails an image further than 2% from it, and script 19 (Optimize artist images) crops the ones already in the library back to it." },
-        { k: "artist_image_target_size", label: "Artist image max size (px, 0 = keep native size)", type: "number", min: 0, max: 4000 },
-        { k: "artist_description_enabled", label: "Fetch artist descriptions", type: "bool" },
-        { k: "album_description_enabled", label: "Fetch album descriptions", type: "bool" },
-        { k: "description_full", label: "Fetch the full description text (not just the summary)", type: "bool" },
       ],
     },
     {
@@ -586,9 +510,6 @@ export const CONFIG_GROUPS: CfgGroup[] = [
         { k: "grade_check_genre_count", label: "Genre count per track (at most mb_genre_count)", type: "bool", help: "A track may hold at most the 'Genres per track' value — only an overflow fails (issue code GENRE_COUNT). There is no lower bound and no quota; keep the two in step." },
         { k: "grade_check_genre_order", label: "Genre order (the family, if present, comes first)", type: "bool", help: "The family must be the FIRST genre, e.g. Rock / Shoegaze (issue code GENRE_ORDER). A family in a later slot, or a genre repeated, fails. The names themselves are graded by the vocabulary check below." },
         { k: "grade_check_genre_vocab", label: "Genre vocabulary (MusicBrainz)", type: "bool", help: "Every GENRE name must be one MusicBrainz publishes (shoegaze, dream pop, …); an unknown name fails with issue code GENRE_VOCAB and is named in the report. Grading never rewrites the tag — run Auto tagging (8) or Format all (10) to canonicalize." },
-        { k: "grade_check_album_description", label: "Album description stored", type: "bool" },
-        { k: "grade_check_artist_image", label: "Artist image stored", type: "bool" },
-        { k: "grade_check_artist_description", label: "Artist description stored", type: "bool" },
         { k: "grade_check_replaygain", label: "ReplayGain tags present (only when a file already carries one)", type: "bool" },
         { k: "grade_check_acoustid", label: "AcoustID tags required (ACOUSTID_ID + ACOUSTID_FINGERPRINT)", type: "bool", help: "Every audio track must carry both halves; a track with neither fails naming both, a half pair naming the missing one. No API key is needed — script 21 Fix AcoustID pairs takes the fingerprint locally and reads the recording id off the file." },
         { k: "grade_check_alias_needed", label: "Locale alias for names the locale cannot read (TITLEALIAS / ARTISTALIAS / ALBUMALIAS)", type: "bool", help: "A TITLE, ARTIST or ALBUM written in a script the configured locale (Import & tags) cannot read must carry its locale alias tag, optionally locale-suffixed (TITLEALIAS-JA). A Latin name never needs one, and neither does a name in the locale's own script — a Latin library is never charged for it. Script 14 / the import write them from MusicBrainz's own aliases." },
@@ -617,7 +538,6 @@ export const CONFIG_GROUPS: CfgGroup[] = [
         { k: "export_workers", label: "Parallel workers (0 = count them from the CPU)", type: "number", min: 0, max: 32 },
         { k: "export_verify", label: "Verify every written file", type: "bool" },
         { k: "export_prune", label: "Delete the destination leftovers first", type: "bool" },
-        { k: "export_playlists", label: "Export playlists", type: "bool" },
         /* The file selection the Export page saves as this device's default
            (`export_copy_files`): the same ELEVEN families its own checkboxes
            draw — the keys of server.exporter.FILE_FAMILIES, in that table's
@@ -626,12 +546,12 @@ export const CONFIG_GROUPS: CfgGroup[] = [
            the run's report; an empty selection is NOT "copy nothing" — it
            means nobody has chosen, so the classic sidecar switch below still
            decides. */
-        { k: "export_copy_files", label: "What an export copies (blank = the switch below decides)", type: "multi", options: [["audio", "The tracks themselves"], ["cover", "Covers and artwork"], ["lyrics", "Lyrics (.lrc)"], ["cue", "Cue sheets (.cue)"], ["log", "Rip log (.log)"], ["accurip", "AccurateRip report (.accurip)"], ["description", "Album description"], ["checksum", "Checksum lists and .torrent"], ["text", "Notes, links and scans"], ["playlist", "Playlists the album carries"], ["other", "Anything else"]], help: "The families an export writes BESIDE the audio, as the Export page's own 'What gets copied' section offers them. A family left out stays in the library and is named in the run's report — never dropped in silence." },
+        { k: "export_copy_files", label: "What an export copies (blank = the switch below decides)", type: "multi", options: [["audio", "The tracks themselves"], ["cover", "Covers and artwork"], ["lyrics", "Lyrics (.lrc)"], ["cue", "Cue sheets (.cue)"], ["log", "Rip log (.log)"], ["accurip", "AccurateRip report (.accurip)"], ["checksum", "Checksum lists and .torrent"], ["text", "Notes, links and scans"], ["playlist", "Playlists the album carries"], ["other", "Anything else"]], help: "The families an export writes BESIDE the audio, as the Export page's own 'What gets copied' section offers them. A family left out stays in the library and is named in the run's report — never dropped in silence." },
         /* The switch the Export page's file selection replaced
            (`export_copy_files`): it still decides WHEN no selection has been
            saved, so a device that always wants the classic set can be served
            from here. A selection saved in the export form wins over it. */
-        { k: "export_sidecars", label: "Export the classic sidecar set (cover/description/lrc/cue/log/accurip) when no file selection is saved", type: "bool" },
+        { k: "export_sidecars", label: "Export the classic sidecar set (cover/lrc/cue/log/accurip) when no file selection is saved", type: "bool" },
         { k: "export_clean_tags", label: "Write only canonical tags", type: "bool" },
         { k: "export_id3v2", label: "ID3v2 version for MP3", type: "select", options: [["2.3", "2.3"], ["2.4", "2.4"]] },
         { k: "export_id3v1", label: "Also write ID3v1 (MP3)", type: "bool" },
@@ -650,21 +570,9 @@ export const CONFIG_GROUPS: CfgGroup[] = [
       ],
     },
     {
-      title: "Downloads & playback",
-      blurb: "What a downloaded (offline) copy holds, and which copy plays. Downloading caches a track on this device so it plays with the server away — see the Downloads page. Quality here is about the CACHE: the library's own audio is never touched, and streaming always serves the library file.",
-      fields: [
-        { k: "download_codec", label: "Downloaded copies are", type: "select", options: [["copy", "Copy (the file's own codec) — default"], ...CODEC_CHOICES.filter(([v]) => v !== "keep")], help: "`Copy` stores exactly what the library holds — nothing is re-encoded, so a track is downloaded in the codec it is already in. Any other target re-encodes the track for this device's cache only (smaller downloads for a phone; the library file keeps its own format), and only a codec the player can decode will play back. There is no `keep` here: `copy` IS \"never re-encode\"." },
-        { k: "download_bitrate", label: "Download bitrate (kbps) / Vorbis quality", type: "number", min: 0, max: 512, help: "The re-encode's rate: kbps for MP3/AAC/Opus, Vorbis' own 0-10 quality scale for Ogg. 0 uses the codec's own default (MP3 320, AAC 256, Ogg 6, Opus 128). Ignored while the codec above is Copy, and by a lossless target." },
-        { k: "playback_source", label: "Play tracks from", type: "select", options: [["stream", "Streaming from the server — default"], ["downloaded", "The downloaded copy"]], help: "`Streaming` asks the server for the library file even when a copy is downloaded; `the downloaded copy` plays what is cached, saving bandwidth and working with the server away. Either way a copy plays when the server cannot be reached, because it is the only thing left." },
-        { k: "gapless_playback", label: "Play albums without a gap between tracks", type: "bool", help: "On, the player keeps the next track preloaded and hands the sound over at a natural track end, so an album plays as the CD did. Off, every track is loaded and started on its own — pick it for a device that dislikes the handover, or if a track's trailing silence is being swallowed." },
-        { k: "infinite_playback", label: "Keep playing past the end of the queue", type: "bool", help: "On, the queue's last track gets a few SIMILAR tracks appended as ordinary queue rows before it ends, so the play never stops — reorder or remove them like any other row. They are scored from this library's own tags (nothing is fetched online, so it works offline), nothing already in the queue is added twice, and Repeat one still ends nothing. Off, the queue ends after its last track." },
-      ],
-    },
-    {
       title: "Server & remote access",
       blurb: "Where this server listens and the address clients should dial. A change to the port or host is picked up at the next start; the address is what a phone or desktop client is told to use.",
       fields: [
-        { k: "download_concurrency", label: "Files read at once for one download (1–8)", type: "number", min: 1, max: 8, help: "The reader pool behind a queue or offline-cache download: higher fills a socket faster, at the cost of staging more file data in memory." },
         { k: "server_host", label: "Listen address (0.0.0.0 = every interface)", type: "text", help: "Anything but 127.0.0.1 means other machines can reach this server — the login gate turns itself on there (see the next group)." },
         { k: "server_port", label: "Port", type: "number", min: 1, max: 65535 },
         { k: "server_public_url", label: "Public address clients should use (blank = this machine)", type: "text" },
@@ -737,7 +645,7 @@ export const SETUP_STEPS: SetupStep[] = [
     title: "Sources & API keys",
     blurb:
       "What the app uses for lyrics, genres, ratings and artwork. The credentials below are the only thing a first run has to paste, and every one of them is optional — a source without its key is simply skipped, saved keys are re-tested as you save them, and all of it is editable later in Settings → Sources (where the provider rows, their orders and the live status of each one live too). " +
-      "The one program in this step is yt-dlp — installed from the Tools step, it is what searches, fetches and captions YouTube (scripts 11 and 18) — and it takes its cookies the same way RateYourMusic does: a cookies.txt in Netscape format, what a browser-extension exporter like \"Get cookies.txt\" writes, imported on Settings' Videos tab for yt-dlp and its Discovery tab for RYM.",
+      "Cookies are a cookies.txt in Netscape format — what a browser-extension exporter like \"Get cookies.txt\" writes — imported on Settings' Discovery tab for RYM.",
     panel: "sources",
   },
   {
@@ -748,7 +656,6 @@ export const SETUP_STEPS: SetupStep[] = [
     panel: "done",
   },
 ];
-
 
 /** Keys the wizard writes itself rather than through a control: the folder its
  *  picker saves, and the flag its own buttons set when the run finishes. */
@@ -786,10 +693,6 @@ export const HIDDEN_KEYS: string[] = [
   "force_reencode_images",
   "force_tracklist",
   "force_xlit",
-  // Script 24's own override lives on the same one-shot switches as the rest:
-  // it is offered by the Force menu (`force.ts`) and the script's Settings tab,
-  // so no raw Settings row shows it.
-  "force_web_ratings",
   // The one-time move of the ENCODER_VERSION default (v4.4.0, ON -> OFF):
   // `normalize_config` rewrites a stored `true` it finds while this flag is
   // unset, then sets the flag, so a later `true` (the user re-enabling the row

@@ -1,12 +1,11 @@
-"""Netscape cookie files: one parser, one jar model, for every cookie login.
+"""Netscape cookie files: one parser, one jar model, for the cookie login.
 
-The app has two cookie-bearing credentials, and they are the same file:
-yt-dlp's jar on disk (``server/api_youtube.py``, ``<music>/.mlo/data/
-cookies.txt``) and RateYourMusic's `Cookie` header (``server/api_rym.py``,
-a header string in the ``rym_cookie`` config key). Both accept a browser
-extension's ``cookies.txt`` export, so the file reading, the strictness, the
-sentences a refusal uses and the per-cookie notes all live HERE, once — a
-second parser is how the two would drift into accepting different files.
+The app's cookie-bearing credential is RateYourMusic's `Cookie` header
+(``server/api_rym.py``, a header string in the ``rym_cookie`` config key),
+read from a browser extension's ``cookies.txt`` export. The file reading, the
+strictness, the sentences a refusal uses and the per-cookie notes all live
+HERE, once — a second parser is how two credential readers would drift into
+accepting different files.
 
 What is in the format, and what this module insists on:
 
@@ -18,39 +17,30 @@ What is in the format, and what this module insists on:
   * a file is proven either by the ``# Netscape HTTP Cookie File`` header or by
     at least one well-shaped cookie line, because both are real exports
     (browsers' own exporters leave the header out).
-  * two column rules are enforced beyond the shape because yt-dlp's loader
-    (``http.cookiejar.MozillaCookieJar``, which ``yt_dlp.cookies`` wraps)
-    REJECTS the whole file when they are broken: the include-subdomains flag
-    must agree with a leading dot on the domain (its ``assert domain_specified
-    == initial_dot``), and the expiry must be digits or empty. A jar this
-    module accepted and yt-dlp then refused would fail every later download
-    with a cause nowhere near the download.
+  * two column rules are enforced beyond the shape because
+    ``http.cookiejar.MozillaCookieJar``'s loader REJECTS the whole file when
+    they are broken: the include-subdomains flag must agree with a leading dot
+    on the domain (its ``assert domain_specified == initial_dot``), and the
+    expiry must be digits or empty. A jar this module accepted and that loader
+    then refused would fail the credential with a cause nowhere near it.
 
-Beyond parsing, this module owns the three things a cookie login needs and
-neither credential could have alone:
+Beyond parsing, this module owns the two things the credential needs:
 
   * ``filter_jar`` — a browser extension exports the WHOLE profile, so an
     import keeps only the cookies the credential is actually sent to, and
     drops everything else (with the count, so the UI can say so).
-  * ``write_jar`` — the atomic credential write (temp file in the target
-    directory, fsync, ``os.replace``): a download running while the user saves
-    a new jar reads either the whole old file or the whole new one.
   * the per-cookie NOTES: a comment the user attaches to one cookie, and the
     expiry the export stated for it. They are keyed by the cookie's identity
     (``domain``, ``path``, ``name`` — see ``cookie_key``), never by position,
     so a re-import leaves a comment on the cookie it was written for. The
     store is the ``cookie_notes`` config value (one JSON object per source,
-    see ``set_note``); a jar-backed credential ALSO carries them into the file
-    as ``# mlo-comment:`` lines (``render_jar``, read back by ``jar_comments``)
-    so the file stays self-describing — and every reader ignores them, because
-    every reader ignores ``#`` lines. Storing a note never touches a cookie
-    line: the file is edited line by line, so the cookie data is byte for byte
-    what it was.
+    see ``set_note``); a ``# mlo-comment:`` line inside a jar is ignored on
+    read (every reader ignores ``#`` lines), so a note never changes the
+    cookie data.
 """
 import json
 import os
 import re
-import tempfile
 from datetime import datetime, timezone
 from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
 
@@ -68,20 +58,20 @@ MAX_COOKIE_BYTES = 512 * 1024
 # thing that tells a cookie jar apart from any other tab-separated text.
 NETSCAPE_HEADER = "# Netscape HTTP Cookie File"
 
-# Our own per-cookie comment line, written directly ABOVE the cookie line it
-# describes. It is an ordinary Netscape comment (a `#` line), so curl, yt-dlp
-# and http.cookiejar skip it; the marker is what tells it apart from the
-# export's own comments when we read a jar back.
+# Our own per-cookie comment marker: a note the app once wrote directly above
+# the cookie line it describes. It is an ordinary Netscape comment (a `#` line),
+# so curl and http.cookiejar skip it; the marker is what lets a re-import drop
+# a stale note line instead of treating it as export content.
 COMMENT_MARK = "# mlo-comment: "
 
 # A cookie line's columns, in order: the domain (a leading dot means "any
 # subdomain"), the include-subdomains flag, the path, the secure flag, the
-# expiry, the name and the value. yt-dlp's own writer (http.cookiejar's
-# MozillaCookieJar) and every browser export use exactly this order.
+# expiry, the name and the value. http.cookiejar's own writer
+# (MozillaCookieJar) and every browser export use exactly this order.
 _COOKIE_COLUMNS = 7
 
-# The expiry column, exactly as yt-dlp's own loader validates it
-# (yt_dlp/cookies.py: `[0-9]+(?:\.[0-9]+)?`); empty means a session cookie.
+# The expiry column, exactly as http.cookiejar's own loader validates it
+# (`[0-9]+(?:\.[0-9]+)?`); empty means a session cookie.
 _EXPIRY_RX = re.compile(r"^\d+(?:\.\d+)?$")
 
 # `#HttpOnly_` is part of the DOMAIN column, not a comment: it is how a jar
@@ -128,7 +118,7 @@ def _domain_columns(domain: str) -> Tuple[str, bool]:
     """(host, initial_dot) from a cookie line's domain column.
 
     The column carries ``#HttpOnly_`` for a cookie the page's own JavaScript
-    must not see, and a leading dot for "any subdomain of this host" — yt-dlp's
+    must not see, and a leading dot for "any subdomain of this host" — the
     loader asserts the include-subdomains flag agrees with that dot, so the two
     facts are read here together.
     """
@@ -146,7 +136,7 @@ def _is_comment_line(stripped: str) -> bool:
 def _parse_cookie_line(line: str) -> Optional[Cookie]:
     """The cookie *line* carries, or None when it is not a cookie line.
 
-    Every rule yt-dlp's own loader enforces is enforced here (see the module
+    Every rule http.cookiejar's own loader enforces is enforced here (see the module
     docstring): the column count, a real host, boolean flags that agree with
     the domain's leading dot, a path that starts at the root, and an expiry
     that is digits or empty.
@@ -180,7 +170,7 @@ def _parse(text: str) -> Tuple[List[Cookie], Optional[str], int, bool]:
 
     Exactly one of ``cookies`` and ``error`` is ever set. A file is accepted on
     EITHER proof, because both are real exports: the ``# Netscape HTTP Cookie
-    File`` header (what curl, yt-dlp and every browser extension write), or at
+    File`` header (what curl and every browser extension write), or at
     least one line shaped like a cookie. The header alone is accepted too — an
     export of a signed-out profile is still a cookie file, and the caller warns
     about what it does not hold.
@@ -233,8 +223,8 @@ def parse_cookie_file(text: str, with_values: bool = False):
     *with_values* is set, for the caller that re-serves the file's cookies as a
     `Cookie` header rather than as a jar of their own (the RateYourMusic
     credential, server/api_rym.py) — one entry per accepted line. The value is
-    only ever returned when asked for: it is a live credential, and the yt-dlp
-    jar's own state is names, counts and domains.
+    only ever returned when asked for: it is a live credential, and the caller's
+    own state is names, counts and domains.
     """
     cookies, error = parse_cookies(text)
     if error:
@@ -316,97 +306,6 @@ def clean_comment(text: str) -> str:
     return flat.strip()[:MAX_COMMENT_CHARS]
 
 
-def render_jar(text: str, comments: Dict[str, str]) -> str:
-    """*text* with each cookie's note written above its line.
-
-    Line by line: the note lines we wrote before are removed (they are
-    re-emitted from *comments*, so this is idempotent) and one fresh
-    ``# mlo-comment:`` line is inserted directly above the cookie line whose
-    identity has a note. Every cookie line, and every other line, is written
-    back exactly as it came in — a note can change the file's comments and
-    nothing else, so a jar written with notes still parses to the identical
-    cookie set and every reader (yt-dlp included) still reads it.
-
-    A note whose cookie is not in *text* is not written: it has nothing to
-    attach to in this file.
-    """
-    out: List[str] = []
-    for line in (text or "").split("\n"):
-        stripped = line.strip()
-        if stripped.startswith(COMMENT_MARK):
-            continue
-        cookie = (None if not stripped or _is_comment_line(stripped)
-                  else _parse_cookie_line(line))
-        if cookie is not None:
-            note = clean_comment(comments.get(
-                cookie_key(cookie.domain, cookie.path, cookie.name), ""))
-            if note:
-                out.append(COMMENT_MARK + note)
-        out.append(line)
-    return "\n".join(out)
-
-
-def jar_comments(text: str) -> Dict[str, str]:
-    """{identity: comment} — the notes a jar carries in its own lines.
-
-    The other half of ``render_jar``: a jar this app wrote states which cookie
-    each note belongs to, so re-importing it (or moving it between installs)
-    brings the notes back without the config they came from.
-    """
-    out: Dict[str, str] = {}
-    pending = ""
-    for line in (text or "").split("\n"):
-        stripped = line.strip()
-        if stripped.startswith(COMMENT_MARK):
-            pending = clean_comment(stripped[len(COMMENT_MARK):])
-            continue
-        cookie = (None if not stripped or _is_comment_line(stripped)
-                  else _parse_cookie_line(line))
-        if cookie is not None and pending:
-            out[cookie_key(cookie.domain, cookie.path, cookie.name)] = pending
-        pending = ""
-    return out
-
-
-def write_jar(path: str, text: str) -> str:
-    """Replace the jar at *path* with *text*, atomically, and return the path.
-
-    The ``# Netscape HTTP Cookie File`` header is written as the FIRST line
-    even when the text did not carry it: http.cookiejar — which yt_dlp.cookies
-    wraps — reads the first line as the file's magic and refuses the whole jar
-    when it is a cookie line instead ("does not look like a Netscape format
-    cookies file"). The app's job here is to hand yt-dlp a jar it can read, so
-    a well-shaped headerless export is completed rather than stored in a form
-    that fails on the next download.
-
-    Written the way the config is (temp file in the target directory, fsync,
-    os.replace): a download running while the user saves a new jar reads either
-    the whole old file or the whole new one, never half of either.
-    """
-    directory = os.path.dirname(path) or "."
-    os.makedirs(directory, exist_ok=True)
-    body = text if text.endswith("\n") else text + "\n"
-    if not any(line.strip().startswith(NETSCAPE_HEADER)
-               for line in body.splitlines()):
-        body = f"{NETSCAPE_HEADER}\n{body}"
-    fd, temp_path = tempfile.mkstemp(prefix=".mlo_cookies_", suffix=".txt",
-                                     dir=directory)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
-            fh.write(body)
-            fh.flush()
-            os.fsync(fh.fileno())
-        # A cookie jar is a credential: readable by the account that owns the
-        # library and nobody else, on the hosts that have such a thing.
-        try:
-            os.chmod(temp_path, 0o600)
-        except OSError:
-            pass
-        os.replace(temp_path, path)
-    finally:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
-    return path
 
 
 def expiry_seconds(expiry: str) -> Optional[float]:
@@ -497,9 +396,8 @@ def expired_warning(cookies: Sequence[Cookie], provider: str,
 # The per-cookie notes. One config value (`cookie_notes`), one JSON object per
 # cookie source, one entry per cookie identity:
 #
-#     {"youtube": {"youtube.com\t/\tSID": {"comment": "my main account"}},
-#      "rym":     {"rateyourmusic.com\t/\tsession": {"comment": "…",
-#                                                   "expiry": "1893456000"}}}
+#     {"rym": {"rateyourmusic.com\t/\tsession": {"comment": "…",
+#                                                "expiry": "1893456000"}}}
 #
 # `comment` is what the user typed, `expiry` is what the import's file stated
 # for that cookie (the RYM credential is a bare `Cookie` header, which has

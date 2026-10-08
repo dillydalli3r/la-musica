@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """The per-page Export dialog's server contract.
 
-Every page that shows a selection — artist, album, track, playlist listing,
-playlist detail, favourites — exports through ONE shared dialog
+Every page that shows a selection — artist, album, track listing, a selection —
+exports through ONE shared dialog
 (web/src/components/ExportDialog.tsx), and that dialog posts the whole option
 form to POST /api/export exactly as the Export page does. This suite pins the
 server half of that agreement:
@@ -22,9 +22,9 @@ server half of that agreement:
   * ONE track stays ONE FILE: the audio is written on its own, never inside an
     archive;
   * many tracks write one file each — audio only, since the defaults leave the
-    album's own `.m3u8`/sidecar files in the library and REPORT them as
-    excluded — plus, when the form asks for them, the sidecars and playlists;
-    a re-run skips everything it already wrote;
+    album's own sidecar files in the library and REPORT them as excluded —
+    plus, when the form asks for them, the sidecars; a re-run skips everything
+    it already wrote;
   * the selection is what decides: exporting only the second track of an album
     writes only that file and (prune off) leaves the first one alone.
 
@@ -188,9 +188,6 @@ try:
     # only ever reports what this run wrote.
     res = post(dialog_body([one, two, solo], DEST))
     assert (res["exported"], res["skipped"]) == (2, 1), res
-    # No album `.m3u8` by default either: a PLAYLIST export is a different
-    # thing (server.playlists.export_m3u8), and this switch is opt-in too.
-    assert res["playlists"] == 0, res
     written = listing(DEST)
     assert f"{DEST}/Music/Artist Two/Album B/1-01 Track 1.flac".replace("\\", "/") in written
     assert f"{DEST}/Music/Artist One/Album A/1-02 Track 2.flac".replace("\\", "/") in written
@@ -229,28 +226,27 @@ try:
     assert [p for p in listing(mp3_one) if p.endswith(".mp3")] == \
         [f"{mp3_one}/Music/Artist One/Album A/1-01 Track 1.mp3".replace("\\", "/")]
 
-    # ------------------------------------- sidecars and playlists are opt-in
+    # ------------------------------------- sidecars are opt-in
     # OFF is the default (asserted above); ON still writes exactly what the old
-    # default did — the album's cover.jpg/.lrc beside the files and one .m3u8
-    # per album plus all.m3u8 — so a device that wants them can still have them.
+    # default did — the album's cover.jpg/.lrc beside the files — so a device
+    # that wants them can still have them. Playlists are gone: no `.m3u8` is
+    # ever written, by any run.
     # …and a client that sends the OLD switch and no file selection (a browser
     # on a cached bundle, or a config from before the selection existed) still
     # gets exactly what it got: `copy_files=None` is "nothing new to say".
     opted = os.path.join(ROOT, "Device5")
     os.makedirs(opted)
-    res = post(dialog_body([one], opted, playlists=True, sidecars=True,
-                           copy_files=None))
-    assert (res["playlists"], res["sidecars"]) == (2, 2), res
+    res = post(dialog_body([one], opted, sidecars=True, copy_files=None))
+    assert res["sidecars"] == 2, res
     got = listing(opted)
     assert f"{opted}/Music/Artist One/Album A/cover.jpg".replace("\\", "/") in got, got
     assert f"{opted}/Music/Artist One/Album A/01 - One.lrc".replace("\\", "/") in got, got
-    assert f"{opted}/Music/Artist One/Album A/Album A.m3u8".replace("\\", "/") in got, got
-    assert [p for p in got if p.lower().endswith("all.m3u8")], got
+    assert not [p for p in got if p.lower().endswith(".m3u8")], got
 
     bare = os.path.join(ROOT, "Device5b")
     os.makedirs(bare)
-    res = post(dialog_body([one], bare, playlists=False, sidecars=False, embed_covers=False))
-    assert (res["playlists"], res["sidecars"]) == (0, 0), res
+    res = post(dialog_body([one], bare, sidecars=False, embed_covers=False))
+    assert res["sidecars"] == 0, res
     assert listing(bare) == [f"{bare}/Music/Artist One/Album A/1-01 Track 1.flac".replace("\\", "/")], \
         listing(bare)
     # The classic switch resolves to its own family set in the RESULT too, so a
@@ -427,6 +423,6 @@ print("ok  export dialog: shared option set == the API's run options, the defaul
       "request exports end to end (audio only, extras reported), 1 track stays 1 "
       "file, album + transcode runs produce one file per track, the file selection "
       "(menu == the exporter's table, audio-only / audio+artwork, empty + unknown "
-      "refused), the classic sidecar switch and playlists opt-in, the structure "
+      "refused), the classic sidecar switch opt-in, the structure "
       "menu + custom structure preview/run agree, bad structures and targets 400, "
       "a running export stops at a file boundary and keeps what it wrote")

@@ -41,7 +41,7 @@ type DepTool = {
 };
 
 /** Sidebar "Dependencies" — the external binaries the scripts shell out to
- * (ffmpeg, yt-dlp, beets…). Mirrors the setup wizard's tool check, but always
+ * (ffmpeg, beets…). Mirrors the setup wizard's tool check, but always
  * reachable: inspect versions, install into the music folder's .mlo/tools, and
  * pull updates in one click. */
 export default function DependenciesPage() {
