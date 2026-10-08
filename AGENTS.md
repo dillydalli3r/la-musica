@@ -99,13 +99,17 @@ them; releasing is their decision, not the last step of a task.
 When they do ask for one:
 
 1. `python tools/check_versions.py vX.Y.Z` — every copy that must agree (10 of
-   them: `mlo/__init__.py`, `Dockerfile`, `README.md`, `desktop/README.md`,
-   `desktop/package.json`, `web/package.json`, `desktop/src-tauri/Cargo.toml`,
-   `Cargo.lock`, `tauri.conf.json` ×2) is listed, and the run fails until all say
-   the same version. Bump first, then run it again with no argument.
+   them: `mlo/__init__.py`, `Dockerfile`, `README.md`, `desktop/package.json`,
+   `desktop/package-lock.json`, `web/package.json`, `web/package-lock.json`,
+   `desktop/src-tauri/Cargo.toml`, `desktop/src-tauri/Cargo.lock`,
+   `desktop/src-tauri/tauri.conf.json`) is listed, and the run fails until all
+   say the same version. Bump first, then run it again with no argument.
 2. Release notes: `docs/release-notes/release-notes-<version>.md`, never the repo
-   root — nothing reads them at build time, they are the record of what a release
-   changed. `git mv` keeps the history when one moves.
+   root. They are the record of what a release changed, and the release workflow
+   now requires them: `release.yml` fails the release if the file is missing,
+   uses it as the GitHub release body, and `tools/make_updater_manifest.py`
+   carries it as the notes an installed app shows. `git mv` keeps the history
+   when one moves.
 3. `git push origin main`, then tag and push it
    (`git tag -a vX.Y.Z -m "la musica X.Y.Z" && git push origin vX.Y.Z`): the tag
    runs `.github/workflows/release.yml` — suites, then the web/desktop/

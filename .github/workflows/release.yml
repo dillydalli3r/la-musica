@@ -9,11 +9,13 @@ name: Release
 # the desktop bundles (Windows/macOS/Linux). The tag is checked against
 # mlo/__init__.py first: the app reports that version, so a mistagged release
 # would ship two different answers to "which version is this?".
-# There is no in-app updater (desktop/src-tauri/tauri.conf.json configures no
-# updater plugin/endpoints/pubkey), so a release is consumed by downloading an
-# installer/zip or pulling the image; the
-# draft/prerelease flags below are just the default "this is a real release"
-# choice.
+# The desktop builds ARE updateable: desktop.yml passes `createUpdaterArtifacts`
+# and the signing key, each leg uploads the bundles' updater artifacts and their
+# signatures, and the release job assembles `latest.json` from exactly those
+# files — the one static URL `plugins.updater.endpoints` in tauri.conf.json
+# names. The release body is `docs/release-notes/release-notes-<version>.md`,
+# the same file the manifest carries as the update's notes and the file the
+# version check below refuses to release without.
 
 on:
   push:
@@ -163,6 +165,20 @@ jobs:
         # is the gate rather than the single grep this step used to do.
         run: python tools/check_versions.py "${GITHUB_REF_NAME}"
 
+      - name: The release notes for this tag
+        id: notes
+        # The record of what a release changed lives in the repository, one file
+        # per version, and it is also what the updater manifest hands to an
+        # installed app's "update available" card. Publishing the GitHub release
+        # with an EMPTY body (or with GitHub's own commit list instead) is how a
+        # release page ends up saying nothing about what changed, so the same
+        # file is the body and a missing one fails the release here rather than
+        # at the manifest step below.
+        run: |
+          NOTES="docs/release-notes/release-notes-${GITHUB_REF_NAME#v}.md"
+          test -f "$NOTES" || { echo "::error::$NOTES is missing - a release with no notes has nothing to read"; exit 1; }
+          echo "path=$NOTES" >> "$GITHUB_OUTPUT"
+
       - name: Package application zip
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
@@ -268,7 +284,10 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           name: la musica ${{ github.ref_name }}
-          generate_release_notes: true
+          # The curated notes, not `generate_release_notes`: GitHub's own list
+          # would be every commit in the range, and the file the repository
+          # keeps is the record a reader (and the updater card) actually wants.
+          body_path: ${{ steps.notes.outputs.path }}
           # Installers only, by extension: the bundles' own trees carry
           # internals (Info.plist, icon.icns, the bare mlo-desktop binary) and
           # a release that lists those beside the installers reads as clutter

@@ -1,5 +1,5 @@
 # la musica
-**v5.5.0** — a self-hosted app that manages, optimizes, audits and grades your music library, from a browser or a desktop window.
+**v6.0.0** — a self-hosted app that manages, optimizes, audits and grades your music library, from a browser or a desktop window.
 
 FastAPI backend + React UI over the `mlo` engine: a library of artists → albums → tracks and music videos, album covers, a multi-source lyrics chain, and MusicBrainz / Discogs / AcoustID identity. All app state — config, the beets library, caches, trash, runtime-installed tools — lives in one `.mlo` folder beside your music.
 
