@@ -13,6 +13,8 @@ import type {
   CoverWriteResult,
   DiscoveryCatalog,
   DiscoveryImageRow,
+  DownloadEntry,
+  DownloadsPayload,
   GradeWarning,
   HomeData,
   ImportAutonomy,
@@ -36,14 +38,17 @@ import type {
   MBReleaseChoicePayload,
   MBSearchFieldHelp,
   MBSearchRows,
+  NeedsWarning,
   PodcastSeries,
   ScriptRunResult,
   ScriptMenu,
+  SlskReleaseIdentity,
   SourceHealth,
   SourceKind,
   SourcesHealth,
   StreamingImportResult,
   UnpackedTree,
+  WishesPayload,
 } from "./types";
 import { toast } from "./store";
 import * as offline from "./lib/offlineCache";
@@ -1452,6 +1457,717 @@ export interface LibraryQueryResponse {
   group_counts: LibraryGroupCount[];
   took_ms: number;
 }
+
+/** Live per-query search progress (server/soulseek_auto.py job_state()) while
+ *  the search stage runs — null once the query has been scored. There is no
+ *  clock here on purpose: slskd's window is a ceiling that a good candidate
+ *  ends early, so the payload carries only what the network answered. */
+export interface SlskSearchProgress {
+  query: string;
+  state: string;
+  responses: number;
+  files: number;
+}
+
+/** `/api/soulseek/status` — slskd's availability and login, plus the saved
+ *  credentials and the ports from the config. */
+export interface SlskStatus {
+  installed: boolean;
+  running: boolean;
+  /** slskd's own network login; null while the daemon is not running. */
+  logged_in: boolean | null;
+  /** slskd's words for a failed login (INVALIDPASS, no credentials) — the
+   *  only explanation some failures have. */
+  error: string | null;
+  /** Set when slskd's web port is held by ANOTHER app's slskd. */
+  conflict: string | null;
+  conflict_username: string | null;
+  /** slskd's GET /application payload (transfer speeds, counters). */
+  server: { uploadSpeed?: number; downloadSpeed?: number; [k: string]: unknown } | null;
+  download_dir: string;
+  web_port: number;
+  listen_port: number;
+  /** Saved config value — prefills the login form. */
+  username: string;
+  /** The account slskd is ACTUALLY signed in as, "" when unknown. Drifts from
+   *  `username` as soon as the login is corrected on slskd's own page. */
+  account: string;
+  password: string;
+  has_credentials: boolean;
+  autostart: boolean;
+  share_dirs: string[];
+  /** The LISTEN port's real state: whether anything accepts on it here, who
+   *  holds it, and what the router was actually told (mlo.portmap). A mapping
+   *  is only `mapped` when a router confirmed it, so the tab may say "opened"
+   *  only then — `refused` carries the router's own words in `detail`. */
+  listen_port_state: {
+    listen_port: number;
+    listening: boolean;
+    /** "slskd" when our daemon accepts on it, "another program" when a
+     *  foreign process does — the conflict the WEB port already reports. */
+    holder: "" | "slskd" | "another program";
+    bindable: boolean;
+    /** Set only when another program holds the port. */
+    conflict: string | null;
+    /** What is true here: the port unbound while slskd runs, or unholdable. */
+    error: string;
+    /** slskd's OWN last log line about a listen port ("" when it said none). */
+    slskd_error: string;
+    mapping: {
+      enabled: boolean;
+      listen_port: number;
+      /** The port the last verdict was about. It can differ from
+       *  `listen_port_state.listen_port`, which is the SAVED port, so a bar
+       *  that describes a mapping must name this one. */
+      mapped_port: number;
+      state: "off" | "mapped" | "refused" | "no_gateway" | "unsupported"
+        | "error" | "pending" | "checking" | "client_down";
+      detail: string;
+      method: "" | "upnp" | "natpmp";
+      verified: boolean;
+      external_ip: string;
+      internal_ip: string;
+      gateway: string;
+      tried: { method: string; state: string; detail: string }[];
+      /** The raw protocol record behind `tried`: whether each method's
+       *  request was answered at all, and the endpoint's own words (a SOAP
+       *  fault code, a NAT-PMP result code) when it was. */
+      attempts: { method: string; answered: boolean; ok: boolean; detail: string }[];
+      checked_at: number;
+      in_flight: boolean;
+      /** When the lease a gateway granted runs out (0 = none was stated, so the
+       *  entry does not expire on its own). A confirmed mapping whose lease has
+       *  passed may be gone — the gateway drops the entry when it runs out. */
+      expires_at: number;
+    };
+  };
+}
+
+/** `/api/soulseek/port-check` — one row per thing this machine can actually
+ *  prove about the listen port (server/soulseek_port.py), for the "Test port"
+ *  button.
+ *
+ *  `proves`/`cannot` are part of every row on purpose: a green row is not a
+ *  promise that the internet reaches the port, and the pair is what says so where
+ *  the state alone would not be read as more than it is. `verdict` is the worst
+ *  row's state, or `ok` only when something accepts on the port AND the router
+ *  lists a mapping for it; `note` is what no row can say. */
+export interface SlskPortCheck {
+  ok: boolean;
+  port: number;
+  checks: {
+    id: string;
+    label: string;
+    state: "ok" | "warn" | "fail" | "unknown";
+    detail: string;
+    /** What a pass on this row means. */
+    proves: string;
+    /** What it can never tell, however green it is. */
+    cannot: string;
+  }[];
+  verdict: "ok" | "warn" | "fail" | "unknown";
+  note: string;
+  checked_at: string;
+}
+
+/** One file of the running auto-import download, as slskd reports it. */
+export interface SlskAutoFile {
+  name?: string;
+  bytes?: number;
+  size?: number;
+  /** fractional file completion (0-100), never only 0-or-100 */
+  percent?: number;
+  speed?: number;
+  state?: string;
+  /** slskd reports the transfer finished */
+  complete?: boolean;
+  /** the pipeline formally accepted the file — it landed on disk */
+  done?: boolean;
+}
+
+/** Live download progress of the auto-import job — null while nothing is in
+ *  flight, and absent entirely on servers predating the payload. Every field
+ *  is optional: the panel renders whatever subset the backend publishes. */
+export interface SlskAutoProgress {
+  phase?: string;
+  username?: string;
+  dir?: string;
+  /** files SLKSD reports complete — a different measure from files_arrived */
+  files_done?: number;
+  /** files the pipeline has accepted onto disk */
+  files_arrived?: number;
+  files_total?: number;
+  bytes?: number;
+  size?: number;
+  /** byte-weighted share of `size`, not a file count */
+  percent?: number;
+  /** instantaneous aggregate rate in bytes/s (delta between polls) */
+  speed?: number;
+  /** remaining bytes / speed, null while nothing is moving */
+  eta_s?: number | null;
+  files?: SlskAutoFile[] | null;
+}
+
+/** Auto-import job state (server/soulseek_auto.py job_state()). `confirm` is
+ *  set while the job waits for the user to approve a lossy-only download. */
+export interface SlskAutoJob {
+  /** The job's own id, as server/soulseek_auto.py publishes every job (its
+   *  `_published`). The queue rows carry the same id as `job_id`, which is what
+   *  lets a live progress frame be matched to the job it belongs to. */
+  id?: number;
+  state: "idle" | "running" | "confirm" | "done" | "error" | "cancelled";
+  stage: string;
+  search: SlskSearchProgress | null;
+  /** Present only while a download is in flight. */
+  progress?: SlskAutoProgress | null;
+  release: {
+    id?: string | null; title?: string; artist?: string; date?: string | null;
+    country?: string | null; catalog_number?: string | null; media?: string;
+  } | null;
+  log: { t: string; msg: string }[];
+  attempts: { username: string; dir: string; reason: string }[];
+  /** The album's own import chain (links, metadata, cover art, then the
+   *  configured scripts), which runs on a thread of its own AFTER the job is
+   *  state "done". `running` is what tells a surface that the album is in the
+   *  library but NOT finished — the job's "done" alone does not say that. */
+  chain?: { running?: boolean } | null;
+  result: {
+    album_path?: string; staging_path?: string; imported?: boolean; organized?: boolean;
+    organize_error?: string | null; error?: string;
+    /** Set when the job gave up on the search and parked the release in the
+     *  wish list instead — there is no album_path in that case. */
+    wished?: boolean; wish_id?: number;
+  } | null;
+  /** The prompt while state == "confirm". `reason` picks the card: "lossy_only"
+   *  asks whether a lossy copy may be downloaded, "no_logs" asks whether a
+   *  lossless album without a rip log may be downloaded, "no_results" reports a
+   *  search that came back empty and offers the wish handoff. All are answered
+   *  through soulseekAutoConfirm(). Only the fields of the variant at hand are
+   *  published, so every field past `reason` is optional and the panel renders
+   *  whatever subset arrives. */
+  confirm: {
+    reason?: "lossy_only" | "no_logs" | "no_results";
+    /** How long the search ran, in seconds (no_results). */
+    waited?: number;
+    /** The queries that came back empty (no_results). */
+    queries?: string[];
+    /** The media the release is (no_logs) — what the album grades as without
+     *  a rip log to verify it. */
+    media?: string;
+    formats?: string[];
+    candidates?: {
+      username: string; dir: string; format: string;
+      matched: number; expected: number; size: number; score: number;
+    }[];
+  } | null;
+}
+
+/** One row of the ONE download queue (`GET /api/queue`, server/api_queue.py):
+ *  a wish, a running auto-import job, a release waiting in the pipeline, an
+ *  import run or a finished download still in the download folder.
+ *
+ *  `stage` is the shared vocabulary — queued / searching / downloading /
+ *  verifying / importing / completed / failed / needs_attention — so a wish
+ *  from MusicBrainz and a folder grabbed off the Soulseek page read the same.
+ *  `source` says which of those put it there. */
+export interface SlskQueueItem {
+  /** "<kind>:<ref>" — pass it back verbatim to queueCancel(). */
+  id: string;
+  kind: "wish" | "job" | "pipeline" | "import" | "ready" | "prompt";
+  /** Set when this row IS a pipeline job (running or settled). */
+  job_id: number | null;
+  /** Set when a wish owns this row. */
+  wish_id: number | null;
+  stage: "queued" | "searching" | "downloading" | "verifying" | "importing"
+       | "completed" | "failed" | "needs_attention" | "background";
+  source_key: "musicbrainz" | "soulseek" | "auto" | string;
+  source: string;
+  title: string;
+  artist: string;
+  release_mbid: string;
+  /** Where the album is (or landed) — the album link, when there is one. */
+  album_path: string;
+  /** A finished download's folder in the download dir (kind "ready"): what
+   *  the Import action on that row sends. Not a library album. */
+  path?: string;
+  /** The release's own identity — the row's `release` block: the catalogue
+   *  number and medium that identify the pressing, its country/date/track
+   *  count, the edition's disambiguation and MusicBrainz's status. Present on
+   *  every row the server builds (server/api_queue.py); empty on the rows that
+   *  cannot know one (a stalled album already in the library, a finished
+   *  download in the folder). Nothing here ever costs a MusicBrainz request. */
+  release?: SlskReleaseIdentity;
+  progress: {
+    text?: string;
+    /** The search query slskd is answering RIGHT NOW (searching rows only):
+     *  a job asks its queries one after another, so this is which one the row
+     *  is waiting on. Set from `soulseek_auto._job_search_progress`. */
+    query?: string;
+    /** slskd's own state word for that query ("InProgress", "Completed", …),
+     *  never invented here. */
+    state?: string;
+    /** The candidate whose folder is being fetched (downloading rows only):
+     *  `peer` is the username and `peer_dir` its folder, both as the job's own
+     *  download snapshot publishes them. `phase` is what the job says it is
+     *  doing with that candidate. */
+    peer?: string;
+    peer_dir?: string;
+    phase?: string;
+    done?: number;
+    total?: number;
+    /** byte-weighted share, null while a search has nothing to weigh */
+    percent?: number | null;
+    files_done?: number;
+    /** Files the job's wait has ACCEPTED on disk — deliberately not the same
+     *  number as `files_done` (what slskd calls complete). */
+    files_arrived?: number;
+    files_total?: number;
+    speed?: number | null;
+    eta_s?: number | null;
+  } | null;
+  /** Why it failed (or what the job is waiting on). On a wish row this is the
+   *  store's own `last_error`, which now carries the rejected candidates'
+   *  reasons (the peer and the refusal), so a row stuck on rejections explains
+   *  itself without the log. */
+  reason: string;
+  /** WHAT the job is doing right now, in its own words — the last line it
+   *  wrote to its log ("Waiting for the album folder …"). Empty when nothing
+   *  live is behind the row. */
+  stage_text?: string;
+  /** WHY nothing has landed yet: the candidates already refused, newest last,
+   *  each with slskd's own reason (`rejected_count` is how many there really
+   *  were — this list is bounded). */
+  rejected?: { username: string; dir: string; reason: string }[];
+  rejected_count?: number;
+  /** True while the album's own import chain (links, metadata, cover art and
+   *  the configured scripts) is still running on its own thread: the album IS
+   *  in the library at that point, and this is what says it is not finished. */
+  chain_running?: boolean;
+  /** Whether this row can be taken off the list (POST /api/queue/clear). True
+   *  only for rows whose work is OVER (a settled job, an imported wish, one
+   *  nothing was found for) — a row still in the pipeline is CANCELLED instead,
+   *  and a finished download waiting to be imported is not clearable at all
+   *  (its action is the import; its bytes are the staging card's). */
+  clearable: boolean;
+  /** One line about what this row's state means right now. */
+  note: string;
+  /** True on a "pipeline" row: the release has NOT started. It is waiting for a
+   *  free slot in the pipeline (see `position`), because
+   *  `soulseek_search_concurrency` releases are already running — the page
+   *  groups these rows as Waiting, which is a different thing from a wish
+   *  waiting for the network to answer. */
+  waiting?: boolean;
+  /** 1-based place in the waiting queue; on `waiting` rows only. */
+  position?: number;
+  attempts?: number;
+  /** Why a FAILED row stopped: "not_found" is never retried on its own, every
+   *  other reason is worth another press once the cause is fixed. */
+  outcome?: string;
+  /** Partial bytes of rejected candidates that could not be removed — still in
+   *  the download folder, reported rather than left for someone to find. */
+  leftovers?: string[];
+  /** True when the import moved the album but the naming script could not
+   *  place EVERY file: the album is in the library and the files that stayed
+   *  behind are still in the download folder (import that folder again to
+   *  finish it). `organize_error` is the import's own sentence about them. */
+  partial?: boolean;
+  organize_error?: string;
+  /** The format a completed album arrived in when it was taken as a LOSSY copy
+   *  under `soulseek_auto_lossy_policy` ("MP3", …; "" otherwise) — the row must
+   *  not read as the lossless import every other row is. */
+  lossy?: string;
+  /** What this row's manual action is ("manual" = enter it by hand in the
+   *  wizard, "answer" = a question parked on the auto-import tab), and where
+   *  it happens. "" when the row has no such action. */
+  action?: "manual" | "answer" | "";
+  action_link?: string;
+  /** Whether POST /api/queue/retry can bring this row back (a terminal state:
+   *  nothing found, or a failed job). */
+  retryable?: boolean;
+  /** Families this album is still missing, in wizard order — the ids the
+   *  wizard's `?missing=` parameter takes. Set on the row of ANY album an
+   *  import is short of a family, whatever the row's own kind and stage: the
+   *  release is finished (the album is in the library), and this is the
+   *  warning on it, not a hold. */
+  missing?: string[];
+  missing_labels?: string[];
+  /** The whole warning, when there is one: what is missing, the wizard link
+   *  and which kind of entry it came from (`NeedsWarning.waiting` is the one
+   *  case that really is held — a review import). */
+  needs?: NeedsWarning;
+  /** The wizard link that opens the album AT the first missing family — the
+   *  same link the import_needs_data notification carries. */
+  wizard_link?: string;
+  /** Whether POST /api/import/prompts/dismiss applies (a row carrying
+   *  `needs`, or a standalone warning row). */
+  dismissable?: boolean;
+  /** Empty searches so far (wish rows): the budget `wishes_not_found_attempts`
+   *  is compared against. */
+  not_found?: number;
+  /** When the next AUTOMATIC attempt may run, 0 when none will (a terminal
+   *  row waits for the user's own retry). */
+  retry_at?: number;
+  /** When the WORKER looks at this row again on its own (0 = never: the row is
+   *  terminal): the failed attempt's backoff when there is one, the search
+   *  interval otherwise (`server.wishes.due_at`). What a waiting row counts
+   *  down to — `retry_at` alone cannot answer it, because a wish with no
+   *  failure behind it still has a next search. */
+  due_at?: number;
+  /** The ranked-candidate FALLBACK WALK this release is being searched with
+   *  (spec R150-R154): the release-choice policy's ranked editions, best first,
+   *  walked one at a time inside the one wish — so a release is ONE row however
+   *  many candidates it is trying. `{index, total, label, mbid, title, tried}`,
+   *  null for a wish with nothing to walk (one candidate, or none). */
+  walk?: SlskWalk | null;
+  /** A wish whose framework album ("Add to library") is on disk with no audio
+   *  yet: cancelling it removes the folder too. */
+  pending?: boolean;
+  created_at: number;
+  updated_at: number;
+  cancelable: boolean;
+  /** The job's last few log lines, for the row's expander. */
+  log_tail: string[];
+}
+
+/** One step of the ranked-candidate fallback walk (`SlskQueueItem.walk`).
+ *  Built by `server.wishes.candidate_state`, so the row, the album page and the
+ *  notification all describe the position the same way. */
+export interface SlskWalk {
+  /** 0-based position being asked for right now. */
+  index: number;
+  /** How many ranked editions the walk may ask (`soulseek_fallback_candidates`,
+   *  clamped to the list the release group actually has). */
+  total: number;
+  /** "Release 2 of 3" — the ONE wording for the position. */
+  label: string;
+  mbid: string;
+  title: string;
+  /** The candidates already asked in this attempt, best first. */
+  tried: { mbid: string; title: string }[];
+}
+
+/** `GET /api/queue` — every section with its rows, plus the counts the tab
+ *  badges show. The three numbers the pipeline runs on: `concurrency` releases
+ *  at once (the overflow WAITS), `candidate_slots` candidate downloads per
+ *  release, and `download_slots` — slskd's own transfer ceiling, which is the
+ *  product of the other two at the shipped defaults (3 × 3 = 9) and which the
+ *  app never relies on to hold either limit. */
+export interface SlskQueuePayload {
+  sections: {
+    queued: SlskQueueItem[];
+    in_progress: SlskQueueItem[];
+    /** Releases whose ranked-candidate walk is spent: still searched, in their
+     *  own subsection (spec R153). */
+    background: SlskQueueItem[];
+    needs_attention: SlskQueueItem[];
+    completed: SlskQueueItem[];
+    failed: SlskQueueItem[];
+  };
+  counts: {
+    queued: number; in_progress: number; background: number;
+    needs_attention: number;
+    completed: number; failed: number; total: number;
+  };
+  running: number;
+  concurrency: number;
+  candidate_slots: number;
+  download_slots: number;
+}
+
+/** What a clear may be scoped to (POST /api/queue/clear): every finished row
+ *  the queue owns ("finished"), the wishlist alone ("wishes"), or one SECTION
+ *  of the queue by name — what a section header's own Clear button sends, and
+ *  exactly the rows it counted. */
+export type SlskQueueScope = "finished" | "wishes"
+  | "queued" | "in_progress" | "background" | "needs_attention" | "completed"
+  | "failed";
+
+/** One slskd transfer (download or upload). `state` is slskd's own enum:
+ *  Queued / InProgress / Completed / Errored / Cancelled / Rejected / … */
+export interface SlskTransfer {
+  id: string;
+  filename: string;
+  size: number;
+  state: string;
+  bytesTransferred?: number | null;
+  percentComplete?: number | null;
+  averageSpeed?: number | null;
+}
+
+export interface SlskTransferUser {
+  username: string;
+  directories: { directory: string; files: SlskTransfer[] }[];
+}
+
+export interface SlskDownloads {
+  downloads: SlskTransferUser[];
+}
+
+/** Which staging root an action targets. They are two directories —
+ *  `<music>/.mlo/downloads` and its `<incomplete>` sibling — and a name is
+ *  only unique INSIDE one of them, so every call names its root. */
+export type StagingRootId = "downloads" | "incomplete";
+
+/** One staging entry — the server's `_downloads_entry()` minus its private
+ *  `_mtime` sort key. `partial` is slskd's own in-flight leftover, `album` an
+ *  entry holding audio (so it can be imported). */
+export interface StagingEntry extends DownloadEntry {
+  /** Epoch seconds of the entry's newest file; the list arrives newest first. */
+  modified: number;
+}
+
+/** One staging root. A folder that was never created reports `exists: false`
+ *  with zero totals — never an error. */
+export interface StagingRoot {
+  /** Absolute path, forward slashes. */
+  folder: string;
+  exists: boolean;
+  count: number;
+  bytes: number;
+  entries: StagingEntry[];
+}
+
+export interface SoulseekStaging {
+  downloads: StagingRoot;
+  incomplete: StagingRoot;
+}
+
+export interface SlskBrowse {
+  username: string;
+  directories: { directory: string; files: { filename: string; size: number }[] }[];
+  /** True when the answer came from this app's own share instead of the peer
+   *  network — a browse of your OWN account, which the peer network cannot
+   *  serve from inside your network (R297). `note` says so in the server's
+   *  own words, and is shown as-is. */
+  local?: boolean;
+  note?: string;
+}
+
+/** One private-message conversation (slskd): the peer and its unread count.
+ *  slskd's list carries no last message — the thread holds the content. */
+export interface SlskConversation {
+  username: string;
+  is_active?: boolean;
+  unread?: number;
+}
+
+/** One private message. `direction` is slskd's own enum (In = from the peer). */
+export interface SlskMessage {
+  id?: number;
+  direction?: "In" | "Out";
+  message?: string;
+  timestamp?: string;
+  acknowledged?: boolean;
+  replayed?: boolean;
+}
+
+
+/** One completed download waiting to be imported. */
+export interface ReadyAlbum {
+  path: string;
+  name: string;
+  /** Path relative to the download dir, for display. */
+  rel: string;
+  files: number;
+  bytes: number;
+}
+
+export interface ReadyAlbums {
+  ok: boolean;
+  albums: ReadyAlbum[];
+  download_dir: string;
+}
+
+/** A started import run (one album, or all of them). */
+export interface ImportRun {
+  ok: boolean;
+  error?: string;
+  status: ImportRunStatus;
+}
+
+/** Progress of the sequential import run: one album at a time, in order. */
+export interface ImportRunStatus {
+  state: "idle" | "running" | "done" | "error" | "cancelled";
+  total: number;
+  done: number;
+  current: string | null;
+  results: { path: string; ok: boolean; album_root: string; error: string }[];
+  errors: string[];
+  started_at: number;
+  finished_at: number;
+}
+
+
+
+/* ---------------------------------------------------------------------- *
+ * Watched artists (server/api_watch.py) — the types the `watch*` methods  *
+ * above answer with.                                                     *
+ * ---------------------------------------------------------------------- */
+
+/** How far back a watch looks. `new_only` (the default) takes release groups
+ *  it has not seen before, so a fresh watch can never pull in a catalogue it
+ *  has been sitting on for years; `backfill` deliberately walks the existing
+ *  discography, still `max_per_cycle` at a time. */
+export type WatchPolicy = "new_only" | "backfill";
+
+/** One release group a watch acted on — the row behind the "queued" and
+ *  "imported" lists. `status` is what happened to it: handed to the wish
+ *  queue, announced only (auto-add off), imported, or failed. */
+export interface WatchItem {
+  release_group_mbid: string;
+  title: string;
+  year: string;
+  release_id: string;
+  /** The wish this became; null when the watch only notified. */
+  wish_id: number | null;
+  status: "queued" | "notified" | "imported" | "failed";
+  at: number;
+  note: string;
+}
+
+/** One watched artist. The rules are the whole point: `release_types` says
+ *  which kinds of release group count, `include` narrows it to a chosen
+ *  allow-list, `exclude` blocks individual release groups, and
+ *  `max_per_cycle` caps how many the watch may queue per check. */
+export interface Watch {
+  id: number;
+  artist_mbid: string;
+  artist: string;
+  added_at: number;
+  /** false = paused: the worker skips it and `next_check_at` reads 0. */
+  enabled: boolean;
+  policy: WatchPolicy;
+  /** MusicBrainz's own release-group type names, lowercased (album, ep,
+   *  single, broadcast, other, compilation, soundtrack, spokenword,
+   *  interview, audiobook, live, remix, dj-mix, mixtape/street, demo,
+   *  field recording). A release group matches when its PRIMARY type is in
+   *  here OR any of its secondary types is. */
+  release_types: string[];
+  /** Allow-list of release-group MBIDs; EMPTY means "no restriction" — any
+   *  new release of the allowed types. Non-empty means only these. */
+  include: string[];
+  /** Release groups that must never be fetched. */
+  exclude: string[];
+  /** The per-check ceiling (1-10): how many release groups ONE cycle may
+   *  queue. This is what keeps a watch from ever dumping a discography. */
+  max_per_cycle: number;
+  /** true = queue straight into the library; false = notify and let the user
+   *  decide from the wish list. */
+  auto_add: boolean;
+  /** 0 = never checked yet. */
+  last_checked_at: number;
+  /** When the worker checks next; 0 while the watch is paused. */
+  next_check_at: number;
+  /** The newest release group the watch has seen, so the next `new_only`
+   *  check knows what is new. */
+  last_seen_release_group: string;
+  checked_count: number;
+  queued_count: number;
+  notified_count: number;
+  imported_count: number;
+  /** The server's own sentence about the last check. */
+  last_result: string;
+  last_error: string;
+  note: string;
+  /** What this watch queued / imported, newest first. */
+  queued: WatchItem[];
+  imported: WatchItem[];
+}
+
+/** `POST /api/watches` — a new watch, or a prefill for one. Everything but
+ *  the artist id is optional; the server fills the rest with its defaults
+ *  (policy `new_only`, types album+ep, one release per cycle, auto-add on). */
+export interface WatchInput {
+  artist_mbid: string;
+  artist?: string;
+  policy?: WatchPolicy;
+  release_types?: string[];
+  include?: string[];
+  exclude?: string[];
+  max_per_cycle?: number;
+  auto_add?: boolean;
+  note?: string;
+}
+
+/** `PATCH /api/watches/{id}` — any subset of the rules, plus the pause. */
+export interface WatchPatch {
+  artist?: string;
+  enabled?: boolean;
+  policy?: WatchPolicy;
+  release_types?: string[];
+  include?: string[];
+  exclude?: string[];
+  max_per_cycle?: number;
+  auto_add?: boolean;
+  note?: string;
+}
+
+/** `GET /api/watches` — the watches, plus the worker that walks them. */
+export interface WatchesPayload {
+  watches: Watch[];
+  worker: {
+    running: boolean;
+    /** Cycles completed since the server started. */
+    cycles: number;
+    last_cycle: number;
+    next_run: number;
+    last_result: string;
+    /** The artists the running cycle is working on. */
+    current: string[];
+  };
+}
+
+/** `POST /api/watches/{id}/check` — what one on-demand check did. */
+export interface WatchCheckResult {
+  ok: boolean;
+  /** Release groups the browse returned for the artist. */
+  checked: number;
+  queued: WatchItem[];
+  notified: WatchItem[];
+  /** The server's own sentence: what it queued, or why it queued nothing. */
+  summary: string;
+}
+
+/** One row of the release-group picker. `allowed` is the server's verdict
+ *  once the watch's rules are applied, and `reason` says why in words —
+ *  including for rows it would NOT fetch ("single", "blocked", "in the
+ *  library", "already queued"). */
+export interface WatchCandidate {
+  release_group_mbid: string;
+  title: string;
+  /** First-release year, "" when MusicBrainz dates it not at all. */
+  year: string;
+  primary_type: string;
+  secondary_types: string[];
+  /** The Podcast SERIES this release group is `part of` (server.integrations
+   *  reads it off the browse's own series relations), or null — the app's
+   *  DERIVED "podcast" type, which MusicBrainz publishes no release-group type
+   *  for. A plain Broadcast (a radio play) has none. */
+  podcast?: { series?: string; title?: string; mbid?: string; number?: string } | null;
+  first_release_date: string;
+  in_library: boolean;
+  queued: boolean;
+  allowed: boolean;
+  /** True when the watch has not seen this release group yet. */
+  is_new: boolean;
+  reason: string;
+}
+
+/** `GET /api/watches/{id}/candidates` (and the by-artist form for a watch
+ *  that does not exist yet): the artist's release groups, filtered so
+ *  `allowed` reflects the current rules. `watch_id` is null for the
+ *  by-artist form. */
+export interface WatchCandidates {
+  artist_mbid: string;
+  artist: string;
+  watch_id: number | null;
+  items: WatchCandidate[];
+  sources_asked: string[];
+  /** What the rows were filtered by — the policy sentence, the type names
+   *  asked for, and how many ids the include / exclude lists hold. */
+  notes: { policy: string; types: string[]; include: number; exclude: number };
+}
+
 
 export const api = {
   health: () => json<{ status: string; version: string }>(`${API}/health`),
@@ -3101,6 +3817,368 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ album_path: albumPath, assignments }),
     }, 600000).then(noteContainerSwap),
+  downloads: () => json<DownloadsPayload>(`${API}/downloads`),
+  downloadsDelete: (names: string[]) =>
+    json<{ deleted: string[]; failed: { name: string; error: string }[]; freed: number }>(
+      `${API}/downloads/delete`,
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ names }) }
+    ),
+  soulseekStatus: () =>
+    json<SlskStatus>(`${API}/soulseek/status`),
+  soulseekStart: () =>
+    json<{ ok: boolean; ready: boolean; message: string; has_credentials: boolean }>(`${API}/soulseek/start`, { method: "POST" }, 30000),
+  soulseekRestart: () =>
+    json<{ ok: boolean }>(`${API}/soulseek/restart`, { method: "POST" }, 60000),
+  /** Share config + the live share audit. `probe` also pulls slskd's own share
+   *  index (tens of megabytes on a large library) to look for a file that is on
+   *  disk, so it is only asked for on demand. */
+  soulseekShares: (probe = false) =>
+    json<any>(`${API}/soulseek/shares${probe ? "?probe=1" : ""}`, undefined, probe ? 180000 : undefined),
+  soulseekSharesSave: (dirs: string[], autostart: boolean | null, apply = true) =>
+    json<{ ok: boolean; dirs: string[]; restarted: boolean }>(`${API}/soulseek/shares`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ dirs, autostart, apply }),
+    }, 60000),
+  soulseekSharesRescan: () =>
+    json<{ ok: boolean }>(`${API}/soulseek/shares/rescan`, { method: "POST" }, 60000),
+  soulseekSharesRefresh: () =>
+    json<{ ok: boolean; message: string }>(`${API}/soulseek/shares/refresh`, { method: "POST" }, 120000),
+  soulseekUploads: () => json<any>(`${API}/soulseek/uploads`),
+  /** The listen port's own check (server/api_soulseek.py): the listener here,
+   *  what the router holds for the port, the addresses both depend on, a
+   *  connection from this machine to the public address, and slskd's login —
+   *  each with what it proves. Every step is bounded on the server and nothing
+   *  there takes a lock, so it may be asked while a download runs; the outside
+   *  half of the answer needs a probe from outside, which this app does not ship. */
+  soulseekPortCheck: () => json<SlskPortCheck>(`${API}/soulseek/port-check`, undefined, 60000),
+  soulseekStop: () =>
+    json<{ ok: boolean; message: string }>(`${API}/soulseek/stop`, { method: "POST" }, 15000),
+  /** Start a manual search: free text, or a MusicBrainz id.
+   *
+   *  `mbid` (a recording id — what the library stores per track — or a
+   *  release/release-group id) is resolved on the server into the queries for
+   *  that ONE track, every one of them POSTed to slskd at once; the answer's
+   *  `id` names them all, so one poll key serves the lot and the poll's payload
+   *  is the merged, deduped result. Nothing is added to the wishes or the queue
+   *  — a search is a search; the user downloads what they pick. */
+  soulseekSearch: (query: string, mbid?: string) =>
+    json<{ id: string; ids?: string[]; queries?: string[]; label?: string; kind?: string }>(
+      `${API}/soulseek/search`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(mbid ? { query, mbid } : { query }),
+    }, 60000),
+  soulseekSearchResults: (id: string) =>
+    json<{
+      state: string | null;
+      isComplete?: boolean;
+      responseCount?: number;
+      fileCount?: number;
+      responses: {
+        username: string;
+        file: string;
+        size: number;
+        bitrate: number | null;
+        duration: number | null;
+        vbr: boolean | null;
+        slot: boolean;
+        speed: number;
+        queue: number;
+      }[];
+    }>(
+      `${API}/soulseek/search/${encodeURIComponent(id)}`,
+      undefined,
+      30000
+    ),
+  soulseekDownload: (username: string, files: { filename: string; size: number }[]) =>
+    json<{ ok: boolean; queued: number }>(`${API}/soulseek/download`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, files }),
+    }, 60000),
+  soulseekDownloads: () => json<SlskDownloads>(`${API}/soulseek/downloads`, undefined, 30000),
+  /** What is actually sitting in the two staging folders, each reported on its
+   *  own. Separate from soulseekDownloads(): that one is slskd's transfer
+   *  history (and empty while the daemon is stopped), this one is the disk. */
+  soulseekStaging: () => json<SoulseekStaging>(`${API}/soulseek/staging`, undefined, 60000),
+  /** Delete ONE entry (file or folder tree) from a staging root. */
+  soulseekStagingDelete: (root: StagingRootId, name: string) =>
+    json<{ ok: boolean; freed: number }>(`${API}/soulseek/staging/delete`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ root, name }),
+    }, 60000),
+  /** Empty one staging root. Per-entry failures come back in `failed` — the
+   *  rest still goes, so the reply is a report, not an abort. */
+  soulseekStagingClear: (root: StagingRootId) =>
+    json<{ ok: boolean; cleared: number; freed: number; failed: { name: string; reason: string }[] }>(
+      `${API}/soulseek/staging/clear`,
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ root }) },
+      120000
+    ),
+  // Private messages — the conversation list carries the unread total (for the
+  // tab badge), the thread is fetched per peer, usernames percent-encoded.
+  soulseekMessages: () =>
+    json<{ ok: boolean; unread: number; conversations: SlskConversation[] }>(
+      `${API}/soulseek/messages`, undefined, 30000
+    ),
+  soulseekConversation: (username: string) =>
+    json<{ ok: boolean; username: string; messages: SlskMessage[] }>(
+      `${API}/soulseek/messages/${encodeURIComponent(username)}`, undefined, 30000
+    ),
+  soulseekSendMessage: (username: string, message: string) =>
+    json<{ ok: boolean; sent: boolean }>(`${API}/soulseek/messages/${encodeURIComponent(username)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message }),
+    }, 15000),
+  soulseekMarkRead: (username: string) =>
+    json<{ ok: boolean; acknowledged: boolean }>(
+      `${API}/soulseek/messages/${encodeURIComponent(username)}/read`, { method: "POST" }, 15000
+    ),
+  soulseekCloseConversation: (username: string) =>
+    json<{ ok: boolean; closed: boolean }>(
+      `${API}/soulseek/messages/${encodeURIComponent(username)}`, { method: "DELETE" }, 15000
+    ),
+  /** A peer's whole shared tree (slskd browse) — what they're offering, so a
+   *  folder can be queued or handed to auto-import without a search hit. */
+  soulseekBrowse: (username: string) =>
+    json<SlskBrowse>(`${API}/soulseek/browse/${encodeURIComponent(username)}`, undefined, 120000),
+  /** Drop transfers from slskd's list (per-file or whole-queue cancel). */
+  soulseekDownloadsCancel: (username: string, transfer_ids: string[]) =>
+    json<{ ok: boolean; cancelled: number }>(`${API}/soulseek/downloads/cancel`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, transfer_ids }),
+    }, 30000),
+  /** Bulk-clear transfers from slskd's history. `finished` drops completed and
+   *  failed rows and keeps the queue, `failed` only the ones that did not
+   *  succeed, `incomplete` also stops what is in flight and DELETES the partial
+   *  bytes already on disk, `all` does both. The server answers with the counts
+   *  plus a `failed` list of transfers whose cleanup was refused. */
+  soulseekDownloadsClear: (scope: "finished" | "failed" | "incomplete" | "all" = "finished") =>
+    json<{
+      cleared: number;
+      files_deleted?: number;
+      bytes_freed?: number;
+      failed?: { username: string; filename: string; reason: string }[];
+    }>(`${API}/soulseek/downloads/clear`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ scope }),
+    }, 60000),
+  // Completed downloads on disk — the review workflow (preview → tag → import).
+  soulseekReview: () =>
+    json<{ dir: string; files: { path: string; file: string; ext: string; is_video: boolean; size: number; mtime: number; user: string; tags: Record<string, string | null>; tech: Record<string, number | string> }[] }>(
+      `${API}/soulseek/review`, undefined, 60000
+    ),
+  soulseekLocalFileUrl: (path: string) => media(`${API}/soulseek/local-file?path=${encodeURIComponent(path)}`),
+  // Playable video preview — native stream when the browser can decode the
+  // container, otherwise a live ffmpeg transcode (DVD VOB / Blu-ray M2TS).
+  soulseekPreviewStreamUrl: (path: string) => media(`${API}/soulseek/preview-stream?path=${encodeURIComponent(path)}`),
+  soulseekDeleteLocal: (path: string) =>
+    json<{ ok: boolean }>(`${API}/soulseek/local-file/delete`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path }),
+    }),
+  soulseekImport: () =>
+    json<{ ok: boolean; moved: string[]; failed?: { album: string; reason: string }[]; organized?: boolean; organize_error?: string; media_tagged?: number; converted?: number }>(`${API}/soulseek/import`, { method: "POST" }, 120000),
+  soulseekAutoStatus: () =>
+    json<SlskAutoJob>(`${API}/soulseek/auto`, undefined, 30000),
+  /** Start the auto-import for one release (or one browsed folder). With
+   *  `soulseek_search_concurrency` releases already running it does not fail:
+   *  the release TAKES ITS PLACE in the waiting queue and the reply says so —
+   *  `waiting` true, `position` where in the line it is and `queue_key` the id
+   *  its row is named by — with no `job`, because it starts by itself (and only
+   *  then) when one of the running releases finishes. */
+  soulseekAutoStart: (body: { release_mbid?: string; queries?: string[]; username?: string; target_dir?: string }) =>
+    json<{ ok: boolean; job?: SlskAutoJob; waiting?: boolean; position?: number; queue_key?: string }>(
+      `${API}/soulseek/auto`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }, 180000),
+  soulseekAutoCancel: () =>
+    json<{ ok: boolean }>(`${API}/soulseek/auto/cancel`, { method: "POST" }, 30000),
+  /** Answer the "only lossy copies found" prompt (accept = download anyway). */
+  soulseekAutoConfirm: (accept: boolean) =>
+    json<{ ok: boolean; accepted: boolean }>(`${API}/soulseek/auto/confirm`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ accept }),
+    }, 30000),
+  soulseekTestLog: (username: string, files: { filename: string; size: number }[]) =>
+    json<{ ok: boolean; threshold: number; logs: { file: string; score: number | null; checksum: string | null; detail: string | null }[] }>(`${API}/soulseek/test-log`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, files }),
+    }, 240000),
+  soulseekLogin: (username: string, password: string) =>
+    json<{ ok: boolean; logged_in: boolean; message: string }>(`${API}/soulseek/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password }),
+    }, 90000),
+  wishes: () => json<WishesPayload>(`${API}/wishes`, undefined, 30000),
+  wishSearch: (id: number) => json<{ ok: boolean; error?: string }>(`${API}/wishes/${id}/search`, { method: "POST" }, 30000),
+  wishesSearchAll: () => json<{ ok: boolean; error?: string }>(`${API}/wishes/search-all`, { method: "POST" }, 30000),
+  // Watched artists — an artist the app keeps an eye on. A watch is    //
+  // the artist-level counterpart of a wish: the server browses         //
+  // MusicBrainz for the artist's release groups and ENQUEUES the ones  //
+  // the rules allow into the wish queue, a few per cycle (see          //
+  // server/api_watch.py). It never queues a discography.               //
+  // ----------------------------------------------------------------- //
+  /** Every watch, plus the worker's own state: when it runs next and what
+   *  its last cycle did. The reads are one request each way — the release
+   *  groups themselves are browsed once per artist, not once per release. */
+  watches: () => json<WatchesPayload>(`${API}/watches`, undefined, 30000),
+  /** Start watching an artist. 400 = unknown/invalid artist id, 409 = the
+   *  artist is already watched (both carry the reason in `detail`). */
+  watchAdd: (body: WatchInput) =>
+    json<{ ok: boolean; watch: Watch }>(`${API}/watches`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }, 60000),
+  /** Change one watch — any subset of its rules, plus `enabled` (the
+   *  pause/resume the row's button uses). */
+  watchUpdate: (id: number, patch: WatchPatch) =>
+    json<{ ok: boolean; watch: Watch }>(`${API}/watches/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    }, 60000),
+  watchDelete: (id: number) => json<{ ok: boolean; id: number }>(`${API}/watches/${id}`, { method: "DELETE" }),
+  /** One check, now, on the user's command: browse the artist once, queue
+   *  at most `max_per_cycle` release groups, and answer what it did
+   *  (`summary` is the server's own sentence about this run). */
+  watchCheck: (id: number) =>
+    json<WatchCheckResult>(`${API}/watches/${id}/check`, { method: "POST" }, 120000),
+  /** The release groups this artist has, with the watch's own rules applied
+   *  to each row — the picker behind the allow/never lists. One MusicBrainz
+   *  browse per request. */
+  watchCandidates: (id: number) =>
+    json<WatchCandidates>(`${API}/watches/${id}/candidates`, undefined, 60000),
+  /** The same list for an artist nobody watches yet — the dialog asks for it
+   *  while the watch is still being created. The rule params are the ones the
+   *  user has picked so far (repeatable, or comma-separated), so each row's
+   *  `allowed` and `reason` describe the rules on screen, not the defaults. */
+  watchCandidatesFor: (artistMbid: string, rules: {
+    policy?: WatchPolicy; release_types?: string[]; include?: string[]; exclude?: string[];
+  } = {}) => {
+    const q = new URLSearchParams();
+    q.set("artist_mbid", artistMbid);
+    if (rules.policy) q.set("policy", rules.policy);
+    for (const t of rules.release_types ?? []) q.append("release_types", t);
+    for (const id of rules.include ?? []) q.append("include", id);
+    for (const id of rules.exclude ?? []) q.append("exclude", id);
+    return json<WatchCandidates>(`${API}/watches/candidates?${q}`, undefined, 60000);
+  },
+
+  /** Albums sitting in the download dir, done downloading, waiting to be
+   *  imported (the "Import all completed" worklist). */
+  soulseekReady: () => json<ReadyAlbums>(`${API}/soulseek/ready`, undefined, 60000),
+  /** Import ONE album, in the background (progress: importAllStatus). */
+  soulseekImportOne: (path: string) =>
+    json<ImportRun>(`${API}/soulseek/import-one`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path }),
+    }, 30000),
+  /** Import every finished download, one album at a time. */
+  soulseekImportAll: () => json<ImportRun>(`${API}/soulseek/import-all`, { method: "POST" }, 30000),
+  importAllStatus: () => json<ImportRunStatus>(`${API}/soulseek/import-all/status`),
+  importAllCancel: () => json<ImportRun>(`${API}/soulseek/import-all/cancel`, { method: "POST" }),
+
+  /** The ONE download queue: queued/searching, in-progress, needs-attention,
+   *  completed and failed rows for the whole pipeline (see api_queue.py). */
+  queue: () => json<SlskQueuePayload>(`${API}/queue`, undefined, 30000),
+  /** Cancel ONE row (`item.id`, e.g. "job:3" / "wish:12" / "pipeline:<mbid>").
+   *  409 = the row is not cancelable any more (it finished, or it is only a
+   *  finished download whose action is the import). */
+  queueCancel: (id: string) =>
+    json<{
+      ok: boolean; cancelled: string; removed?: boolean;
+      /** Job ids the cancel STOPPED (a wish's own acquisition). Non-empty
+       *  means the download really was stopped, not just the row removed. */
+      jobs?: number[];
+      /** Queue tickets dropped: acquisitions that had not started yet. */
+      dropped?: string[];
+    }>(`${API}/queue/cancel`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id }),
+    }, 60000),
+  /** Retry ONE terminal row by hand — the other half of the retry policy: a
+   *  "nothing found" wish or a spent attempts cap is never retried by the
+   *  server on its own, so this press is the way back. A `wish:` row is
+   *  re-armed and searched now; a `job:` row's release goes back into the
+   *  pipeline. 409 = the row is still running, or has nothing to retry with. */
+  queueRetry: (id: string) =>
+    json<{ ok: boolean; retried: string }>(`${API}/queue/retry`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id }),
+    }, 60000),
+  /** Take FINISHED rows off the queue: one row (`item.id`), every finished one
+   *  (`scope: "finished"`), the wishlist alone (`"wishes"`), or ONE SECTION of
+   *  the queue (`"completed"` … — what a section header's own Clear button
+   *  sends, and exactly what it counted). Nothing in the library is touched
+   *  and no download is deleted; `cleared` is how many rows went, `ids`
+   *  which. 409 = the row is not finished (cancel is a different action, and
+   *  the message names it). */
+  queueClear: (body: { id?: string; scope?: SlskQueueScope }) =>
+    json<{ ok: boolean; cleared: number; ids: string[] }>(`${API}/queue/clear`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }, 60000),
+  /** Cancel EXACTLY these queue rows — the queue's own selection
+   *  (`item.id`: "pipeline:<key>" for a release still waiting, "job:<id>" for
+   *  a running one). One press, one call, and an honest answer: `cancelled` is
+   *  how many of the ids went, `ids` which, and `missed` the ones that had
+   *  already started, already finished or were never there. A release that has
+   *  not started never downloads a byte. */
+  queueCancelIds: (ids: string[]) =>
+    json<{ ok: boolean; cancelled: number; ids: string[]; missed: string[] }>(
+      `${API}/soulseek/downloads/cancel`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids }),
+      }, 60000),
+  /** "Clear all": empty the pipeline's WAITING queue — every release queued
+   *  behind the ones already running, dropped before it starts anything. A
+   *  RUNNING release is untouched (that is a cancel on its own row), and no
+   *  settled row, library album or slskd transfer is affected. Needs no daemon
+   *  (it is this app's own queue); `cleared`/`ids` say what went. */
+  queueClearWaiting: () =>
+    json<{ ok: boolean; cleared: number; ids: string[] }>(
+      `${API}/soulseek/downloads/clear`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ scope: "queued" }),
+      }, 60000),
+  soulseekDownloadBulk: (username: string, files: { filename: string; size?: number }[]) =>
+    json<{ queued: number }>(`${API}/soulseek/download-bulk`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, files }),
+    }, 120000),
+  /** Queue everything a peer shares (or one folder of it). */
+  soulseekDownloadUser: (username: string, folder?: string) =>
+    json<{ queued: number; scanned: number; skipped: number }>(`${API}/soulseek/download-user`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, folder }),
+    }, 180000),
+  soulseekSearchCancel: (id: string) =>
+    json<{ ok: boolean }>(`${API}/soulseek/search/cancel`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id }),
+    }, 30000),
 };
 
 /** One row of `GET /api/capabilities`: what one feature can do HERE. */

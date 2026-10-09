@@ -1,4 +1,4 @@
-"""Framework albums: the album folder "Add to library" creates before its audio exists.
+"""Framework albums: the album folder a wish creates before its audio exists.
 
 "Add to library" on a MusicBrainz entity calls :func:`create`, which writes the
 album ON DISK at the path the naming script will put it at, fills it with the
@@ -6,26 +6,30 @@ release's own tracklist (``.mlo_expected.json``, written by mlo.paths' own
 writer) and the release-group cover, and drops a ``.mlo_pending.json`` marker.
 The album is therefore in the library the second it is asked for — the library
 scan lists it as PENDING with its track list, and its tracks are not playable
-and not counted as present — so the user can see the album they asked for and
-fill the folder with its audio themselves.
+and not counted as present — while the existing wish queue searches Soulseek
+for the audio that fills it.
 
-Nothing here forks the pipeline: the manifest is ``mlo.paths``'s writer and the
+Nothing here forks the pipeline: the manifest is ``mlo.paths``'s writer, the
 cover comes through the art cache (``server.artcache`` — allowlist, on-disk
-cache and fallback tiers included, never a second HTTP client).
+cache and fallback tiers included, never a second HTTP client), and the
+download is a normal wish on the normal wish queue (``server.wishes``), which
+the existing worker searches (``server.wishes_worker``).
 
 Lifecycle, in one place:
 
-* :func:`create`     — folder + manifest + cover + marker
+* :func:`create`     — folder + manifest + cover + marker + wish
 * :func:`create_from_request` — the same, from what an add ALREADY holds, so
-  the reply does not wait for MusicBrainz (the add's own thread resolves the
-  rest and `create` finishes the marker)
+  the reply does not wait for MusicBrainz (:func:`finish_deferred` ends it)
+* :func:`framework_for_release` — the placeholder an import for that release
+  must land in
 * :func:`drop_placeholder_cover` — the import calls this once a REAL cover has
   been written (and `clear_if_filled` at the end of an import), so our
   temporary image goes only when something stands in its place
 * :func:`clear_if_filled` — the marker goes once the import has finished the
   folder (the configured chain ran, or none is configured); a chain that has
   NOT run yet leaves the album pending, because it is not finished
-* :func:`remove_folder` — cancel/delete takes the folder with it
+* :func:`remove_for_wish` / :func:`remove_folder` — cancel/delete takes the
+  folder with it
 * :func:`adopt_root` — an import landing on a framework album's path writes
   INTO it instead of beside it
 * :func:`rename_placeholder` — and the folder then takes the name the naming
@@ -46,6 +50,28 @@ from mlo.paths import library_root
 # The cover this module fetches is CAA's release-group front, asked for at the
 # same 1200 px the cover page's own CAA candidate uses.
 _COVER_PX = 1200
+
+# Where a wish came from — the queue view labels a row with it. The values
+# live in server.wishes.SOURCES; this is the one this module writes.
+SOURCE = "musicbrainz"
+
+# The stage the ONE queue carries while a framework album's MusicBrainz
+# identity is still being resolved (`create_from_request`). It is not one of
+# `server.soulseek_auto.STAGES`: a wish in this state is not waiting for the
+# NETWORK, it is waiting for the server itself — and "queued" reads as "waiting
+# for a download" while nothing has been searched yet. The queue view groups it
+# with the waiting rows and labels it "Searching MusicBrainz…"
+# (server/api_queue.py, web/src/pages/SoulseekPage.tsx).
+STAGE_RESOLVING = "searching_musicbrainz"
+
+# The key the deferred marker carries, and how long it is believed. The
+# resolution runs inside the process that wrote the marker, so one older than
+# this was written by a process that died mid-resolve: the queue then reads the
+# WISH's own state instead of a step that will never finish. honey: minutes,
+# not seconds — `mode="all"` resolves every edition at MusicBrainz's own
+# one-request-a-second budget.
+RESOLVING = "resolving"
+RESOLVING_MAX_AGE = 900.0
 
 # Extensions the placeholder may take, from the content type the art cache
 # reports. Anything unexpected is stored as .jpg: the art cache already proved
@@ -95,6 +121,26 @@ def is_placeholder(folder):
     "import" can be aimed at a folder with nothing in it.
     """
     return bool(pathmod.load_pending(str(folder or ""))) and not has_audio(folder)
+
+
+def is_resolving(folder):
+    """Whether *folder* is a framework album whose MusicBrainz identity is
+    still being resolved — `create_from_request`'s marker, still FRESH.
+
+    The queue reads this instead of the wish's own status while the add's
+    resolution runs (server/api_queue.py): the row says what the server is
+    doing. A marker whose resolution never landed (the process was killed
+    between the two) is not believed for ever — its age is the bound, see
+    `RESOLVING_MAX_AGE` — and the row falls back to the wish's own state.
+    """
+    info = pathmod.load_pending(str(folder or "")) or {}
+    if not info.get(RESOLVING):
+        return False
+    try:
+        age = time.time() - float(info.get("resolving_at") or 0)
+    except (TypeError, ValueError):
+        return False
+    return 0 <= age <= RESOLVING_MAX_AGE
 
 
 def _artist_of(release):
@@ -358,6 +404,41 @@ def prefetch_content(folder, cfg=None, *, background=False):
     return True
 
 
+def _revive(wish, cfg):
+    """Make a wish a FRESH add may reuse searchable again — or answer that the
+    album is already here.
+
+    "Add to library" reuses the wish already standing for the release, which is
+    right for the search: one release, one row, one job. But the worker's own
+    pass skips TERMINAL wishes — that is what terminal means — so reusing one as
+    it stood recorded a framework album nothing would ever search, while the
+    reply said the search had started. `wishes.rearm` is the store's own "search
+    it again" (status wanted, the attempt and empty-search counters and the
+    backoff cleared, due now) and the only way back from a terminal verdict.
+
+    `imported` is the one terminal status a re-add must not simply re-arm: it
+    says the album IS in the library, so there is nothing to search for and no
+    framework album to create. The wish's own folders are where that claim is
+    checked — `album_path` is where the import landed the album, `target_dir`
+    the folder the add created — because the library scan cannot answer for a
+    folder with no tags, and a wish marked imported with no audio anywhere is
+    exactly the state `server.interrupt_recovery`'s sweep repairs. A re-add must
+    not believe it either.
+
+    Returns True when the album is here (the caller reports `existing`).
+    """
+    from server import wishes
+
+    if str(wish.get("status") or "").strip().lower() == "imported":
+        if has_audio(wish.get("album_path")) or has_audio(wish.get("target_dir")):
+            return True
+        wishes.rearm(wish["id"])
+        return False
+    if wishes.is_terminal(wish, cfg):
+        wishes.rearm(wish["id"])
+    return False
+
+
 def _prune_empty_parent(parent):
     """Remove *parent* when it is empty — the artist folder a provisional
     folder's guess can leave behind (`Radiohead []`)."""
@@ -434,31 +515,52 @@ def _identity_block(release):
     }
 
 
-def create(release, cfg=None, *, title="", artist="", year="", cover=True,
-           prefetch=True, deferred=None):
-    """Create the framework album for *release*.
+def create(release, cfg=None, *, source=SOURCE, queries=None, title="",
+           artist="", year="", cover=True, prefetch=True, deferred=None,
+           candidates=None):
+    """Create the framework album for *release* and queue its wish.
 
     Idempotent: a folder that already holds audio is left exactly as it is
-    (the album arrived), and a folder that is already a framework album is
-    refreshed rather than duplicated. Returns a row the route reports; raises
-    ValueError when the release cannot name a library folder at all.
+    (the album arrived), a folder that is already a framework album is
+    refreshed rather than duplicated, and the wish is the one already standing
+    for this release — whichever id keys it (see `wishes.find_for_release`) —
+    so a second call, and a call that names the same pressing by its release
+    GROUP instead of its release, both return the one wish and cost one search.
+    Returns a row the route reports; raises ValueError when the release cannot
+    name a library folder at all.
+
+    A wish the store had ENDED is re-armed first (`_revive`): the add is a
+    fresh request and the worker's own pass skips terminal wishes, so reusing
+    one as it stands recorded a framework album nothing would ever search while
+    the reply said the search had started. A wish whose album is genuinely
+    here answers as `existing` instead — no folder is created for an album the
+    library already has.
 
     `deferred` is the row `create_from_request` returned when "Add to library"
     answered BEFORE MusicBrainz did: the album was already on disk from what
     the caller held, so its provisional folder is MOVED onto the name this
-    release really has (`_adopt_deferred`).
+    release really has (`_adopt_deferred`) and its wish is the album's wish.
 
     `prefetch` is the add-time page content (`prefetch_content`): on, the
     folder's description, artist artwork, links and ranked cover candidates are
-    fetched before this call returns, so the album's page renders real content.
-    NO REQUEST passes it: those provider calls measured 10-20 s of an add's own
-    latency (`server.api_add._create_all` — the cover search, the RateYourMusic
-    link lookup and the MusicBrainz metadata step) for content that only an
-    OPENED page ever reads, so the route writes the record and then runs
-    `prefetch_content(folder, cfg, background=True)`. It stays a parameter for
-    a caller that does want the content in hand before its next line (the tests
-    that assert what the marker then carries).
+    fetched before this call returns, so the album's page renders real content
+    while the search runs. NO REQUEST passes it: those provider calls measured
+    10-20 s of an add's own latency (`server.api_add._create_all` — the cover
+    search, the RateYourMusic link lookup and the MusicBrainz metadata step)
+    for content that only an OPENED page ever reads, so the route writes the
+    record and then runs `prefetch_content(folder, cfg, background=True)`. It
+    stays a parameter for a caller that does want the content in hand before
+    its next line (the tests that assert what the marker then carries).
+
+    `candidates` is the ranked fallback list the caller resolved for this
+    release's GROUP (`integrations.group_targets`): every eligible edition best
+    first, `release`'s own id first. It is recorded on the wish, and the search
+    walks it in that order when the network does not have the edition it
+    started with (spec R150). Omitted, the wish has ONE candidate — its own key
+    — and behaves exactly as it did before the walk existed.
     """
+    from server import wishes
+
     cfg = cfg or load_config()
     rid = str(release.get("id") or "").strip()
     rgid = str(release.get("release_group_id") or "").strip()
@@ -474,13 +576,64 @@ def create(release, cfg=None, *, title="", artist="", year="", cover=True,
 
     row = {"album_path": folder.replace("\\", "/"), "title": title,
            "artist": artist, "year": year, "release_id": rid,
-           "release_group_id": rgid, "created": False,
+           "release_group_id": rgid, "wish_id": None, "created": False,
            "existing": False, "cover": None, "error": None}
 
     if os.path.isdir(folder) and _audio_files(folder):
-        # The album is already here: nothing to create.
+        # The album is already here: nothing to create, and the wish is left
+        # to the worker's own "already in your library" handling.
         row["existing"] = True
         return row
+
+    # The release may already be a wish under the OTHER id its caller holds:
+    # "Add to library" resolves an edition and keys the wish by its release id,
+    # while a wish saved from an album link carries the release GROUP id. Two
+    # rows for one pressing are two searches, each with its own job, both
+    # downloading the same album — so the row already standing for this release
+    # IS this add's wish. A deferred add's own wish is named outright: it was
+    # keyed by whatever id the request held, which is not always an id this
+    # resolution can find again (a recording id, for one).
+    wish = None
+    if deferred:
+        wid = deferred.get("wish_id")
+        wish = wishes.get_wish(int(wid)) if wid else None
+    if not wish:
+        wish = wishes.find_for_release(rid, rgid)
+    if wish and _revive(wish, cfg):
+        row["existing"] = True
+        return row
+    if not wish:
+        wish = wishes.add_wish(rid or rgid, title=title, artist=artist, year=year,
+                               note="Added to the library from MusicBrainz.",
+                               target_dir=folder, queries=queries, source=source,
+                               # The release payload the add ALREADY resolved:
+                               # `add_wish` records its identity block (medium,
+                               # countries, catalogue number, label, status,
+                               # track count) on the wish, which is the only
+                               # place a framework album's facts can live until
+                               # its audio arrives — the marker carries the
+                               # naming-script fields and nothing to show a
+                               # pressing with. Without it the album's own tile
+                               # reads as a blank cell until the worker's
+                               # identity pass happens to look the release up
+                               # (a tick that can be minutes away, and a second
+                               # MusicBrainz request for a payload this call is
+                               # already holding) — see `server.library
+                               # ._pending_release_identity`.
+                               release=release)
+    if wish and candidates:
+        # The ranked fallback (spec R150) the caller resolved from the release
+        # GROUP — every eligible edition with its own facts. It is the same list
+        # the row the album was created from carried, so the walk can move on
+        # without another MusicBrainz browse, and the store only ever FILLS an
+        # empty list (`wishes.set_candidates`): a wish already walking its own
+        # editions cannot have its rows replaced by a re-add. The ORDER those
+        # rows are walked in is never stored at all — the walk derives it from
+        # the policy in force at each attempt (`wishes.walked_rows`), so a
+        # release queued before a rule changed is searched by the new rule. A
+        # re-add of an ENDED wish starts a fresh walk (`wishes.rearm`).
+        wishes.set_candidates(wish["id"], candidates)
+    row["wish_id"] = wish["id"] if wish else None
 
     os.makedirs(folder, exist_ok=True)
     # The manifest is the release's own tracklist, written by the same writer
@@ -496,10 +649,12 @@ def create(release, cfg=None, *, title="", artist="", year="", cover=True,
         "year": year,
         "date": str(release.get("date") or ""),
         "release_type": release_tags(release).get("RELEASETYPE") or "",
+        "wish_id": row["wish_id"],
         # The release's own facts, so the tile can show the pressing while the
         # audio is still missing (`server.library._pending_release_identity`).
         "release": _identity_block(release),
         "waiting_for": "the audio for this release",
+        "source": source,
         "added_at": time.time(),
         "cover": None,
     }
@@ -508,6 +663,9 @@ def create(release, cfg=None, *, title="", artist="", year="", cover=True,
         row["cover"] = (info["cover"] or {}).get("file")
     pathmod.save_pending(folder, info)
 
+    # The wish carries the folder it is filling, so the queue view can link
+    # straight to the pending album (and a cancel takes the folder with it).
+    wishes.update_wish(row["wish_id"], {"album_path": folder})
     row["created"] = True
     try:
         from server import events
@@ -515,38 +673,39 @@ def create(release, cfg=None, *, title="", artist="", year="", cover=True,
         tagcache.invalidate_album(folder)
         events.emit("album_pending",
                     f"Added to your library: {artist} — {title}".strip(" —"),
-                    "Its audio is not there yet — add it when you have it.",
-                    {"album_path": row["album_path"], "release_id": rid},
-                    config=cfg)
+                    "Searching Soulseek for it now.",
+                    {"album_path": row["album_path"], "wish_id": row["wish_id"],
+                     "release_id": rid}, config=cfg)
     except Exception:
         traceback.print_exc()
     # The page content, fetched NOW rather than when the audio lands: the
     # folder is already an album the user can open, so it should not read as an
-    # empty one. Never fatal (the folder is already recorded).
+    # empty one. Never fatal (the folder and the wish are already recorded).
     if prefetch:
         prefetch_content(folder, cfg)
     return row
 
 
 def create_from_request(mbid, *, release_mbid="", kind="", title="", artist="",
-                        year="", cfg=None):
-    """Record the framework album of an add BEFORE MusicBrainz answers.
+                        year="", queries=None, cfg=None):
+    """Record the framework album and wish of an add BEFORE MusicBrainz answers.
 
     "Add to library" used to resolve MusicBrainz inside the request — a browse
     plus an edition lookup per release group, tens of seconds on a throttled
-    MusicBrainz (`integrations.auto_import_targets`) — and the album never
-    needed that: the request already holds the entity, the title and the
-    artist, which is everything the naming script needs to name a folder. What
-    MusicBrainz is still owed is the release's own payload (its tracklist, its
-    cover, the country/medium/catalogue tags that spell the folder's final
-    name); the add's own thread resolves that once the reply is out.
+    MusicBrainz (`integrations.auto_import_targets`) — and the album and its
+    wish never needed that: the request already holds the entity, the title and
+    the artist, which is everything the naming script needs to name a folder and
+    the queue needs to search for it. What MusicBrainz is still owed is the
+    release's own payload (its tracklist, its cover, the country/medium/catalogue
+    tags that spell the folder's final name); the add's own thread resolves that
+    once the reply is out, and :func:`finish_deferred` ends the placeholder.
 
-    The marker says `resolving` while that runs, so the library row says the
-    server is asking MusicBrainz rather than reading it as a folder that will
-    stay empty. No manifest and no cover are written yet: the release's
-    tracklist is exactly what MusicBrainz still owes this add, and a guessed
-    one would put tracks on the album's page that this release may not have.
-    `create` writes both when the resolution lands.
+    The marker says `resolving` while that runs, so the queue shows what the
+    server is doing instead of "queued" — the row that would otherwise read as
+    waiting for a download nothing has searched for. No manifest and no cover
+    are written yet: the release's tracklist is exactly what MusicBrainz still
+    owes this add, and a guessed one would put tracks on the album's page that
+    this release may not have. `create` writes both when the resolution lands.
 
     `kind` is the request's own kind, UNRESOLVED: `kind="auto"` needs a lookup
     of its own to become a fact, so the resolution does it. The ids are recorded
@@ -556,10 +715,11 @@ def create_from_request(mbid, *, release_mbid="", kind="", title="", artist="",
 
     Returns the row `create` returns plus `resolving`, or None when the caller's
     own data cannot name a folder: no title or artist, no music folder or
-    naming script, or an album already sitting in the folder. The route then
-    keeps its synchronous resolution (`server.api_add`).
+    naming script, or an album already sitting in the folder the wish names. The
+    route then keeps its synchronous resolution (`server.api_add`).
     """
     from server import integrations as intg
+    from server import wishes
 
     cfg = cfg or load_config()
     title = str(title or "").strip()
@@ -580,16 +740,26 @@ def create_from_request(mbid, *, release_mbid="", kind="", title="", artist="",
     folder = folder_for_release(guess, cfg)
     if not folder:
         return None
-    if os.path.isdir(folder) and _audio_files(folder):
+
+    wish = wishes.find_for_release(rid or own, rgid)
+    if wish and (has_audio(wish.get("album_path"))
+                 or has_audio(wish.get("target_dir"))):
         return None         # the album is here: the route answers that instead
 
     row = {"album_path": folder.replace("\\", "/"), "title": title,
            "artist": artist, "year": year, "release_id": rid,
-           "release_group_id": rgid, "created": True,
+           "release_group_id": rgid, "wish_id": None, "created": True,
            "existing": False, "cover": None, "error": None, "resolving": True}
+    if not wish:
+        wish = wishes.add_wish(rid or own, title=title, artist=artist, year=year,
+                               note="Added to the library from MusicBrainz.",
+                               target_dir=folder, queries=queries, source=SOURCE)
+    row["wish_id"] = wish["id"] if wish else None
     os.makedirs(folder, exist_ok=True)
     pathmod.save_pending(folder, {
         "pending": True,
+        RESOLVING: True,
+        "resolving_at": time.time(),
         "release_id": rid,
         "release_group_id": rgid,
         "title": title,
@@ -598,22 +768,62 @@ def create_from_request(mbid, *, release_mbid="", kind="", title="", artist="",
         "date": "",
         "release_type": "",
         "release": _identity_block(guess),
+        "wish_id": row["wish_id"],
         "waiting_for": "MusicBrainz to be asked what this release is",
+        "source": SOURCE,
         "added_at": time.time(),
         "cover": None,
     })
+    # The wish carries the folder it is filling, so the queue view links
+    # straight to the album the user just asked for.
+    wishes.update_wish(row["wish_id"], {"album_path": folder})
     try:
         from server import events
         from server import tagcache
         tagcache.invalidate_album(folder)
         events.emit("album_pending",
                     f"Added to your library: {artist} — {title}".strip(" —"),
-                    "Asking MusicBrainz what this release is.",
-                    {"album_path": row["album_path"], "release_id": rid},
-                    config=cfg)
+                    "Asking MusicBrainz what this release is — the search "
+                    "starts as it answers.",
+                    {"album_path": row["album_path"], "wish_id": row["wish_id"],
+                     "release_id": rid}, config=cfg)
     except Exception:
         traceback.print_exc()
     return row
+
+
+def finish_deferred(deferred, albums, cfg=None):
+    """End a deferred add's placeholder: the album it named has it, or not.
+
+    Called once the add's own resolution has run (`server.api_add`'s
+    `_prepare_add`) with the rows `_create_all` produced. Either end is final,
+    and neither leaves a provisional folder claiming to be an album nothing will
+    fill:
+
+    * ADOPTED — a CREATED row landed in the provisional folder (the resolution
+      moved it onto the release's real name, `_adopt_deferred`). The marker
+      `create` wrote replaces the resolving one; the flag is cleared here as
+      well, for the album that arrived before the resolution could rewrite it.
+      Returns True.
+    * NOT ADOPTED — nothing was created for it (the library already holds the
+      release, MusicBrainz had no usable answer, the resolution failed). The
+      provisional folder must go, which the caller does with
+      `remove_for_wish`; this only reports the verdict, because what the WISH
+      ends as (re-armed, imported, given the reason) is the route's decision.
+      Returns False.
+    """
+    path = os.path.normpath(str((deferred or {}).get("album_path") or ""))
+    adopted = any(os.path.normpath(str(a.get("album_path") or "")) == path
+                  and a.get("created") for a in (albums or []))
+    if not adopted:
+        return False
+    info = pathmod.load_pending(path)
+    if info and info.get(RESOLVING):
+        info.pop(RESOLVING, None)
+        info.pop("resolving_at", None)
+        info["waiting_for"] = "the audio for this release"
+        pathmod.save_pending(path, info)
+    return True
 
 
 def drop_placeholder_cover(folder):
@@ -766,6 +976,109 @@ def remove_folder(folder, *, force=False):
     return True
 
 
+def remove_for_wish(wish_id, cfg=None):
+    """Cancel: a framework album is the wish's own folder, so it goes with it.
+
+    Falls back to the marker's own wish id when the wish row is gone already
+    (the route deletes the row and the folder in either order).
+    """
+    from server import wishes
+
+    wid = None
+    try:
+        wid = int(wish_id) if wish_id is not None else None
+    except (TypeError, ValueError):
+        wid = None
+    wish = wishes.get_wish(wid) if wid is not None else None
+    folder = str((wish or {}).get("album_path") or "")
+    if folder and _pending_for(folder, wid):
+        return remove_folder(folder)
+    if wid is None:
+        return False
+    for cand in _scan_pending(library_root((cfg or load_config()).get("music_folder"))):
+        if _pending_for(cand, wid):
+            return remove_folder(cand)
+    return False
+
+
+def framework_for_release(release, cfg=None, *, wish_id=None):
+    """The framework album standing for *release* — the folder an import must
+    land in — or "".
+
+    THE identity rule for "this download IS the album the user added": the
+    wish that created the placeholder (the job's OWN `wish_id` when it fills
+    one, else the wish keyed by this release's ids — `wishes.find_for_release`)
+    names the folder, and the folder's own marker has to agree about the
+    release. A folder that holds audio is a real album and not a placeholder,
+    so it answers "" and leaves the caller's own "already in your library"
+    check to own that case.
+
+    Why an IMPORT asks: `server.soulseek_auto._import` moved a finished
+    download to `<library root>/<Artist - Album>` and left organize to
+    redirect it into the placeholder afterwards. That intermediate folder is
+    an ALBUM to the library walker — one level too shallow to sit under its
+    artist — so the grid drew it with the library root's own folder name as
+    its artist and the folder name as its title, beside the album it was about
+    to become. Landing in the placeholder is one tile from the first byte.
+    """
+    from server import wishes
+
+    rid = str((release or {}).get("id") or "").strip()
+    rgid = str((release or {}).get("release_group_id") or "").strip()
+    wish = None
+    if wish_id is not None:
+        try:
+            wish = wishes.get_wish(int(wish_id))
+        except (TypeError, ValueError):
+            wish = None
+    if not wish and (rid or rgid):
+        try:
+            wish = wishes.find_for_release(rid, rgid)
+        except Exception:
+            traceback.print_exc()
+            wish = None
+    folder = str((wish or {}).get("album_path") or "")
+    if not folder or not os.path.isdir(folder):
+        return ""
+    # ...and it has to be THIS scope's library: the wish store is the app's
+    # own, and a scope handed in through MLO_MUSIC_FOLDER (a test, a second
+    # library) can inherit a row whose folder belongs to another one. Handing
+    # that folder to an import would move an album out of the library it
+    # belongs to.
+    from mlo.paths import library_root
+
+    root = library_root((cfg or load_config()).get("music_folder"))
+    if not root:
+        return ""
+    here = os.path.normcase(os.path.abspath(folder))
+    inside = os.path.normcase(os.path.abspath(root)) + os.sep
+    if not here.startswith(inside):
+        return ""
+    info = pathmod.load_pending(folder)
+    if not info or _audio_files(folder):
+        return ""
+    want = {i.lower() for i in (rid, rgid) if i}
+    have = {str(info.get(k) or "").strip().lower()
+            for k in ("release_id", "release_group_id")}
+    have.discard("")
+    if want and have and not (want & have):
+        return ""               # a placeholder for a DIFFERENT release
+    return folder
+
+
+def _pending_for(folder, wid):
+    """Whether *folder* is a framework album waiting on wish *wid*."""
+    info = pathmod.load_pending(folder)
+    if not info:
+        return False
+    if wid is None:
+        return True
+    try:
+        return int(info.get("wish_id")) == int(wid)
+    except (TypeError, ValueError):
+        return False
+
+
 def _scan_pending(root, limit=2000):
     """Every framework folder under *root* (a marker's own name is enough)."""
     out = []
@@ -793,10 +1106,13 @@ def adopt_root(new_root, meta_tags):
     an existing framework folder for this release/release group is the
     destination.
 
-    Identity is asked in one step: the folders beside the one organize picked
-    (a mismatch is usually only the last segment). Only a folder still carrying
-    its marker is ever adopted: a filled folder is a real album and
-    `clear_if_filled` owns that end.
+    Identity is asked in two steps, cheapest first: the folders beside the one
+    organize picked (a mismatch is usually only the last segment), then the
+    folder the release's own WISH points at (`wishes.find_for_release`) — a
+    placeholder named under a DIFFERENT artist folder is still this release's,
+    and the wish is the record of that (`pending_albums.create` writes the
+    folder onto it). Only a folder still carrying its marker is ever adopted: a
+    filled folder is a real album and `clear_if_filled` owns that end.
     """
     want = {str((meta_tags or {}).get(k) or "").strip().lower()
             for k in ("MUSICBRAINZ_ALBUMID", "MUSICBRAINZ_RELEASEGROUPID")}
@@ -821,7 +1137,7 @@ def adopt_root(new_root, meta_tags):
         have.discard("")
         if want & have:
             return cand
-    return new_root
+    return _wished_placeholder(want, new_root)
 
 
 def rename_placeholder(old, new):
@@ -842,7 +1158,11 @@ def rename_placeholder(old, new):
     So the folder MOVES onto the name the script gives it, which is what the
     pipeline does with every album it lands (`_adopt_deferred` is the same move
     at add time). The marker is inside the folder and travels with it, so the
-    framework album stays the same framework album — one release, one folder.
+    framework album stays the same framework album — one release, one folder —
+    and the wish that created it is re-pointed, because its ``album_path`` is
+    what the queue links to and what "is this release already in my library"
+    reads (`_revive`: a wish whose folder was renamed out from under it looked
+    like an album that never arrived, and the worker went hunting again).
 
     Returns the folder it now occupies, or "" when it could not be moved: not a
     framework album, gone, a folder already standing at the new name (a real
@@ -855,7 +1175,8 @@ def rename_placeholder(old, new):
         return ""
     if os.path.normcase(old) == os.path.normcase(new):
         return new
-    if not pathmod.load_pending(old):
+    info = pathmod.load_pending(old)
+    if not info:
         return ""
     if os.path.exists(new):
         return ""
@@ -866,4 +1187,48 @@ def rename_placeholder(old, new):
         traceback.print_exc()
         return ""
     _prune_empty_parent(os.path.dirname(old))
+    _point_wish_at(info, old, new)
     return new
+
+
+def _point_wish_at(info, old, new):
+    """Carry a framework album's wish onto the folder it now occupies."""
+    try:
+        from server import wishes
+
+        wid = info.get("wish_id")
+        if not wid:
+            return
+        row = wishes.get_wish(int(wid)) or {}
+        fields = {}
+        for key in ("album_path", "target_dir"):
+            have = os.path.normpath(str(row.get(key) or ""))
+            if have and os.path.normcase(have) == os.path.normcase(old):
+                fields[key] = new.replace("\\", "/")
+        if fields:
+            wishes.update_wish(int(wid), fields)
+    except Exception:
+        traceback.print_exc()
+
+
+def _wished_placeholder(want, new_root):
+    """The framework folder the release's own wish points at, or *new_root*.
+
+    The second half of :func:`adopt_root`: the placeholder of a release whose
+    artist folder organize did not name the same way is not beside `new_root`,
+    but the wish that created it knows where it is. A folder that is gone, that
+    has lost its marker, or that IS `new_root` leaves the answer untouched.
+    """
+    from server import wishes
+
+    ids = sorted(want)
+    try:
+        wish = wishes.find_for_release(ids[0], ids[1] if len(ids) > 1 else "")
+    except Exception:
+        return new_root
+    other = os.path.normpath(str((wish or {}).get("album_path") or ""))
+    if not other or os.path.normcase(other) == os.path.normcase(os.path.normpath(str(new_root))):
+        return new_root
+    if not os.path.isdir(other) or not pathmod.load_pending(other):
+        return new_root
+    return other

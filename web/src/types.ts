@@ -301,6 +301,30 @@ export interface ExpectedTrack {
   missing: boolean;
 }
 
+/** One entry of <music>/.mlo/downloads — slskd's staging area. */
+export interface DownloadEntry {
+  name: string;
+  /** A folder (an album) rather than a loose file. */
+  dir: boolean;
+  bytes: number;
+  files: number;
+  audio: number;
+  images: number;
+  /** Holds audio, so it can be imported into the library as an album. */
+  album: boolean;
+  /** slskd's own in-flight leftover — not a completed result. */
+  partial: boolean;
+}
+
+export interface DownloadsPayload {
+  folder: string;
+  exists: boolean;
+  count: number;
+  bytes: number;
+  entries: DownloadEntry[];
+  music_folder: string;
+}
+
 /** One place the music folder does not match
  *  `<music>/Artists/<Artist>/<Album>/<files>`. */
 export interface LayoutIssue {
@@ -1077,6 +1101,88 @@ export interface MatchSuggestion {
 export interface GenreCascade {
   per_track: { position: number; disc: number; title: string; genres: string[]; source: string | null }[];
   levels: { track: boolean; release: boolean; release_group: boolean; artist: boolean };
+}
+
+/** A release's own identity — the ONE block every surface that knows a
+ *  release carries (server/wishes.py RELEASE_KEYS): the two facts that
+ *  identify a PRESSING first (its catalog number, the medium it is on), then
+ *  where and when it came out and how much it carries, then the edition's own
+ *  disambiguation and the status MusicBrainz gives it (Official / Promotion /
+ *  Bootleg / …).
+ *
+ *  Every key is present on the server's rows; a fact nobody could resolve is
+ *  empty (or 0) and renders as absent — never invented, never a placeholder
+ *  that looks like data. Optional here only because a client may be reading a
+ *  payload from an older server. */
+export interface SlskReleaseIdentity {
+  id: string;
+  title: string;
+  artist: string;
+  date: string;
+  /** MusicBrainz's FIRST release event — the singular code `country` has
+   *  always been. `countries` below is the release's whole event set. */
+  country: string;
+  /** Every country the release came out in, in MusicBrainz's own event order
+   *  (first = `country`). It is what an import writes to RELEASECOUNTRY as a
+   *  "; "-joined list — a release out in several countries is not one that
+   *  came out in the first of them. Optional: a payload from a server or a job
+   *  summary predating the field states only the singular one. */
+  countries?: string[];
+  status: string;
+  media: string[];
+  track_count: number;
+  disambiguation: string;
+  catalog_number: string;
+  label: string;
+}
+
+export interface Wish {
+  id: number;
+  release_mbid: string;
+  title: string;
+  artist: string;
+  year: string;
+  /** `not_found` is terminal: the searches came back empty
+   *  `wishes_not_found_attempts` times, so the worker stops searching it and
+   *  the row waits for the user's own retry (server/wishes' retry policy). */
+  status: "wanted" | "searching" | "imported" | "failed" | "available" | "not_found";
+  note: string;
+  target_dir: string;
+  queries: string[];
+  attempts: number;
+  /** Empty searches so far, and when the next AUTOMATIC one may run (0 = none
+   *  will: a terminal row is re-armed only by the queue's retry). */
+  not_found: number;
+  retry_at: number;
+  added_at: number;
+  updated_at: number;
+  last_search: number;
+  last_error: string;
+  album_path: string;
+  /** The store's own verdict: the worker will never search this wish again on
+   *  its own (imported, nothing was found, or failed for good — see
+   *  server/wishes' retry policy). This is what makes it safe to take off the
+   *  list; a wish that is still wanted or being searched is not terminal, and
+   *  clearing it is refused. */
+  terminal?: boolean;
+  /** WHICH pressing this wish is waiting for (server/wishes' release
+   *  identity). Present on every row the server builds; empty facts mean the
+   *  release was never looked up (or MusicBrainz could not answer). */
+  release?: SlskReleaseIdentity;
+}
+
+export interface WishesPayload {
+  wishes: Wish[];
+  worker: {
+    running: boolean;
+    enabled: boolean;
+    current: string | null;
+    last_cycle: number;
+    last_result: string;
+    next_run: number;
+    interval_hours: number;
+  };
+  log: { t: number; level: string; msg: string }[];
 }
 
 /** Home page payload: library highlights. */

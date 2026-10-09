@@ -2200,7 +2200,7 @@ dependencies = [
 
 [[package]]
 name = "mlo-desktop"
-version = "6.0.0"
+version = "7.0.0"
 dependencies = [
  "block2",
  "dirs 6.0.0",

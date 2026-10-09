@@ -12,14 +12,24 @@ For every track it decodes audio with librosa (vendored into
 
 Skips tracks that already carry both tags unless overwrite/force is set,
 and respects the per-filetype audio_tag_writes gates (BPM / INITIALKEY).
+
+The engine is the app's own Rust helper (`rust/`, the `mlo-audio` binary):
+one `analyze` call decodes the track once and returns tempo, key and the mood
+features, so a decoded track never travels into Python. The librosa
+implementations below stay as the fallback for a build without the helper (the
+dependencies are optional), and as the reference the helper's parity test
+compares against.
 """
+import json
 import math
 import os
 import sys
 
 from .audio import AudioFile
 from .config import should_write_audio_tag
+from .dr import DECODE_TIMEOUT, rust_helper
 from .paths import AUDIO_EXTS
+from .subproc import run_tool
 from .stats import (
     new_stats, _make_pbar, _pbar_skip, _pbar_update, _walk_files,
     _collect_targets, is_audio_file, worker_count, bound_numeric_threads,
@@ -144,6 +154,90 @@ def _load_signal(path, sr, max_seconds=None):
         return y, sr
     except Exception:
         return None, None
+
+
+# ----------------------------------------------------------------------
+# The Rust helper (rust/, the `mlo-audio` binary)
+# ----------------------------------------------------------------------
+# The engine for this pass: one `analyze` call spawns ffmpeg, decodes the
+# track and returns tempo, key and the mood features as JSON. The discovery is
+# `mlo.dr.rust_helper()`'s (a helper built for DYNAMIC RANGE is this one too),
+# reused rather than duplicated.
+_FFMPEG_PROBED = False
+_FFMPEG_EXE = None
+
+
+def _ffmpeg_exe():
+    """The bundled or system ffmpeg, probed once per process."""
+    global _FFMPEG_PROBED, _FFMPEG_EXE
+    if _FFMPEG_PROBED:
+        return _FFMPEG_EXE
+    _FFMPEG_PROBED = True
+    try:
+        from .tools import detect_all_tools
+        _FFMPEG_EXE = (detect_all_tools().get("ffmpeg") or {}).get("ffmpeg_exe")
+    except Exception:
+        _FFMPEG_EXE = None
+    return _FFMPEG_EXE
+
+
+def _analyze_with_rust(path, *, sr=22050, max_seconds=None, trim=False):
+    """Parsed `mlo-audio analyze` JSON, or None when the helper cannot be used.
+
+    None means "fall back to librosa": no helper, no ffmpeg, a helper that
+    will not start, prints nothing, or prints something that is not its
+    contract. A helper that DID run returns its dict — the caller decides what
+    a reported `failed` means (the librosa path is the same decode, so a real
+    decode failure is not hidden).
+    """
+    helper = rust_helper()
+    if helper is None:
+        return None
+    ffmpeg = _ffmpeg_exe()
+    if not ffmpeg:
+        return None
+    argv = [helper, "analyze", "--ffmpeg", str(ffmpeg), "--input", path,
+            "--sr", str(int(sr))]
+    if max_seconds:
+        argv += ["--max-seconds", str(max_seconds)]
+    if trim:
+        argv += ["--trim"]
+    try:
+        proc = run_tool(argv, capture_output=True, text=True,
+                        timeout=DECODE_TIMEOUT)
+    except Exception:
+        return None
+    lines = [ln for ln in (proc.stdout or "").splitlines() if ln.strip()]
+    if not lines:
+        return None
+    try:
+        data = json.loads(lines[-1])
+    except ValueError:
+        return None
+    if not isinstance(data, dict) or "failed" not in data:
+        return None
+    return data
+
+
+def _helper_key_bpm(path, min_seconds):
+    """(bpm, key) from the helper, or None when it cannot answer.
+
+    None means "run the librosa path". A tuple — even ``(None, None)`` — is a
+    real answer: the helper decoded the track but found it too short (or found
+    no tempo/key), which is what `detect_key_bpm` returns for those.
+    """
+    data = _analyze_with_rust(path, sr=22050, trim=True)
+    if data is None or data.get("failed"):
+        return None
+    duration = float((data.get("features") or {}).get("duration") or 0.0)
+    if duration < max(1, min_seconds):
+        return None, None
+    bpm = data.get("bpm")
+    key = None
+    idx = data.get("key_index")
+    if idx is not None:
+        key = (int(idx), bool(data.get("key_minor")))
+    return (int(round(float(bpm))) if bpm is not None else None), key
 
 
 def _key_notation(tonic_idx, minor, notation):
@@ -275,7 +369,14 @@ def detect_key_bpm(path, min_seconds=10):
     the harmonic chroma against an ensemble of published key profiles.
     Returns (None, None) for tracks shorter than *min_seconds* (too short
     for stable estimates).
+
+    The Rust helper answers first when it is present; the librosa path below
+    is the fallback (and the reference the parity test compares against).
     """
+    got = _helper_key_bpm(path, min_seconds)
+    if got is not None:
+        return got
+
     import numpy as np
     import librosa
 

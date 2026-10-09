@@ -1,5 +1,7 @@
 import { useSyncExternalStore } from "react";
 
+import type { SlskAutoProgress } from "../api";
+
 /** The notification tray's store: what the bell's panel lists.
  *
  *  One record per OUTCOME the server announced on `/ws/events` (see
@@ -355,3 +357,79 @@ export function useNotifications(): { items: NotificationRecord[]; unread: numbe
 }
 
 
+
+/* ------------------------------------------------------------------------- *
+ * Live transfer progress
+ *
+ * A second, deliberately separate store: the shell's own socket (App.tsx)
+ * hands every `{"type":"transfers"}` frame from the progress relay here, and
+ * the Soulseek page's bars are drawn from the frame instead of its own 3 s
+ * poll (server/main.py pushes the same rows /api/soulseek/downloads returns).
+ *
+ * It lives beside the tray because both are the client end of the server's
+ * push channels, and because the separation has to be visible in one place: a
+ * progress tick is NOT an outcome. `publishTransfers` never touches `ingest`,
+ * so a byte count that changes four times a second can never raise a toast,
+ * an OS notification or a tray row.
+ * ------------------------------------------------------------------------- */
+
+/** One slskd transfer, as pushed — slskd's own field names, because the frame
+ *  carries slskd's own rows verbatim. */
+export interface LiveTransfer {
+  id?: string;
+  state?: string;
+  size?: number;
+  bytesTransferred?: number;
+  percentComplete?: number;
+  averageSpeed?: number;
+}
+
+/** One live job, as its module publishes it — `progress` is the same block
+ *  /api/soulseek/auto serves, handed over verbatim. */
+export interface LiveJob {
+  id?: number;
+  state?: string;
+  stage?: string;
+  stage_key?: string;
+  progress?: SlskAutoProgress | null;
+}
+
+/** One frame from the progress relay. `files` carries only the transfers
+ *  whose bytes or state changed (a slskd tree holds the whole history), and
+ *  `resync` says the list changed shape — a transfer appeared or was dropped
+ *  — which is the one case that needs a real refetch. */
+export interface TransfersFrame {
+  type: "transfers";
+  files?: LiveTransfer[];
+  jobs?: LiveJob[];
+  resync?: boolean;
+}
+
+let liveFrame: TransfersFrame | null = null;
+const liveListeners = new Set<() => void>();
+
+/** Hand one frame to the live-progress store. Called by the shell's socket
+ *  handler; a frame with nothing in it is still a frame (the page decides
+ *  what changed). */
+export function publishTransfers(frame: TransfersFrame) {
+  liveFrame = frame;
+  for (const fn of liveListeners) fn();
+}
+
+function subscribeLive(fn: () => void): () => void {
+  liveListeners.add(fn);
+  return () => {
+    liveListeners.delete(fn);
+  };
+}
+
+/** The newest frame, or null before the first one. The identity changes once
+ *  per frame, which is what the page's merge effect keys on. */
+export function liveTransfers(): TransfersFrame | null {
+  return liveFrame;
+}
+
+/** The hook a live progress surface renders from. */
+export function useLiveTransfers(): TransfersFrame | null {
+  return useSyncExternalStore(subscribeLive, liveTransfers, liveTransfers);
+}

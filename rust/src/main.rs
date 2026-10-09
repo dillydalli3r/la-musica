@@ -14,9 +14,28 @@
 //! Zero dependencies: the arithmetic is the standard library's, and the helper
 //! has to build offline in a container stage and on a dev machine alike.
 //!
+//! The second pass it owns is `analyze` — the tempo, key and mood/energy
+//! features that used to be two librosa passes (`mlo.audiometa.detect_key_bpm`
+//! and `mlo.moods.classify`). It spawns the same ffmpeg, decodes pcm_f32le
+//! mono itself, does the DSP here and prints ONE json line:
+//!
+//!     {"bpm":128.0,"key":"C# minor","key_index":1,"key_minor":true,
+//!      "mood":"energetic","energy":0.72,"valence":0.55,"confidence":0.6,
+//!      "features":{...},"failed":false,"reason":""}
+//!
+//! `key_index` / `key_minor` let Python map the key back to the (tonic, minor)
+//! tuple its public functions return; `features` carries the exact dict
+//! `mlo.moods._features` returns, and Python re-derives the verdict from it so
+//! the mood vocabulary stays owned by `mlo.moods`.
+//!
 //! Usage:
 //!     mlo-audio dr --ffmpeg <ffmpeg> --input <track> --channels N
 //!                  [--rate 44100] [--block-seconds 3] [--threads N]
+//!     mlo-audio analyze --ffmpeg <ffmpeg> --input <track>
+//!                  [--sr 22050] [--max-seconds N] [--trim]
+
+mod analysis;
+mod fft;
 
 use std::fmt::Write as _;
 use std::io::{Read, Write as _};
@@ -38,7 +57,21 @@ struct Opts {
     threads: u32,
 }
 
-fn parse_args(argv: &[String]) -> Result<Opts, String> {
+/// `analyze`'s arguments (see `analysis.rs` for the pipeline they drive).
+struct AnalyzeOpts {
+    ffmpeg: String,
+    input: String,
+    sr: u32,
+    max_seconds: f64,
+    trim: bool,
+}
+
+const DEFAULT_ANALYZE_SR: u32 = 22050;
+
+/// The usage line both failure shapes are built from.
+const USAGE: &str = "mlo-audio dr|analyze --ffmpeg <exe> --input <file>";
+
+fn parse_dr(argv: &[String]) -> Result<Opts, String> {
     let mut o = Opts {
         ffmpeg: String::new(),
         input: String::new(),
@@ -47,13 +80,7 @@ fn parse_args(argv: &[String]) -> Result<Opts, String> {
         block_seconds: DEFAULT_BLOCK_SECONDS,
         threads: 0,
     };
-    if argv.first().map(String::as_str) != Some("dr") {
-        return Err(format!(
-            "unknown command {:?} — usage: mlo-audio dr --ffmpeg <exe> --input <file> --channels N",
-            argv.first().map(String::as_str).unwrap_or("")
-        ));
-    }
-    let mut i = 1;
+    let mut i = 0;
     while i < argv.len() {
         let key = argv[i].as_str();
         let val = || -> Result<String, String> {
@@ -79,6 +106,47 @@ fn parse_args(argv: &[String]) -> Result<Opts, String> {
     }
     if o.channels < 1 {
         return Err("--channels must be >= 1 (the caller probes it)".into());
+    }
+    Ok(o)
+}
+
+fn parse_analyze(argv: &[String]) -> Result<AnalyzeOpts, String> {
+    let mut o = AnalyzeOpts {
+        ffmpeg: String::new(),
+        input: String::new(),
+        sr: DEFAULT_ANALYZE_SR,
+        max_seconds: 0.0,
+        trim: false,
+    };
+    let mut i = 0;
+    while i < argv.len() {
+        let key = argv[i].as_str();
+        let val = || -> Result<String, String> {
+            argv.get(i + 1)
+                .cloned()
+                .ok_or_else(|| format!("{key} needs a value"))
+        };
+        match key {
+            "--ffmpeg" => o.ffmpeg = val()?,
+            "--input" => o.input = val()?,
+            "--sr" => o.sr = val()?.parse().map_err(|_| "bad --sr".to_string())?,
+            "--max-seconds" => {
+                o.max_seconds = val()?.parse().map_err(|_| "bad --max-seconds".to_string())?
+            }
+            "--trim" => {
+                o.trim = true;
+                i += 1;
+                continue;
+            }
+            other => return Err(format!("unknown option {other}")),
+        }
+        i += 2;
+    }
+    if o.ffmpeg.is_empty() || o.input.is_empty() {
+        return Err("--ffmpeg and --input are required".into());
+    }
+    if o.sr < 1000 {
+        return Err("--sr must be >= 1000".into());
     }
     Ok(o)
 }
@@ -197,7 +265,22 @@ fn round_half_even(v: f64) -> i64 {
     n as i64
 }
 
-fn json_string(s: &str) -> String {
+/// The float-returning half of the same rule (see `round_half_even`).
+pub(crate) fn round_half_even_f64(v: f64) -> f64 {
+    let floor = v.floor();
+    let frac = v - floor;
+    if frac == 0.5 {
+        if (floor as i64) % 2 == 0 {
+            floor
+        } else {
+            floor + 1.0
+        }
+    } else {
+        v.round()
+    }
+}
+
+pub(crate) fn json_string(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
     for ch in s.chars() {
@@ -312,11 +395,114 @@ fn run_dr(o: &Opts) -> String {
     report(dr, &reason, false)
 }
 
+/// `analyze`'s decode: first audio stream, mono float32 at the analysis rate.
+fn analyze_decode_argv(o: &AnalyzeOpts) -> Vec<String> {
+    let mut v = vec![
+        o.ffmpeg.clone(),
+        "-loglevel".into(),
+        "fatal".into(),
+        "-nostdin".into(),
+        "-i".into(),
+        o.input.clone(),
+        "-map".into(),
+        "0:a:0".into(),
+        "-ac".into(),
+        "1".into(),
+        "-ar".into(),
+        o.sr.to_string(),
+    ];
+    if o.max_seconds > 0.0 {
+        v.push("-t".into());
+        v.push(format!("{}", o.max_seconds));
+    }
+    v.extend([
+        "-c:a".into(),
+        "pcm_f32le".into(),
+        "-f".into(),
+        "f32le".into(),
+        "-".into(),
+    ]);
+    v
+}
+
+fn run_analyze(o: &AnalyzeOpts) -> String {
+    let mut child = match Command::new(&o.ffmpeg)
+        .args(&analyze_decode_argv(o)[1..])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return analysis::report(None, true, &format!("ffmpeg could not be started: {e}"))
+        }
+    };
+    let mut err_pipe = child.stderr.take();
+    let err_handle = std::thread::spawn(move || {
+        let mut s = String::new();
+        if let Some(p) = err_pipe.as_mut() {
+            let _ = p.read_to_string(&mut s);
+        }
+        s
+    });
+    let mut out = match child.stdout.take() {
+        Some(s) => s,
+        None => return analysis::report(None, true, "ffmpeg gave no output stream"),
+    };
+    let mut bytes = Vec::new();
+    if let Err(e) = out.read_to_end(&mut bytes) {
+        let _ = child.kill();
+        return analysis::report(None, true, &format!("ffmpeg could not decode it: {e}"));
+    }
+    let status = child.wait();
+    let stderr = err_handle.join().unwrap_or_default();
+    if let Ok(st) = status {
+        if !st.success() {
+            return analysis::report(
+                None,
+                true,
+                &format!("ffmpeg could not decode it: {}", tail(&stderr)),
+            );
+        }
+    }
+    let mut samples: Vec<f32> = Vec::with_capacity(bytes.len() / SAMPLE_BYTES);
+    for ch in bytes.chunks_exact(SAMPLE_BYTES) {
+        samples.push(f32::from_le_bytes([ch[0], ch[1], ch[2], ch[3]]));
+    }
+    drop(bytes);
+    if samples.is_empty() {
+        return analysis::report(None, true, "ffmpeg produced no audio samples");
+    }
+    if o.trim {
+        samples = analysis::trim(&samples);
+        if samples.is_empty() {
+            return analysis::report(None, true, "no audible signal after trimming silence");
+        }
+    }
+    let feats = analysis::analyze(&samples, o.sr);
+    analysis::report(Some(&feats), false, "")
+}
+
 fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
-    let line = match parse_args(&argv) {
-        Ok(o) => run_dr(&o),
-        Err(e) => report(None, &e, true),
+    let line = match argv.first().map(String::as_str) {
+        Some("dr") => match parse_dr(&argv[1..]) {
+            Ok(o) => run_dr(&o),
+            Err(e) => report(None, &e, true),
+        },
+        Some("analyze") => match parse_analyze(&argv[1..]) {
+            Ok(o) => run_analyze(&o),
+            Err(e) => analysis::report(None, true, &e),
+        },
+        other => report(
+            None,
+            &format!(
+                "unknown command {:?} — usage: {USAGE}",
+                other.unwrap_or("")
+            ),
+            true,
+        ),
     };
     let mut stdout = std::io::stdout();
     let _ = stdout.write_all(line.as_bytes());

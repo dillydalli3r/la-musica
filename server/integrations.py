@@ -7389,8 +7389,8 @@ def auto_import_targets(mbid, kind=None, mode="best", types=None,
     # queuing a release or a group the library already holds downloaded the
     # same album a second time, and the duplicate then landed beside it.
     from mlo.config import load_config
-    from server import library
-    owned = library.owned_mbids(load_config())
+    from server import wishes
+    owned = wishes.owned_mbids(load_config())
     if kind == "release":
         rel, rid = resolve_release(mbid)
         if not rid:

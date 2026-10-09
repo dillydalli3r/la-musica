@@ -36,6 +36,8 @@ export default {
   "nav.equalizer": "Equalizer",
   "nav.settings": "Settings",
   "nav.donations": "Donations",
+  "nav.soulseek": "Soulseek",
+  "nav.watched": "Watched artists",
 
   // —— App shell: the top bar, the sidebar rail, global loading ——————————
   "topbar.search": "Search your library…",
@@ -574,4 +576,17 @@ export default {
   "rating.webAlbumTitleNoSources": "Album Web rating {value} of 5 — the script recorded no source",
   "rating.webAria": "Web rating: {value} of 5",
   "rating.webAlbumAria": "Album Web rating: {value} of 5",
+
+  // —— Soulseek acquisition: the download queue's rows and the MBID search ——
+  "queue.step": "Now: {text}",
+  "queue.asking": "Asking {label}: {title}",
+  "queue.peer": "{user} · {dir}",
+  "queue.wait_next": "Next search in {when}",
+  "queue.wait_retry": "Retrying in {when}",
+  "queue.chain_running": "In the library — the import pipeline is still running",
+  "queue.chain_running_brief": "the import pipeline is still running",
+  "queue.rejected": "Rejected candidates ({count})",
+  "soulseek.mbid.chip": "Search by MBID",
+  "soulseek.mbid.hint": "That looks like a MusicBrainz id — pressing Search looks for that one track: its artist and title, its album and the id itself are all searched at once.",
+  "soulseek.mbid.label": "MBID search: {label}",
 } as const;

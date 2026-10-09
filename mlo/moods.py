@@ -65,7 +65,8 @@ import os
 import warnings
 
 from .audio import AudioFile
-from .audiometa import _detect_bpm, _detect_key, _ensure_librosa, _load_signal
+from .audiometa import (_analyze_with_rust, _detect_bpm, _detect_key,
+                        _ensure_librosa, _load_signal)
 from .config import should_write_audio_tag
 from .paths import LIB_AUDIO_EXTS
 from .stats import (_collect_targets, _make_pbar, _pbar_skip, _pbar_update,
@@ -335,15 +336,49 @@ def _verdict(features):
 # ----------------------------------------------------------------------
 # Public classification
 # ----------------------------------------------------------------------
+# The feature dict `_features` returns, and therefore the one the helper must
+# hand back before `_verdict` can score it.
+_RUST_FEATURE_KEYS = frozenset((
+    "duration", "rms_db", "dynamic_range_db", "onset_rate",
+    "centroid_hz", "percussive_ratio", "tempo", "key"))
+
+
+def _rust_verdict(path):
+    """_verdict() from the helper's features, or None to fall back to librosa.
+
+    Only the FEATURES come from the helper; the verdict is re-derived here by
+    the same `_verdict`/`_score` the librosa path uses, so the thresholds and
+    the verdict vocabulary stay owned by this module.
+    """
+    data = _analyze_with_rust(path, sr=ANALYSIS_SR,
+                              max_seconds=ANALYSIS_MAX_SECONDS)
+    if data is None or data.get("failed"):
+        return None
+    feats = data.get("features")
+    if not isinstance(feats, dict) or not _RUST_FEATURE_KEYS <= set(feats):
+        return None
+    if float(feats.get("duration") or 0.0) < MIN_SECONDS:
+        return None
+    return _verdict(feats)
+
+
 def classify(path, cfg=None):
     """Mood verdict for one audio file, or None when it cannot be analysed.
 
-    Decodes at most ANALYSIS_MAX_SECONDS of mono audio; librosa missing,
-    an unreadable/garbage file or a too-short track all return None. Never
-    raises, so a scanning caller can simply move on to the next track.
+    Decodes at most ANALYSIS_MAX_SECONDS of mono audio; an unreadable/garbage
+    file or a too-short track returns None. Never raises, so a scanning caller
+    can simply move on to the next track.
+
+    The Rust helper answers first when it is present (the feature recipe is
+    its job now); the librosa path below is the fallback for a build without
+    the helper. Either way `_verdict` is what turns features into a verdict,
+    so the mood vocabulary has one owner.
     """
     if not path or not os.path.isfile(path):
         return None
+    fast = _rust_verdict(path)
+    if fast is not None:
+        return fast
     if _ensure_librosa() is None:
         return None
     try:

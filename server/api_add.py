@@ -59,6 +59,7 @@ class AddToLibraryRequest(BaseModel):
     title: str = ""
     artist: str = ""
     year: str = ""
+    queries: Optional[List[str]] = None
 
 
 class CancelAddRequest(BaseModel):
@@ -76,10 +77,10 @@ def _unless_owned(targets, cfg=None):
     The answer is the same one the policy gives — a skipped row saying why.
     """
     from mlo.config import load_config
-    from server import library
+    from server import wishes
 
     try:
-        owned = library.owned_mbids(cfg or load_config())
+        owned = wishes.owned_mbids(cfg or load_config())
     except Exception:
         return list(targets), []       # a library that cannot be read: unchanged
     kept, skipped = [], []
@@ -162,8 +163,8 @@ def _group_edition_targets(group_mbid, release_mbid, mode, cfg=None):
     # library is reported the same way instead of being added twice.
     try:
         from mlo.config import load_config
-        from server import library
-        owned = library.owned_mbids(cfg or load_config())
+        from server import wishes
+        owned = wishes.owned_mbids(cfg or load_config())
         if rid.lower() in owned or (belongs and belongs in owned):
             return [], [{"mbid": rid, "reason": "already in the library"}]
     except Exception:
@@ -201,26 +202,51 @@ def _targets(mbid, kind, mode, release_mbid="", cfg=None, types=None):
     return intg.auto_import_targets(mbid, kind, mode, types=types, limit=None)
 
 
-def _create_all(targets, cfg, *, title="", artist="", year="", deferred=None):
-    """Create one framework album per target release.
+def _create_all(targets, cfg, *, queries=None, title="", artist="", year="",
+                deferred=None):
+    """Create one framework album + wish per target release, and start the
+    search for what this call created.
 
-    The album folder IS the record of what the user asked for — a placeholder
-    the user fills with the audio themselves. NO album has its page content
-    fetched INLINE — not even the single one a "Add to library" press is about.
-    Measured on a real add by release id (`.pi/profile_add.py`, case b): 10-20 s
-    of the request's ~11-21 s were `pending_albums.prefetch_content`'s provider
-    calls (`cover_search` ~3-8 s, the RYM link lookup ~2.7 s, MusicBrainz
-    metadata ~3-5 s) — content that is only ever read when the user OPENS the
-    album's page, and that the reply does not need: the folder, its manifest
-    and its cover are already on disk by then, which is what the album row
-    shows. So every album's page content goes to
-    `prefetch_content(background=True)` — the same call the batch caller
-    already used — and the request answers with the record it wrote.
+    The album and its wish are the RECORD of what the user asked for; the
+    SEARCH is started here, by the one queue this app has — `wishes_worker`'s
+    own pass, never a second queue beside it. A plain "Add to library" used to
+    only record and leave the searching to the worker's next tick, which can be
+    two minutes away with nothing on screen in between; it now kicks that pass
+    at the end of the call, so the release is being searched for as the reply
+    is written.
+
+    The kick names no wish: the pass is the worker's OWN, so it searches every
+    wish that is due by its own policy (`wishes.due_at` — the interval, or a
+    retry's backoff, whichever is later). A brand-new wish is due immediately
+    and is picked up on this pass; a release that already failed and is waiting
+    out its backoff keeps that wait, which is what stops a re-add from spending
+    another attempt on a network that just answered. ONE kick covers the whole
+    call — an artist's dozens of albums start on the one pass, not one pass
+    each.
+
+    With `auto_acquisition_enabled` off NOTHING is started: the wish sits on
+    the queue until the user runs it by hand (its own Search now), which is the
+    whole difference between "not recorded" and "not started".
+
+    NO album has its page content fetched INLINE — not even the single one a
+    "Add to library" press is about. Measured on a real add by release id
+    (`.pi/profile_add.py`, case b): 10-20 s of the request's ~11-21 s were
+    `pending_albums.prefetch_content`'s provider calls (`cover_search` ~3-8 s,
+    the RYM link lookup ~2.7 s, MusicBrainz metadata ~3-5 s) — content that
+    is only ever read when the user OPENS the album's page, and that the
+    reply does not need: the folder, its manifest, its cover and its wish are
+    already on disk by then, which is what the album row shows. So every
+    album's page content goes to `prefetch_content(background=True)` — the
+    same call the batch caller already used — and the request answers with
+    the record it wrote.
     """
+    from mlo import import_policy
     from server import integrations as intg
-    from server import pending_albums
+    from server import pending_albums, wishes_worker
 
+    auto = import_policy.auto_acquisition_enabled(cfg)
     albums, errors = [], []
+    recorded = False
     for t in targets:
         try:
             release, rid = intg.resolve_release(t["mbid"])
@@ -228,9 +254,17 @@ def _create_all(targets, cfg, *, title="", artist="", year="", deferred=None):
                 errors.append({"mbid": t["mbid"], "reason": "no release matches this ID"})
                 continue
             row = pending_albums.create(
-                release, cfg,
+                release, cfg, queries=queries,
                 title=t.get("title") or title, artist=artist, year=year,
                 prefetch=False,
+                # The ranked fallback list (spec R150) the target already
+                # carries from `integrations.group_targets`: the release
+                # group's eligible editions, best first. Recording it is what
+                # makes the wish's search walk PAST a pressing that has nothing
+                # usable instead of ending at the one edition this add
+                # resolved. A target with none (an add that named ONE release)
+                # keeps the single-candidate behavior it always had.
+                candidates=t.get("candidates") or None,
                 # The FIRST album this resolution creates takes over the
                 # framework album the add already put on disk (`deferred`);
                 # every later one (mode="all") gets its own folder, exactly as
@@ -241,9 +275,15 @@ def _create_all(targets, cfg, *, title="", artist="", year="", deferred=None):
             albums.append(row)
             if row.get("created") and row.get("album_path"):
                 pending_albums.prefetch_content(row["album_path"], cfg, background=True)
+            recorded = recorded or bool(row.get("created") and row.get("wish_id"))
         except Exception as e:
             traceback.print_exc()
             errors.append({"mbid": t["mbid"], "reason": str(e)})
+    if recorded and auto:
+        # The worker's own pass, started now: it reads the wish store itself,
+        # so what it searches (and what it leaves to its own retry) is the
+        # store's decision and not this call's.
+        wishes_worker.trigger()
     return albums, errors
 
 
@@ -258,6 +298,7 @@ def _prepare_artist(mbid, mode, cfg, req, types=None):
     `types` is the call's own type filter (see `AddToLibraryRequest`): the
     groups it leaves out are reported as skipped, by `auto_import_targets`.
     """
+    from mlo import import_policy
     from server import events
 
     albums, errors = [], []
@@ -265,14 +306,22 @@ def _prepare_artist(mbid, mode, cfg, req, types=None):
         targets, skipped = _targets(mbid, "artist", mode, cfg=cfg, types=types)
         for s in skipped:
             errors.append({"mbid": s.get("mbid"), "reason": s.get("reason")})
-        albums, more = _create_all(targets, cfg, title=req.title,
-                                   artist=req.artist, year=req.year)
+        albums, more = _create_all(targets, cfg, queries=req.queries,
+                                   title=req.title, artist=req.artist, year=req.year)
         errors.extend(more)
     except Exception as e:
         traceback.print_exc()
         errors.append({"mbid": mbid, "reason": str(e)})
     if not albums:
         body = "Nothing could be added."
+    elif not import_policy.auto_acquisition_enabled(cfg):
+        # The albums ARE in the library: saying nothing about the search would
+        # leave the user waiting for a download nothing is doing.
+        body = import_policy.AUTO_OFF_NOTE
+    elif all(a.get("existing") for a in albums if a):
+        # Every group this call touched is one the library already holds: the
+        # one honest sentence is that nothing was added.
+        body = _already_note()
     else:
         body = "Each album is in your library — add its audio when you have it."
     if errors:
@@ -292,27 +341,32 @@ def _prepare_add(mbid, kind, mode, release_mbid, cfg, req, deferred, types=None)
     """Resolve a deferred add's MusicBrainz identity and finish its album.
 
     Runs on a daemon thread, exactly like the artist path: the reply already
-    carries the framework album the REQUEST could name
+    carries the framework album and the wish the REQUEST could name
     (`pending_albums.create_from_request`), and what is left is the lookup that
     used to hold the button down — a browse plus an edition resolution per
     release group, tens of seconds on MusicBrainz's own one-request-a-second
-    budget. The resolution itself is unchanged (`_targets` + `_create_all`).
+    budget. The resolution itself is unchanged (`_targets` + `_create_all`),
+    and one kick starts the search for everything it recorded.
 
-    It ends in one of two places, and neither leaves the placeholder claiming
-    to be an album nothing will fill:
+    It ends in exactly one of three places, and none of them leaves the
+    placeholder claiming to be an album nothing will fill:
 
     * recorded — the created album adopts the placeholder folder, which is the
-      name the release really has (`_adopt_deferred`);
-    * nothing was created (the library already holds the release, MusicBrainz
-      had no usable answer, the resolution failed) — the placeholder folder
-      goes and a "library_add" notice says why.
+      name the release really has (`pending_albums.finish_deferred`);
+    * the library already holds the release — the placeholder goes and the wish
+      is marked imported AT the album that is really there, so the queue row
+      states the truth instead of promising a download;
+    * MusicBrainz could not answer, or has nothing — the placeholder goes and
+      the wish keeps its place on the queue WITH the reason, so the user sees
+      what happened and the search can still be run from the row.
 
     A successful resolution says nothing more: the frame the press already sent
     ("Asking MusicBrainz what this release is…") is followed by the album being
-    in the library. An add that could not record an album after its reply must
-    not be silent.
+    in the library and the search running. The two ends that could not record an
+    album report themselves — an add that failed after its reply must not be
+    silent.
     """
-    from server import events, pending_albums
+    from server import events, pending_albums, wishes
 
     albums, errors = [], []
     try:
@@ -320,8 +374,8 @@ def _prepare_add(mbid, kind, mode, release_mbid, cfg, req, deferred, types=None)
                                     types=types)
         for s in skipped:
             errors.append({"mbid": s.get("mbid"), "reason": s.get("reason")})
-        albums, more = _create_all(targets, cfg, title=req.title,
-                                   artist=req.artist or "",
+        albums, more = _create_all(targets, cfg, queries=req.queries,
+                                   title=req.title, artist=req.artist or "",
                                    year=req.year, deferred=deferred)
         errors.extend(more)
     except Exception as e:
@@ -331,8 +385,9 @@ def _prepare_add(mbid, kind, mode, release_mbid, cfg, req, deferred, types=None)
     if albums:
         return
 
+    wid = deferred.get("wish_id")
     try:
-        pending_albums.remove_folder(deferred.get("album_path"))
+        pending_albums.remove_for_wish(wid, cfg)    # the placeholder goes
     except Exception:
         traceback.print_exc()
     reason = next((str((e or {}).get("reason") or "") for e in errors
@@ -340,13 +395,26 @@ def _prepare_add(mbid, kind, mode, release_mbid, cfg, req, deferred, types=None)
                   "MusicBrainz has no release to add for this request.")
     where = _owned_path(deferred, mbid, cfg)
     try:
+        if wid and where:
+            # The album IS in the library, so "imported" is the truth about this
+            # wish — and nothing searches for what is already here.
+            wishes.mark_imported(int(wid), where)
+        elif wid:
+            # The request stands and keeps its place on the queue, with the
+            # reason on the row: whatever MusicBrainz answered, the user still
+            # has a wish they can search or cancel.
+            wishes.mark_wanted(int(wid), error=reason)
+    except Exception:
+        traceback.print_exc()
+    try:
         label = f"{req.artist} — {req.title}".strip(" —")
         events.emit("library_add",
                     (f"Already in your library: {label}" if where
                      else f"Could not add: {label}"),
-                    (_already_note() if where
-                     else f"{reason} Nothing was added."),
-                    {"mbid": mbid, "reason": reason,
+                    (_already_note() if where else
+                     f"{reason} It is not in your library — the request stays on "
+                     f"the queue."),
+                    {"mbid": mbid, "wish_id": wid, "reason": reason,
                      "errors": errors[:20]}, config=cfg)
     except Exception:
         pass
@@ -356,18 +424,18 @@ def _owned_path(deferred, mbid, cfg):
     """The library folder holding this add's release, or "".
 
     The deferred add's own "already in your library" answer, asked of the
-    LIBRARY (`library.owned_mbids` — the albums on disk with their own MBID
-    tags) rather than of the marker: the marker is keyed by whatever id the
-    request held, which is not always the id the resolution learned.
+    LIBRARY (`wishes.owned_mbids` — the albums on disk with their own MBID tags)
+    rather than of the wish: the wish is keyed by whatever id the request held,
+    which is not always the id the resolution learned.
     """
-    from server import library
+    from server import wishes
 
     try:
-        owned = library.owned_mbids(cfg)
+        owned = wishes.owned_mbids(cfg)
     except Exception:
         return ""
-    return library.owned_path(owned, deferred.get("release_id"),
-                              deferred.get("release_group_id"), mbid)
+    return wishes.owned_path(owned, deferred.get("release_id"),
+                             deferred.get("release_group_id"), mbid)
 
 
 def _pending_album_payload(row):
@@ -375,7 +443,7 @@ def _pending_album_payload(row):
             "artist": row.get("artist"), "year": row.get("year"),
             "release_id": row.get("release_id"),
             "release_group_id": row.get("release_group_id"),
-            "cover": row.get("cover"),
+            "wish_id": row.get("wish_id"), "cover": row.get("cover"),
             "created": bool(row.get("created")),
             "resolving": bool(row.get("resolving")),
             "already_in_library": bool(row.get("existing"))}

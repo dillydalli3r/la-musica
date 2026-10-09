@@ -3,7 +3,7 @@ import type { ReactNode } from "react";
 import { Link, Navigate, NavLink, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Activity, ArrowUpRight, BarChart3, ChevronLeft, ChevronRight, ClipboardCheck, Compass, Disc3, Download, Gauge, HardDriveDownload, Heart, HeartHandshake, Home, Import,
+  Activity, ArrowDownUp, ArrowUpRight, BarChart3, ChevronLeft, ChevronRight, ClipboardCheck, Compass, Disc3, Download, Eye, Gauge, HardDriveDownload, Heart, HeartHandshake, Home, Import,
   Keyboard, Library, ListChecks, ListMusic, Loader2, Menu, Music2, Music4, PanelLeftClose, Search, Sliders, SlidersHorizontal, Sparkles, Tags, Trash2, User, WifiOff, X,
   Settings as SettingsIcon, Wrench,
 } from "lucide-react";
@@ -21,6 +21,7 @@ import { GradeTraySync } from "./components/GradeWarning";
 import ShortcutsOverlay from "./components/Shortcuts";
 import { applyConfigLocale, useI18n, type MessageKey } from "./lib/i18n";
 import { applyAccentVars, resolveAccent } from "./lib/accent";
+import { publishTransfers } from "./lib/notifications";
 import { useJobLocks, type LocksPayload } from "./lib/locks";
 
 // Route-level code splitting: only the landing page ships in the initial
@@ -44,6 +45,8 @@ const EqualizerPage = lazy(() => import("./pages/EqualizerPage"));
 const DependenciesPage = lazy(() => import("./pages/DependenciesPage"));
 const GenrePage = lazy(() => import("./pages/GenrePage"));
 const DownloadsPage = lazy(() => import("./pages/DownloadsPage"));
+const SoulseekPage = lazy(() => import("./pages/SoulseekPage"));
+const WatchedArtistsPage = lazy(() => import("./pages/WatchedArtistsPage"));
 const ImportWizard = lazy(() => import("./pages/ImportWizard"));
 const DonationsPage = lazy(() => import("./pages/DonationsPage"));
 const InProgressPage = lazy(() => import("./pages/InProgressPage"));
@@ -174,7 +177,11 @@ const NAV_GROUPS: { labelKey: MessageKey; items: { to: string; labelKey: Message
       // Charts sits with Discover: the same sources, ranked, over the windows
       // the user picked — and beside them the library's own play history.
       { to: "/charts", labelKey: "nav.charts", icon: BarChart3, end: false },
+      // Watched artists are the same queue as Discover: a release group added
+      // here is searched, downloaded and imported by the one pipeline.
+      { to: "/watched", labelKey: "nav.watched", icon: Eye, end: false },
       { to: "/import", labelKey: "nav.import", icon: Import, end: false },
+      { to: "/soulseek", labelKey: "nav.soulseek", icon: ArrowDownUp, end: false },
       // MusicBrainz sits with acquiring: browsing the database IS how a user
       // finds the release they are about to import, and every entity page
       // carries the actions that put one in the library.
@@ -249,6 +256,58 @@ type Timer = ReturnType<typeof setTimeout>;
  *  the default black & white, never to an unset colour. */
 export function applyAccent(name: string | null) {
   applyAccentVars(resolveAccent(name));
+}
+
+/** Soulseek availability dot: green = logged into the Soulseek network,
+ * amber = slskd running but not logged in, hidden = not running. Sits on
+ * the nav icon's corner so it reads the same with the sidebar collapsed.
+ * When logged in, `name` carries the account name — shown in the tooltip.
+ *
+ * `enabled` is false while the shell is behind the login gate: the dot is not
+ * rendered there (the sidebar is not), and a client that has not been told
+ * where its server is must not poll an address it cannot reach — that poll was
+ * one more failed request per 20s on the screen whose whole job is to ask for
+ * the address. */
+function useSlskDot(enabled: boolean) {
+  const { data: st } = useQuery({
+    queryKey: ["soulseek", "status-dot"],
+    queryFn: api.soulseekStatus,
+    enabled,
+    refetchInterval: 20000,
+    refetchIntervalInBackground: false,
+    staleTime: 15000,
+    retry: false,
+  });
+  if (st?.logged_in) {
+    // The LIVE account, not the saved username — those drift apart.
+    const name = String(st.account || st.username || "").trim() || null;
+    return {
+      cls: "bg-emerald-500",
+      tip: name ? `Soulseek — logged in as ${name}` : "Soulseek — connected",
+      name,
+    };
+  }
+  if (st?.conflict) return { cls: "bg-red-500", tip: `Soulseek — ${st.conflict}`, name: null };
+  if (st?.running) {
+    // The daemon's own words (INVALIDPASS, no credentials…) beat a generic
+    // "not logged in" — the dot is the only place some users will look.
+    return {
+      cls: "bg-amber-400",
+      tip: st.error ? `Soulseek — not logged in: ${st.error}` : "Soulseek — running, not logged in",
+      name: null,
+    };
+  }
+  return null;
+}
+
+function SlskIconDot({ dot }: { dot: { cls: string; tip: string; name?: string | null } | null }) {
+  if (!dot) return null;
+  return (
+    <span
+      className={`absolute -top-1 -right-1.5 h-2 w-2 rounded-full ${dot.cls} ring-2 ring-panel`}
+      title={dot.tip}
+    />
+  );
 }
 
 /** How often the bars check the lock registry for a producer that died without
@@ -567,6 +626,53 @@ export default function App() {
     || (IN_TAURI && auth.data === null)
     || (!!auth.data?.required && !auth.data.authenticated);
 
+  const slskDot = useSlskDot(!needsLogin);
+
+  // A finished auto-import is a download the user asked for minutes ago and has
+  // long stopped watching, so the edge announces it wherever they are. Same
+  // query key as the auto panel — one poll, react-query keeps the more
+  // aggressive interval — and the panel's own toast is untouched.
+  //
+  // The observer takes the job's STATE alone, as one primitive, and the album
+  // path is read from the cache only when the edge actually fires. Observing
+  // the raw job (stage text, byte counts, a growing log) re-rendered App on
+  // every poll — and App is the whole shell.
+  const { data: autoStateNow } = useQuery({
+    queryKey: ["soulseekAuto"],
+    queryFn: api.soulseekAutoStatus,
+    // No server to ask yet: the login screen owns the screen and the only
+    // request it should be making is its own status probe.
+    enabled: !needsLogin,
+    // 2s while a job is live is the point of the poll — it is how the queue and
+    // the confirm prompt advance — and it drops to 15s the moment the job
+    // leaves running/confirm, so an idle client is not polling a list at all.
+    refetchInterval: (q) => (q.state.data?.state === "running" || q.state.data?.state === "confirm" ? 2000 : 15000),
+    refetchIntervalInBackground: false,
+    select: (j) => j.state,
+  });
+  const autoState = useRef<string | null>(null);
+  useEffect(() => {
+    const st = autoStateNow ?? null;
+    const prev = autoState.current;
+    autoState.current = st;
+    // Only the running/confirm → done EDGE announces. The ref holds that edge
+    // to one firing, so a later poll, a re-render or a reload of an old
+    // finished job cannot re-announce it.
+    if (st !== "done" || (prev !== "running" && prev !== "confirm")) return;
+    // A wish handoff also ends "done" — but nothing landed on disk to tag.
+    const job = qc.getQueryData<{
+      chain?: { running?: boolean } | null;
+      result?: { album_path?: string } | null;
+    }>(["soulseekAuto"]);
+    const album = job?.result?.album_path ?? "";
+    if (!album) return;
+    // "done" is the DOWNLOAD's edge, not the pipeline's: the album is in the
+    // library while the configured scripts may still be to come.
+    const chainRunning = !!job?.chain?.running;
+    toast(`Imported ${album.split(/[\\/]/).filter(Boolean).pop() || album} — it is in your library`
+      + (chainRunning ? ` — ${t("queue.chain_running_brief")}` : ""));
+  }, [autoStateNow, qc, t]);
+
   // ---- offline ------------------------------------------------------------
   // `isOffline()` is true while the API is answering from the on-disk cache
   // (see lib/offlineCache.ts): the app keeps working — that is the point of
@@ -829,6 +935,24 @@ export default function App() {
       ws.onmessage = (e) => {
         try {
           const p = JSON.parse(e.data);
+          if (p?.type === "soulseek") {
+            // The daemon's login/run state changed under us (a login that
+            // just landed, an unexpected logout, a port conflict): re-read
+            // the status both the tab and the nav dot derive from, so the
+            // dot repaints without waiting for the next poll or a reload.
+            qc.invalidateQueries({ queryKey: ["soulseek"] });
+            qc.invalidateQueries({ queryKey: ["soulseekStatus"] });
+            return;
+          }
+          if (p?.type === "transfers") {
+            // Live transfer progress (see server/main.py's transfer watcher).
+            // Handed to the store the Soulseek page draws its bars from — NOT
+            // invalidated, because a byte count changing four times a second
+            // must not refetch anything, and never routed through the
+            // notification tray (lib/notifications.ts keeps the two apart).
+            publishTransfers(p);
+            return;
+          }
           if (p?.type === "progress_end") {
             // The producer's own "finished" — the ONE thing that ends its bar.
             // A total-complete frame does NOT: producers publish those
@@ -1109,6 +1233,7 @@ export default function App() {
               >
                 <span className="nav-icon relative shrink-0 inline-flex">
                   <Icon className="h-4 w-4 shrink-0" />
+                  {to === "/soulseek" && <SlskIconDot dot={slskDot} />}
                 </span>
                 <span
                   className={`overflow-hidden whitespace-nowrap text-ellipsis transition-[max-width,opacity] duration-150 ${
@@ -1176,6 +1301,7 @@ export default function App() {
                   >
                     <span className="nav-icon relative shrink-0 inline-flex">
                       <Icon className="h-4 w-4 shrink-0" />
+                      {to === "/soulseek" && <SlskIconDot dot={slskDot} />}
                     </span>
                     {/* Wrapping, not nowrap: a translation is longer than the
                         English label it was written beside ("Now playing" is
@@ -1432,6 +1558,8 @@ export default function App() {
             {/* The offline downloads: the tracks this browser can play with
                 the server down, as the library's own album table. */}
             <Route path="/downloads" element={<DownloadsPage />} />
+            <Route path="/soulseek" element={<SoulseekPage />} />
+            <Route path="/watched" element={<WatchedArtistsPage />} />
             <Route path="/trash" element={<TrashPage />} />
             <Route path="/artist/:path" element={<ArtistPage />} />
             <Route path="/podcast/:series" element={<PodcastPage />} />

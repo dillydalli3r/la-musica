@@ -26,6 +26,8 @@ export default {
   "nav.equalizer": "イコライザー",
   "nav.settings": "設定",
   "nav.donations": "寄付",
+  "nav.soulseek": "Soulseek",
+  "nav.watched": "ウォッチ中のアーティスト",
 
   "topbar.search": "ライブラリを検索…",
   "topbar.back": "戻る",
@@ -529,4 +531,17 @@ export default {
   "rating.webAlbumTitleNoSources": "アルバムの Web 評価 {value} / 5 — スクリプトは取得元を記録していません",
   "rating.webAria": "Web 評価: {value} / 5",
   "rating.webAlbumAria": "アルバムの Web 評価: {value} / 5",
+
+  // —— Soulseek acquisition: the download queue's rows and the MBID search ——
+  "queue.step": "現在: {text}",
+  "queue.asking": "{label} に問い合わせ中: {title}",
+  "queue.peer": "{user} · {dir}",
+  "queue.wait_next": "次の検索まで {when}",
+  "queue.wait_retry": "{when} 後に再試行",
+  "queue.chain_running": "ライブラリに取り込み済み — インポート処理はまだ実行中です",
+  "queue.chain_running_brief": "インポート処理はまだ実行中です",
+  "queue.rejected": "拒否された候補 ({count})",
+  "soulseek.mbid.chip": "MBID で検索",
+  "soulseek.mbid.hint": "MusicBrainz の ID のようです — 検索を押すとその 1 曲だけを探します：アーティストとタイトル、アルバム、ID 自体を同時に検索します。",
+  "soulseek.mbid.label": "MBID 検索：{label}",
 } as const;

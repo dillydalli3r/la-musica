@@ -170,13 +170,16 @@ def _notify_configured(kind: str, cfg: dict) -> bool:
     """Is this event kind switched on in the config?
 
     Defaults are True: a server whose config predates these keys must still
-    announce a finished import.
+    announce a found wish, which is the whole point of the feature.
     """
     key = {
+        "wish_found": "notify_wish_found",
         "download_done": "notify_download_done",
         "import_ready": "notify_import_ready",
         "import_started": "notify_import_start",
         "import_done": "notify_import_done",
+        "download_started": "notify_soulseek_download_start",
+        "upload_started": "notify_soulseek_upload_start",
     }.get(kind)
     if not key:
         return True

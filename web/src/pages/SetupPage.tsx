@@ -15,6 +15,7 @@ import {
   Settings,
   ShieldCheck,
   Sparkles,
+  Users,
 } from "lucide-react";
 import { api, deviceUnavailable, installSummary, setToken, unavailableFeatures } from "../api";
 import FolderPicker from "../components/FolderPicker";
@@ -228,18 +229,77 @@ export default function SetupPage() {
     }
   };
 
-  /** Save this step's answers and move on. */
+  /** Save this step's answers and move on. `advance` false = stay, which is
+   *  only used by the step that also starts slskd. */
   const saveStep = async (advance: boolean) => {
     if (!draft || badCount) return;
     const changed = cfgChanges(draft, config ?? {}, stepFields(step));
     setBusy(true);
     try {
-      if (Object.keys(changed).length) {
-        await api.saveConfig(changed);
+      if (Object.keys(changed).length) await api.saveConfig(changed);
+      if (step.panel === "slskd") {
+        if (draft.soulseek_share_library !== false) {
+          await api.soulseekSharesRefresh().catch(() => undefined);
+          await api.soulseekStart();
+          toast("slskd started — sharing your library");
+        } else if (Object.keys(changed).length) {
+          toast.success("Saved");
+        }
+      } else if (Object.keys(changed).length) {
         toast.success("Saved");
       }
       qc.invalidateQueries({ queryKey: ["config"] });
       if (advance) setIndex((i) => i + 1);
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /**
+   * Save the Soulseek credentials and prove them: slskd performs the network
+   * handshake, so the only honest test is "start it and ask what the network
+   * says". The status payload is the Soulseek tab's own source of truth —
+   * `logged_in` names the account, `error` is slskd's own sentence
+   * (INVALIDPASS, empty credentials, a port it could not bind) — so Test and
+   * the tab can never disagree about what happened.
+   */
+  const testSoulseek = async () => {
+    setBusy(true);
+    try {
+      // Save first: the server builds slskd's config from the SAVED values, so
+      // testing an unsaved pair would test the previous login.
+      const changed = cfgChanges(draft ?? {}, config ?? {}, stepFields(step));
+      if (Object.keys(changed).length) {
+        await api.saveConfig(changed);
+        qc.invalidateQueries({ queryKey: ["config"] });
+      }
+      const started = await api.soulseekStart();
+      let last = await api.soulseekStatus();
+      if (!last.installed) {
+        toast.error("slskd is not installed on this host yet — install it on the Tools step first");
+        return;
+      }
+      // slskd's web API answers a few seconds before the network login does.
+      // The plain promise is the app's own idiom for this wait (see
+      // ImportWizard's retry loop): Promise.withResolvers is ES2024 and this
+      // tsconfig's lib predates it.
+      for (let i = 0; i < 30 && !last.logged_in && !last.error; i++) {
+        await new Promise((r) => setTimeout(r, 1000));
+        last = await api.soulseekStatus();
+      }
+      if (last.logged_in) {
+        toast.success(`Signed in as ${last.account || last.username || "your Soulseek account"}`);
+      } else if (last.error) {
+        toast.error(`slskd refused the login: ${last.error}`);
+      } else if (last.conflict) {
+        toast.error(
+          `Another slskd already holds port ${last.web_port}${last.conflict_username ? ` (signed in as ${last.conflict_username})` : ""} — stop it, or change the web port`
+        );
+      } else {
+        toast(started.message || "slskd started, but the Soulseek login has not answered yet — the Soulseek page shows the live state");
+      }
     } catch (e) {
       toast.error(String(e));
     } finally {
@@ -427,6 +487,7 @@ export default function SetupPage() {
           <div>
             <div className="flex items-center gap-2 text-sm font-semibold">
               {step.panel === "sources" ? <Sparkles className="h-4 w-4 text-accent" /> : null}
+              {step.panel === "slskd" ? <Users className="h-4 w-4 text-accent" /> : null}
               {step.panel === "password" ? <ShieldCheck className="h-4 w-4 text-accent" /> : null}
               {step.panel === "done" ? <Check className="h-4 w-4 text-emerald-400" /> : null}
               {step.title}
@@ -711,6 +772,16 @@ export default function SetupPage() {
             </button>
             {!isLast && (
               <div className="ml-auto flex flex-wrap justify-end gap-2">
+                {step.panel === "slskd" && (
+                  <button
+                    className="btn-ghost"
+                    onClick={testSoulseek}
+                    disabled={busy}
+                    title="Save these credentials, start slskd and report what the Soulseek network answered — the same payload the Soulseek page's dot is drawn from"
+                  >
+                    Test login
+                  </button>
+                )}
                 {/* The account step is the one step the wizard will not let a
                     first run skip: everything after it can be read by anyone
                     who reaches this address, and the password is the only
@@ -730,7 +801,7 @@ export default function SetupPage() {
                   </button>
                 ) : (
                   <button className="btn-primary" onClick={() => saveStep(true)} disabled={busy || badCount > 0} title={badCount ? "Fix the highlighted fields first" : undefined}>
-                    {busy ? "Saving…" : "Save & continue"}{" "}
+                    {busy ? "Saving…" : step.panel === "slskd" ? "Save & start sharing" : "Save & continue"}{" "}
                     <ArrowRight className="h-3.5 w-3.5" />
                   </button>
                 )}

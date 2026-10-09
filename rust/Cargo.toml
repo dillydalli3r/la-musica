@@ -2,7 +2,7 @@
 name = "mlo-audio"
 version = "0.1.0"
 edition = "2021"
-description = "la musica's native audio-analysis helper (dynamic range so far)"
+description = "la musica's native audio-analysis helper (dynamic range, tempo/key/mood)"
 license = "MIT"
 # ZERO dependencies on purpose: the helper has to build offline, from nothing
 # but rustc + cargo, in a container stage and on a developer's machine alike.
