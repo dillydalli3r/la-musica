@@ -841,10 +841,17 @@ check("only the run that owns the bar ticks it, never both",
       len(overlap) == TICKS and len({f[2] for f in overlap}) == 1,
       f"{len(overlap)} frame(s) while both ran: "
       f"{[(f[0], f[1], f[2]) for f in overlap]}")
-check("and the bar never carried the other run's name",
+# …and that is a claim about the OVERLAP window, not about every frame the case
+# ever recorded: once one of the two runs ENDS, the survivor is the only run in
+# flight and legitimately paints the bar with its own name (which is what the
+# rule is for — the header shows the run that has been in flight longest, and
+# after the other one it IS that run). Counting the whole case made this
+# assertion race the finishing order: it passed locally and failed twice on the
+# CI runner, where the second run's own tail landed inside the recorded list.
+check("and the bar never carried the other run's name while both ran",
       len([name for name in ("Optimize FLACs", "Process images")
-           if any(name in f[2] for f in bar_frames)]) == 1,
-      f"{sorted({f[2] for f in bar_frames})}")
+           if any(name in f[2] for f in overlap)]) == 1,
+      f"{sorted({f[2] for f in overlap})}")
 check("each run's own in-progress row carries its own script",
       sorted(rows) == ["Optimize FLACs", "Process images"]
       and all(texts == {label} for label, texts in rows.items()),
