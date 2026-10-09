@@ -94,6 +94,7 @@ COPY_CRC_RE = re.compile(r"^Copy CRC\s+([0-9A-Fa-f]{8})")
 TEST_CRC_RE = re.compile(r"^Test CRC\s+([0-9A-Fa-f]{8})")
 XLD_CRC_RE = re.compile(r"^CRC32 hash\s*:\s*([0-9A-Fa-f]{8})")
 XLD_TEST_CRC_RE = re.compile(r"^CRC32 hash\s+\(test run\)\s*:\s*([0-9A-Fa-f]{8})")
+XLD_SKIP_ZERO_RE = re.compile(r"^CRC32 hash\s+\(skip zero\)\s*:\s*([0-9A-Fa-f]{8})")
 ACCURATE_CRC_RE = re.compile(r"\[([0-9A-Fa-f]{8})\]")
 
 # A cue sheet's own tracklist: "  TRACK 01 AUDIO", the TITLE/PERFORMER lines
@@ -410,6 +411,34 @@ def parse_log_checksums(text):
     return per_track
 
 
+def parse_log_skip_zero_checksums(text):
+    """Map track number -> XLD's `CRC32 hash (skip zero)` value (8 hex).
+
+    XLD prints this SECOND CRC-32 beside the plain one: the same decoded PCM
+    with every zero sample omitted (`_audio_crc32(..., skip_zero=True)`
+    reproduces it; verified against all 11 tracks of a real XLD log). It is
+    NOT the track's CRC — it describes no file on disk — which is exactly why
+    it is useful here: when the plain CRCs differ but these match, the two
+    transfers hold the same audio and differ only in leading/trailing silence.
+    EAC prints no such line, so an EAC log answers {} and the caller's
+    wording falls back to the plain verdict.
+    """
+    out = {}
+    current = None
+    for raw in text.splitlines():
+        line = raw.strip()
+        m = re.match(r"^Track\s+(\d{1,3})\b", line, re.IGNORECASE)
+        if m:
+            current = int(m.group(1))
+            continue
+        if current is None:
+            continue
+        m = XLD_SKIP_ZERO_RE.match(line)
+        if m:
+            out[current] = m.group(1).upper()
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # What a rip's own sheets say about its tracklist
 #
@@ -716,11 +745,12 @@ def _file_seconds(path):
 # full request is buffered, so asking for megabytes costs throughput).
 _CRC_CHUNK = 1 << 16
 
-# Decoded CRCs per (path, size, mtime_ns). Decoding a track is the most
-# expensive thing this module does, and the audit pass and the grader ask the
-# same question about the same unchanged file (grading a CD library would
+# Decoded CRCs per (path, size, mtime_ns, variant). Decoding a track is the
+# most expensive thing this module does, and the audit pass and the grader ask
+# the same question about the same unchanged file (grading a CD library would
 # otherwise decode every track a second time). Keyed on size+mtime, so a
-# re-ripped or edited file is never served a stale verdict. Bounded: a long
+# re-ripped or edited file is never served a stale verdict; `variant` keeps the
+# plain CRC apart from XLD's skip-zero one (`_audio_crc32`). Bounded: a long
 # session over a churning library drops the map rather than growing forever.
 _CRC_MEMO = {}
 # The same verdict keyed by the AUDIO's own identity instead of the file's
@@ -736,13 +766,44 @@ _CRC_MEMO_LOCK = threading.Lock()
 _CRC_MEMO_MAX = 20000
 
 
-def _audio_crc32(ffmpeg_exe, path):
+def _drop_zero_samples(buf):
+    """The 16-bit little-endian samples of *buf* that are NOT zero, as bytes.
+
+    XLD's `CRC32 hash (skip zero)` is the CRC-32 of exactly this: the decoded
+    PCM with every zero sample omitted (verified against all 11 tracks of a
+    real XLD log). numpy does the filtering at C speed — a 64 KiB buffer is
+    32 k samples, so the temporary is small — and a build without numpy falls
+    back to a byte loop that is correct, just slower. Only a track whose plain
+    CRC already mismatched ever pays for this.
+    """
+    if len(buf) % 2:
+        buf = buf[:-1]                      # a partial sample is not one
+    try:
+        import numpy as np
+    except ImportError:
+        out = bytearray()
+        for i in range(0, len(buf), 2):
+            if buf[i] or buf[i + 1]:
+                out += buf[i:i + 2]
+        return bytes(out)
+    samples = np.frombuffer(buf, dtype="<i2")
+    nonzero = samples[samples != 0]
+    return nonzero.tobytes() if nonzero.size else b""
+
+
+def _audio_crc32(ffmpeg_exe, path, skip_zero=False):
     """CRC-32 of the file's decoded 16-bit PCM (the value EAC/XLD print in
     their logs), as 8 uppercase hex digits, or None on failure.
 
     The decoder's PCM is fed to zlib.crc32 in _CRC_CHUNK-sized pieces as it
     arrives, so a track's samples are never held in memory — a 60-minute disc
-    used to cost hundreds of MB of RSS for its single largest track."""
+    used to cost hundreds of MB of RSS for its single largest track.
+
+    *skip_zero* reproduces XLD's OWN second variant, `CRC32 hash (skip zero)`:
+    the same CRC-32 with every zero sample omitted (`_drop_zero_samples`). It
+    describes no file on disk, so it is NEVER the comparison value — the plain
+    CRC is. It exists so a plain mismatch can be told apart from a
+    leading/trailing-silence difference when the verdict is worded."""
     import zlib
 
     key = None
@@ -750,7 +811,7 @@ def _audio_crc32(ffmpeg_exe, path):
     try:
         st = os.stat(path)
         norm = os.path.normcase(os.path.abspath(path))
-        key = (norm, st.st_size, st.st_mtime_ns)
+        key = (norm, st.st_size, st.st_mtime_ns, skip_zero)
         with _CRC_MEMO_LOCK:
             if key in _CRC_MEMO:
                 return _CRC_MEMO[key]
@@ -762,7 +823,7 @@ def _audio_crc32(ffmpeg_exe, path):
         identity = _audio_identity(path)
         if identity:
             with _CRC_MEMO_LOCK:
-                hit = _CRC_AUDIO_MEMO.get((norm, identity))
+                hit = _CRC_AUDIO_MEMO.get((norm, identity, skip_zero))
             if hit is not None:
                 with _CRC_MEMO_LOCK:
                     _CRC_MEMO[key] = hit
@@ -781,7 +842,8 @@ def _audio_crc32(ffmpeg_exe, path):
                 buf = fh.read(_CRC_CHUNK)
                 if not buf:
                     break
-                crc = zlib.crc32(buf, crc)
+                crc = zlib.crc32(_drop_zero_samples(buf) if skip_zero else buf,
+                                 crc)
                 size += len(buf)
 
     reader = threading.Thread(target=pump, daemon=True)
@@ -810,7 +872,7 @@ def _audio_crc32(ffmpeg_exe, path):
             if identity:
                 if len(_CRC_AUDIO_MEMO) >= _CRC_MEMO_MAX:
                     _CRC_AUDIO_MEMO.clear()
-                _CRC_AUDIO_MEMO[(key[0], identity)] = got
+                _CRC_AUDIO_MEMO[(key[0], identity, skip_zero)] = got
     return got
 
 

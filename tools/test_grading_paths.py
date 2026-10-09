@@ -1781,6 +1781,272 @@ if _FFMPEG:
        "and `(test run)` does not stand in for the plain line either")
 
 # ----------------------------------------------------------------------
+# A second XLD log — The King of Limbs, TICK001CD — teaches the verdict to
+# say WHAT KIND of mismatch it is: same audio with different silence, or a
+# different transfer of the same CD.
+# ----------------------------------------------------------------------
+print("== XLD log CRC mismatch: what it says ==")
+# The owner's CD-1.log (XLD 20110312, ripped 2011-03-24 by another person,
+# drive HL-DT-ST GS23N, read offset 667), verbatim TOC and CRC lines; its
+# AccurateRip/gain/statistics blocks are elided (no reader touches them).
+KOL_SAMPLE = """\
+X Lossless Decoder version 20110312 (130.0)
+
+XLD extraction logfile from 2011-03-24 16:30:03 +1100
+
+Radiohead / The King Of Limbs
+
+Used drive : HL-DT-ST DVDRW  GS23N (revision SB03)
+
+Ripper mode             : CDParanoia III 10.2
+Read offset correction  : 667
+Gap status              : Analyzed, Appended
+
+TOC of the extracted CD
+     Track |   Start  |  Length  | Start sector | End sector 
+    ---------------------------------------------------------
+        1  | 00:00:00 | 05:14:38 |         0    |    23587   
+        2  | 05:14:38 | 04:40:54 |     23588    |    44641   
+        3  | 09:55:17 | 04:27:10 |     44642    |    64676   
+        4  | 14:22:27 | 03:12:56 |     64677    |    79132   
+        5  | 17:35:08 | 05:00:30 |     79133    |   101662   
+        6  | 22:35:38 | 04:46:67 |    101663    |   123179   
+        7  | 27:22:30 | 04:50:05 |    123180    |   144934   
+        8  | 32:12:35 | 05:21:32 |    144935    |   169041   
+
+Track 01
+    Filename : /Users/hamishduncan/Desktop/Radiohead - The King Of Limbs - FLAC Log Cue - 2011/01 Radiohead - Bloom.flac
+    Pre-gap length : 00:02:00
+
+    CRC32 hash (test run)  : 15788F23
+    CRC32 hash             : 15788F23
+    CRC32 hash (skip zero) : 3EDA7C1D
+    AccurateRip signature  : 35FFC532
+
+Track 02
+    Filename : /Users/hamishduncan/Desktop/Radiohead - The King Of Limbs - FLAC Log Cue - 2011/02 Radiohead - Morning Mr. Magpie.flac
+
+    CRC32 hash (test run)  : 006AE096
+    CRC32 hash             : 006AE096
+    CRC32 hash (skip zero) : 18B4BD58
+    AccurateRip signature  : 3694A865
+
+Track 03
+    Filename : /Users/hamishduncan/Desktop/Radiohead - The King Of Limbs - FLAC Log Cue - 2011/03 Radiohead - Little By Little.flac
+
+    CRC32 hash (test run)  : B168532D
+    CRC32 hash             : B168532D
+    CRC32 hash (skip zero) : 737B1AEB
+    AccurateRip signature  : 872974A5
+
+Track 04
+    Filename : /Users/hamishduncan/Desktop/Radiohead - The King Of Limbs - FLAC Log Cue - 2011/04 Radiohead - Feral.flac
+
+    CRC32 hash (test run)  : 0DCADDD5
+    CRC32 hash             : 0DCADDD5
+    CRC32 hash (skip zero) : FC5BA282
+    AccurateRip signature  : B8889C07
+
+Track 05
+    Filename : /Users/hamishduncan/Desktop/Radiohead - The King Of Limbs - FLAC Log Cue - 2011/05 Radiohead - Lotus Flower.flac
+    Pre-gap length : 00:02:52
+
+    CRC32 hash (test run)  : 991894A9
+    CRC32 hash             : 991894A9
+    CRC32 hash (skip zero) : 3EC9C065
+    AccurateRip signature  : 357207BD
+
+Track 06
+    Filename : /Users/hamishduncan/Desktop/Radiohead - The King Of Limbs - FLAC Log Cue - 2011/06 Radiohead - Codex.flac
+
+    CRC32 hash (test run)  : 03A384D8
+    CRC32 hash             : 03A384D8
+    CRC32 hash (skip zero) : 3380E15C
+    AccurateRip signature  : 305B418D
+
+Track 07
+    Filename : /Users/hamishduncan/Desktop/Radiohead - The King Of Limbs - FLAC Log Cue - 2011/07 Radiohead - Give Up the Ghost.flac
+
+    CRC32 hash (test run)  : 81B447D2
+    CRC32 hash             : 81B447D2
+    CRC32 hash (skip zero) : 23CD5A55
+    AccurateRip signature  : 0A6CCB9D
+
+Track 08
+    Filename : /Users/hamishduncan/Desktop/Radiohead - The King Of Limbs - FLAC Log Cue - 2011/08 Radiohead - Separator.flac
+
+    CRC32 hash (test run)  : 3910D07B
+    CRC32 hash             : 3910D07B
+    CRC32 hash (skip zero) : 591ADF75
+    AccurateRip signature  : 0115E91B
+
+No errors occurred
+
+End of status report
+"""
+_KOL_PLAIN = {1: "15788F23", 2: "006AE096", 3: "B168532D", 4: "0DCADDD5",
+              5: "991894A9", 6: "03A384D8", 7: "81B447D2", 8: "3910D07B"}
+_KOL_SKIP = {1: "3EDA7C1D", 2: "18B4BD58", 3: "737B1AEB", 4: "FC5BA282",
+             5: "3EC9C065", 6: "3380E15C", 7: "23CD5A55", 8: "591ADF75"}
+ok(_discs.parse_log_checksums(KOL_SAMPLE) == _KOL_PLAIN,
+   "the KoL log's plain CRCs are read")
+ok(_discs.parse_log_skip_zero_checksums(KOL_SAMPLE) == _KOL_SKIP,
+   "and its `CRC32 hash (skip zero)` variant, per track, beside them")
+ok(len(_discs.parse_log_track_seconds(KOL_SAMPLE)) == 8
+   and round(_discs.parse_log_track_seconds(KOL_SAMPLE)[1], 4) == 314.5067
+   and round(_discs.parse_log_toc_seconds(KOL_SAMPLE), 3) == 2253.893,
+   "its TOC (mm:ss:ff) is read too")
+ok(not _discs.parse_log_skip_zero_checksums(XLD_SAMPLE).get(0)
+   and set(_discs.parse_log_skip_zero_checksums(XLD_SAMPLE)) == set(range(1, 12)),
+   "an EAC log answers {} for the variant — the caller then keeps its wording")
+
+def _xld_wording_checks():
+    """The variant's RULE and the two verdict wordings, end to end.
+
+    XLD's `(skip zero)` is the CRC-32 of the decoded PCM with every zero
+    sample omitted: pinned here independently of any log — a FLAC whose
+    samples are known in this file, crc32'd here, has to come back as those
+    values — and then used to drive the grader's wording through a real
+    `_grade_album` run.
+    """
+    import struct as _struct
+    import wave as _wave
+    import zlib as _zlib
+
+    pattern = ([(0, 0)] * 64
+               + [(1234, -1234), (0, 0), (321, 654), (0, 0)] * 8
+               + [(0, 0)] * 64)
+
+    def frames(samples):
+        return b"".join(_struct.pack("<hh", left, right)
+                        for left, right in samples)
+
+    z_plain = format(_zlib.crc32(frames(pattern)) & 0xFFFFFFFF, "08X")
+    z_skip = format(_zlib.crc32(frames(
+        [lr for lr in pattern if lr[0] or lr[1]])) & 0xFFFFFFFF, "08X")
+
+    w_dir = os.path.join(music, "Artists", "Artist", "XLD Wording (2020)")
+    os.makedirs(w_dir, exist_ok=True)
+    w_flac = os.path.join(w_dir, "01 - Song.flac")
+    wav = w_flac + ".wav"
+    with _wave.open(wav, "w") as w:
+        w.setnchannels(2)
+        w.setsampwidth(2)
+        w.setframerate(44100)
+        w.writeframes(frames(pattern))
+    subprocess.run([FLAC_EXE, "-s", "-f", "-8", "-o", w_flac, wav],
+                   check=True, capture_output=True)
+    os.remove(wav)
+    set_tags(w_flac, dict(FULL, MEDIA="CD"))
+    w_log = os.path.join(w_dir, "CD-1.log")
+
+    def write_log(plain, test_run, skip_zero):
+        """A one-track XLD log over w_flac; skip_zero=None writes an
+        EAC-shaped block with no such line."""
+        lines = ["X Lossless Decoder version 20151214 (149.1)", "",
+                 "XLD extraction logfile from 2016-06-16 12:47:40 -0400", "",
+                 "Artist / Album", "", "TOC of the extracted CD",
+                 "     Track |   Start  |  Length  | Start sector"
+                 " | End sector ",
+                 "    -------------------------------------------------"
+                 "---------\n"
+                 "        1  | 00:00:00 | 00:00:10 |         0    |"
+                 "      749   \n\nTrack 01",
+                 "    Filename : /Users/someone/Desktop/XLD rips/01 Song.flac",
+                 "",
+                 f"    CRC32 hash (test run)    : {test_run}",
+                 f"    CRC32 hash               : {plain}"]
+        if skip_zero is not None:
+            lines.append(f"    CRC32 hash (skip zero)   : {skip_zero}")
+        with open(w_log, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(lines) + "\n")
+
+    ok(_discs._audio_crc32(_FFMPEG, w_flac) == z_plain
+       and _discs._audio_crc32(_FFMPEG, w_flac, skip_zero=True) == z_skip,
+       "the app's skip-zero mode is XLD's own rule — the plain CRC and the "
+       "CRC with every zero sample omitted, both reproduced from known "
+       f"samples ({_discs._audio_crc32(_FFMPEG, w_flac)} / "
+       f"{_discs._audio_crc32(_FFMPEG, w_flac, skip_zero=True)} vs "
+       f"{z_plain} / {z_skip})")
+
+    write_log(z_plain, z_plain, z_skip)
+    res = _grade_album(w_dir, "EMBEDDED", _crc_cfg)
+    ok("CRC" not in res["tracks"][0]["issues"]
+       and not any("silence" in i or "DIFFERENT audio" in i
+                   for i in res["issues"]),
+       f"a matching XLD log still passes silently "
+       f"({res['tracks'][0]['issues']})")
+
+    # Same audio, different silence: the plain CRC differs but the skip-zero
+    # one agrees — the verdict says so instead of accusing the app.
+    write_log("11111111", "11111111", z_skip)
+    res = _grade_album(w_dir, "EMBEDDED", _crc_cfg)
+    ok("CRC_MISMATCH" in res["tracks"][0]["issues"]
+       and any("leading/trailing silence" in i for i in res["issues"]),
+       "plain differs but skip-zero matches → the silence wording "
+       f"({res['issues']})")
+    ok(any(z_skip in i and "11111111" in i for i in res["issues"]),
+       "and it quotes both values it compared")
+
+    # The KoL case: neither variant matches -> the log is another transfer.
+    write_log(_KOL_PLAIN[1], _KOL_PLAIN[1], _KOL_SKIP[1])
+    res = _grade_album(w_dir, "EMBEDDED", _crc_cfg)
+    ok("CRC_MISMATCH" in res["tracks"][0]["issues"]
+       and any("DIFFERENT audio of the same length" in i for i in res["issues"])
+       and any("Keep the rip whose log matches" in i for i in res["issues"]),
+       f"neither variant matches → the different-transfer wording ({res['issues']})")
+    ok(any(_KOL_SKIP[1] in i and _KOL_PLAIN[1] in i for i in res["issues"]),
+       "naming the log's own values, and what the user can do")
+
+    # An EAC log prints no `(skip zero)` line: its verdict is unchanged.
+    write_log("11111111", "11111111", None)
+    res = _grade_album(w_dir, "EMBEDDED", _crc_cfg)
+    ok(any("does not match its own log" in i for i in res["issues"])
+       and not any("silence" in i or "DIFFERENT audio" in i
+                   for i in res["issues"]),
+       "an EAC-shaped mismatch keeps the original sentence "
+       f"({res['issues']})")
+
+    # An XLD log the app cannot checksum does NOT block the CD verdict. The
+    # log's own SHA256 half reads 'unsupported' (checksum_status NONE) and,
+    # per spec R30, that is not a missing leg to charge: the 'checksums' leg is
+    # the per-track CRC comparison the app computes itself. With that matching
+    # and a REAL .accurip, all three legs are ok and the disc reads REAL — so a
+    # perfectly verifiable XLD rip is not locked out of the verdict.
+    from mlo.accurip import _canonical_accurip_text  # noqa: E402
+
+    with open(os.path.join(w_dir, "CD-1.accurip"), "w", encoding="utf-8") as fh:
+        fh.write(_canonical_accurip_text(
+            "[CUETools log; Date: 2026-01-01 00:00:00; Version: 2.2.6]\n"
+            "[AccurateRip ID: 00000001-00000001-00000001]\n\n"
+            "Track   [  CRC   |   V2   ] Status\n"
+            " 01     [00000001|00000002] (V1+V2/Y) Accurately ripped\n"))
+    set_tags(w_flac, {"LOG_GRADE": "100"})
+    write_log(z_plain, z_plain, z_skip)
+    res = _grade_album(w_dir, "EMBEDDED", dict(
+        _crc_cfg, audit_log_score_threshold=100,
+        audit_require_accuraterip=True, audit_verify_log_checksum=True))
+    tr0 = res["tracks"][0]
+    ok(tr0.get("checksum_status") == "NONE"
+       and tr0.get("audit_legs") == {"log-score": "ok", "checksums": "ok",
+                                     "accuraterip": "ok"}
+       and tr0.get("audit") == "REAL",
+       "an XLD log the app cannot checksum is not a missing leg: a matching "
+       "per-track CRC plus a REAL .accurip reads REAL "
+       f"({tr0.get('audit_legs')} / {tr0.get('audit')} / "
+       f"{tr0.get('checksum_status')})")
+    ok(not any("nothing established the CD verdict's 'checksums'"
+               in i for i in res["issues"]),
+       "and nothing charges the disc for the log checksum it cannot read "
+       f"({res['issues']})")
+
+
+if _FFMPEG:
+    _xld_wording_checks()
+else:
+    print("  skipped: no ffmpeg — the XLD mismatch wording is not graded here")
+
+# ----------------------------------------------------------------------
 # beets config: directory: is the library root, not the music folder
 # ----------------------------------------------------------------------
 print("== beets config ==")

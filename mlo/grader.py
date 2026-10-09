@@ -3359,6 +3359,7 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
             try:
                 from .discs import parse_log_checksums, read_log_text, \
                     parse_log_track_seconds, log_crc_map, _file_seconds, \
+                    parse_log_skip_zero_checksums, \
                     _track_num_of, album_discs as _album_discs, \
                     disc_of_filename, _file_track_number, \
                     _disc_pattern_for as _pat2, _disc_expected_name as _exp_name
@@ -3375,6 +3376,10 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                 disc_pattern = _pat2(cfg)
                 per_disc_crc = {}
                 unmapped_crc = {}
+                # XLD's `(skip zero)` variant, same disc attribution: it only
+                # words a plain mismatch, it never decides one.
+                per_disc_skip = {}
+                unmapped_skip = {}
 
                 def _disc_for_log(name):
                     low = os.path.basename(name).lower()
@@ -3396,13 +3401,22 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                 log_text = {lp: read_log_text(lp) for lp in sorted(log_paths)}
                 for lp in sorted(log_paths):
                     got = parse_log_checksums(log_text[lp])
-                    if not got:
-                        continue
                     d = _disc_for_log(lp)
-                    if d:
-                        per_disc_crc.setdefault(d, {}).update(got)
-                    else:
-                        unmapped_crc.update(got)
+                    if got:
+                        if d:
+                            per_disc_crc.setdefault(d, {}).update(got)
+                        else:
+                            unmapped_crc.update(got)
+                    # XLD's second variant, `CRC32 hash (skip zero)`, read the
+                    # same way: it only ever informs the WORDING of a plain
+                    # mismatch (same audio, trimmed silence vs different
+                    # audio), never the pass/fail.
+                    skip = parse_log_skip_zero_checksums(log_text[lp])
+                    if skip:
+                        if d:
+                            per_disc_skip.setdefault(d, {}).update(skip)
+                        else:
+                            unmapped_skip.update(skip)
                 if not per_disc_crc and not unmapped_crc:
                     total_checks += 1
                     failed_checks += 1
@@ -3421,6 +3435,7 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                     # otherwise every track of that disc read "not covered by
                     # .log CRC" beside a log that covered all of them.
                     crc_by_path = {}
+                    skip_by_path = {}
                     paths_by_disc = {}
                     for ap in audio_paths:
                         dd = (disc_by_path.get(ap)
@@ -3433,12 +3448,14 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                             parse_log_track_seconds(log_text[lp]))
                     for dd, disc_paths in paths_by_disc.items():
                         crcs = per_disc_crc.get(dd)
+                        skips = per_disc_skip.get(dd)
                         seconds = log_seconds_by_disc.get(dd) or {}
                         if crcs is None and single_log:
                             # Exactly one log covers the album's tracks,
                             # whichever disc its name claims — a single-disc
                             # rip whose log name carries no disc number.
                             crcs = next(iter(per_disc_crc.values()), {}) or unmapped_crc
+                            skips = next(iter(per_disc_skip.values()), {}) or unmapped_skip
                             seconds = next(iter(log_seconds_by_disc.values()), {})
                         elif crcs is None and unmapped_crc and not per_disc_crc:
                             # Every log failed to state its disc (unusual
@@ -3446,18 +3463,24 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                             # nothing can be attributed to the wrong disc
                             # because no disc was attributable at all.
                             crcs = unmapped_crc
-                        crc_by_path.update(log_crc_map(
-                            crcs or {}, disc_paths, seconds,
-                            durations={q: _file_seconds(q) for q in disc_paths},
-                            # The grader reads a track's position off the FILE
-                            # NAME first (D-TT survives a stale TRACKNUMBER
-                            # tag); the verifier reads it off the tag.
-                            number_of=lambda q: (_track_num_of(q)
-                                                 or _file_track_number(q))))
-                    # (path, the CRC the log states for it) for the value
-                    # pass below, filled while the mapping is already resolved
-                    # here — the disc-to-log attribution must not be guessed
-                    # twice.
+                            skips = unmapped_skip
+                        # The SAME matcher maps both variants: the skip-zero
+                        # rows are numbered exactly like the plain ones.
+                        for _map, _into in ((crcs, crc_by_path),
+                                            (skips, skip_by_path)):
+                            _into.update(log_crc_map(
+                                _map or {}, disc_paths, seconds,
+                                durations={q: _file_seconds(q) for q in disc_paths},
+                                # The grader reads a track's position off the
+                                # FILE NAME first (D-TT survives a stale
+                                # TRACKNUMBER tag); the verifier reads it off
+                                # the tag.
+                                number_of=lambda q: (_track_num_of(q)
+                                                     or _file_track_number(q))))
+                    # (path, the CRC the log states for it, the log's skip-zero
+                    # CRC when it prints one) for the value pass below, filled
+                    # while the mapping is already resolved here — the
+                    # disc-to-log attribution must not be guessed twice.
                     stated = []
                     for ap in audio_paths:
                         tr_track = track_by_path.get(ap)
@@ -3468,7 +3491,7 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                         crc = crc_by_path.get(ap)
                         covered = crc is not None
                         if covered:
-                            stated.append((ap, crc))
+                            stated.append((ap, crc, skip_by_path.get(ap)))
                         total_checks += 1
                         if not covered:
                             failed_checks += 1
@@ -3498,7 +3521,7 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                         from .tools import detect_all_tools as _detect
                         from .audit import note_crc as _note_crc, \
                             recorded_crc as _recorded_crc
-                        pairs = [(ap, want) for ap, want in stated
+                        pairs = [(ap, want, skip) for ap, want, skip in stated
                                  if want
                                  and os.path.splitext(ap)[1].lower() in _crc_exts]
                         if pairs:
@@ -3513,7 +3536,7 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                             # recorded never asks which ffmpeg to use.
                             ffmpeg_exe = None
                             actuals = []
-                            for ap, _want in pairs:
+                            for ap, _want, _skip in pairs:
                                 actual = _recorded_crc(ap, cfg)
                                 if not actual:
                                     if ffmpeg_exe is None:
@@ -3524,7 +3547,7 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                                     if actual is not None:
                                         _note_crc(ap, actual, cfg)
                                 actuals.append(actual)
-                            for (ap, want), actual in zip(pairs, actuals):
+                            for (ap, want, skip_want), actual in zip(pairs, actuals):
                                 if actual is None:
                                     # undecodable: the coverage check speaks
                                     # for this track, not a fabricated verdict
@@ -3533,14 +3556,65 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                                 if tr_track is None:
                                     continue
                                 total_checks += 1
-                                if str(actual).upper() != str(want).upper():
-                                    failed_checks += 1
+                                if str(actual).upper() == str(want).upper():
+                                    continue
+                                failed_checks += 1
+                                # The plain CRCs differ. XLD prints a SECOND
+                                # CRC per track — its `(skip zero)` variant,
+                                # the same audio with zero samples omitted
+                                # (`mlo.discs._audio_crc32(..., skip_zero=True)`
+                                # reproduces it) — so the verdict can say WHICH
+                                # kind of difference this is instead of leaving
+                                # "the rip does not match its own log", which
+                                # reads as "the app is broken". Only a mismatch
+                                # pays for this second decode; an EAC log prints
+                                # no such line and keeps the original sentence
+                                # byte for byte.
+                                skip_actual = None
+                                if skip_want:
+                                    if ffmpeg_exe is None:
+                                        ffmpeg_exe = ((_detect().get("ffmpeg")
+                                                       or {}).get("ffmpeg_exe"))
+                                    skip_actual = (_crc_of(ffmpeg_exe, ap,
+                                                           skip_zero=True)
+                                                   if ffmpeg_exe else None)
+                                if (skip_actual and skip_want
+                                        and skip_actual.upper()
+                                        == str(skip_want).upper()):
+                                    add_issue(
+                                        f"Log CRC {str(want).upper()} does not "
+                                        f"match the track's audio CRC {actual}, but "
+                                        f"the log's `CRC32 hash (skip zero)` "
+                                        f"{str(skip_want).upper()} matches this "
+                                        f"audio's skip-zero CRC {skip_actual}: the "
+                                        f"audio is the same except for "
+                                        f"leading/trailing silence (a different "
+                                        f"gap/offset trim). The .log still "
+                                        f"describes a different transfer of this "
+                                        f"CD, so it cannot verify this disc",
+                                        tr_track["file"])
+                                elif skip_want:
+                                    add_issue(
+                                        f"Log CRC {str(want).upper()} does not "
+                                        f"match the track's audio CRC {actual}, and "
+                                        f"the log's `CRC32 hash (skip zero)` "
+                                        f"{str(skip_want).upper()} does not match "
+                                        f"this audio's skip-zero CRC "
+                                        f"{skip_actual or 'unreadable'} either — the "
+                                        f".log describes DIFFERENT audio of the same "
+                                        f"length: another transfer/offset/gap "
+                                        f"setting of this CD, or files re-encoded "
+                                        f"since the rip. Keep the rip whose log "
+                                        f"matches, or drop the .log that does not "
+                                        f"belong to these files",
+                                        tr_track["file"])
+                                else:
                                     add_issue(
                                         f"Log CRC {str(want).upper()} does not match "
                                         f"the track's audio CRC {actual} — the rip "
                                         f"does not match its own log",
                                         tr_track["file"])
-                                    tr_track["issues"].append("CRC_MISMATCH")
+                                tr_track["issues"].append("CRC_MISMATCH")
                     except Exception as e:
                         unavailable("CD rip-log CRC value check", e)
             except Exception as e:
@@ -4055,15 +4129,30 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                 # readout and mlo.audit's run log use: a disc nobody could
                 # check must not read like a disc that failed.
                 _legs = tr.get("audit_legs") or _cd_legs(tr)
+                _failed = sorted(n for n, state in _legs.items()
+                                 if state == "fail")
                 _short = ", ".join(sorted(
                     n for n, state in _legs.items() if state in ("fail", "missing")
                 )) or "verifiable evidence (no check could be evaluated)"
-                if not stored_tag:
-                    add_issue(f"Missing AUDIT tag (run Audit Library) — the CD "
-                              f"verdict needs: {_short}", basename)
+                # A leg that FAILED is not a leg that is ABSENT: naming both
+                # under "needs:" reads as "go run Audit Library", which is the
+                # wrong remedy for a rip whose CRC does not match its own log.
+                # A FAILED leg is named by its reason; a leg nothing could
+                # check is named as absent. (XLD's unreadable log checksum is
+                # neither — it is not a leg at all, see
+                # mlo.discs.check_log_checksum and spec R30.)
+                _where = ("Missing AUDIT tag (run Audit Library)" if not stored_tag
+                          else f"AUDIT tag is {stored_tag.upper()} (not REAL)")
+                if _failed:
+                    _absent = sorted(n for n, state in _legs.items()
+                                     if state == "missing")
+                    _rest = f"; still needed: {', '.join(_absent)}" if _absent else ""
+                    add_issue(f"{_where} — the CD verdict is not REAL: "
+                              + "; ".join(_cd_leg_reason(n, tr) for n in _failed)
+                              + _rest, basename)
                 else:
-                    add_issue(f"AUDIT tag is {stored_tag.upper()} (not REAL) — "
-                              f"the CD verdict needs: {_short}", basename)
+                    add_issue(f"{_where} — the CD verdict needs: {_short}",
+                              basename)
                 tr["issues"].append("AUDIT")
 
             # ---- manual override wins over every derived verdict ----------
