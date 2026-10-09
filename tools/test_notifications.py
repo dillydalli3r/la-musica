@@ -56,7 +56,17 @@ def drain():
 
     BOTH stores go: `recent()` answers from the memory ring AND the durable log
     (see server/events.py — that is what a client closed overnight catches up
-    from), so clearing one would leave the other's frames in the next count."""
+    from), so clearing one would leave the other's frames in the next count.
+
+    The import COALESCER is closed first (flush_coalesced): an import run's
+    steps are counted and published as ONE frame when the run goes quiet, and
+    its timer is 20 s of WALL time — a tally left pending by an earlier case
+    could land in the middle of this one on a slower runner. Flushing discards
+    that frame with the rest and cancels the timer."""
+    try:
+        events_mod.flush_coalesced()
+    except Exception:
+        pass
     with events_mod._lock:
         events_mod._events.clear()
     try:

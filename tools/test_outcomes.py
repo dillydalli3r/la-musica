@@ -134,7 +134,20 @@ class Patch:
 
 
 def drain():
-    """Forget every frame so far, so a count is about THIS outcome."""
+    """Forget every frame so far, so a count is about THIS outcome.
+
+    The import coalescer is CLOSED first (server.events.flush_coalesced): an
+    import run's steps are counted and published as ONE frame when the run goes
+    quiet, so a tally left pending by an earlier case would otherwise land in
+    the middle of this one. Flushing it discards that frame with the rest AND
+    cancels the timer, which is what makes the counts below deterministic — the
+    same window is 20 s of WALL time, and a slower runner used to fire it at a
+    different moment relative to the case that was counting frames (this suite
+    passed locally and failed in CI for exactly that reason)."""
+    try:
+        events.flush_coalesced()
+    except Exception:
+        pass
     with events._lock:
         events._events.clear()
     try:  # the durable log as well: recent() reads both (spec R216)
