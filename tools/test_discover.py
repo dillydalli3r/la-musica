@@ -192,9 +192,10 @@ ok(discover.skip_note(discover.BY_ID["lastfm"], {}) == "skipped: no lastfm_api_k
    "the skip note names the key, and a keyless source has none")
 ok(sources["rym"]["rec_kinds"] == ["tracks"]
    and sources["rym"]["entity_kinds"] == ["tracks"]
-   and sources["rym"]["kinds"] == [] and not sources["rym"]["genres"],
-   f"RateYourMusic recommends and answers about entities for TRACKS only — it "
-   f"lists no genre and publishes none ({sources['rym']})")
+   and sources["rym"]["kinds"] == ["tracks"] and not sources["rym"]["genres"],
+   f"RateYourMusic recommends, browses and answers about entities for TRACKS "
+   f"only — its chart filter is its genre browse and its artist shelf, and it "
+   f"publishes no genre list ({sources['rym']})")
 ok(sources["rym"]["needs"] == [] and sources["rym"]["ready"] is True,
    "…and declares no credential: with the archive route on it is asked "
    "without a rym_cookie (its own gate says when that is impossible)")
@@ -713,6 +714,88 @@ discover.recommended_payload(cfg=RYM_CFG, seed="shoegaze", kind="artists",
 ok(rym_calls() == [],
    "an album or artist shelf never asks RateYourMusic — its registry row says "
    "tracks only")
+
+# --------------------------------------------------------------------------- #
+# 4c) RateYourMusic as a genre BROWSE source — the same chart, one genre
+# --------------------------------------------------------------------------- #
+print("== RateYourMusic as a genre browse source ==")
+# A GENRE browse asks the same chart filter the recommendation seed does, and
+# its rows are the browse's own: same row shape, same provenance rule.
+fresh(router=None, search={"rows": [], "total": 0})
+stub_rym()
+rym_browse = discover.genre_payload(cfg=RYM_CFG, genre="shoegaze", kind="tracks",
+                                    limit=5, lib=LIBRARY)
+browse_rym = [row for row in rym_browse["items"] if row["source"] == "rym"]
+ok(rym_calls() == [("rym_charts", "tracks", "all", "shoegaze", "")],
+   f"a genre browse asks RateYourMusic for its own chart OF that genre "
+   f"({rym_calls()})")
+ok({row["title"] for row in browse_rym} == {"Star Roving", "Sugar for the Pill"}
+   and all(set(row) == ROW_KEYS for row in browse_rym)
+   and browse_rym[0]["reason"] == "Genre: Shoegaze",
+   f"its rows arrive in the one browse shape, labelled like every other "
+   f"source ({[row['title'] for row in browse_rym]})")
+ok("rym" not in rym_browse["notes"],
+   f"a source that answered carries no note ({rym_browse['notes']})")
+
+# An archived answer says so on the browse too, exactly as the charts page and
+# the recommendation shelf do.
+fresh(router=None, search={"rows": [], "total": 0})
+stub_rym()
+intg._rym_route.update({"route": "archive", "cached": False,
+                        "snapshot": "20210325091401",
+                        "url": "https://web.archive.org/web/20210325091401/"
+                               "https://rateyourmusic.com/charts/top/song/all-time/"})
+rym_browse_archived = discover.genre_payload(cfg=RYM_CFG, genre="shoegaze",
+                                             kind="tracks", limit=5, lib=LIBRARY)
+intg._rym_route.clear()
+ok(rym_browse_archived["notes"]["rym"].startswith("from an archived snapshot")
+   and "web.archive.org" in rym_browse_archived["notes"]["rym"],
+   f"an archived answer says where the browse's RYM rows were read from "
+   f"({rym_browse_archived['notes']['rym']})")
+
+# With the archive route OFF and no rym_cookie the source is SKIPPED before any
+# request — the same gate the chart and the shelf use, not an ask that fails.
+fresh(router=None, search={"rows": [], "total": 0})
+stub_rym()
+no_route = discover.genre_payload(cfg={"music_folder": "C:/Music"},
+                                  genre="shoegaze", kind="tracks", limit=5,
+                                  lib=LIBRARY)
+ok(rym_calls() == [] and no_route["notes"]["rym"].startswith(
+       "skipped: no rym_cookie"),
+   f"with no archive route and no cookie, RYM is skipped before any request "
+   f"({no_route['notes'].get('rym')})")
+
+# The chart's own name is checked here too: a genre RYM does not know comes
+# back as its UNFILTERED chart, which must never be sold as that genre's.
+fresh(router=None, search={"rows": [], "total": 0})
+stub_rym(chart="Best songs of all time")
+rym_browse_wrong = discover.genre_payload(cfg=RYM_CFG, genre="not-a-genre",
+                                          kind="tracks", limit=5, lib=LIBRARY)
+ok(not [row for row in rym_browse_wrong["items"] if row["source"] == "rym"]
+   and rym_browse_wrong["notes"]["rym"].startswith(
+       'skipped: RateYourMusic has no genre called "not-a-genre"'),
+   f"a chart that does not name the genre asked for is refused, not relabelled "
+   f"({rym_browse_wrong['notes'].get('rym')})")
+
+# A chart is ONE ranked page: a deeper window is read off that page, not
+# re-fetched from a cursor RYM does not publish.
+fresh(router=None, search={"rows": [], "total": 0})
+stub_rym()
+rym_page2 = discover.genre_payload(cfg=RYM_CFG, genre="shoegaze", kind="tracks",
+                                   limit=5, offset=1, lib=LIBRARY)
+ok([row["title"] for row in rym_page2["items"] if row["source"] == "rym"]
+   == ["Sugar for the Pill"]
+   and rym_calls() == [("rym_charts", "tracks", "all", "shoegaze", "")],
+   "a deeper offset is sliced off the same chart page, not asked for twice")
+
+# An album or artist browse never asks RYM: its registry row lists tracks only.
+fresh(router=None, search={"rows": [], "total": 0})
+stub_rym()
+discover.genre_payload(cfg=RYM_CFG, genre="shoegaze", kind="albums", lib=LIBRARY)
+discover.genre_payload(cfg=RYM_CFG, genre="shoegaze", kind="artists", lib=LIBRARY)
+ok(rym_calls() == [],
+   "an album or artist BROWSE never asks RateYourMusic either — its registry "
+   "row lists tracks only")
 
 # --------------------------------------------------------------------------- #
 # 5) The query bounds a browse UI cannot exceed

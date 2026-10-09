@@ -28,7 +28,11 @@ header implies (`/`), and the cookie's name. One identity per stored pair, and
 a re-import leaves the comments exactly where they were.
 
 The file format, the strictness and the sentences are the SHARED ones
-(server/cookies.py, `parse_cookies`) — the same file the yt-dlp jar accepts.
+(server/cookies.py): a Netscape `cookies.txt` is parsed exactly as the yt-dlp
+jar parses it, and the SAME box also takes the other shapes a user has to hand
+— the whole `Cookie:` header read off devtools, a devtools "Copy as cURL" dump,
+or a cookie editor's JSON export (`parse_cookie_input`) — so the paste that
+obviously holds the credential is imported rather than refused.
 
 No route here ever returns, logs or toasts a cookie VALUE: a session cookie is
 a live credential, so the settings panel is told names, counts and sentences.
@@ -45,7 +49,7 @@ from mlo.config import load_config, save_config
 # sentences that explain them) are the ones already proven on `/api/youtube`.
 from server.cookies import (MAX_COOKIE_BYTES, CookieUpload, cookie_key,
                             cookie_row, expired_warning, hosts_match,
-                            notes_for, parse_cookies, set_note)
+                            notes_for, parse_cookie_input, set_note)
 from server.integrations import _rym_cookie
 
 router = APIRouter(tags=["rym"])
@@ -289,10 +293,14 @@ def rym_cookies_post(req: CookieUpload):
     The text is validated as a Netscape cookie file FIRST, exactly as the
     yt-dlp jar is (`server.cookies.parse_cookies`): junk is refused with the
     reason instead of replacing a credential that works, and the body is
-    refused BY SIZE before anything is parsed. A well-formed export that holds
-    no rateyourmusic.com cookie replaces NOTHING — a signed-out tab's export
-    must not cost the user the session that was doing the job — and comes back
-    with `stored: 0` plus the sentence saying why.
+    refused BY SIZE before anything is parsed. What the Netscape reader refuses
+    is then tried as the other shapes the SAME credential arrives in — the
+    whole `Cookie:` header, a devtools "Copy as cURL" dump, a JSON export
+    (`server.cookies.parse_cookie_input`, filed under rateyourmusic.com when
+    the shape states no host). A well-formed input that holds no
+    rateyourmusic.com cookie replaces NOTHING — a signed-out tab's export must
+    not cost the user the session that was doing the job — and comes back with
+    `stored: 0` plus the sentence saying why.
 
     For the cookies it does store, the expiry the file stated is remembered in
     the notes store (the header has nowhere to carry it) WITHOUT touching any
@@ -318,7 +326,7 @@ def rym_cookies_post(req: CookieUpload):
             f"{MAX_COOKIE_BYTES // 1024} KiB. Paste or drop the cookies.txt "
             "itself, not a browser profile folder",
         )
-    records, error = parse_cookies(text)
+    records, error = parse_cookie_input(text, default_host=RYM_HOST)
     if error:
         raise HTTPException(400, error)
     cookies = [(record.domain, record.name, record.value) for record in records]

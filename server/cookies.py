@@ -53,6 +53,7 @@ import re
 import tempfile
 from datetime import datetime, timezone
 from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
+from urllib.parse import urlparse
 
 from pydantic import BaseModel
 
@@ -242,6 +243,211 @@ def parse_cookie_file(text: str, with_values: bool = False):
     if with_values:
         return [(c.domain, c.name, c.value) for c in cookies], None
     return [(c.domain, c.name) for c in cookies], None
+
+
+# --------------------------------------------------------------------------- #
+# What a user can actually paste
+# --------------------------------------------------------------------------- #
+# A browser extension's cookies.txt is not the only shape a credential arrives
+# in: devtools' own "Copy as cURL" and a cookie editor's JSON export carry the
+# same cookies, and a user who pastes one of those into the import box should
+# get it imported rather than a lecture about tab-separated columns. The THREE
+# extra shapes are read here, in one place, and a Netscape file is still handed
+# to `_parse` FIRST — so the strictness, and every refusal sentence, is exactly
+# the one that already exists. `parse_cookie_input` is what the import route
+# calls; `parse_cookies` is unchanged for every caller that wants only a jar.
+#
+# A shape with no host of its own (a bare `Cookie:` header; a cURL dump whose
+# URL was not kept) is filed under the caller's `default_host` — the one host
+# that credential is only ever sent to — and a shape with no host to file it
+# under is refused, never guessed at.
+_COOKIE_NAME_RE = re.compile(r"^[A-Za-z0-9!#$%&'*+\-.^_`|~]+$")
+_CURL_RE = re.compile(r"(?:^|\s)curl\b", re.I)
+_CURL_ARG_RE = re.compile(
+    r"(?P<flag>-H|--header|-b|--cookie)\s+(?P<q>['\"])(?P<val>.*?)(?P=q)", re.S)
+_CURL_URL_RE = re.compile(r"https?://[^\s'\"\\]+")
+_JSON_EXPIRY_KEYS = ("expirationDate", "expires", "expiry", "expiration")
+
+
+def _header_pairs(value: str) -> Optional[List[Tuple[str, str]]]:
+    """[(name, value)] from a `Cookie:` header's value, or None when the text
+    is not a cookie header at all.
+
+    None (not []) is what tells "this is not that shape" from "a header with no
+    pairs in it", so the caller can try the next shape on None. A header is a
+    `;`-separated list of `name=value`; a segment with no `=`, or a name that is
+    not a cookie token, means the whole text is something else. Newlines are
+    flattened first because a copied header wraps.
+
+    An UNLABELLED text must carry at least TWO pairs: one `name=value` is what
+    a URL's query string looks like too, and the box must never take a pasted
+    address for the session it would replace. A text that SAYS `Cookie:` is
+    unambiguous and may hold a single pair."""
+    text = str(value or "").replace("\r", " ").replace("\n", " ").strip()
+    labelled = text[:7].lower() == "cookie:"
+    if labelled:
+        text = text[7:].strip()
+    if not text:
+        return None
+    pairs = []
+    for part in text.split(";"):
+        part = part.strip()
+        if not part:
+            continue
+        name, sep, val = part.partition("=")
+        name = name.strip()
+        if not sep or not _COOKIE_NAME_RE.match(name):
+            return None
+        pairs.append((name, val.strip().strip('"')))
+    if not pairs or (len(pairs) < 2 and not labelled):
+        return None
+    return pairs
+
+
+def _json_entries(text: str) -> Optional[List[dict]]:
+    """The cookie objects of a JSON export, or None when the text is not one.
+
+    Accepts a bare list, a single object, or an object wrapping the list in
+    `"cookies"` — the three shapes the browser extensions and devtools write.
+    Every entry must state a `name` and a `value`; anything less is not the
+    shape at all (and is handed back to the Netscape refusal), because an entry
+    with no value cannot become a cookie.
+    """
+    stripped = str(text or "").strip()
+    if not stripped or stripped[0] not in "[{":
+        return None
+    try:
+        data = json.loads(stripped)
+    except ValueError:
+        return None
+    if isinstance(data, dict):
+        inner = data.get("cookies")
+        data = inner if isinstance(inner, list) else [data]
+    if not isinstance(data, list) or not data:
+        return None
+    for entry in data:
+        if not isinstance(entry, dict):
+            return None
+        if not str(entry.get("name") or "").strip() or "value" not in entry:
+            return None
+    return data
+
+
+def _json_expiry(entry: dict) -> str:
+    """An entry's expiry as the jar's digit column, or "" for a session cookie.
+
+    The editors spell the date in seconds (`expirationDate`), and a value past
+    1e11 is milliseconds (some exports use `expires`). A 0 or a negative is the
+    session-cookie spelling and becomes "" so it is never read as 1970."""
+    for key in _JSON_EXPIRY_KEYS:
+        raw = entry.get(key)
+        if raw in (None, ""):
+            continue
+        try:
+            when = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if when <= 0:
+            continue
+        if when > 1e11:
+            when /= 1000.0
+        return str(int(when)) if float(when).is_integer() else repr(when)
+    return ""
+
+
+def _cookie_records(domain: str, pairs, *, secure: bool = False,
+                    expiry: str = "") -> List[Cookie]:
+    """The accepted `Cookie` records for *pairs*, on ONE host — or [] when the
+    host cannot be a cookie domain (an unstated host, or a shape the jar's own
+    column rules refuse)."""
+    raw = str(domain or "").strip()
+    host = raw.lstrip(".").lower()
+    if not host or ("." not in host and host != "localhost"):
+        return []
+    initial_dot = raw.startswith(".")
+    out = []
+    for name, value in pairs:
+        name = str(name or "").strip()
+        if name:
+            out.append(Cookie(host, "/", name, str(value or ""), expiry,
+                              bool(secure), initial_dot))
+    return out
+
+
+def _curl_input(text: str) -> Optional[dict]:
+    """{"pairs", "host"} from a devtools "Copy as cURL" dump, or None.
+
+    The cookie comes from a `-H 'cookie: …'` (the usual) or a `-b/--cookie`
+    argument; the host is read from the URL in the dump so a cookie is filed
+    under the site the request was actually made to. A dump with no cookie in
+    it is not this shape at all, and a cookie with no URL falls back to the
+    caller's default host."""
+    body = str(text or "")
+    if not _CURL_RE.search(body) and "-H" not in body and "--header" not in body:
+        return None
+    header = ""
+    for match in _CURL_ARG_RE.finditer(body):
+        val = match.group("val").strip()
+        if val[:7].lower() == "cookie:":
+            header = val
+            break
+        if match.group("flag") in ("-b", "--cookie") and "=" in val:
+            header = "cookie: " + val
+            break
+    if not header:
+        return None
+    pairs = _header_pairs(header)
+    if not pairs:
+        return None
+    host = ""
+    found = _CURL_URL_RE.search(body)
+    if found:
+        try:
+            host = urlparse(found.group(0)).hostname or ""
+        except ValueError:
+            host = ""
+    return {"pairs": pairs, "host": host}
+
+
+def parse_cookie_input(text: str,
+                       default_host: str = "") -> Tuple[List[Cookie], Optional[str]]:
+    """(cookies, error) for whatever the user pasted.
+
+    A Netscape cookie FILE (`parse_cookies`) is tried first and returned
+    unchanged, refusals and all; what it refuses is then tried as a `Cookie:`
+    header, a devtools cURL dump and a JSON export, in that order. A shape with
+    no host of its own is filed under *default_host* (the one host that
+    credential is sent to); when neither states a host, the Netscape sentence is
+    returned, so a caller's refusal wording does not change with the shape."""
+    raw = str(text or "")
+    cookies, error = parse_cookies(raw)
+    if error is None:
+        return cookies, None
+
+    entries = _json_entries(raw)
+    if entries:
+        records = []
+        for entry in entries:
+            domain = entry.get("domain") or entry.get("host") or default_host
+            records.extend(_cookie_records(
+                domain, [(str(entry["name"]).strip(), entry.get("value"))],
+                secure=bool(entry.get("secure")), expiry=_json_expiry(entry)))
+        if records:
+            return records, None
+
+    curl = _curl_input(raw)
+    if curl:
+        records = _cookie_records(curl["host"] or default_host, curl["pairs"])
+        if records:
+            return records, None
+
+    pairs = _header_pairs(raw)
+    if pairs:
+        records = _cookie_records(default_host, pairs)
+        if records:
+            return records, None
+
+    return [], error
 
 
 def cookie_key(domain: str, path: str, name: str) -> str:

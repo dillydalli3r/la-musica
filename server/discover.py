@@ -22,7 +22,8 @@ every external source that can speak about genres:
   so a row the library owns is KEPT and marked (`owned`, `path`) rather than
   dropped. A source whose entity feed answers a page of ANOTHER kind — Last.fm
   states similar ARTISTS and similar TRACKS, ListenBrainz only the artists one,
-  Discogs and RateYourMusic state no similarity at all — is NOT a failure
+  RateYourMusic's chart filter is seeded by an ARTIST and no other page, and
+  Discogs states no similarity at all — is NOT a failure
   there: it is left out of the asking and named once, compactly, in
   `not_applicable` (see `entity_limit`), because a feed a provider does not
   publish is a fact about the provider, not about this request.
@@ -225,21 +226,27 @@ SOURCES = (
     # RateYourMusic answers with its OWN ranked songs — its charts, narrowed by
     # the genre or the artist it is asked about — and nothing else: it publishes
     # no genre list, no text search and no similar-entity feed, and its genre
-    # READING lives in the import chain (`server.integrations`). It is last in
-    # this list on purpose — the registry order is the genre/rec merge order,
-    # and a RYM row carries no MusicBrainz id, so it must never win a row that a
-    # source holding an id also named (that id is what makes the row addable) —
-    # and first in `CHART_ORDER` below, where the user asked for it as the
-    # primary track source.
+    # READING lives in the import chain (`server.integrations`). The SAME chart
+    # filter is what lets it answer a genre browse (`kinds=("tracks",)` — its
+    # genre chart) and an ARTIST's own ranked songs (`entity_kinds=("tracks",)`
+    # seeded by an artist page, see `_ENTITY_SEED`); it still has no album or
+    # artist chart this scraper reads, so it lists and shelves TRACKS only. It
+    # is last in this list on purpose — the registry order is the genre/rec
+    # merge order, and a RYM row carries no MusicBrainz id, so it must never win
+    # a row that a source holding an id also named (that id is what makes the
+    # row addable) — and first in `CHART_ORDER` below, where the user asked for
+    # it as the primary track source.
     _source("rym", "RateYourMusic",
             "Its own user-ranked song charts (all-time and per year), scraped "
             "from the site and narrowed by GENRE or by ARTIST — the same chart "
             "URL carries the filter, verified against the chart pages RYM has "
-            "served. RYM has no API and refuses an automated client without a "
-            "rym_cookie, so an archived snapshot answers behind the live route, "
-            "and a chart the archive never captured says so. Tracks only; no "
-            "month or week chart exists.",
-            rec_kinds=("tracks",),
+            "served. That one filter is what it lists a genre browse with (its "
+            "top songs of the genre) and what it shelves an ARTIST page with "
+            "(that artist's own ranked songs). RYM has no API and refuses an "
+            "automated client without a rym_cookie, so an archived snapshot "
+            "answers behind the live route, and a chart the archive never "
+            "captured says so. Tracks only; no month or week chart exists.",
+            ("tracks",), rec_kinds=("tracks",), entity_kinds=("tracks",),
             charts=("tracks",), chart_periods=("all", "year")),
 )
 BY_ID = {spec["id"]: spec for spec in SOURCES}
@@ -829,6 +836,30 @@ def _browse(sid, kind, genre, limit, offset, cfg):
         return discovery.lastfm_tag_top(kind, genre, limit=limit, offset=offset, cfg=cfg)
     if sid == "spotify":
         return discovery.spotify_genre_albums(genre, limit=limit, offset=offset, cfg=cfg)
+    if sid == CHART_FIRST:
+        # RYM's genre answer IS its own chart narrowed to `/g:<genre>/` — the
+        # same ranked-song list the Charts page reads, one genre at a time. Its
+        # registry `kinds` is TRACKS only (it publishes no album/artist chart
+        # this scraper reads), and the chart's OWN name is checked before its
+        # rows are believed: RYM answers a genre it does not have by dropping
+        # the filter, and presenting its all-time chart as the genre's would be
+        # the same lie the recommendation arm refuses to tell.
+        if kind not in integrations.RYM_CHART_KINDS:
+            raise _Skip("RateYourMusic charts only: "
+                        + ", ".join(integrations.RYM_CHART_KINDS))
+        got = integrations.rym_charts(kind=kind, period="all",
+                                      limit=limit + offset, cfg=cfg, genre=genre)
+        if not integrations.rym_chart_states(got.get("chart"), genre):
+            raise _Skip('RateYourMusic has no genre called "%s" — its own '
+                        "chart filter matched no such chart" % genre)
+        rows = got["rows"]
+        if offset:
+            # A chart is ONE ranked page: there is no server-side cursor, so a
+            # deeper window is read off the same page (the cap we asked the
+            # scrape for is the offset plus this page) rather than pretending
+            # RYM paged for us. A page shorter than the offset is simply empty.
+            rows = rows[offset:]
+        return {"rows": rows, "total": None}
     raise _Skip("no %s list from this source" % kind)
 
 
@@ -870,8 +901,9 @@ def genre_payload(cfg=None, genre="", kind="albums", source="all", limit=25,
     rows, more = [], False
     for spec in specs:
         asked.ask(spec["id"])
-        if not can_run(spec, cfg):
-            asked.note(spec["id"], skip_note(spec, cfg))
+        skip = _source_skip(spec, cfg)
+        if skip:
+            asked.note(spec["id"], skip)
             continue
         try:
             got = _browse(spec["id"], kind, genre, limit, offset, cfg)
@@ -890,6 +922,7 @@ def genre_payload(cfg=None, genre="", kind="albums", source="all", limit=25,
             row["_source"] = spec["id"]
             rows.append(row)
 
+    _rym_archive_note(cfg, asked)
     items = [finalize_row(row, index, "Genre: %s" % _genre_display(genre))
              for row in sort_rows(merge_rows(rows))]
     return {"genre": genre, "kind": kind, "source": source, "items": items,

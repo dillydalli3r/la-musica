@@ -111,6 +111,15 @@ NO_SESSION_JAR = (
 JUNK = [
     ("just some words\nand more words\n", "not a Netscape cookie file"),
     ('{"cookies": [{"name": "session"}]}\n', "not a Netscape cookie file"),
+    # A pasted ADDRESS is not a cookie header: `?a=b&c=d` looks like one
+    # `name=value`, which is exactly why an unlabelled one-pair paste is
+    # refused rather than allowed to replace the session it would overwrite.
+    ("https://rateyourmusic.com/charts/top/song/all-time/?a=b&c=d\n",
+     "not a Netscape cookie file"),
+    # …and an UNLABELLED single pair is the same ambiguity ("session=x" could
+    # be a one-line header or the tail of anything); a paste that says
+    # `Cookie:` is what distinguishes it.
+    ("session=onlyonepair\n", "not a Netscape cookie file"),
     # 7 columns, but the flags are not booleans — the shared parser's own rule
     # (yt-dlp's loader refuses the WHOLE file when they are broken).
     (".rateyourmusic.com\tMAYBE\t/\tTRUE\t1893456000\tsession\tx\n",
@@ -123,7 +132,9 @@ JUNK = [
 
 # Every secret the fixtures carry: none of them may appear in an API answer.
 SECRETS = ["S3SSION-VALUE", "CF-VALUE", "CSRF-VALUE", "YT-VALUE", "YT-ONLY",
-           "NOPE-VALUE", "SHAPED", "SUB-VALUE", "CF2-VALUE", "MANUAL-VALUE"]
+           "NOPE-VALUE", "SHAPED", "SUB-VALUE", "CF2-VALUE", "MANUAL-VALUE",
+           "HDR-SESSION", "HDR-CF", "CURL-SESSION", "CURL-CF",
+           "JSON-SESSION", "JSON-CF"]
 
 
 def stored():
@@ -290,6 +301,61 @@ try:
     saved = post(SHAPED_ONLY)
     assert saved["stored"] == 1 and saved["session"] is True, saved
     assert stored() == "session=SHAPED", stored()
+
+    # ----------------------------------------------------------------- #
+    # 7b. The other shapes the same credential arrives in
+    # ----------------------------------------------------------------- #
+    # A devtools `Cookie:` header pasted into the import box (a shape with no
+    # domain of its own): filed under rateyourmusic.com, the one host it is
+    # sent to, and stored as the header the scraper reads.
+    saved = post("Cookie: session=HDR-SESSION; cf_clearance=HDR-CF\n")
+    assert saved["stored"] == 2 and saved["session"] is True, saved
+    assert saved["sites"] == ["rateyourmusic.com"], saved
+    assert stored() == "session=HDR-SESSION; cf_clearance=HDR-CF", stored()
+    assert_no_values(saved, "the Cookie-header import")
+    # A LABELLED single pair is unambiguous and is taken; the unlabelled form is
+    # the one the junk list refuses.
+    single, err = cookie_mod.parse_cookie_input("Cookie: session=LONE",
+                                                "rateyourmusic.com")
+    assert err is None and [(c.name, c.value) for c in single] == [("session", "LONE")], \
+        (single, err)
+
+    # A devtools "Copy as cURL" dump: the cookie is read out of the `-H`
+    # argument and filed under the URL's own host.
+    curl = ("curl 'https://rateyourmusic.com/charts/top/song/all-time/' \\\n"
+            "  -H 'accept: text/html' \\\n"
+            "  -H 'cookie: session=CURL-SESSION; cf_clearance=CURL-CF' \\\n"
+            "  --compressed\n")
+    saved = post(curl)
+    assert saved["stored"] == 2 and saved["session"] is True, saved
+    assert stored() == "session=CURL-SESSION; cf_clearance=CURL-CF", stored()
+    assert_no_values(saved, "the cURL import")
+
+    # A cookie editor's JSON export (a list of objects), domain included; the
+    # expiry it states is remembered like the file's own column.
+    saved = post(json.dumps([
+        {"domain": ".rateyourmusic.com", "name": "session",
+         "value": "JSON-SESSION", "path": "/", "secure": True,
+         "expirationDate": 1893456000},
+        {"domain": ".rateyourmusic.com", "name": "cf_clearance",
+         "value": "JSON-CF", "path": "/", "secure": True,
+         "expirationDate": 1893456000},
+    ]))
+    assert saved["stored"] == 2 and saved["session"] is True, saved
+    assert stored() == "session=JSON-SESSION; cf_clearance=JSON-CF", stored()
+    rows = api_rym.cookie_list()
+    assert next(r for r in rows if r["name"] == "session")["expiry"] == "1893456000", rows
+    assert_no_values(saved, "the JSON import")
+
+    # A JSON export of some OTHER site is not this credential: it stores
+    # nothing and leaves the working one exactly as it was.
+    before_json = stored()
+    saved = post(json.dumps([{"domain": "example.net", "name": "x", "value": "y"}]))
+    assert saved["stored"] == 0 and stored() == before_json, saved
+    assert "rateyourmusic.com" in saved["warnings"][0], saved
+    # …and a JSON entry with no value is not the shape at all: it falls back to
+    # the Netscape refusal rather than become a cookie with an empty value.
+    refused('{"cookies": [{"name": "session"}]}', "not a Netscape cookie file")
 
     # ----------------------------------------------------------------- #
     # 8. The manual box and the import agree
