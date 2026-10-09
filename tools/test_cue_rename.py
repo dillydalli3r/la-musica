@@ -196,7 +196,8 @@ def test_disc_aware_track_refs(base):
 
     The disc restriction is what decides between two discs of one album
     carrying the same track numbers, and a reference no track of the disc
-    explains is still left exactly as written."""
+    explains is removed when the rest of the sheet IS the disc (see
+    test_extra_entry_removed) — otherwise it stays exactly as written."""
     from mlo.discs import cue_file_refs, fix_cue_filenames
 
     d = os.path.join(base, "TrackFirst")
@@ -207,9 +208,12 @@ def test_disc_aware_track_refs(base):
                       "77 - Nothing.wav"])
     notes = fix_cue_filenames(d, config=CFG)
     refs = cue_file_refs(os.path.join(d, "CD-1.cue"))
-    assert refs == ["1-01 Alpha.flac", "1-02 36.flac", "1-03 Gamma.flac",
-                    "77 - Nothing.wav"], (notes, refs)
-    assert any("77 - Nothing.wav" in n and "left as-is" in n for n in notes), notes
+    # The three references that find their track are repointed, and the fourth
+    # — a reference no track of the disc explains, with the other three
+    # covering the disc exactly — is the sheet naming a track the album does
+    # not have, so it goes (see test_extra_entry_removed).
+    assert refs == ["1-01 Alpha.flac", "1-02 36.flac", "1-03 Gamma.flac"], (notes, refs)
+    assert any("77 - Nothing.wav" in n and "removed" in n for n in notes), notes
     print("PASS  a track-first reference finds the D-TT track of its disc")
 
     md = os.path.join(base, "TwoDiscs")
@@ -244,6 +248,48 @@ def test_disc_aware_track_refs(base):
     refs = cue_file_refs(os.path.join(im, "CD-1.cue"))
     assert refs == ["CD-1.flac"], (notes, refs)
     print("PASS  a single-image sheet names the disc's one file")
+
+
+def test_extra_entry_removed(base):
+    """A sheet that lists MORE tracks than the album has: the extra entry is
+    removed — FILE line and the TRACK block it owns — and only when the rest
+    of the sheet provably IS the disc.
+
+    The owner's case: CD-1.cue names thirteen tracks over twelve files, the
+    thirteenth ("13 - Creep [clean].wav") a variant the rip does not hold. The
+    twelve that resolve cover the disc exactly and each claims a different
+    file, so the surplus entry is the sheet naming a track the album does not
+    have: running CUE Sheets leaves a sheet the grader's CUE check accepts.
+    When the rest does NOT cover the disc the sheet is left alone — an entry
+    the album cannot explain is not evidence that the sheet may be trimmed."""
+    from mlo.discs import cue_file_refs, fix_cue_filenames
+
+    d = os.path.join(base, "ExtraEntry")
+    os.makedirs(d)
+    names = ["1-01 One.flac", "1-02 Two.flac", "1-03 Three.flac"]
+    touch_audio(d, *names)
+    paths = write_cue_custom(
+        d, "CD-1.cue", ["01 - One.wav", "02 - Two.wav", "03 - Three.wav",
+                        "13 - Creep [clean].wav"])
+    notes = fix_cue_filenames(d, config=CFG)
+    text = open(paths, encoding="utf-8").read()
+    assert cue_file_refs(paths) == names, (notes, cue_file_refs(paths))
+    assert "TRACK 13" not in text and "Creep" not in text, text
+    assert "TRACK 03" in text and "INDEX 01" in text, text
+    assert any("13 - Creep [clean].wav" in n and "removed" in n for n in notes), notes
+    print("PASS  an entry the album does not have is removed with its TRACK block")
+
+    # Same surplus, but the sheet does not map onto the disc (one of the
+    # album's files is claimed by nobody) — left exactly as written.
+    ni = os.path.join(base, "NotWholeDisc")
+    os.makedirs(ni)
+    touch_audio(ni, *names)
+    npath = write_cue_custom(
+        ni, "CD-1.cue", ["01 - One.wav", "02 - Two.wav", "99 - Nope.wav"])
+    notes = fix_cue_filenames(ni, config=CFG)
+    assert cue_file_refs(npath)[-1] == "99 - Nope.wav", (notes, cue_file_refs(npath))
+    assert any("99 - Nope.wav" in n and "left as-is" in n for n in notes), notes
+    print("PASS  a sheet that does not cover the disc is left as written")
 
 
 def test_converted_source_repoints(base):
@@ -339,6 +385,7 @@ def main():
         test_case_only_rename(base)
         test_format_cues_recollect(base)
         test_disc_aware_track_refs(base)
+        test_extra_entry_removed(base)
         test_converted_source_repoints(base)
         test_split_image_rip(base)
         print("All cue-rename tests passed.")

@@ -1800,45 +1800,47 @@ def _fix_cue_filenames_locked(album_dir, log_fn, config):
                         and sum(1 for ln in lines
                                 if CUE_FILE_RE.match(ln.rstrip("\n"))) == 1)
 
-        changed = False
-        out_lines = []
-        for line in lines:
-            m = CUE_FILE_RE.match(line.rstrip("\n"))
-            if not m:
-                out_lines.append(line)
-                continue
-            ref = m.group(1)
-            # Every spelling this reference may denote: the whole reference
-            # first (a "/" can be a CHARACTER of the name, one this app writes
-            # as "_": "1-01 AC/DC.flac" for "1-01 AC_DC.flac") and then its leaf
-            # (a reference is usually path-shaped — "CD1/01 x.flac" — and the
-            # LEAF is the file in this folder). See naming.cue_ref_names.
-            names = naming.cue_ref_names(ref)
+        # ONE pass decides every FILE entry's fate, because the trim below is
+        # a decision about the SHEET and not about one line: an entry can only
+        # be called EXTRA when the rest of the sheet is provably the album.
+        starts = [i for i, line in enumerate(lines)
+                  if CUE_FILE_RE.match(line.rstrip("\n"))]
+        entries = []
+        for k, i in enumerate(starts):
+            ref = CUE_FILE_RE.match(lines[i].rstrip("\n")).group(1)
+            entries.append({
+                "start": i,
+                "end": starts[k + 1] if k + 1 < len(starts) else len(lines),
+                "line": lines[i],
+                "ref": ref,
+                "names": naming.cue_ref_names(ref),
+            })
+
+        def decide(entry):
+            """(the line to write, the file it names, a note) for ONE entry.
+
+            The file it names is the audio file this entry CLAIMS — the proof
+            the trim below rests on — and None when nothing resolved. Every
+            rule is the one this function has always had; only the bookkeeping
+            around them is new."""
+            line, ref, names = entry["line"], entry["ref"], entry["names"]
             ref_base = names[-1] if names else ""
             new_line = line
-
-            # The reference AS WRITTEN: when that name is in the folder the
-            # sheet is right, and only a conversion can still need a repoint.
             exists = bool(ref_base) and (
                 os.path.isfile(os.path.join(album_dir, ref_base))
                 or ref_base.lower() in exact
                 or any(f.lower() == ref_base.lower() for f in audio)
             )
             if exists:
-                # The name is there — but a conversion may have left the file
-                # this album actually plays under a different extension. The
-                # sheet must name that one, not the rip source it came from.
                 twin = _converted_twin(ref_base, album_dir, audio)
                 if twin is not None and twin.lower() != ref_base.lower():
                     head = ref[: len(ref) - len(ref_base)] if ref_base else ""
                     new_ref = head + twin
                     new_line = line.replace(f'"{ref}"', f'"{new_ref}"', 1)
                     if new_line != line:
-                        notes.append(
+                        return new_line, twin, (
                             f'{cue}: FILE "{ref}" -> "{new_ref}" (converted)')
-                        changed = True
-                out_lines.append(new_line)
-                continue
+                return new_line, ref_base, None
             candidates, matched = None, None
             for nm in names:
                 # 1) unique normalized-name match
@@ -1872,22 +1874,69 @@ def _fix_cue_filenames_locked(album_dir, log_fn, config):
                 actual = candidates[0]
                 # Keep any directory part of the original reference — but only
                 # when the LEAF was what matched. When the whole reference is
-                # the name (its "/" was a character this app wrote as "_"),
+                # the name (its "/" was a character this app writes as "_"),
                 # its "directory" was never one.
                 head = (ref[: len(ref) - len(matched)]
                         if matched and ref.endswith(matched) else "")
                 new_ref = head + actual
                 if new_ref != ref:
-                    new_line = line.replace(
-                        f'"{ref}"', f'"{new_ref}"', 1)
+                    new_line = line.replace(f'"{ref}"', f'"{new_ref}"', 1)
                     if new_line != line:
-                        notes.append(
-                            f"{cue}: FILE \"{ref}\" -> \"{new_ref}\"")
-                        changed = True
-            else:
+                        return new_line, actual, f'{cue}: FILE "{ref}" -> "{new_ref}"'
+                return new_line, actual, None
+            return new_line, None, None
+
+        resolved = [(e, *decide(e)) for e in entries]
+        claims = [claimed for _e, _line, claimed, _note in resolved if claimed]
+
+        # THE ALBUM'S OWN TRACKS ARE THE PROOF that an unresolvable entry is
+        # EXTRA. Every entry that DID resolve must claim a DIFFERENT file of
+        # this disc, and between them they must be exactly the disc's files:
+        # then the sheet lists the album PLUS something the album does not have
+        # (the owner's "CD-1.cue: 13 - Creep [clean].wav" beside twelve tracks),
+        # and removing the extras is not a guess — what is left maps one-to-one
+        # onto the files on disk. Anything else (an ambiguous reference, a sheet
+        # whose files are not all accounted for, a disc the mapping does not
+        # name) is left exactly as it was and reported, which is what this
+        # function has always done.
+        drop = set()
+        missing = [e for e, _line, claimed, _note in resolved if not claimed]
+        own = [os.path.basename(p) for p in (disc_audio if cue_disc is not None else [])]
+        if missing and own:
+            wanted = {f.lower() for f in own}
+            claimed_keys = [c.lower() for c in claims]
+            if len(claimed_keys) == len(set(claimed_keys)) and set(claimed_keys) == wanted:
+                drop = {id(e) for e in missing}
+
+        changed = False
+        out_lines = list(lines[:entries[0]["start"]]) if entries else []
+        for entry, new_line, claimed, note in resolved:
+            if id(entry) in drop:
+                # The entry AND the TRACK/INDEX block it owns go together: a
+                # TRACK line without its FILE (or one claiming a file the album
+                # does not have) is the "CUE references a file the album does
+                # not have" failure itself, and dropping only the FILE line
+                # would leave the sheet listing a track nothing can play.
+                block = lines[entry["start"]:entry["end"]]
+                track = next((CUE_TRACK_LINE_RE.match(ln).group(1)
+                              for ln in block if CUE_TRACK_LINE_RE.match(ln)), "")
                 notes.append(
-                    f"{cue}: unresolved FILE \"{ref}\" left as-is")
+                    f'{cue}: removed {"track " + track + " " if track else ""}'
+                    f'"{entry["ref"]}" — this {"disc" if len(discs) > 1 else "album"} '
+                    f'has {len(own)} file(s) and this entry names one it does not have')
+                changed = True
+                continue
+            if note:
+                notes.append(note)
+            elif not claimed:
+                # Reported where its own entry sits, so the note stream stays in
+                # sheet order (what a caller reads) — an entry that could not be
+                # resolved and could not be proven extra is left exactly as it is.
+                notes.append(f'{cue}: unresolved FILE "{entry["ref"]}" left as-is')
+            if new_line != entry["line"]:
+                changed = True
             out_lines.append(new_line)
+            out_lines.extend(lines[entry["start"] + 1:entry["end"]])
 
         if changed:
             try:
