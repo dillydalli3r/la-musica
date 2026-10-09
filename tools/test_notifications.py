@@ -67,6 +67,16 @@ def drain():
         events_mod.flush_coalesced()
     except Exception:
         pass
+    # …and the library-changed frame's own debounce is cancelled with it (see
+    # test_outcomes' drain for why: it is SILENT, it is WALL-clock, and a burst
+    # armed by an earlier case must not land in a later one's count).
+    try:
+        with events_mod._lib_changed_lock:
+            if events_mod._lib_changed_timer is not None:
+                events_mod._lib_changed_timer.cancel()
+                events_mod._lib_changed_timer = None
+    except Exception:
+        pass
     with events_mod._lock:
         events_mod._events.clear()
     try:

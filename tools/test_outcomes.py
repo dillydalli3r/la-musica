@@ -148,6 +148,18 @@ def drain():
         events.flush_coalesced()
     except Exception:
         pass
+    # The library-changed frame is debounced by its own WALL-clock timer
+    # (server.events.note_library_write), and it is SILENT — a burst armed by an
+    # earlier case used to land as an extra frame in a later one, which is the
+    # other half of the same timing flake (this suite passed locally and failed
+    # on CI). Cancelling it here is what makes a frame count about THIS case.
+    try:
+        with events._lib_changed_lock:
+            if events._lib_changed_timer is not None:
+                events._lib_changed_timer.cancel()
+                events._lib_changed_timer = None
+    except Exception:
+        pass
     with events._lock:
         events._events.clear()
     try:  # the durable log as well: recent() reads both (spec R216)
@@ -159,6 +171,20 @@ def drain():
 def frames(kind=None):
     kept = events.recent(0, limit=10 ** 6)
     return [e for e in kept if kind is None or e.get("event") == kind]
+
+
+def notices():
+    """Every frame that is a NOTICE — the silent library-changed signal excluded.
+
+    `library_changed` (server.events.note_library_write) is deliberately not a
+    notice: it is the silent "something in the library moved" signal every
+    mutating request raises, it never reaches a tray or a popup, and it is
+    debounced by its OWN wall-clock timer. A case asserting that a path says
+    NOTHING must not be tripped by it — and on CI it was: the debounce landed
+    between the cancel and the count on a runner slow enough for the window to
+    fall there, which is why this suite passed locally and failed in CI.
+    """
+    return [f for f in frames() if f.get("event") != "library_changed"]
 
 
 def expect_frames(kind, count=1, timeout=10.0):
@@ -348,7 +374,8 @@ with SLSK_UP, Patch(intg, resolve_release=resolve_any), \
           bool(nf) and nf[0]["data"]["wish_id"] == wish["id"]
           and nf[0]["data"]["link"] == "/soulseek"
           and nf[0]["data"]["outcome"] == "not_found")
-    check("...and nothing else was emitted", len(frames()) == 1, str(len(frames())))
+    check("...and nothing else was emitted", len(notices()) == 1,
+          str([f["event"] for f in notices()]))
     stored = wishes.get_wish(wish["id"])
     check("the wish records the outcome and the reason",
           stored["status"] == "not_found" and stored["not_found"] == 1
@@ -414,7 +441,7 @@ with SLSK_UP, Patch(intg, resolve_release=resolve_any), \
           first["retry_at"] > time.time() and not worker._due(first, cfg_b)
           and wishes.retry_delay(cfg_b, 1) == 1800)
     check("...and it says nothing on the bus while it is only retrying",
-          frames() == [], str(frames()))
+          notices() == [], str([f["event"] for f in notices()]))
     check("...and the reason is recorded",
           TRANSIENT[:20] in first["last_error"], first["last_error"])
     wrow = next((r for r in queue()["sections"]["queued"]
@@ -488,7 +515,7 @@ check("...with the reason the user can act on",
       and err[0]["data"]["outcome"] == "transient",
       json.dumps(err[0]["data"]) if err else "")
 check("...and nothing else (never also an import_ready)",
-      len(frames()) == 1, str([f["event"] for f in frames()]))
+      len(notices()) == 1, str([f["event"] for f in notices()]))
 
 # The queue row for it: failed, with the reason and a retry.
 row = next((r for r in queue()["sections"]["failed"]
@@ -533,7 +560,7 @@ check("...and the leftovers are on the queue row too",
       any(LOST in (r.get("leftovers") or []) for r in queue()["sections"]["failed"]),
       json.dumps([r.get("leftovers") for r in queue()["sections"]["failed"]]))
 check("...and no second frame of any other kind",
-      len(frames()) == 1, str([f["event"] for f in frames()]))
+      len(notices()) == 1, str([f["event"] for f in notices()]))
 
 # (c) nothing usable on the network at all.
 drain()
@@ -589,7 +616,8 @@ with pipe_patches(), SLSK_UP:
     auto.cancel(job_id)
     _wait_job_state(job_id, states=("cancelled",))
 time.sleep(0.4)   # a frame, if one were coming, is asynchronous
-check("a cancelled job says nothing", frames() == [], str([f["event"] for f in frames()]))
+check("a cancelled job says nothing", notices() == [],
+      str([f["event"] for f in notices()]))
 
 # --------------------------------------------------------------------------- #
 # 4. a stalled album: the queue shows it, names what is missing, and offers the
