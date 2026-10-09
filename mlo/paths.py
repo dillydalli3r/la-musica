@@ -338,6 +338,11 @@ def trash_path(path, music_folder=None, user="") -> str:
     except OSError:
         return ""
     name = os.path.basename(src)
+    # A real name on disk, so only the LENGTH rule can bite here: the " (n)"
+    # suffix this adds would push an already-long name past what a filesystem
+    # accepts. The shared rule trims it and keeps a file's extension.
+    from .naming import sanitize_segment
+    name = sanitize_segment(name) or "entry"
     stem, ext = (name, "") if is_dir else os.path.splitext(name)
     dest = os.path.join(bin_dir, name)
     n = 2

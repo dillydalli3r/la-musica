@@ -88,15 +88,66 @@ _RESERVED_RE = re.compile(r"(?i)^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(\..*)?$")
 _UUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 
 
-def sanitize_segment(name):
-    """ONE file or folder name: every invalid character becomes "_".
+# THE LENGTH RULE of the whole app, beside the character rule above.
+#
+# A filesystem refuses a NAME longer than 255 characters (NTFS) or 255 bytes
+# (ext4, APFS), and Windows refuses a whole PATH at 260 (the same number
+# mlo.subproc.MAX_PATH_LIMIT measures for the bundled tools — the app does not
+# rely on long-path support being enabled, and its desktop shell enables
+# nothing). Character substitution alone therefore is not enough: a release
+# whose album title is a paragraph used to spell a folder or a file the OS
+# refuses, and the import then failed with the generic "a file inside it is
+# still in use" sentence instead of a name it could have shortened.
+#
+# 240 UTF-8 bytes is the bound, not 255: the app's own writers add short
+# suffixes around a name (".m3u8", " (2)" for a collision, ".mlo_tmp_…", a
+# timestamp in the Trash), and the difference is what keeps those legal too.
+# Measuring BYTES is the safe side of both rules — 240 bytes is under NTFS's
+# 255 characters for any ASCII name and under every 255-byte filesystem — and
+# a cut never lands mid-character.
+MAX_SEGMENT_BYTES = 240
 
-    The single rule every writer names files with. Illegal characters are
-    REPLACED, never dropped, so the mapping is readable and predictable:
-    "DECO*27" is "DECO_27", one invalid character is one "_" (a run of three
-    is "___"), and the result is a fixed point — sanitize_segment(x) ==
-    sanitize_segment(sanitize_segment(x)) — so organizing an already
-    organized library is a no-op instead of a rename.
+# The longest trailing extension the length rule keeps intact when it has to
+# cut a whole name (".flac", ".m4a", ".opus", ".accurip", ".m3u8"): a file
+# without its extension is a file this app's own scanners stop finding, which
+# is worse than a name that lost its last words.
+_MAX_EXT_BYTES = 12
+
+# The fields of `track_variables` whose VALUE is free text — a title, an album,
+# an artist, a label, a catalog number. These are what give way when a name is
+# too long: the rest of the vocabulary (MusicBrainz ids, dates, disc/track
+# numbers, media, release type, country) is what a reader identifies the album
+# BY, so a cut never lands there. See `eval_script` and `_value_text`.
+FREE_TEXT_FIELDS = frozenset({
+    "albumartist", "artist", "albumartistsort", "album", "title",
+    "label", "catalognumber", "genre",
+})
+
+# How far a free-text value may be cut when a name has to fit. Not zero: a name
+# keeps SOMETHING of its title, and a value emptied would also drop the
+# brackets a script wraps it in.
+_MIN_VALUE_BYTES = 16
+
+
+def _clip_bytes(text, limit):
+    """*text* cut to at most *limit* UTF-8 bytes, never mid-character."""
+    raw = text.encode("utf-8")
+    if len(raw) <= limit:
+        return text
+    return raw[:limit].decode("utf-8", "ignore")
+
+
+def _char_rule(name):
+    """The character rule alone (see `sanitize_segment`), without the length
+    backstop: the length rule re-runs this on what it cut, and a rule that
+    called itself would be the one place a name could differ from what the
+    reader keys it by.
+
+    Illegal characters are REPLACED, never dropped, so the mapping is readable
+    and predictable: "DECO*27" is "DECO_27", one invalid character is one "_"
+    (a run of three is "___"), and the result is a fixed point — char(x) ==
+    char(char(x)) — so organizing an already organized library is a no-op
+    instead of a rename.
 
     A "/" here is the character the OS cannot have in a name, never a folder
     boundary: callers that hold a whole relative path want sanitize_path.
@@ -120,6 +171,45 @@ def sanitize_segment(name):
     if reserved:
         text = reserved.group(1) + "_" + (reserved.group(2) or "")
     return text
+
+
+def _fit_segment(text):
+    """ONE name cut to what a filesystem accepts, its extension kept.
+
+    The backstop of the length rule (see MAX_SEGMENT_BYTES): what normally
+    gives way is the title, because `eval_script`/`_value_text` shrink the
+    free-text VALUES before a name is assembled. This handles the name whose
+    literal text is too long on its own — a hand-typed naming script, a
+    spelling nothing in the vocabulary accounts for — and it keeps the
+    extension, because a file without its ".flac" is a file this app's own
+    scanners stop finding, which is worse than a name that lost its last
+    words. The cut is re-run through the character rule, so it cannot leave a
+    name that ends in a space or a dot.
+    """
+    if len(text.encode("utf-8")) <= MAX_SEGMENT_BYTES:
+        return text
+    stem, ext = os.path.splitext(text)
+    if 0 < len(ext.encode("utf-8")) <= _MAX_EXT_BYTES:
+        room = MAX_SEGMENT_BYTES - len(ext.encode("utf-8"))
+        head = _char_rule(_clip_bytes(stem, room))
+        if head:
+            return head + ext
+    return _char_rule(_clip_bytes(text, MAX_SEGMENT_BYTES))
+
+
+def sanitize_segment(name):
+    """ONE file or folder name: the character rule, then the length rule.
+
+    The single rule every writer names files with. Characters are replaced
+    (`_char_rule`) and the result is cut to what a filesystem accepts
+    (`_fit_segment`) — so a caller that assembles a name around a long title
+    gets a name it can really create, without having to know the limit. Both
+    halves are fixed points, so the whole rule is: sanitize_segment(x) ==
+    sanitize_segment(sanitize_segment(x)) — organizing an already organized
+    library stays a no-op, and a reader that keys a name through `name_key`
+    agrees with the writer character for character.
+    """
+    return _fit_segment(_char_rule(name))
 
 
 def sanitize_path(text):
@@ -221,8 +311,12 @@ FUNCTIONS = ("if", "eq", "ne", "not", "and", "or", "left", "right", "num",
              "lower", "upper", "replace")
 
 
-def _func(name, args, variables):
-    a = [_run(tokens, variables) for tokens in args]
+def _func(name, args, variables, value_cap=MAX_SEGMENT_BYTES):
+    # The cap travels with the call: a $left(...) or $replace(...) over a
+    # free-text value is that value's own words, and the fitting in
+    # `eval_script` has to reach them or a script that rewrites a title would
+    # be the one place the length rule stopped applying.
+    a = [_run(tokens, variables, value_cap) for tokens in args]
     if name == "if":
         if len(a) >= 2:
             cond = a[0].strip()
@@ -351,7 +445,24 @@ def script_vocabulary(script):
     return fields, calls
 
 
-def _run(tokens, variables):
+def _value_text(name, value, cap=MAX_SEGMENT_BYTES):
+    """One substituted tag value: the character rule, then the length rule for
+    a FREE-TEXT field (see FREE_TEXT_FIELDS).
+
+    The character rule comes first and whole (`sanitize_segment`), then the
+    value is cut to `cap` bytes when it is one of the fields a name takes its
+    words from — a title, an album, an artist, a label. That is the half of
+    the length rule that makes the TITLE give way: the ids, dates and numbers
+    the script puts around it are structural, are never cut here, and are what
+    `eval_script` measures the room left for these against.
+    """
+    text = sanitize_segment(str(value or ""))
+    if name in FREE_TEXT_FIELDS:
+        text = _clip_bytes(text, max(_MIN_VALUE_BYTES, int(cap)))
+    return text
+
+
+def _run(tokens, variables, value_cap=MAX_SEGMENT_BYTES):
     """Evaluate a compiled token list against *variables*."""
     out = []
     for token in tokens:
@@ -359,7 +470,6 @@ def _run(tokens, variables):
         if kind == "lit":
             out.append(token[1])
         elif kind == "var":
-            value = str(variables.get(token[1], "") or "")
             # Every substituted TAG VALUE is a name fragment, so it goes
             # through the one rule (mlo.naming.sanitize_segment): a title like
             # "Aerials / Arto" or "AC/DC" must not invent a folder level, and
@@ -367,24 +477,49 @@ def _run(tokens, variables):
             # path either. The script's OWN "/" separators (between
             # %variables%) are literal tokens and stay untouched, so the
             # structure the user typed still means structure.
-            out.append(sanitize_segment(value))
+            out.append(_value_text(token[1], variables.get(token[1], ""),
+                                   value_cap))
         else:
-            out.append(_func(token[1], token[2], variables))
+            out.append(_func(token[1], token[2], variables, value_cap))
     return "".join(out)
 
 
-def _eval(script, variables):
+def _eval(script, variables, value_cap=MAX_SEGMENT_BYTES):
     """Raw evaluation (no sanitization — applied once at the top level)."""
-    return _run(_compile(script), variables)
+    return _run(_compile(script), variables, value_cap)
 
 
 def eval_script(script, variables, shorter_ids=False):
     """Evaluate a Picard-style naming script into a relative path string.
 
     When shorter_ids is True, full MusicBrainz UUIDs in the output are
-    truncated to their first 8 characters.
+    truncated to their first 8 characters — which also gives the free-text
+    values that much more room, since the fit below is measured, not assumed.
+
+    A name that does not FIT gives way in its TITLE, never as a whole. The
+    script is evaluated with each free-text value capped (`_value_text`), and
+    the longest segment it produced decides how much room a value may have:
+    over MAX_SEGMENT_BYTES the cap shrinks by the overflow and the script is
+    evaluated again, so what is cut is the album or track title while the
+    disc/track numbers, the MusicBrainz ids, the brackets and the extension
+    around it survive — the parts a reader identifies the file by, and the
+    parts the grader's expected-path check and the organizer's rename both
+    read back. `sanitize_path`'s own per-segment cap is the backstop for a
+    name whose LITERAL text is too long (a hand-typed script).
     """
     text = _eval(script, variables)
+    cap = MAX_SEGMENT_BYTES
+    for _ in range(8):
+        worst = max((len(s.encode("utf-8")) for s in text.split("/")), default=0)
+        if worst <= MAX_SEGMENT_BYTES:
+            break
+        # Both corrections at once, the smaller of the two: an even share for
+        # several long values, and the whole overflow off when one field is
+        # what overran. Either way the segment shrinks, so the loop ends.
+        cap = max(_MIN_VALUE_BYTES,
+                  min(cap - (worst - MAX_SEGMENT_BYTES),
+                      cap * MAX_SEGMENT_BYTES // worst))
+        text = _eval(script, variables, cap)
     if shorter_ids:
         text = _UUID_RE.sub(lambda m: m.group(0)[:8], text)
     return sanitize_path(text)

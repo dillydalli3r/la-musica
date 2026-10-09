@@ -425,7 +425,13 @@ def _track_name(track, stem, prefix=""):
     from .naming import sanitize_segment
     title = sanitize_segment(str(track.get("title") or "")).strip(" ._")
     head = f"{prefix}{int(track['position']):02d}"
-    return f"{head} {title}.flac" if title else f"{head} {stem}_{int(track['position']):02d}.flac"
+    name = f"{head} {title}.flac" if title else f"{head} {stem}_{int(track['position']):02d}.flac"
+    # The whole name, not just its parts: `head` and the extension are added
+    # AROUND the title, so a paragraph-long TITLE has to give way inside the
+    # name the filesystem is asked to create — nine characters of numbering and
+    # the ".flac" stay, the title's tail is what is cut (the shared rule in
+    # mlo.naming, which every other writer names files with).
+    return sanitize_segment(name)
 
 
 def _split_one(args):

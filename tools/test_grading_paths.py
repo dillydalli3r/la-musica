@@ -20,6 +20,7 @@ from mlo.grader import (ALBUM_TAGS, EMPTY_FOLDER, EXPECTED_TRACKS_INCOMPLETE,
                         _grade_album, _naming_mismatch, _release_type_candidates,
                         printed_pct, run_grade_library, tag_key_allowed)
 from mlo.paths import save_expected_tracks
+from mlo import naming
 from mlo.naming import (DEFAULT_NAMING_SCRIPT, UNKNOWN_RELEASE_TYPE,
                         eval_script, track_variables)
 from server.beetscfg import generate_config
@@ -231,6 +232,105 @@ ok(_naming_mismatch(good.replace(_alb, _alb.upper()), folder,
                     DEFAULT_NAMING_SCRIPT, "", BASE_TAGS)[0] == "case",
    "case-only difference reports 'case' (PATH_CASE check)")
 shutil.rmtree(folder, ignore_errors=True)
+
+# ----------------------------------------------------------------------
+# The LENGTH rule: a name that is too long gives way in its TITLE
+# ----------------------------------------------------------------------
+print("== the length rule ==")
+# The longest allowed name is a filesystem fact (255), and the app reserves a
+# little of it for the suffixes its own writers add.
+ok(naming.MAX_SEGMENT_BYTES < 255,
+   f"the name limit leaves room for the app's own suffixes ({naming.MAX_SEGMENT_BYTES})")
+
+# A paragraph-long TITLE, ALBUM and ARTIST: nothing the script produces may
+# exceed the limit anywhere in the path — and what gives way is the free text,
+# never the structure the app identifies an album and a file by.
+_long = dict(BASE_TAGS, TITLE="T" * 400, ALBUM="A" * 400,
+             ARTIST="B" * 400, ALBUMARTIST="B" * 400)
+_segs = eval_script(DEFAULT_NAMING_SCRIPT, track_variables(_long)).split("/")
+ok(_segs and all(len(s.encode("utf-8")) <= naming.MAX_SEGMENT_BYTES for s in _segs),
+   f"every segment of a paragraph-titled album fits ({[len(s) for s in _segs]})")
+# ...and the extension a caller appends (+".flac") still lands under 255 bytes
+ok(all(len(s.encode("utf-8")) + 5 <= 255 for s in _segs),
+   "and the extension a caller appends still fits the real limit")
+ok(_segs[-1].startswith("1-01 T") and _segs[0].startswith("BBB"),
+   f"the numbering and the words that fit are kept ({_segs[-1][:12]!r})")
+ok("A" * 10 in _segs[-2],
+   "the album's own words are what was cut, not the whole segment")
+
+# An album whose tags carry every id keeps them: the ids are what a reader
+# identifies the release by, and what gave way is the text around them.
+_ids = dict(_long, MUSICBRAINZ_ALBUMARTISTID=_MBID,
+            MUSICBRAINZ_ALBUMID="abcdef01-1234-1234-1234-123456789abc",
+            MUSICBRAINZ_RELEASEGROUPID="abcdef02-1234-1234-1234-123456789abc",
+            MUSICBRAINZ_TRACKID="abcdef03-1234-1234-1234-123456789abc")
+_rel_ids = eval_script(DEFAULT_NAMING_SCRIPT, track_variables(_ids)).split("/")
+ok(_MBID in _rel_ids[0] and _ids["MUSICBRAINZ_ALBUMID"] in _rel_ids[1]
+   and _ids["MUSICBRAINZ_RELEASEGROUPID"] in _rel_ids[1]
+   and _ids["MUSICBRAINZ_TRACKID"] in _rel_ids[2],
+   "every MusicBrainz id survives the cut")
+ok(all(len(s.encode("utf-8")) <= naming.MAX_SEGMENT_BYTES for s in _rel_ids),
+   "and the ids do not push a segment over the limit")
+# ...and the SHORT-id spelling is still the short spelling: the fit is
+# measured, so freeing id bytes must not be mistaken for a different path.
+_short_ids = eval_script(DEFAULT_NAMING_SCRIPT, track_variables(_ids),
+                         shorter_ids=True).split("/")
+ok(all(len(s.encode("utf-8")) <= naming.MAX_SEGMENT_BYTES for s in _short_ids)
+   and _MBID not in _short_ids[0] and _MBID[:8] in _short_ids[0],
+   "the short-id spelling fits and is still short")
+
+# An ordinary release is untouched, byte for byte: the rule only ever bites
+# when a name would really not fit.
+ok(eval_script(DEFAULT_NAMING_SCRIPT, track_variables(BASE_TAGS))
+   == "Artist/2020 - Album/1-01 Song",
+   "a normal album's path is unchanged")
+
+# A hand-typed script whose LITERAL text is too long is cut as a whole, and
+# the extension survives — a file without its ".flac" is one this app's own
+# scanners stop finding.
+_literal = eval_script("Z" * 400 + "/" + "W" * 400 + "/" + "q" * 400 + ".flac",
+                       track_variables(BASE_TAGS))
+ok(all(len(s.encode("utf-8")) <= naming.MAX_SEGMENT_BYTES
+       for s in _literal.split("/")),
+   "a script with a literal too long is cut to what the OS accepts too")
+ok(_literal.endswith(".flac"), f"the extension is kept ({_literal[-12:]!r})")
+
+# Bytes, not characters: a CJK title is cut on a character boundary, so the
+# name that reaches the filesystem is still valid UTF-8.
+_cjk = eval_script(DEFAULT_NAMING_SCRIPT,
+                   track_variables(dict(BASE_TAGS, TITLE="曲" * 400,
+                                        ALBUM="集" * 400)))
+ok(all(len(s.encode("utf-8")) <= naming.MAX_SEGMENT_BYTES and "\ufffd" not in s
+       for s in _cjk.split("/")),
+   "a multi-byte title is cut between characters, never through one")
+
+# The rule is a fixed point (organizing an organized library is a no-op) and
+# the reader keys a name exactly as the writer spells it.
+_long_name = naming.sanitize_segment("N" * 400 + ".flac")
+ok(naming.sanitize_segment(_long_name) == _long_name,
+   "the rule is a fixed point (a second pass changes nothing)")
+ok(len(_long_name.encode("utf-8")) <= naming.MAX_SEGMENT_BYTES
+   and _long_name.endswith(".flac"),
+   f"the backstop cuts a whole name and keeps its extension ({_long_name[-10:]!r})")
+ok(naming.name_key("N" * 400 + ".flac") == _long_name,
+   "the reader keys a long name to what the writer would spell")
+
+# End to end through the grader: an album named by a paragraph-long title is
+# not a naming mismatch, because the expected path is fitted the same way.
+_ltags = dict(BASE_TAGS, TITLE="T" * 400, ALBUM="A" * 400,
+              ALBUMARTIST="B" * 400)
+_lfolder = tempfile.mkdtemp(prefix="mlo_naming_long_")
+try:
+    _llib = os.path.join(_lfolder, "Artists")
+    _lpath = album_path(_llib, _ltags)
+    ok(_naming_mismatch(_lpath, _lfolder, DEFAULT_NAMING_SCRIPT, "", _ltags)
+       == ("ok", None),
+       "the grader accepts the fitted path for a paragraph-titled album")
+    ok(all(len(part.encode("utf-8")) <= naming.MAX_SEGMENT_BYTES
+           for part in os.path.relpath(_lpath, _llib).split(os.sep)),
+       "and that path really is inside the limit")
+finally:
+    shutil.rmtree(_lfolder, ignore_errors=True)
 
 # ----------------------------------------------------------------------
 # End-to-end: _grade_album on a synthetic album

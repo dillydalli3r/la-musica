@@ -111,7 +111,12 @@ def _side_temp(src_path, tag, ext):
     """
     folder = os.path.dirname(str(src_path)) or "."
     base = os.path.basename(str(src_path))
-    return os.path.join(folder, f".mlo_tmp_{tag}_{base}")
+    # The name is the source's own with a fixed prefix, so a source file
+    # already near the limit would spell a working file the filesystem refuses.
+    # The shared rule trims it and keeps the extension last, which is what the
+    # tools pick their output format from (see the docstring above).
+    from .naming import sanitize_segment
+    return os.path.join(folder, sanitize_segment(f".mlo_tmp_{tag}_{base}"))
 
 
 def _strip_jpeg_metadata(input_path, output_path):

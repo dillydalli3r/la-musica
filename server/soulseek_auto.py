@@ -5031,7 +5031,11 @@ def fetch_video_on_soulseek(artist, title, dest, cfg, seconds=None):
     cand = candidates[0]
     wanted = [{"filename": cand["file"], "size": cand["size"]}]
     slsk.enqueue_download(cand["username"], wanted)
-    name = os.path.basename(_remote_rel(cand["file"]))
+    # The name is the PEER's own file name and it is about to be joined onto a
+    # local folder, so it goes through the app's one name rule: a character a
+    # filesystem refuses, a name too long to create, or a ".." segment (which
+    # basename alone leaves intact) can no longer decide where this file lands.
+    name = _safe_component(os.path.basename(_remote_rel(cand["file"])), "video")
     got = {"path": "", "user": cand["username"], "filename": name,
            "size": cand["size"], "source": "soulseek"}
     if not dest:
@@ -5113,7 +5117,13 @@ def _youtube_filename(track, ext):
         ext = ".mkv"
     elif not ext.startswith("."):
         ext = "." + ext
-    return f"{disc}-{pos:02d} {_safe_component(track.get('title'), 'track')}{ext.lower()}"
+    # `<disc>-<pos>` and the extension are assembled AROUND the title, so the
+    # whole name goes through the shared rule (not just the title): a
+    # paragraph-long track title gives way inside a name the filesystem will
+    # really create, and the numbering and ".mkv"/".mp4" stay.
+    return _safe_component(
+        f"{disc}-{pos:02d} {_safe_component(track.get('title'), 'track')}"
+        f"{ext.lower()}", "track")
 
 
 def _youtube_progress(done, total, text):

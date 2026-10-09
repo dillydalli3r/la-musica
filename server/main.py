@@ -6702,7 +6702,14 @@ async def import_upload(
     try:
         for f in files:
             name = (f.filename or "file").replace("\\", "/")
-            parts = [p for p in name.split("/") if p and p not in (".", "..")]
+            # Each part is a CLIENT-supplied name about to be created on disk:
+            # the app's one name rule (mlo.naming.sanitize_segment) replaces the
+            # characters a filesystem refuses and cuts a part too long to
+            # create, so an upload cannot fail on a name the app could have
+            # spelled, and a ".." or drive-relative part is defused below.
+            parts = [p for p in (sanitize_segment(part)
+                                 for part in name.split("/")
+                                 if part and part not in (".", "..")) if p]
             if not parts:
                 continue
             # reject absolute/escaping paths

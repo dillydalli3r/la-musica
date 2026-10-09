@@ -30,6 +30,7 @@ import httpx
 from mlo.config import load_config
 from mlo.discs import is_disc_parent
 from mlo.fetchdeps import installed_path
+from mlo.naming import sanitize_segment
 from mlo.paths import LIB_AUDIO_EXTS, library_root
 from server.beetscfg import REPO_ROOT
 
@@ -3485,7 +3486,15 @@ def import_completed(cfg=None, finish=False, progress=None):
         # organize has not renamed into place yet must not be published.
         root = library_root(folder)
         os.makedirs(root, exist_ok=True)
-        safe = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", str(name)).strip().rstrip(".")
+        # The name is the PEER's own folder name, so it goes through the app's
+        # one name rule (mlo.naming.sanitize_segment): characters the OS
+        # refuses are replaced rather than deleted (so this staging folder is
+        # spelled like every other folder the app writes), a reserved device
+        # name or an all-dots segment cannot name something else, and the name
+        # is cut to what a filesystem accepts — a peer's paragraph-long folder
+        # name used to become a destination that could not be created. The
+        # " (n)" collision suffix below stays inside the limit.
+        safe = sanitize_segment(str(name))
         dest = os.path.join(root, safe or "Soulseek Download")
         n = 2
         while os.path.exists(dest):

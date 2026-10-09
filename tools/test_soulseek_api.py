@@ -227,8 +227,24 @@ soulseek.downloads_state = lambda cfg=None: [{
 try:
     moved = soulseek.import_completed(ICFG)
     skipped = soulseek.last_import_skipped()
+
+    # the peer's own folder name is a NAME the app has to create here: a name at
+    # the filesystem's limit used to be imported AS IS, and what the download dir
+    # held plus the app's own " (n)" suffix is a name a filesystem refuses. The
+    # shared rule (mlo.naming.sanitize_segment) now fits it, so the import lands.
+    from mlo import naming
+
+    _LONG_PEER = "P" * 250
+    put(f"Long User/Music/{_LONG_PEER}/01 - long.flac")
+    _long_moved = soulseek.import_completed(ICFG)
 finally:
     soulseek.downloads_state = _real_downloads_state
+_long_dir = [p for p in _long_moved if os.path.basename(p).startswith("PP")]
+assert len(_long_dir) == 1, _long_moved
+_long_seg = os.path.basename(_long_dir[0])
+assert len(_long_seg.encode("utf-8")) <= naming.MAX_SEGMENT_BYTES, len(_long_seg)
+assert os.path.isfile(os.path.join(_long_dir[0], "01 - long.flac")), _long_dir[0]
+assert not os.path.exists(os.path.join(DD, "Long User")), "source left behind"
 
 assert isinstance(moved, list), moved              # shape every caller unpacks
 assert skipped == [os.path.join(DD, "Still Downloading")], skipped

@@ -39,6 +39,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from mlo.config import DEFAULT_RUN_ALL_ORDER, load_config
 from mlo.discs import (DISC_BRACKET_RE, disc_number_of_path, disk_rows,
                        is_disc_dir, match_disc_row, sidecar_tracklist)
+from mlo.naming import sanitize_segment
 from mlo.paths import (AUDIO_EXTS, LIB_AUDIO_EXTS, expected_tracks_state,
                        library_root, load_expected_tracks, move_path,
                        save_expected_tracks)
@@ -4734,8 +4735,13 @@ def _inside(path, folder):
 
 
 def _unique_dir(parent, name):
-    """``<parent>/<name>``, deduplicated with " (2)", " (3)"…"""
-    safe = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", str(name)).strip().rstrip(".") or "Import"
+    """``<parent>/<name>``, deduplicated with " (2)", " (3)"…
+
+    The name is user- or tag-supplied (an album name, an upload's own), so it
+    goes through the app's one name rule (mlo.naming.sanitize_segment): the
+    characters the OS refuses are replaced, the name is cut to what a
+    filesystem accepts, and the " (n)" suffix stays inside that limit."""
+    safe = sanitize_segment(str(name)) or "Import"
     dest = os.path.join(parent, safe)
     n = 2
     while os.path.exists(dest):
