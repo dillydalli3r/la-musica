@@ -428,6 +428,14 @@ ok(os.path.isfile(os.path.join(SCOPE_B, "CD-1.accurip")),
 ok(stats["modified_count"] >= 1 and stats["error_count"] == 0,
    f"…and it reports the work it did ({stats['modified_count']} written, "
    f"{stats['skipped_count']} already current, {stats['errors']})")
+# …and it SAYS SO on the way out. A disc whose .accurip is already current is
+# skipped by design, and that skip used to be silent — no note, no line — so a
+# plain press on an album menu printed the header and then nothing at all,
+# which is exactly what "the script is broken" looked like (the owner's
+# report; the app's own log shows the header with no per-disc line after it).
+ok("already current" in out,
+   f"…and the already-current disc is NAMED in the run's own output — a silent "
+   f"skip reads as a broken button ({out[-300:]!r})")
 
 print("== each WAV transport lane takes ONE lane's share of the thread budget ==")
 # Script 9 used to spawn each track's ffmpeg with no -threads, so the pool's N

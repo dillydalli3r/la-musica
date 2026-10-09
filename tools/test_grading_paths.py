@@ -2357,6 +2357,29 @@ else:
                    genre="Jazz"))["genre"] == "Jazz",
        "and an unreadable path falls back to it instead of failing the name")
 
+    # Key-for-key parity, the claim _item_naming_vars makes in its own
+    # docstring: the two maps must expose EVERY variable the naming script may
+    # use, not only the ones this file happens to test by value. The key that
+    # was missing — musicbrainz_releasegroupid — names both the album folder's
+    # last bracket and the file name's last bracket in the app's own script, so
+    # a beets import wrote names the organizer and the grader's naming check
+    # then asked for ("PATH: expected '… [<releasegroupid>].flac' (run
+    # organize)"). A value check on one variable cannot see a variable that is
+    # absent; this can.
+    _missing = sorted(set(_genre_vars) - set(_item_vars))
+    _extra = sorted(set(_item_vars) - set(_genre_vars))
+    ok(not _missing and not _extra,
+       f"the import and the organizer expose the SAME naming variables "
+       f"(missing {_missing}, extra {_extra})")
+    _rg = "b8048f24-c026-3398-b23a-b5e50716cbc7"
+    _vars_rg = _mloplugin._item_naming_vars(
+        _BeetsItem(path=_gflac, title="Song", album="Amnesia",
+                   albumartist="Artist", artist="Artist",
+                   mb_releasegroupid=_rg))
+    ok(_rg in eval_script(DEFAULT_NAMING_SCRIPT, _vars_rg),
+       "…and the release-group id the app's own script names files with lands "
+       "in the path the import computes")
+
 # The percentage EVERY surface prints (the library header, an album row, the
 # grading strip) comes from one rule: 100 belongs to a score with nothing
 # failed. The owner's own library — thousands of checks — showed the failure

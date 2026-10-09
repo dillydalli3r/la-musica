@@ -373,6 +373,15 @@ def _item_naming_vars(item):
         "musicbrainz_albumartistid": _first(item.mb_albumartistid) or "",
         "musicbrainz_artistid": _first(item.mb_artistid) or "",
         "musicbrainz_albumid": _first(item.mb_albumid) or "",
+        # The RELEASE GROUP id: the app's own naming script puts it in the
+        # album folder's last bracket AND in the file name's last bracket
+        # (mlo.naming.DEFAULT_NAMING_SCRIPT), so leaving it out here made a
+        # beets import name the album and every track WITHOUT it — a path the
+        # organizer and the grader's naming check then reported as
+        # "PATH: expected '… [<releasegroupid>].flac' (run organize)".
+        # _item_naming_vars claims key-for-key parity with
+        # mlo.naming.track_variables; this is the key that was missing.
+        "musicbrainz_releasegroupid": _first(item.mb_releasegroupid) or "",
         # The two track ids the script may name a file with: the RECORDING
         # (mb_trackid) and this release's track (mb_releasetrackid).
         "musicbrainz_trackid": _first(item.mb_trackid) or "",

@@ -1083,7 +1083,19 @@ def run_generate_accurip(config):
                             except OSError:
                                 pass
                         if not needs_regen:
+                            # SAID OUT LOUD. This is the common case — every
+                            # later run over a disc whose .accurip is already
+                            # current lands here — and it used to skip in
+                            # SILENCE: no note, no count a caller could see, so
+                            # a plain press read exactly like a broken button
+                            # (the owner's album-menu press printed the header
+                            # and then nothing at all). The line names the file
+                            # and the way to insist.
                             row["skipped"] += 1
+                            note("info", f"  {os.path.basename(album_dir)}: "
+                                         f"{os.path.basename(accurip_path)} is "
+                                         f"already current — left as it is "
+                                         f"(force to regenerate)")
                             continue
                 except OSError:
                     pass
@@ -1092,6 +1104,9 @@ def run_generate_accurip(config):
 
             if not write_files:
                 row["skipped"] += 1
+                note("info", f"  {os.path.basename(album_dir)}: .accurip writing "
+                             f"is switched off (write_accurip_files) — nothing "
+                             f"written")
                 continue
 
             cue_path = _find_cue_for_disc(album_dir, disc_num, discs, pattern)

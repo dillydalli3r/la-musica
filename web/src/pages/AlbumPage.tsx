@@ -365,8 +365,37 @@ export default function AlbumPage() {
     toast(`${saved} of ${missingVideos.length} music video(s) saved`);
   };
 
-  const runScripts = async (ids: number[]) => {
-    await api.run(ids, [data.path]);
+  /** Run *ids* over this album's folder through the app's one script route,
+   *  and SAY what happened.
+   *
+   *  The reply used to be dropped (`await api.run(ids, [data.path])` and
+   *  nothing more), which made the menu's own promise unreadable: the plain
+   *  AccurateRip run on a disc whose `.accurip` is already current is a
+   *  deliberate no-op (`mlo.accurip` leaves it as it is), and with no toast and
+   *  no error it read exactly like a broken button — the owner's report. What
+   *  it prints is the runner's own outcome (`server/script_runners`), the same
+   *  one the generated Tag-actions menu reports through, and a refused request
+   *  surfaces instead of becoming an unhandled rejection. */
+  const runScripts = async (ids: number[], force?: Record<string, boolean>) => {
+    try {
+      const res = await api.run(ids, [data.path], force);
+      const results = res.results ?? [];
+      const failed = results.find((r) => r.error);
+      if (failed) {
+        toast.error(`${failed.label ?? "Script"} failed — ${failed.error}`);
+      } else if (results.length && results.every((r) => r.skipped)) {
+        toast(results[0].reason || "Nothing to do");
+      } else {
+        const touched = results.reduce(
+          (n, r) =>
+            n + Number((r.stats as { modified_count?: number } | undefined)?.modified_count ?? 0),
+          0,
+        );
+        toast(touched ? `${touched} file(s) updated` : "Nothing to do — already current");
+      }
+    } catch (e) {
+      toast.error(String(e));
+    }
     // scripts rewrite tags in place — the album payload (tags, grading,
     // covers) is stale until the shared invalidation runs
     invalidateLibrary(qc);
@@ -1074,6 +1103,16 @@ export default function AlbumPage() {
                     // disc, CUETools), which is why it is here and not on a
                     // track row.
                     { label: SCRIPT_LABEL[9], icon: FileCheck2, onClick: () => runScripts([9]) },
+                    // …and its forced twin, because the plain run above is
+                    // FILL-ONLY: a disc whose .accurip is already current is
+                    // deliberately left as it is (mlo.accurip), which is the
+                    // common case and the one that made the plain press read as
+                    // broken. This is the press that re-verifies a rip.
+                    {
+                      label: t("menu.forceEntry", { script: SCRIPT_LABEL[9] }),
+                      icon: FileCheck2,
+                      onClick: () => runScripts([9], { accurip: true }),
+                    },
                     { label: SCRIPT_LABEL[8], icon: FileMusic, onClick: () => runScripts([8]) },
                     { label: SCRIPT_LABEL[4], icon: FileMusic, onClick: () => runScripts([4]) },
                     // 23 · Optimize tags: the scoped excess-tag strip, right

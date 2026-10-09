@@ -187,7 +187,7 @@ publishes, including the ones that write nothing until they do.
 | 16 | Mood & Energy | The mood classifier alone | `MOOD`, `ENERGY` | no | no |
 | 17 | Lyrics transliterate (AI) | Romanization/translation tags and sidecars, re-synced at `lrc_sync_level`; the per-track work runs through the worker pool (one track's chunk requests used to be paid one after another) | `TRANSLITERATION-*`, `TRANSLATION-*`, sidecars | no | **yes** (configured AI endpoint) |
 | 19 | Optimize artist images | Re-fits `Artists/<Artist>/artist.*` to `artist_image_aspect` / `artist_image_target_size`, re-encodes as `artist.jpg`/`artist.png` | the artist image in place (only when it has to move) | re-encodes in place; never deletes | no |
-| 20 | Optimize library layout | The music folder's shape against `<music>/Artists/<Artist>/<Album>/…`: audio at the root or in an artist folder, stray files, unexpected folders, empty albums, `wrong_case` rows. With `layout_apply` (ON) it SETTLES what the folder itself proves — a wrong-case name is renamed, audio outside an album folder is moved into the one its tags name, and what is excess goes to the Trash (a stray file, a folder inside an album that is neither a disc folder nor holds audio, an album folder with no audio, a foreign root folder holding no audio, an album-less artist folder, the `.mlo_*` leftovers) — and reports every other row with the reason it stayed, re-derived at the move (R185). Writes ONE report describing the whole library (plus a `fixes` list) to `<music>/.mlo/data/`, which the Library page warns from; scoped to `targets` when a run names them, and library-wide when it does not (R9) | one report file + the renamed/moved/removed paths | `layout_apply` (removals go to the Trash) | no |
+| 20 | Optimize library layout | The music folder's shape against `<music>/Artists/<Artist>/<Album>/…`: audio at the root or in an artist folder, stray files, unexpected folders, empty albums, `wrong_case` rows. With `layout_apply` (ON) it SETTLES what the folder itself proves — a wrong-case name is renamed, audio outside an album folder is moved into the one its tags name, and what is excess goes to the Trash (a stray file, a duplicate `description (2).txt`, the `.mlo_*` leftovers, and a folder — inside an album, an album, a foreign root folder, an album-less artist — only when it is EMPTY, since "holds no audio" is a finding and not a licence to take the .cue/.log/artwork inside it) — and reports every other row with the reason it stayed, re-derived at the move (R185). Writes ONE report describing the whole library (plus a `fixes` list) to `<music>/.mlo/data/`, which the Library page warns from; scoped to `targets` when a run names them, and library-wide when it does not (R9) | one report file + the renamed/moved/removed paths | `layout_apply` (removals go to the Trash) | no |
 | 21 | Fix AcoustID pairs | Completes (or CREATES) a track's `ACOUSTID_ID`/`ACOUSTID_FINGERPRINT` pair — the failures `Missing ACOUSTID_ID and ACOUSTID_FINGERPRINT` and `Missing ACOUSTID_ID` / `Missing ACOUSTID_FINGERPRINT` (all `(run Fix AcoustID pairs)`). The recording the pair must name is a question the FILE answers itself (its own `ACOUSTID_ID`, its `MUSICBRAINZ_TRACKID`, or the recording MBID this app's naming script wrote into the file name), and the fingerprint is taken from the audio locally by fpcalc — so a CD rip AcoustID has never seen, or a run with no usable key, is repairable with no request at all. The service is asked only for a half pair whose file names no recording anywhere; a file carrying no AcoustID tag and naming no recording is skipped, never written from a guess | `ACOUSTID_ID`, `ACOUSTID_FINGERPRINT` | no | only for a half pair that names no recording |
 | 22 | Submit fingerprints (AcoustID) | Gives AcoustID the fingerprint and the MusicBrainz recording id a file already states (`mlo.acoustid.submit_files`): the recording is read the way script 21 reads it, the fingerprint is taken locally, the service is asked what it already links (`pair_known`) and what this app already handed over (`load_submissions`), and only what is genuinely new goes in ONE batched `v2/submit` — each track reported ACCEPTED, ALREADY_KNOWN, REJECTED or skipped with a named cause. **Not in the shipped order** (`OPT_IN_SCRIPTS`): a submission is a public, outward-facing write, so it runs only when someone asks — a details menu, `POST /api/import/acoustid/submit`, the wizard's AcoustID step, or a `run_all_order` the user put it in themselves | nothing locally | no | **yes** (AcoustID database) |
 | 23 | Optimize tags | The tag strip script 10 already performs as a step of its own pass, on its own and scoped (`mlo/taghygiene.py`): every tag the grader calls excess — a name outside the shared vocabulary, a `COMMENT` carrying a value, an alias nothing needs (R16a/R16b: the name is one the locale reads, the spelling is for another locale, a second spelling of the same alias, or the value is the name itself) | tags | **yes** (deletes the excess tags) | no |
@@ -665,7 +665,11 @@ evidence matters.
   (this library's, like R22's audit evidence); a track whose container has no
   such md5 falls back to the older "any track newer than the `.accurip`" rule, so
   nothing is ever judged current on a weaker test than before. The first run
-  after this check changes regenerates once, to record the identities.
+  after this check changes regenerates once, to record the identities. A disc
+  that IS current is left as it is and the run NAMES it
+  (`<album>: CD-1.accurip is already current — left as it is (force to
+  regenerate)`): the skip used to be silent, which made a plain press read as a
+  broken script.
 - **R24 — the AUDIT tag vocabulary is `REAL` / `FAKE`**; the album-level summary
   is `REAL`, `FAKE` or `Mix` (`summarize_audits`: FAKE wins, a uniform REAL
   passes through, anything else is Mix) and `None` when no track carries one.
@@ -1664,6 +1668,21 @@ rating.
   (`server/beets/mloplugin.py::_item_genre`) and falls back to the item only for a
   file that states none. An import and the organizer therefore compute the same
   `%genre%`, and the same path from it.
+- **R57f — the import and the organizer expose the SAME naming variables, key
+  for key.** `server/beets/mloplugin.py::_item_naming_vars` claims that parity
+  in its own docstring; `tools/test_grading_paths.py` now pins it over the KEY
+  SETS (`_item_naming_vars` vs `mlo/naming.py::track_variables`), not only over
+  the values of the variables a test happens to name. It was one key short:
+  `musicbrainz_releasegroupid` was absent, and the app's own naming script names
+  BOTH the album folder's last bracket and the file name's last bracket with it
+  (`mlo/naming.py::DEFAULT_NAMING_SCRIPT`). So a beets import renamed an album
+  and every track to a spelling without it, which the organizer and the grader's
+  naming check then asked for as `PATH: expected '… [<releasegroupid>].flac' (run
+  organize)` — and the two movers disagreed about where the album lives, leaving
+  audio-less album folders holding their sidecars behind (the shape script 20 had
+  to be taught to leave alone, R185). A variable merely ABSENT from one map
+  evaluates to `""` (`eval_script` resolves an unknown name to the empty
+  string), so a value check cannot see it; the key set is the assertion.
 - **R58** — free text is untouched, byte for byte: `TITLE`, `ALBUM`, `ARTIST`,
   `ALBUMARTIST`, `LABEL`, `COMMENT` and the lyrics are somebody's words, and
   "AC/DC" and "k.d. lang" must survive a tag write. Only the tags in
@@ -3860,16 +3879,33 @@ the work (`POST /api/library/layout/apply`, or script 20's own run).
   itself proves: a wrong-case name is renamed to `naming_script`'s spelling,
   audio outside any album folder is moved into the album its own tags name, and
   what is EXCESS goes to the app's Trash — a stray file (not audio, artwork or
-  a known sidecar: an nfo, a db, a stray text file), a folder inside an album
-  that is neither a disc folder nor holding audio, an album folder with no
-  audio in it, a foreign folder in the music-folder root holding no audio, an
-  album-less artist folder, and the `.mlo_*` leftovers of the old layout.
+  a known sidecar: an nfo, a db, a stray text file), a numbered duplicate of the
+  album's `description.txt`, the `.mlo_*` leftovers of the old layout, and a
+  FOLDER, which the pass may remove at all only when it is EMPTY (an empty album
+  folder, an empty artist folder, an empty folder inside an album, an empty
+  foreign folder in the music-folder root).
   NOTHING IS DELETED: every removal is `mlo.paths.trash_path`, carrying the
   origin manifest the Trash page restores from, and `layout_apply` off makes
-  the whole pass a report again. Two kinds are never removed — a foreign folder
-  that HOLDS AUDIO (nothing can say where its contents belong) and a hidden
-  folder inside `Artists/` (a sync client's or a checkout's marker) — and every
-  row that is left is reported with the reason it stayed.
+  the whole pass a report again.
+  **A folder-level removal needs a POSITIVE proof, and the proof is emptiness
+  (`mlo.layout._removable_folder`).** "Holds no audio" is a FINDING, not a
+  licence to take the files inside: an album folder whose audio a mover took
+  first still holds the rip's `.cue`/`.log`/`.accurip`, its artwork and its
+  description, and removing it would take files the scan never named — the
+  owner's report was exactly that, whole album folders with their sidecars moved
+  to the Trash as "empty albums" by a library-wide run. So such a folder is
+  reported and LEFT, and the junk inside it is still removed — but INDIVIDUALLY,
+  as a `stray_file`/`sidecar_copy` row of its own. A folder that cannot be
+  LISTED is refused as "not known to be empty" rather than judged empty: a
+  transient directory-listing failure used to read as "no audio" and offered the
+  album for removal. And the app's own state is never an album folder: a
+  `SKIP_DIRS`/`.mlo*` child of an artist folder is skipped (it used to be
+  offered as an "album with no audio", which moved the app's own database
+  aside), while any other hidden folder reports as `hidden_folder` with no fix.
+  Two further kinds are never removed — a foreign folder that HOLDS AUDIO or
+  FILES (nothing can say where its contents belong) and a hidden folder inside
+  `Artists/` (a sync client's or a checkout's marker) — and every row that is
+  left is reported with the reason it stayed.
   **The reason is asked again at the move** (`mlo.layout._may_trash`), never
   trusted from the report: a row's path must be inside the music folder (never
   that folder itself, never `Artists/`, never `.mlo`), and a folder that gained
@@ -6986,10 +7022,12 @@ and install what the platform supports.
    `<music>/Artists/<Artist>/<Album>/…` shape and, with `layout_apply` (ON),
    settles what the folder itself proves — a wrong-case name is renamed, audio
    outside any album folder is moved into the one its own tags name, and what is
-   excess goes to the Trash (stray files, folders inside an album that hold no
-   audio, empty album folders, foreign root folders holding no audio, album-less
-   artist folders, the `.mlo_*` leftovers) — while a foreign folder that HOLDS
-   AUDIO and a hidden folder inside `Artists/` are reported and left alone.
+   excess goes to the Trash (stray files, the `.mlo_*` leftovers, and a FOLDER —
+   inside an album, an album, a foreign root folder, an album-less artist —
+   only when it is EMPTY, since "holds no audio" is a finding and not a licence
+   to take the `.cue`/`.log`/artwork inside it) — while a foreign folder that
+   HOLDS AUDIO OR FILES and a hidden folder inside `Artists/` are reported and
+   left alone, and the app's own `.mlo*` state is never walked into at all.
    Nothing is deleted: the Trash lists every removal and can put it back (R185).
    Set `layout_apply` off for a report-only pass. Script 20 writes that one
    report to `<music>/.mlo/data/` and the Library page warns from it, so the

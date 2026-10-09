@@ -182,10 +182,10 @@ report). Findings, with the fix the apply may perform:
 | `audio_at_root` | audio file directly in `<music>` | move into the album its tags name |
 | `audio_in_artists` | audio directly in `Artists/` | move into its album folder |
 | `audio_in_artist` | audio directly in an artist folder | move into its album folder |
-| `unexpected_folder` | foreign folder in `<music>` root | Trash **only** if it holds no audio |
-| `unexpected_subfolder` | folder inside an album that is neither a disc folder nor holds audio | Trash |
-| `empty_album` | album folder with no audio anywhere beneath | Trash |
-| `empty_artist` | artist folder with no album folder **and no sibling for the same artist** | Trash |
+| `unexpected_folder` | foreign folder in `<music>` root | Trash **only** if it is EMPTY |
+| `unexpected_subfolder` | folder inside an album that is neither a disc folder nor holds audio | Trash **only** if it is EMPTY |
+| `empty_album` | album folder with no audio anywhere beneath | Trash **only** if it is EMPTY; otherwise report and leave (rule 2) |
+| `empty_artist` | artist folder with no album folder **and no sibling for the same artist** | Trash **only** if it is EMPTY; otherwise report and leave (rule 2) |
 | `split_artist` | **two folders that name one artist** (see §4.3) | merge (see §4.3) |
 | `wrong_case` | name differs from the naming script by case only | rename |
 | `sidecar_copy` | duplicate/numbered sidecar | rename or Trash (§3.3) |
@@ -200,8 +200,14 @@ Rules:
    the fix runs, never trusted from the report: the path must be inside the
    music folder (never the folder itself, never `Artists/`, never `.mlo`), and a
    folder that gained audio since the scan is refused and reported instead.
-2. **Two things are never removed**: a foreign root folder that holds audio, and
-   a hidden folder inside `Artists/`.
+2. **A FOLDER is removed only when it is EMPTY.** "Holds no audio" is a finding,
+   not a licence to take the files inside: an album folder whose audio a mover
+   took first still holds the rip's `.cue`/`.log`/`.accurip` and its artwork, so
+   it is reported and left (the junk inside it is still removed individually).
+   A folder that cannot be listed is refused as "not known to be empty", and a
+   `SKIP_DIRS`/`.mlo*` child of an artist folder is the app's own state, never an
+   album. Two kinds are never removed at all: a foreign root folder that holds
+   audio or files, and a hidden folder inside `Artists/`.
 3. **A scoped run** (an import, an album action) confines both the scan and the
    fixes to the named targets and **stores no report**, so a one-album pass can
    never become "the last scan of the library".

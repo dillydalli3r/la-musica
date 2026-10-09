@@ -8,11 +8,20 @@ reported here.
 The SCAN moves nothing: it says what is wrong and where. :func:`apply_fixes`
 then fixes what the folder itself proves — a name spelled in the wrong letter
 case, audio that is not in an album folder at all, an artist folder with no
-album under it — and removes what is excess: a stray file, a foreign folder
-holding no audio, an album folder with no audio in it. Every removal goes to
-the app's own Trash, which lists it and can put it back, so nothing is
-destroyed; a file whose album cannot be read from its own tags is named, never
-guessed at.
+album under it — and removes what is excess. Every removal goes to the app's
+own Trash, which lists it and can put it back, so nothing is destroyed; a file
+whose album cannot be read from its own tags is named, never guessed at.
+
+WHAT MAY BE REMOVED is deliberately narrow, because a removal the user did not
+ask for is the one mistake this module cannot undo for them: only files the
+scan NAMED (a stray file, a duplicate sidecar, the app's own ``.mlo_*``
+leftover) and only folders that are EMPTY (see :func:`_removable_folder`). A
+folder that still holds anything — the rip's ``.cue``/``.log``/``.accurip``, its
+artwork, a description — is reported and left, however little audio it holds:
+"Holds no audio" is a finding, not a licence to take the files inside. The
+app's own state dirs (``SKIP_DIRS``, every ``.mlo*``) are never walked into or
+reported as albums, and a folder that could not be listed is never treated as
+an empty one.
 
 One scan answers every surface, so their numbers cannot disagree:
 
@@ -36,8 +45,8 @@ import time
 
 from . import stats as mlo_stats
 from .discs import is_disc_dir
-from .paths import (IMAGE_EXTS, album_sidecar_of, app_data_dir, library_root,
-                    mlo_root, move_path, trash_path)
+from .paths import (IMAGE_EXTS, SKIP_DIRS, album_sidecar_of, app_data_dir,
+                    library_root, mlo_root, move_path, trash_path)
 from .ui import Color, c, log, print_header
 
 # --------------------------------------------------------------------------- #
@@ -63,13 +72,16 @@ REPORT_NAME = "layout_report.json"
 # into the app's Trash (mlo.paths.trash_path), which keeps the origin manifest
 # the Trash page restores from.
 _UNFIXABLE = {
-    "unexpected_folder": "a foreign folder holding audio — where its contents "
-                         "belong is the user's call",
+    "unexpected_folder": "a foreign folder that holds audio or files — where "
+                         "its contents belong is the user's call",
     "hidden_folder": "a hidden folder is a tool's marker (a sync client, a "
                      "checkout) — moving or deleting one is the user's call",
-    "unexpected_subfolder": "a folder that holds audio or is a disc folder — "
-                            "left where it is",
-    "empty_album": "an album folder that holds audio again — left where it is",
+    "unexpected_subfolder": "a folder that holds audio, or holds files, or is "
+                            "a disc folder — left where it is",
+    "empty_album": "an album folder that holds audio or files again — left "
+                   "where it is",
+    "empty_artist": "an artist folder that holds an album, audio or files "
+                    "again — left where it is",
     "stray_file": "no longer a stray — it is audio, artwork or a sidecar now",
     "stray_in_artists": "no longer a stray — it is audio, artwork or a sidecar "
                         "now",
@@ -211,6 +223,29 @@ def _has_audio(d, names=None):
         if any(_is_audio(f) for f in names):
             return True
     return False
+
+
+def _removable_folder(d):
+    """``(ok, why)`` — may this FOLDER be moved to the Trash as it stands?
+
+    The one move that takes everything a folder holds needs a POSITIVE proof,
+    and the proof is that the folder is EMPTY. "Holds no audio" is not proof:
+    an album folder whose audio a mover took first still holds the rip's
+    .cue/.log/.accurip and its artwork, and an unreadable folder is not an
+    empty one at all. Removing either takes files the scan never named — the
+    owner's report was whole album folders that still held their sidecars,
+    moved to the Trash as "empty albums". Junk inside such a folder is still
+    removed, but INDIVIDUALLY (a `stray_file` / `sidecar_copy` row of its
+    own), so nothing here ever takes a file the scan did not name.
+    """
+    names, err = _list(d)
+    if err:
+        return False, f"it could not be listed ({err}), so it is not known to be empty"
+    if names:
+        n = len(names)
+        return False, (f"it still holds {n} "
+                       f"entr{'y' if n == 1 else 'ies'}")
+    return True, ""
 
 
 def artist_album_folders(artist_dir):
@@ -586,14 +621,17 @@ def scan_library(cfg=None, stats=None):
                 closed(stats, skipped=True)
                 continue
             holds = _has_audio(p)
+            removable, why = _removable_folder(p)
             issues.append(_issue(
                 "unexpected_folder", p, folder,
                 "folder in the music folder root%s" % (" holding audio" if holds else ""),
                 "the library lives in Artists/ \u2014 move anything real into "
                 "Artists/<Artist>/<Album>/"
-                + ("" if holds else "; script 20 moves the folder itself to "
-                                  "the Trash"),
-                fix=None if holds else {"action": "trash"}))
+                + ("" if holds else
+                   ("; script 20 moves the folder itself to the Trash" if removable
+                    else f"; {why}, so script 20 leaves it and you remove it by "
+                         f"hand if it is junk")),
+                fix={"action": "trash"} if removable else None))
             closed(stats, reported=True)
         elif _is_audio(name):
             opened(stats)
@@ -663,6 +701,29 @@ def scan_library(cfg=None, stats=None):
                 else:
                     closed(sink, skipped=True)
                 continue
+            if an in SKIP_DIRS or an.startswith(".mlo"):
+                # The app's own state (.mlo, .mlo_data, data — SKIP_DIRS is the
+                # one list of it, the same one mlo.paths.prune_empty_dirs
+                # walks by). It is never an album folder, and it is never
+                # reported: the scan used to hand "<artist>/.mlo" to the apply
+                # as an "album folder with no audio", which moved the app's own
+                # database aside for being empty of MUSIC.
+                opened(sink)
+                closed(sink, skipped=True)
+                continue
+            if an.startswith("."):
+                # Any other hidden folder is a tool's marker (a sync client, a
+                # checkout) — the same finding the Artists/ level reports, and
+                # like it, nothing this module may move or delete.
+                opened(sink)
+                rows.append(_issue(
+                    "hidden_folder", ap, folder,
+                    "hidden folder \u201c%s\u201d inside artist folder "
+                    "\u201c%s\u201d" % (an, name),
+                    "hidden folders are not library content \u2014 move or "
+                    "delete it"))
+                closed(sink, reported=True)
+                continue
             if albums is not None and an not in albums:
                 # A neighbouring album of a scoped run: listed, not looked at.
                 opened(sink)
@@ -681,15 +742,27 @@ def scan_library(cfg=None, stats=None):
             # strays walk. The wrong-case check used to read the folder for
             # itself (`_list(album_dir)`), which made every album two directory
             # scans on top of this one.
-            album_entries = entries(ap, sink)
-            if not _has_audio(ap, album_entries):
+            album_entries, album_err = _list(ap)
+            if album_err:
+                # A folder that could not be listed is NOT an empty one. The
+                # failure is counted and the album is judged by nothing else —
+                # a transient error (a network mount, a concurrent writer, a
+                # permissions hiccup) used to read as "holds no audio" and the
+                # apply then offered the whole album for removal.
+                sink["error_count"] += 1
+                sink["errors"].append((ap, f"cannot list: {album_err}"))
+            elif not _has_audio(ap, album_entries):
+                removable, why = _removable_folder(ap)
                 rows.append(_issue(
                     "empty_album", ap, folder,
                     "album folder \u201c%s / %s\u201d holds no audio" % (name, an),
-                    "an empty album grades as an error \u2014 script 20 moves "
-                    "the folder to the Trash, so put the album in it first if "
-                    "it is one you are still filling",
-                    fix={"action": "trash"}))
+                    ("an empty album grades as an error \u2014 script 20 moves "
+                     "the folder to the Trash, so put the album in it first if "
+                     "it is one you are still filling") if removable else
+                    ("an album folder with no audio grades as an error, but %s "
+                     "\u2014 script 20 leaves it rather than take the files; "
+                     "remove the folder by hand if it is junk" % why),
+                    fix={"action": "trash"} if removable else None))
             # Letter-case drift: the folder or file is in the right PLACE but
             # spells its name the way the filesystem let somebody type it,
             # not the way the naming script spells it. Reported next to the
@@ -711,14 +784,19 @@ def scan_library(cfg=None, stats=None):
                         # turns the structure into one MKV (mlo.videodisc).
                         closed(sink, skipped=True)
                     else:
+                        removable, why = _removable_folder(fp)
                         rows.append(_issue(
                             "unexpected_subfolder", fp, folder,
                             "folder \u201c%s\u201d inside album \u201c%s / %s\u201d"
                             % (f, name, an),
-                            "only disc folders (CD1, Disc 2, \u2026) belong "
-                            "inside an album \u2014 script 20 moves it to the "
-                            "Trash",
-                            fix={"action": "trash"}))
+                            ("only disc folders (CD1, Disc 2, \u2026) belong "
+                             "inside an album \u2014 script 20 moves it to the "
+                             "Trash") if removable else
+                            ("only disc folders (CD1, Disc 2, \u2026) belong "
+                             "inside an album, but %s \u2014 script 20 leaves "
+                             "it rather than take the files; remove it by hand "
+                             "if it is junk" % why),
+                            fix={"action": "trash"} if removable else None))
                         closed(sink, reported=True)
                     continue
                 ext = os.path.splitext(f)[1].lower()
@@ -796,12 +874,16 @@ def scan_library(cfg=None, stats=None):
         # apply ask.
         if empty_artist(p):
             opened(sink)
+            removable, why = _removable_folder(p)
             rows.append(_issue(
                 "empty_artist", p, folder,
                 "artist folder \u201c%s\u201d holds no album folder" % name,
-                "remove it to the Trash (script 20, Optimize library layout), "
-                "or put one of the artist's albums inside it",
-                fix={"action": "trash"}))
+                ("remove it to the Trash (script 20, Optimize library layout), "
+                 "or put one of the artist's albums inside it") if removable
+                else ("the artist folder holds no album, but %s \u2014 script "
+                      "20 leaves it rather than take the files; remove the "
+                      "folder by hand if it is junk" % why),
+                fix={"action": "trash"} if removable else None))
             closed(sink, reported=True)
         return rows, sink
 
@@ -1152,12 +1234,16 @@ def _may_trash(src, kind, lib, folder):
             return False, "it is a disc folder \u2014 the layout wants it"
         if _has_audio(src):
             return False, "it holds audio now"
-        return True, ""
+        # The folder is only removable when it is EMPTY: the removal takes
+        # everything inside it, and a folder that still holds the rip's
+        # sidecars or its artwork is not "an empty album" (see
+        # :func:`_removable_folder`).
+        return _removable_folder(src)
     if kind == "empty_artist":
         if not empty_artist(src):
             return False, ("it is no longer an artist folder without albums "
                            "\u2014 it holds an album or audio now")
-        return True, ""
+        return _removable_folder(src)
     # A stray: the file the scan reported as neither audio, artwork nor a
     # known sidecar — the row's own detail line, checked again.
     if os.path.isdir(src):
@@ -1257,8 +1343,10 @@ def apply_fixes(cfg=None, report=None, stats=None, user=None):
     one on each row it can settle) are carried out: a name spelled in the
     wrong letter case is renamed to the script's spelling, audio that is not in
     an album folder is moved into the one its own tags name, and what is excess
-    — a stray file, a foreign folder holding no audio, an album folder with no
-    audio in it, an artist folder with no album — goes to the app's Trash.
+    — a stray file, a duplicate sidecar, the app's own ``.mlo_*`` leftover, an
+    EMPTY album/artist/foreign folder — goes to the app's Trash. A folder that
+    still holds files carries no trash fix at all: it is reported with the
+    reason it stayed (see :func:`_removable_folder`).
     Every row's reason is re-derived from the folder itself at the move (see
     :func:`_may_trash`), so a library that changed since the scan is refused,
     not acted on, and every row is reported either way — the report says what

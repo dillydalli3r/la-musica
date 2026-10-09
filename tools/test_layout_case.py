@@ -330,9 +330,14 @@ ok(res["counts"].get("empty_artist") == 1
 ok(bool(ea[0]["detail"]) and "no album folder" in ea[0]["detail"]
    and "Solo" in ea[0]["detail"],
    f"the row says which folder and why ({ea[0]['detail']})")
-ok("Trash" in ea[0]["hint"],
-   f"the hint names the Trash — the only removal this app offers a user "
-   f"({ea[0]['hint']})")
+# The artist folder here holds artist.jpg + description.txt (the artist's own
+# art), so the scan reports it and offers NO removal: a folder-level removal
+# takes everything inside it, and script 20 only removes a folder that is
+# EMPTY. The hint says so, and says what a user who wants it gone can do.
+ok(not ea[0].get("fix"),
+   f"an artist folder that still holds files carries NO removal ({ea[0].get('fix')})")
+ok("leaves it" in ea[0]["hint"] and "by hand" in ea[0]["hint"],
+   f"…and the hint says the files are why it stays ({ea[0]['hint']})")
 # The near miss: audio anywhere beneath keeps a folder out of this finding.
 ok(not any(i["path"] == "Artists/Loose" for i in ea)
    and res["counts"].get("audio_in_artist") == 1,
@@ -379,6 +384,14 @@ NOBODY = os.path.join(MF, "Artists", "Nobody")
 os.makedirs(NOBODY, exist_ok=True)
 with open(os.path.join(NOBODY, "artist.jpg"), "wb") as f:
     f.write(b"x")
+# A genuinely EMPTY artist folder, and a genuinely EMPTY album folder: the only
+# two shapes a folder-level removal may ever take. "Holds no audio" is a
+# finding; an empty folder is the proof the removal needs (the owner's report
+# was whole album folders that still held their .cue/.log/artwork).
+DUST = os.path.join(MF, "Artists", "Dust")
+os.makedirs(DUST, exist_ok=True)
+GONE = os.path.join(MF, "Artists", "Caps", "Gone")
+os.makedirs(GONE, exist_ok=True)
 
 print("== apply fixes (script 20 through /api/run) ==")
 # The real path, exactly as the Optimization page's Run button takes it: the
@@ -409,23 +422,34 @@ ok(stored(os.path.join(MF, "Artists", "Loose"), "Loose Album")
    and stored(os.path.join(MF, "Artists", "Loose", "Loose Album"), "1-01 Song.flac")
    and not os.path.exists(os.path.join(MF, "Artists", "Loose", "1-01 Song.flac")),
    "audio loose in an artist folder moved into the album folder its own tags name")
-ok(not os.path.exists(NOBODY) and not os.path.exists(SOLO),
-   "both album-less artist folders are gone from Artists/")
+# The album-less artist folders that still HOLD FILES are left where they are —
+# a folder-level removal takes everything inside it, and the probe is that the
+# folder is empty — while the two genuinely EMPTY shells are gone.
+ok(os.path.isdir(NOBODY) and os.path.isfile(os.path.join(NOBODY, "artist.jpg"))
+   and os.path.isdir(SOLO),
+   "an album-less artist folder that still holds files is left where it is")
+ok(not os.path.exists(DUST) and not os.path.exists(GONE),
+   "the genuinely empty artist and album shells are removed")
+ok(os.path.isdir(os.path.join(MF, "Artists", "Caps", "Empty"))
+   and os.path.isfile(os.path.join(MF, "Artists", "Caps", "Empty", "cover.jpg")),
+   "an album folder holding only its cover is left — the cover is a file, and "
+   "nothing here takes a file the scan did not name")
 
 # The counts, and the rows: what is settled leaves `issues`, what may not move
 # stays — with its reason.
-ok(res.get("fixed") == 9 and res.get("fix_failed") == 0,
-   f"nine fixes, none failed (got fixed={res.get('fixed')} failed={res.get('fix_failed')})")
-ok(res.get("skipped") == 2
-   and sorted(res["counts"]) == ["hidden_folder", "unexpected_folder"],
-   f"the two rows nothing may act on are still reported — the foreign folder "
-   f"that holds audio and the hidden folder ({res.get('skipped')} skipped, "
-   f"{res['counts']})")
-ok(res["total"] == len(res["issues"]) == 2,
+ok(res.get("fixed") == 8 and res.get("fix_failed") == 0,
+   f"eight fixes, none failed (got fixed={res.get('fixed')} failed={res.get('fix_failed')})")
+left_kinds = sorted(res["counts"])
+ok("empty_album" in left_kinds and "empty_artist" in left_kinds
+   and "hidden_folder" in left_kinds and "unexpected_folder" in left_kinds,
+   f"every row that may not move is still reported with its reason "
+   f"({res['counts']})")
+ok(res["total"] == len(res["issues"]),
    f"total/counts/issues agree after the fixes ({res['total']}, {len(res['issues'])})")
-# The stray file and the empty album the scan reported are GONE from the
-# library, and both are in the Trash with their origin recorded — which is the
-# whole of "removed" here: the Trash page lists them and can put them back.
+# The stray file and the two EMPTY shells the scan reported are GONE from the
+# library, and each is in the Trash with its origin recorded — which is the
+# whole of "removed" here: the Trash page lists it and can put it back. Nothing
+# that still held a file is in the Trash at all.
 def binned(name):
     """The path a Trash entry called *name* has, or "" when there is none."""
     root = os.path.join(MF, ".mlo", "trash")
@@ -450,24 +474,28 @@ ok(os.path.isfile(os.path.join(MF, "Artists", "Dup", "Dup Album", "description.t
    "…and the canonical description.txt the app reads is untouched")
 ok(dup_dest and open(dup_dest, "r", encoding="utf-8").read().startswith("the album's own"),
    f"…while the copy is in the Trash, byte for byte ({dup_dest})")
-empty_dest = binned("Empty")
-ok(not os.path.exists(os.path.join(MF, "Artists", "Caps", "Empty")),
-   "the empty album folder is gone from Artists/")
-ok(empty_dest and os.path.isfile(os.path.join(empty_dest, "cover.jpg")),
-   f"…and it is in the Trash with the file it held, not deleted ({empty_dest})")
+empty_dest = binned("Gone")
+ok(not os.path.exists(GONE), "the empty album folder is gone from Artists/")
+ok(empty_dest and os.path.isdir(empty_dest) and not os.listdir(empty_dest),
+   f"…and it is in the Trash, empty as it was, not deleted ({empty_dest})")
+dust_dest = binned("Dust")
+ok(not os.path.exists(DUST) and bool(dust_dest),
+   f"…as is the empty artist shell ({dust_dest})")
+ok(not binned("Nobody") and not binned("Solo") and not binned("Empty"),
+   "no folder that still held a file was moved to the Trash")
 with open(os.path.join(os.path.dirname(stray_dest), ".mlo_manifest.json"),
           encoding="utf-8") as f:
     trashed = json.load(f).get("entries", {})
 ok(str(trashed.get("notes.txt", {}).get("origin", "")).replace("\\", "/")
    == stray.replace("\\", "/")
-   and str(trashed.get("Empty", {}).get("origin", "")).replace("\\", "/")
-   == os.path.join(MF, "Artists", "Caps", "Empty").replace("\\", "/"),
+   and str(trashed.get("Gone", {}).get("origin", "")).replace("\\", "/")
+   == GONE.replace("\\", "/"),
    f"…and each records where it came from, so the Trash page can restore it "
    f"({sorted(trashed)})")
 ok("stray file" in fixes.get("Artists/Good/Good Album/notes.txt", {}).get("action", ""),
    f"the removal is worded for the user ({fixes.get('Artists/Good/Good Album/notes.txt')})")
-ok("empty album folder" in fixes.get("Artists/Caps/Empty", {}).get("action", ""),
-   f"…and so is the folder's ({fixes.get('Artists/Caps/Empty')})")
+ok("empty album folder" in fixes.get("Artists/Caps/Gone", {}).get("action", ""),
+   f"…and so is the folder's ({fixes.get('Artists/Caps/Gone')})")
 ok(all(f["result"] in ("fixed", "failed", "skipped") and f["action"]
        for f in res.get("fixes", [])),
    "every outcome is a result plus words, so a reader can say what happened")
@@ -495,12 +523,13 @@ def landed_entry(name):
     return ""
 
 
-for name, folder, files in (("Nobody", NOBODY, ["artist.jpg"]),
-                            ("Solo", SOLO, ["artist.jpg", "description.txt"])):
+# The two shapes a folder-level removal is allowed to take ARE removed, and
+# their Trash entry records where each came from, so the Trash page can restore
+# it. (A folder that still held a file is in no bin at all — asserted above.)
+for name, folder in (("Dust", DUST), ("Gone", GONE)):
     dest = landed_entry(name)
-    ok(bool(dest) and all(os.path.isfile(os.path.join(dest, f)) for f in files),
-       f"the album-less artist folder {name} landed in the Trash with every "
-       f"file — nothing was deleted ({dest})")
+    ok(bool(dest) and os.path.isdir(dest),
+       f"the empty folder {name} landed in the Trash ({dest})")
     with open(os.path.join(os.path.dirname(dest), ".mlo_manifest.json"),
               encoding="utf-8") as f:
         entries = json.load(f).get("entries", {})
@@ -741,9 +770,8 @@ print("== the re-derivation: a report that no longer describes the folder ==")
 # the folder the report calls an empty album is FILLED between the two — the
 # user's own edit, mid-run — and the removal has to refuse rather than act.
 LATER = os.path.join(MF, "Artists", "Caps", "Later")
-os.makedirs(LATER, exist_ok=True)
-with open(os.path.join(LATER, "cover.jpg"), "wb") as f:
-    f.write(b"x")
+os.makedirs(LATER, exist_ok=True)     # EMPTY: the only shape the scan offers
+                                      # a removal for
 
 stale = layoutmod.scan_library({"music_folder": MF, "naming_script": SCRIPT})
 row = [i for i in stale["issues"] if i["path"] == "Artists/Caps/Later"]
@@ -767,7 +795,7 @@ ok(os.path.isdir(LATER) and os.path.isfile(os.path.join(LATER, "1-01 Song.flac")
 # whole reason its row carries no fix) and a hidden folder (which never does).
 by_path = {f["path"]: f for f in out["fixes"]}
 ok(by_path.get("Downloads", {}).get("result") == "skipped"
-   and "foreign folder holding audio" in by_path.get("Downloads", {}).get("action", ""),
+   and "foreign folder that holds audio or files" in by_path.get("Downloads", {}).get("action", ""),
    f"a foreign folder holding audio is left, with the reason ({by_path.get('Downloads')})")
 ok(by_path.get("Artists/.stfolder", {}).get("result") == "skipped"
    and "hidden folder" in by_path.get("Artists/.stfolder", {}).get("action", ""),
@@ -901,5 +929,62 @@ ok(scoped_snap["report"]["artists"] > 1,
 ok(scoped_snap["stale"] is False,
    "the stored report is not marked stale by the refresh's own config")
 layoutmod.scan_library = _real_scan
+
+print("== the app's own state is never an album folder ==")
+# The owner's report, exactly: a library that kept its state inside the artist
+# folder. The scan used to hand "<artist>/.mlo" to the apply as "an album folder
+# with no audio" — moving the app's own database to the Trash — and its child
+# "data" as an "unexpected folder" inside that album. Both are the app's own,
+# and both are invisible to this walk now (SKIP_DIRS plus the `.mlo*` prefix).
+ARTIST_MLO = os.path.join(MF, "Artists", "Caps", ".mlo", "data")
+os.makedirs(ARTIST_MLO, exist_ok=True)
+with open(os.path.join(ARTIST_MLO, "keep.json"), "w", encoding="utf-8") as f:
+    f.write("{}")
+_scan_mlo = layoutmod.scan_library({"music_folder": MF, "naming_script": SCRIPT})
+_mlo_rows = [i for i in _scan_mlo["issues"]
+             if "/.mlo" in i["path"] or i["path"].endswith("/.mlo")]
+ok(not _mlo_rows,
+   f"a .mlo state folder inside an artist folder is not an album, and is not "
+   f"reported ({_mlo_rows})")
+layoutmod.apply_fixes({"music_folder": MF, "naming_script": SCRIPT}, _scan_mlo)
+ok(os.path.isfile(os.path.join(ARTIST_MLO, "keep.json")),
+   "…and the apply never moves it — the app's own state is not 'an album with "
+   "no audio'")
+
+print("== a folder that cannot be listed is not an empty one ==")
+# A transient listing failure (a network mount, a concurrent writer, a
+# permissions hiccup) used to read as "holds no audio": the scan offered the
+# whole album for removal and the apply took it, sidecars and all. The failure
+# is an ERROR now, and the album is judged by nothing else.
+UNREAD = os.path.join(MF, "Artists", "Caps", "Unreadable")
+album("Artists/Caps/Unreadable", tags("Caps", "Unreadable Album"))
+_real_list = layoutmod._list
+
+
+def _flaky_list(d):
+    if os.path.normcase(os.path.abspath(d)) == os.path.normcase(os.path.abspath(UNREAD)):
+        return [], "injected listing failure"
+    return _real_list(d)
+
+
+layoutmod._list = _flaky_list
+try:
+    _stats = {"total_scanned": 0, "skipped_count": 0, "unchanged_count": 0,
+              "error_count": 0, "errors": []}
+    _rep = layoutmod.scan_library({"music_folder": MF, "naming_script": SCRIPT}, _stats)
+    _row = [i for i in _rep["issues"] if i["path"] == "Artists/Caps/Unreadable"]
+    ok(not _row,
+       f"an unlistable album folder is NOT reported as an empty album ({_row})")
+    ok(_stats["error_count"] >= 1
+       and any("cannot list" in e[1] for e in _stats["errors"]),
+       f"…the failure is counted as the error it is ({_stats['errors'][-1:]})")
+    _out2 = layoutmod.apply_fixes({"music_folder": MF, "naming_script": SCRIPT}, _rep)
+    _offer = [f for f in _out2["fixes"] if f["path"] == "Artists/Caps/Unreadable"]
+    ok(not _offer, f"…and nothing offers to remove it ({_offer})")
+    ok(os.path.isdir(UNREAD)
+       and os.path.isfile(os.path.join(UNREAD, "1-01 Song.flac")),
+       "…so the album is still there, every file of it")
+finally:
+    layoutmod._list = _real_list
 
 print(f"\nAll {passed} checks passed.")
