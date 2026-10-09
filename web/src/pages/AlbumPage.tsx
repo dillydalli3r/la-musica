@@ -1,7 +1,7 @@
 ﻿import { Fragment, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { ChevronDown, ChevronRight, CircleAlert, Play, Wand2, Trash2, FolderSync, FolderOpen, BarChart3, ImageUp, Image as ImageIcon, FileVideo, Film, Disc3, CloudDownload, Sparkles, ListPlus, ListStart, ShieldCheck, FileMusic, ListChecks, Info as InfoIcon, Loader2, Pencil, RefreshCw, Tags, Users } from "lucide-react";
+import { ChevronDown, ChevronRight, CircleAlert, Play, Wand2, Trash2, FolderSync, FolderOpen, BarChart3, ImageUp, Image as ImageIcon, FileVideo, FileCheck2, Film, Disc3, CloudDownload, Sparkles, ListPlus, ListStart, ShieldCheck, FileMusic, ListChecks, Info as InfoIcon, Loader2, Pencil, RefreshCw, Tags, Users } from "lucide-react";
 import { api } from "../api";
 import { rescanLayout } from "../lib/layoutScan";
 import { LinkChips, LinkEditorButton } from "../components/Links";
@@ -1064,6 +1064,16 @@ export default function AlbumPage() {
                     { label: SCRIPT_LABEL[5], icon: FileMusic, onClick: () => runScripts([5]) },
                     { label: SCRIPT_LABEL[6], icon: ShieldCheck, onClick: () => runScripts([6]) },
                     { label: SCRIPT_LABEL[7], icon: FileMusic, onClick: () => runScripts([7]) },
+                    // 9 · AccurateRip: sits right behind 7 because both are
+                    // "measure this rip" passes, and it is the pass the CD
+                    // audit's own verdict is written FROM — the grade reports
+                    // "nothing established the CD verdict's 'accuraterip'
+                    // evidence" when a disc has no .accurip, so the album whose
+                    // readout just said that is exactly where the script that
+                    // writes it belongs. Folder-scoped (one .accurip per CD
+                    // disc, CUETools), which is why it is here and not on a
+                    // track row.
+                    { label: SCRIPT_LABEL[9], icon: FileCheck2, onClick: () => runScripts([9]) },
                     { label: SCRIPT_LABEL[8], icon: FileMusic, onClick: () => runScripts([8]) },
                     { label: SCRIPT_LABEL[4], icon: FileMusic, onClick: () => runScripts([4]) },
                     // 23 · Optimize tags: the scoped excess-tag strip, right
