@@ -1,5 +1,5 @@
 # la musica
-**v7.0.0** — a self-hosted app that manages, optimizes, audits, grades, downloads and plays your music library, from a browser, a desktop window or a phone.
+**v1.0.0** — a self-hosted app that manages, optimizes, audits, grades, downloads and plays your music library, from a browser, a desktop window or a phone.
 
 FastAPI backend + React UI over the `mlo` engine: music and music videos, playlists, favourites, artist artwork and biographies, a multi-source lyrics chain, and MusicBrainz / Discogs / AcoustID identity. All app state — config, playlists, the beets library, caches, downloads, trash, runtime-installed tools — lives in one `.mlo` folder beside your music.
 
@@ -42,7 +42,7 @@ are there for the rest.
 - **Import** — archives, folders and uploads all run one pipeline through the eight-step wizard (Select → Links → Match → Covers → Genres → Lyrics → Advisory → Finish), then the import script chain (the Finish step ticks the chain's scripts and can force a re-run of the ones it ticks). A whole-CD image rip (one `.flac` plus its `.cue`) is split into one file per track on the way in. AcoustID matching, MBID assignment, and a framework album for a release you add before its audio exists.
 - **Optimization** — 25 scripts, Run All or one at a time: lyrics, CUEs, FLAC re-encode, covers, audits, DR/ReplayGain, AccurateRip, key/BPM, beets tags, transliteration, artist images (fetch then re-fit), artist bios, layout, tag strip, web ratings. Each script, its force flags and its order: the spec.
 - **Grading** — 70 checks over tracks, albums, artist folders and folders, toggleable per check with Strict/Balanced/Relaxed presets; Home and the Library open with the verdict and what fails.
-- **Discover & export** — genre browse and recommendations from the library's own tags and from online providers; export as MP3/AAC/Opus/Vorbis/FLAC-copy in `zip` or server-side; offline downloads; notifications (including Web Push) in six languages.
+- **Discover & export** — genre browse and recommendations from the library's own tags and from online providers (RateYourMusic first for track genres and web ratings, and browsable by genre); export as MP3/AAC/Opus/Vorbis/FLAC-copy in `zip` or server-side, with a codec's own quality presets (MP3 V0…V5, a custom bitrate, or `copy` for no transcode) and one "set as default" behind both the Export page and the player bar's per-track panel; offline downloads; notifications (including Web Push) in six languages.
 
 ## Clients
 The same React build runs in every target. The desktop install (Windows,

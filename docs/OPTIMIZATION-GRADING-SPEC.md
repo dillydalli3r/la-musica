@@ -563,14 +563,27 @@ pressed, which clears one album's aliases without the library-wide pass (10) or 
 re-encode (3, whose rewrite strip follows the vocabulary half only, `mlo.containers`).
 `ALBUMALIAS` is graded by both halves like the other two; it is written by the import
 and the tagging stage and was graded by nothing before this rule.
-**R17 — CD vs Digital Media vs other.** `_is_cd()` is `mlo.tagtext.is_cd_media`:
-`MEDIA == "cd"` or `"hdcd"`, case-insensitively. An **HDCD is a CD** — the same
-disc with the extra High Definition Compatible Digital encoding on it, ripped
-and logged the same way — so the CUE/LOG/AccurateRip/CRC/`LOG_GRADE`
-expectations, the `.log`-CRC audit legs (R21) and the `SOURCE` stripping a CD
-gets all apply to `MEDIA=HDCD` exactly as they do to `MEDIA=CD`; the two are one
-vocabulary value each (`mlo.tagtext.CD_MEDIA_VALUES`), and `HDCD` is a value of
-`MEDIA_VALUES` rather than an unknown one. `MEDIA == "digital media"` requires
+**R17 — CD vs Digital Media vs other.** `_is_cd()` is `mlo.tagtext.is_cd_media`,
+and **every form of CD is a CD**: `MEDIA` naming any value of MusicBrainz's CD
+family — `CD`, `HDCD`, `SHM-CD`, `UHQCD`, `HQCD`, `Blu-spec CD`, `Blu-spec CD2`,
+`XRCD`, `Enhanced CD`, `Copy Control CD`, `Mixed Mode CD`, `Data CD`, `DTS CD`,
+`Minimax CD`, `8cm CD`, `8cm CD+G`, `CD+G`, `CD-R` — answers the same question
+the same way, case-insensitively and with the separators folded (`SHMCD` is
+`SHM-CD`). They are the same disc: red-book 16-bit/44.1 kHz audio that a ripper
+logs, cues and checksums exactly like any other pressing, so the
+CUE/LOG/AccurateRip/CRC/`LOG_GRADE` expectations, the `.log`-CRC audit legs
+(R21) and the `SOURCE` stripping a CD gets all apply to every one of them
+exactly as they do to `MEDIA=CD`. Each keeps its own spelling as a value of
+`MEDIA_VALUES` rather than being rewritten to `CD` — that is what the release
+states and what an import stamps (`mlo.release_choice.cd_media_value`), so a
+`SHM-CD` album's MEDIA says `SHM-CD` while every CD rule treats it as one. The
+SAME predicate is what a MusicBrainz FORMAT name is read with
+(`mlo.release_choice.is_cd_format`), so the best-release choice, the search
+templates and the Soulseek pipeline's own `.log`/`.cue` gate can never disagree
+with the grader about what a CD pressing is. **Deliberately not the family:**
+`SACD` (a DSD disc with its own evidence rules) and the video discs (`VCD`,
+`SVCD`) whose names merely contain the letters `cd` — a video format is never
+claimed by the `CD` label of the medium order either. `MEDIA == "digital media"` requires
 `SOURCE`. Any other value in `KNOWN_MEDIA` is graded like Digital Media without
 the `SOURCE` requirement, and a value outside `KNOWN_MEDIA` fails
 `grade_check_media`. Two interactions follow
@@ -1984,7 +1997,21 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   level. The subfolder under the export root (`safe_subfolder`), the CUE
   sheet's own name (`re_safe_filename`) and the organizer (`eval_script` →
   `sanitize_path`) all call this one function: a second spelling of the character set is how a path
-  the app WROTE stops being a path the app can FIND again.
+  the app WROTE stops being a path the app can FIND again. **The rule has a
+  LENGTH half too** (`mlo.naming.MAX_SEGMENT_BYTES`, 240 UTF-8 bytes): a
+  filesystem refuses a name over 255 characters (NTFS) or 255 bytes (ext4,
+  APFS), and Windows stops a whole path at 260 (`mlo.subproc.MAX_PATH_LIMIT`,
+  which the app mirrors and never lifts) — 240 leaves room for the short
+  suffixes the app's own writers append (`.m3u8`, a ` (2)` collision,
+  `.mlo_tmp_…`, a Trash timestamp). What gives way is the TITLE, never the
+  name: `eval_script` caps each free-text value (title/album/artist/label/
+  catalog/genre), measures the longest segment the script produced and shrinks
+  the cap by the overflow until it fits, so the disc/track numbers, the
+  MusicBrainz ids, the brackets and the extension survive while the words are
+  cut; a backstop (extension-preserving, re-sanitized, never mid-character on a
+  multi-byte title) catches a name whose LITERAL text is too long. The length
+  half is a fixed point too, and `name_key` — the reader's comparison key —
+  applies it, so a writer and a reader can never disagree about a long name.
 - **R101 — the tags keep the truth; only the NAME on disk changes.** A `TITLE`
   of `AC/DC` is written to the file as `AC_DC.flac` and the tag inside stays
   `AC/DC`, byte for byte: the library's data is the evidence, and sanitisation
@@ -2069,6 +2096,22 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   the load says "its equalizer profile '…' is gone — pick another profile
   before exporting", and the run refuses that profile — never a silent
   fallback to another curve.
+- **R97b — the export vocabulary is the server's, on every surface that
+  exports.** A codec and its quality presets are read from `GET
+  /api/export/codecs` (`server.exporter.codec_specs`: label, produced
+  extension, the ordered presets with their bitrates, the custom range and the
+  codec's default) — never a second hand-written table beside it. The Export
+  page and the PLAYER BAR's per-track export panel render the SAME control
+  (`web/src/components/CodecQualitySelect.tsx`), so MP3 offers V0…V5,
+  320/256/192/128 CBR and a custom bitrate on both, FLAC its compression
+  levels, and adding a codec needs no UI change. `GET /api/track/export` takes
+  the same two fields the export request uses (`codec`, `quality` — `FORM_FIELDS`
+  minus the rest) and builds its ffmpeg arguments with the exporter's own
+  builder; the `copy` codec serves the ORIGINAL file with no transcode at all.
+  "Set as default" writes `export_codec`/`export_quality` — R97's saved-default
+  keys, the same ones the Export page's own button writes — and a surface that
+  has them reads them when it opens, so the panel starts on the user's own
+  choice rather than on a hardcoded default.
 - **R98 — the EQ profiles the app accepts are Equalizer APO / Peace files,
   both shapes, and their approximations are stated.** ONE parser
   (`mlo/eq.py`) reads both. The first shape is the Equalizer APO / Peace text:
@@ -4166,6 +4209,31 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   survives the memory ring, that a client which already saw it is not sent it
   twice, and that the log keeps exactly the newest `_LOG_KEEP` frames. The append and the compaction it may trigger share the module lock: the rewrite is a read-modify-write of the whole file, so a frame appended between its read and its `os.replace` would be rewritten away — silently, and only under concurrent emitters.
 
+- **R216b — an import RUN earns ONE notice, not one per album.** A run of
+  albums (a bulk "Import all downloads", a wishes pass, the auto-import
+  pipeline draining) narrates its own progress and its own successes as STEPS,
+  not as frames: `server.events.import_step` counts `import_done` (an album's
+  chain finished) and `download_done` (the run's own tally) and publishes
+  nothing, and once nothing has happened for `_COALESCE_QUIET_S` (20 s) the run
+  earns ONE frame — the run's own summary when it has one, that album's own
+  words and album link when the run was a SINGLE album, and a count ("Imported
+  5 albums") otherwise — under the `import_done` kind, which is already an
+  OS-popup kind with the user's own switch (`notify_import_done`). Nothing is
+  lost: every step is still on the queue page, which is where progress lives.
+  **Progress keeps its own contract**: `download_started`, `import_ready` and
+  `import_started` are the user's switches (off by default) and go out
+  immediately when they are on — a switch that says "narrate the middle" has to
+  mean it — and they are never counted. **Failures are never held**:
+  `download_failed` (every candidate for a release tried and rejected) and the
+  wish's terminal ends (`wish_not_found`/`wish_failed`) speak at once, which is
+  the notice the user must not wait 20 s for, and `import_needs_data` likewise
+  (the app is stuck on an album and a person has to decide; the queue's
+  needs-attention section names it meanwhile). `tools/test_notifications.py`
+  pins all four halves: three albums then ONE frame counting them, a single
+  album speaking in its own words, the run's own tally winning, progress-only
+  publishing nothing at all, and a failed run adding no summary to the failure
+  that spoke.
+
 - **R206 — a stored audit verdict is trusted for the AUDIO it was written for,
   not for the file's mtime.** Script 6 re-decides nothing it can already prove: a
   file whose evidence record describes what is on disk — its size and mtime, or
@@ -5141,6 +5209,23 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   changes the queue, never fires from a text field's own undo, and has no
   button: it is named in the app's keyboard help. Micro-seeks (a drag's own
   steps) never enter the stack.
+
+- **R301b — a drag on a seek bar HOLDS the sound; the release resumes it.**
+  A scrub is a gesture, not a stream of seeks: while the progress bar is
+  dragged the element is paused (`beginScrub`, one hold per gesture, the
+  element the press landed on) and when the pointer is released the SAME
+  element starts again — only if it was really playing, so scrubbing a paused
+  track never starts it — at the position the drag ended on. The release is
+  listened for on the WINDOW as well as on the bar, so a drag that ends with
+  the pointer off the track still puts the sound back. It is a HOLD, not a
+  stop: the pause it causes never clears `playing` (PlayerBar's `handlePause`),
+  so the bar, the fullscreen player, the media session and the next-track
+  preload keep reading the track as the playing one and nothing downstream is
+  torn down for a one-second gesture. Both seek bars behave this way — the
+  bar's own input and the fullscreen `ScrubSeek` (audio and video) — and
+  `scrub-start`/`scrub-end` are rows in the playback black box (R299's
+  diagnostics), which is what makes a "sound stopped while I was dragging"
+  report answerable.
 
 - **R302 — what the OS draws now moves with the app's own transport.**
   `seekbackward`/`seekforward` are REGISTERED (±10 s, honouring the platform's
