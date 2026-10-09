@@ -41,16 +41,17 @@ function chipLabel(reason: string): string {
 }
 
 /** The policy RULE behind a reason, for the chip's tooltip: the reason states
- *  a fact about one edition ("16/16 tracks of the release group"), the rule
- *  states what that fact means ("a release short of the release group's track
- *  count is penalised"), and the two are paired by the words they share. No
+ *  a fact about one edition ("16/16 tracks of the release group's own count"),
+ *  the rule states what that fact means ("the album's own count is what a
+ *  release is measured against"), and the two are paired by the words they
+ *  share. No
  *  match is fine — the chip falls back to the reason's own sentence, which is
  *  why a reworded rule can never make the UI lie. */
 const RULE_HINTS: [RegExp, RegExp][] = [
   [/official|promotion|bootleg|unofficial/i, /official|promotion|bootleg/i],
   [/\bcd\b|medium|digital|vinyl/i, /medium order|physical|digital/i],
-  [/tracks? of the release group|complete|short of/i, /track count|complete/i],
-  [/original release date|reissue|deluxe|later edition/i, /reissue|original edition/i],
+  [/tracks? of the release group|tracks? of the album|complete|short of/i, /track count|count|complete/i],
+  [/original release date|reissue|deluxe|later edition/i, /earliest|reissue|original edition/i],
   [/country/i, /country/i],
   [/clean|edited|explicit audio/i, /explicit|clean|altered/i],
   [/disambig|parenthes/i, /plain|parenthes/i],

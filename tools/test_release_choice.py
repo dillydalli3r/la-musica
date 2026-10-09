@@ -184,13 +184,79 @@ assert pick([two]) == "two"
 # …and the medium rule still outranks this one: a CD+DVD combo beats vinyl
 assert pick([rel("vinyl", fmt="Vinyl"), boxed]) == "box", order([rel("vinyl", fmt="Vinyl"), boxed])
 
-# the release group's OWN stated count is what an oversized edition is measured
-# against: 30 tracks for a group that says 12 loses to the 12
+# the ALBUM'S OWN count is what a release is measured against, and it is the
+# release group's OWN when the group states one: 30 tracks for a group that
+# says 12 loses to the 12 …
 over = rel("over", fmt="CD", tracks=30)
 assert pick([over, plain], group(track_count=12)) == "plain", order([over, plain])
-# with no stated count the fullest edition DEFINES the target, so it is not
-# penalised for being the fullest (the pre-existing rule, unchanged)
+# … and with NO stated count the reference is the FULLEST single-disc edition
+# of the album's own pressings (the normal shape, and the one carrying the most
+# tracks), so a much fuller edition still defines the album and the shorter one
+# is the partial pressing.
+assert rc.expected_tracks(group(), [over, plain]) == 30, rc.expected_tracks(group(), [over, plain])
 assert pick([over, plain]) == "over", order([over, plain])
+# The reference is exactly that: the fullest SINGLE-disc edition. A multi-disc
+# box never sets it (its total is not what a single CD carries), and neither
+# does an edition naming itself expanded — the reported bug, where a 2012 "XX"
+# anniversary CD of 13 tracks came back over the band's 10-track album because
+# the group's other pressings had made a 5-disc box's 90 the "group count".
+pressing = [rel(f"p{i}", tracks=10) for i in range(5)]
+xx = rel("xx", tracks=13, title="Album XX", disambiguation="20th anniversary edition")
+assert rc.expected_tracks(group(), pressing + [xx]) == 10, \
+    rc.expected_tracks(group(), pressing + [xx])
+assert pick(pressing + [xx]) == "p0", order(pressing + [xx])
+xx_row = [c for c in rc.rank_releases(group(), pressing + [xx], cfg())
+          if c.release_mbid == "xx"][0]
+assert any("names itself an anniversary" in r for r in xx_row.reasons), xx_row.reasons
+boxy = rel("boxy", tracks=90, fmt="CD",
+           media=[{"format": "CD", "track-count": 18}] * 5)
+assert rc.expected_tracks(group(), pressing + [boxy]) == 10, \
+    rc.expected_tracks(group(), pressing + [boxy])
+# The fullest SINGLE CD is the preference, though: two single-disc pressings of
+# the album's own shape are ranked by the fuller one, and only those — the
+# reference is the filled disc, not the truncated one.
+assert rc.expected_tracks(group(), [rel("ten", tracks=10), rel("thirteen", tracks=13)]) == 13, \
+    rc.expected_tracks(group(), [rel("ten", tracks=10), rel("thirteen", tracks=13)])
+assert pick([rel("ten", tracks=10), rel("thirteen", tracks=13)]) == "thirteen", \
+    order([rel("ten", tracks=10), rel("thirteen", tracks=13)])
+# …and the album's own count is not measured against a promo either: a lone
+# 1-track promo cannot define the album, so the 12-track album does not read as
+# "holding more than the album" (`expected_tracks`'s own exclusion).
+promo1 = rel("promo1", status="Promotion", tracks=1)
+assert rc.expected_tracks(group(), [promo1, plain]) == 12, \
+    rc.expected_tracks(group(), [promo1, plain])
+
+# 1f. EXPANDED editions — an edition naming itself an anniversary, deluxe,
+#     expanded, bonus or box-set edition sorts below the album's own, even when
+#     it holds exactly the album's tracks and one disc: the name is the data
+#     saying "this is the album plus something", and it is the only signal a
+#     single-disc bonus re-release leaves (MusicBrainz files the 2012 "XX"
+#     anniversary CD as one CD of 13 tracks).
+named = rel("named", tracks=12, title="Album", disambiguation="20th anniversary edition")
+assert pick([named, plain]) == "plain", order([named, plain])
+named_row = [c for c in rc.rank_releases(group(), [named, plain], cfg())
+             if c.release_mbid == "named"][0]
+assert any("names itself an anniversary" in r for r in named_row.reasons), named_row.reasons
+assert rc.is_expanded_edition({"title": "Album XX", "disambiguation": "20th anniversary edition"})
+assert rc.is_expanded_edition({"title": "Album: 20th Anniversary Edition"})
+assert rc.is_expanded_edition({"title": "Album", "disambiguation": "Deluxe Edition"})
+assert rc.is_expanded_edition({"title": "Album (Expanded)"})
+assert rc.is_expanded_edition({"title": "Album", "disambiguation": "Box Set"})
+assert rc.is_expanded_edition({"title": "Album", "disambiguation": "Collector's Edition"})
+# What it deliberately is NOT: a plain remaster is the same album with the same
+# tracks (the date tier already prefers the earlier pressing), and a club or
+# catalogue comment says nothing about the contents.
+assert not rc.is_expanded_edition({"title": "Album", "disambiguation": "remastered"})
+assert not rc.is_expanded_edition({"title": "Album", "disambiguation": "BMG club edition"})
+assert not rc.is_expanded_edition({"title": "Album", "disambiguation": "CB 811"})
+# A group whose ONLY edition names itself expanded still gets it — the rule
+# ranks, it does not forbid.
+assert pick([named]) == "named"
+# An expanded edition never DEFINES the album's count either, so a deluxe
+# pressing cannot make the album read as short of it …
+deluxe_early = rel("dx", tracks=20, date="1994-01-01", disambiguation="Deluxe Edition")
+assert rc.expected_tracks(group(), [deluxe_early, plain]) == 12, \
+    rc.expected_tracks(group(), [deluxe_early, plain])
 
 # 1d. Physical video carriers rank ABOVE Digital Media (issue #53): a music
 #     video published on a disc is the release worth archiving, and naming the
@@ -257,24 +323,28 @@ lone = rc.choose_release(group(), [rel("promo", status="Promotion")], cfg())
 assert lone.eligible is False and any("no official edition exists" in r
                                       for r in lone.reasons), lone.reasons
 
-# 3. Completeness: a release short of the release group's own track count is
-#    penalised, so a 1-track promo can never win over the full album — even
-#    when both are official (status is not doing the work here).
+# 3. Completeness: a release short of the album's own count is penalised, so a
+#    1-track promo can never win over the full album — even when both are
+#    official (status is not doing the work here).
 rows = [rel("sampler", tracks=1, title="Sampler"),
         rel("album", tracks=12)]
 assert pick(rows, cfg=cfg()) == "album", order(rows, cfg=cfg())
 rows = [rel("promo", status="Promotion", tracks=1, date="1996-01-01"),
         rel("album", tracks=12, date="1997-01-20")]
 assert pick(rows, cfg=cfg()) == "album"
-# A stated release-group count wins over the fullest edition offered.
+# A stated release-group count is the reference, whatever the editions carry.
 assert pick([rel("full", tracks=12), rel("short", tracks=6)],
             group(track_count=12), cfg=cfg()) == "full"
-# A partial edition says so.
+# A partial edition says so — and says WHICH count measured it.
 short = rc.choose_release(group(), [rel("full", tracks=12), rel("short", tracks=6)], cfg())
 whole = [c for c in rc.rank_releases(group(), [rel("full", tracks=12),
                                                rel("short", tracks=6)], cfg())]
-assert any("short of the fullest edition offered" in r
+assert any("short of the album's own count" in r
            for c in whole for r in c.reasons), whole
+assert any("short of the release group's own count" in r
+           for c in rc.rank_releases(group(track_count=12),
+                                     [rel("full", tracks=12), rel("short", tracks=6)], cfg())
+           if c.release_mbid == "short" for r in c.reasons)
 
 # 4. The EARLIEST edition beats a later reissue/deluxe — the reference is the
 #    earliest edition the group OFFERS (not its stated first-release-date; see
@@ -282,12 +352,27 @@ assert any("short of the fullest edition offered" in r
 #    date in full wins.
 original, deluxe = rel("orig", date="1997-01-20"), rel("deluxe", date="2011-05-01")
 assert pick([deluxe, original], cfg=cfg()) == "orig"
-# … unless the later one is materially more complete.
+# A later edition wins on completeness only where the edition it would beat is
+# genuinely SHORT of the album's own count, i.e. where the two editions
+# disagree and the fuller one is the album (see rule 1e's mode block) — a
+# re-release cannot buy the pick with bonus material on top of the album's own
+# count, which is the half of this tier that used to be unreachable.
 heavy = rel("deluxe24", date="2011-05-01", tracks=24)
 assert pick([rel("orig", tracks=12), heavy], cfg=cfg()) == "deluxe24"
-assert any("short of the fullest edition offered" in r
+assert any("short of the album's own count" in r
            for c in rc.rank_releases(group(), [rel("orig", tracks=12), heavy], cfg())
            if c.release_mbid == "orig" for r in c.reasons)
+# …while the SAME re-release loses once the pressings agree on the album: five
+# 12-track single-disc pressings make the album's own count 12, so a 24-track
+# edition is the one carrying more. It is not demoted by the count (rule 6
+# prefers the fullest single CD) — it is the NAME that decides, so an edition
+# calling itself a deluxe/anniversary/XX edition loses to them (rule 1f above),
+# and an unnamed fuller pressing of the album's own shape wins.
+agreed = [rel(f"p{i}", tracks=12) for i in range(5)]
+assert pick(agreed + [heavy], cfg=cfg()) == "deluxe24", order(agreed + [heavy], cfg=cfg())
+named_heavy = rel("deluxe24x", date="2011-05-01", tracks=24, title="Album XX",
+                  disambiguation="Deluxe Edition")
+assert pick(agreed + [named_heavy], cfg=cfg()) == "p0", order(agreed + [named_heavy], cfg=cfg())
 # Among editions of the SAME year the one stating its date in full wins (the
 # album folder is named after this date) — and an earlier year still beats a
 # later, fully-dated one.

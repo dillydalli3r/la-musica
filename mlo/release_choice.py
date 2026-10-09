@@ -28,21 +28,35 @@ lower tier can ever outvote a higher one, which is why the score IS the order:
                video beats the same video published as a download), digital
                last by default. A format the order does not name ranks after
                every configured one.
-4. set         a box set — media this library cannot use (a DVD, a Blu-ray)
-               carried BESIDE the album's own, or three discs of the album —
-               sorts below the album's own. A release whose own medium is the
-               video carrier (a single-disc DVD/Blu-ray/VHS) is not a bundle
-               and is ranked by rule 3 like any other medium: what separates a
-               video edition is its stated recordings (rule 1), not its medium.
+4. set         an edition that is not the album as released sorts below the
+               album's own: a box set — media this library cannot use (a DVD,
+               a Blu-ray) carried BESIDE the album's own, or three discs of
+               the album — an edition that NAMES itself an expanded one
+               (anniversary, deluxe, expanded, bonus, box set, "XX"), or one
+               carrying an extra disc. A release whose
+               own medium is the video carrier (a single-disc DVD/Blu-ray/VHS)
+               is not a bundle and is ranked by rule 3 like any other medium:
+               what separates a video edition is its stated recordings
+               (rule 1), not its medium.
 5. compressed  a release that names itself a re-encode of a disc (BDRip,
                DVDRip, x264, …) sorts below the disc's own streams — a remux or
                a full-disc edition is taken as it comes, never a derivative.
-6. tracks      a release short of the release group's OWN track count is
-               penalised, so a 1-track promo can never beat the full album.
+6. tracks      a release is measured against the ALBUM'S OWN count — the
+               release group's when it states one, else its fullest
+               SINGLE-DISC pressing (see `expected_tracks`: the normal
+               shape, and the one carrying the most tracks) — so a partial
+               pressing (a 1-track promo, a half-length sampler) is penalised
+               in proportion and can never beat the album.
 7. date        the EARLIEST release date wins — the original pressing, not a
-               reissue or a deluxe — unless a later one is materially more
-               complete (tier 6 outranks this one). The reference is the
-               earliest edition this group OFFERS, not the group's stated
+               reissue or a deluxe. Nothing above it is a reason to prefer a
+               later edition: rule 4 demotes the ones that name themselves
+               expanded and the ones carrying extra discs or media, so the
+               bonus material a re-release carries can never outvote the date —
+               and an edition of the album's own shape that holds more tracks
+               merely ties here (rule 6, capped at the album's own count) rather
+               than winning. The
+               reference is the earliest edition this group OFFERS, not the
+               group's stated
                first-release-date: a pressing that predates that date is still
                the earlier record of the two, and an album whose original is
                not on offer is decided by the editions that are.
@@ -79,8 +93,9 @@ MusicBrainz fields read, per rule: `media[].video` on every recording the
 release states — the flat `media` of a release lookup or each disc's `tracks`
 in a raw payload (release, the video rule), `status` (release),
 `media[].format` and
-`medium_formats` (release), `track-count` per medium + the release group's own
-count (release / release group), `date` (release) against
+`medium_formats` (release), `track-count` per medium, and the release group's
+own count when it states one (release / release group) — the count the group's
+pressings agree on is the fallback, `expected_tracks` — `date` (release) against
 `first-release-date` (release group), `disambiguation` (release),
 `country` (release), `title` (release), and the release group's
 `primary-type` / `secondary-types` for the caller's type filter. The public
@@ -134,7 +149,7 @@ _TIER_LABELS = {
     "video": "the video edition rule",
     "status": "release status",
     "medium": "the medium order",
-    "set": "the box-set rule",
+    "set": "the box-set/extended-edition rule",
     "compressed": "the disc-versus-re-encode rule",
     "tracks": "the track count",
     "date": "the release date",
@@ -152,6 +167,8 @@ _TIER_LABELS = {
 _TIER_NOTES = {
     "video": "an edition whose recordings are all music videos ranks below one "
              "that carries the album's audio",
+    "set": "an edition that is the album plus media, discs or bonus material "
+           "ranks below the album as released",
     "date": "the earliest release date offered wins",
     "precision": "a full date beats one that states only its month or its year",
     "disambiguation": "a title with no MusicBrainz disambiguation comment "
@@ -190,21 +207,61 @@ def is_compressed_release(release):
 # disambiguation comment, never in a field of its own.
 _CLEAN_RE = re.compile(r"\bclean\b|\bedited\b|\bcensored\b|\bradio edit\b", re.IGNORECASE)
 
+# An EXPANDED edition: the album re-issued with more than the album. The app
+# must not prefer one over the album's own pressing — the extra material is not
+# what was asked for — so this is a DEMOTION, never a prohibition: a group whose
+# only edition is the anniversary box still gets it.
+#
+# MusicBrainz states these in the release's title or its disambiguation comment
+# ("20th anniversary edition", "Deluxe Edition", "Expanded", "Box Set",
+# "Collector's Edition", "Special Edition", "Album XX") and never in a field of
+# its own — the same two fields the compressed-release and clean-edition rules
+# read. Deliberately NOT here: `remaster`/`remastered` (a remaster is the same
+# album with the same tracks, and the date tier already prefers the earlier
+# pressing). A bare "xx" rides the same rule: it is what re-releases are
+# titled, and an album whose OWN title carries it demotes every edition of its
+# group alike — which reorders nothing.
+_EXPANDED_RE = re.compile(
+    r"\b(?:anniversary|deluxe|expanded|expansion|bonus|box ?set|"
+    r"collector'?s? edition|special edition|xx)\b",
+    re.IGNORECASE,
+)
+
+
+def is_expanded_edition(release):
+    """Whether *release* names itself an expanded edition of the album.
+
+    True for an anniversary/deluxe/expanded/bonus/box-set edition, whose own
+    title or MusicBrainz disambiguation comment says so. Such an edition ranks
+    BELOW the album's own (rule 4) and never defines the album's track count
+    (`expected_tracks`), so a re-release's bonus material can neither outrank
+    the album at the set tier nor make the album read as "short" of it.
+    """
+    node = release if isinstance(release, dict) else {}
+    text = f"{node.get('title') or ''} {node.get('disambiguation') or ''}"
+    return bool(_EXPANDED_RE.search(text))
+
+
 _RULES = (
     "official beats promotion beats bootleg — an unofficial edition is only "
     "chosen when nothing official exists",
     "the configured medium order decides first: CD, then the other physical "
     "media — the video carriers DVD/Blu-ray/VHS/Video CD/LaserDisc included — "
     "and digital last",
-    "a release short of the release group's own track count is penalised",
+    "the album's OWN count is what a release is measured against — the release "
+    "group's when it states one, else its fullest single-disc pressing — so a "
+    "release short of it is penalised and the fullest single CD is preferred",
+    "an edition that is not the album as released sorts below the album's own: "
     "a box set — an edition carrying DVD/Blu-ray media BESIDE the album's own "
-    "(a CD album with a bonus DVD), or one disc after another — sorts below "
-    "the album's own CD/digital media; a release whose own medium IS the video "
-    "carrier is ranked by the medium order instead",
+    "(a CD album with a bonus DVD), or one disc after another — and an edition "
+    "naming itself an anniversary/deluxe/expanded/bonus/XX edition; a release "
+    "whose own medium IS the video carrier is ranked by the medium order "
+    "instead",
     "a COMPRESSED derivative of a disc (a BDRip/DVDRip/x264 re-encode) sorts "
     "below the disc's own streams, which are taken as they are",
     "the EARLIEST release date wins: an earlier edition of the group beats a "
-    "later reissue or deluxe unless the later one is materially more complete",
+    "later reissue or deluxe — the bonus material a re-release carries is no "
+    "reason to prefer the later one (the rules above already demote it)",
     "an edition that states its release date in full (YYYY-MM-DD) beats one "
     "that states only its month or its year when the two could be the same "
     "day — the album folder is named after it",
@@ -572,7 +629,12 @@ class _Context:
     primary: str
     secondary: tuple
     expected: int
-    expected_stated: bool
+    # Where `expected` came from: "group" (the release group's own stated
+    # count), "single" (its fullest single-disc pressing), "editions" (their
+    # fullest edition of any shape — a group with no single-disc edition) or ""
+    # (none) — the tier's reason says WHICH count the release was measured
+    # against.
+    expected_source: str
     first_date: str
     first_year: Optional[int]
     # The earliest edition this payload OFFERS — the date tier's reference
@@ -617,18 +679,63 @@ def policy_report(cfg=None):
 
 
 def expected_tracks(release_group, releases):
-    """The release group's own track count.
+    """The ALBUM'S OWN track count — what a release is measured against.
 
-    MusicBrainz states no count on a release group, so the fullest edition
-    offered is what "the release group's track count" means in practice — and
-    when the caller does state one, that is what a release is measured
-    against. 0 when nothing states a count at all.
+    The release group's stated count when it states one (a MusicBrainz
+    release-group payload usually does not). Otherwise the count of the
+    FULLEST edition of the album's own SHAPE — a single disc (the normal
+    pressing), several when the group has no single-disc edition at all (a
+    genuine double album) — among the editions that are the album as released.
+    That is the reference the user's own rule names: prefer the normal-looking
+    single CD, and among those the one carrying the most tracks.
+
+    Editions that are not the album never define it: a promotion or a bootleg,
+    and one naming itself an expanded edition (`is_expanded_edition` — the
+    2012 "XX" anniversary CD included). Taking the FULLEST edition instead let
+    a bonus-track re-release set the bar and then beat the original for
+    carrying its own extra material: that "XX" — one CD of 13 tracks — won over
+    the band's 10-track album, because the group's other pressings had made 90
+    the "group count".
+
+    The ranking reads `_expected_count` for the same number AND where it came
+    from, so a reason can say which count the release was measured against.
+    """
+    return _expected_count(release_group, releases)[0]
+
+
+def _expected_count(release_group, releases):
+    """`expected_tracks` plus its source: (count, "group"|"single"|"editions"|"").
+
+    "group" is the release group's own stated count, "single" the fullest
+    single-disc edition of the album's own pressings, "editions" their fullest
+    edition of any shape (a group with no single-disc edition at all), and ""
+    nothing stated a count at all — which the ranking reports and never
+    penalises.
     """
     stated = _stated_track_count(release_group)
     if stated:
-        return stated
-    counts = [track_count(r) for r in releases or []]
-    return max([c for c in counts if c > 0] or [0])
+        return stated, "group"
+    normal = [r for r in (releases or [])
+              if isinstance(r, Mapping) and not _defines_nothing(r)]
+    singles = [track_count(r) for r in normal if disc_count(r) == 1]
+    singles = [c for c in singles if c > 0]
+    if singles:
+        return max(singles), "single"
+    counts = [track_count(r) for r in normal if track_count(r) > 0]
+    return (max(counts), "editions") if counts else (0, "")
+
+
+def _defines_nothing(rel):
+    """Whether *rel* may not DEFINE the album's own track count.
+
+    A promotion or a bootleg is somebody else's pressing, and an expanded
+    edition is the album plus material — neither is the album as released, so
+    neither gets to say how many tracks the album has. Such a release is still
+    MEASURED against the count (it is ranked, and likely demoted by it); this
+    only keeps it from setting the reference.
+    """
+    status = str((rel or {}).get("status") or "").strip().lower()
+    return status in _PROMO_STATUSES or is_expanded_edition(rel)
 
 
 def _stated_track_count(node):
@@ -953,14 +1060,42 @@ def _status_reason(status):
     return ladder.get(status, "MusicBrainz states no release status")
 
 
-def _set_level(rel):
-    """(level, reason) for the box-set tier — rule 4 in the module docstring.
+def _count_source_label(source):
+    """How a reason names the count a release was measured against.
 
-    A box set is not a bigger album: it is the album plus media this library
-    cannot use (a DVD, a Blu-ray) and, at its worst, four more discs of the
-    same record. Both signals score below an edition that holds just the
-    album, which is what makes a plain CD or digital release win before the
-    track-count and date rules ever see the box.
+    `expected_tracks` says where the number came from: "group" is
+    MusicBrainz's own release-group count, "editions" the count the group's own
+    pressings agree on. An unstated count is never penalised, so the fallback
+    wording only keeps a reason readable rather than raising.
+    """
+    return {"group": "the release group's own count",
+            "single": "the album's own count (its fullest single-disc pressing)",
+            "editions": "the album's own count (the fullest edition it has)"}.get(
+                str(source or ""), "the album's own count")
+
+
+def _set_level(rel):
+    """(level, reasons) for the box-set tier — rule 4 in the module docstring.
+
+    An edition that is not the album as released sorts below the album's own,
+    and two signals say so, because neither catches everything alone:
+
+    * WHAT IT HOLDS. Video media riding ALONG with the album's own medium, or
+      disc after disc of the same record. A 3-CD anniversary box with a DVD is
+      the album twice over plus a disc of video; four discs of the same album
+      are not a bigger album either.
+    * WHAT IT CALLS ITSELF. An edition naming itself an anniversary, deluxe,
+      expanded, bonus, box-set or "XX" edition (`is_expanded_edition`). This is
+      the one signal a single-disc bonus re-release leaves: MusicBrainz files
+      the 2012 "XX" anniversary CD as ONE CD of 13 tracks, so nothing about its
+      media gives it away — and the track-count rule does not demote it either,
+      since a single CD carrying the most tracks is what THAT rule prefers.
+
+    Both score below an edition that holds just the album, which is what makes
+    a plain CD or digital release win before the track-count and date rules
+    ever see the box. An expanded NAME is the worse signal of the two (an
+    extra disc of the album's own material is still the album; a re-release
+    that says it is not is a different edition).
 
     What makes video media a BOX SET is that it rides ALONG with the album's
     own medium: a 3-CD anniversary box with a DVD is the same album twice
@@ -978,14 +1113,21 @@ def _set_level(rel):
     formats = list(media_formats(rel))
     video = [f for f in formats if is_video_format(f)]
     if video and len(video) < len(formats):
-        return 0.0, ("carries " + ", ".join(sorted(set(video)))
-                     + " — a box set, not the album's own media")
+        return 0.0, ["carries " + ", ".join(sorted(set(video)))
+                     + " — a box set, not the album's own media"]
     discs = disc_count(rel)
     if discs >= 3:
-        return 0.35, f"{discs} discs — a box set rather than the album"
-    if discs == 2:
-        return 0.8, "2 discs"
-    return 1.0, "one disc"
+        level, why = 0.35, f"{discs} discs — a box set rather than the album"
+    elif discs == 2:
+        level, why = 0.8, "2 discs"
+    else:
+        level, why = 1.0, "one disc"
+    reasons = [why]
+    if is_expanded_edition(rel):
+        level = min(level, 0.5)
+        reasons.append("names itself an anniversary/deluxe/expanded edition — "
+                       "the album's own pressing ranks above it")
+    return level, reasons
 
 
 def _evaluate(rel, ctx, index):
@@ -1025,9 +1167,10 @@ def _evaluate(rel, ctx, index):
     reasons.append(f"{label} — preferred medium (order {rank + 1})" if rank < len(ctx.order)
                    else f"{label or 'no medium stated'} — not in the configured medium order")
 
-    # 4. the set: what the edition actually HOLDS ...
-    level_set, set_reason = _set_level(rel)
-    reasons.append(set_reason)
+    # 4. the set: what the edition actually HOLDS, and what it CALLS ITSELF —
+    #    a box set, an extra disc, or an edition naming itself an expanded one.
+    level_set, set_reasons = _set_level(rel)
+    reasons.extend(set_reasons)
 
     # 5. the disc's own streams, not someone's re-encode of them: a BDRip or a
     #    DVDRip is a lossy derivative, and when the group also offers the disc
@@ -1039,7 +1182,14 @@ def _evaluate(rel, ctx, index):
     else:
         level_compressed = 1.0
 
-    # 6. completeness ...
+    # 6. completeness — measured against the ALBUM'S OWN count (ctx.expected:
+    #    the release group's when it states one, else its fullest single-disc
+    #    pressing, `expected_tracks`). A partial pressing is penalised in
+    #    proportion, and the fullest edition of the album's own shape is the
+    #    preference — which is what the user asked for: the normal single CD,
+    #    carrying the most tracks. Nothing here penalises holding MORE, because
+    #    an edition that holds more than the album's own shape is a box set or a
+    #    re-release naming itself expanded, and rule 4 already demoted it.
     if count <= 0:
         level_tracks = 0.5
         reasons.append("no track count on MusicBrainz — not counted against it")
@@ -1047,24 +1197,30 @@ def _evaluate(rel, ctx, index):
         level_tracks = 1.0
         reasons.append(f"{count} tracks")
     else:
-        level_tracks = min(1.0, count / ctx.expected)
-        if count > ctx.expected and ctx.expected_stated:
-            # The release group itself says how many tracks the album has, and
-            # this edition holds more: that is the bonus-disc half of a box set,
-            # scored below the album proper. Only a STATED count is trusted here
-            # — when the group states none, `expected` is the fullest edition
-            # offered (see `expected_tracks`), and penalising everything below
-            # the box would be the opposite of the rule.
+        # The reference is the album's own count (`expected_tracks`). A
+        # partial pressing is penalised in proportion; an edition carrying the
+        # album's own count is the preference (the fullest single CD); and
+        # carrying MORE is a penalty only when the release GROUP itself stated
+        # the album's count — that is MusicBrainz saying how many tracks the
+        # album has, so an edition holding more is the bonus-disc half of a box
+        # set. A count derived from the editions' own shapes cannot tell a
+        # fuller pressing from an expanded one, and the tier must not guess:
+        # rule 4 is what demotes the extended edition there, by its name and
+        # its media.
+        album = _count_source_label(ctx.expected_source)
+        if count < ctx.expected:
+            level_tracks = count / ctx.expected
+            reasons.append(f"{count} of {ctx.expected} tracks — short of {album}")
+        elif count == ctx.expected:
+            level_tracks = 1.0
+            reasons.append(f"{count}/{ctx.expected} tracks of {album}")
+        elif ctx.expected_source == "group":
             level_tracks = max(0.1, ctx.expected / count)
-            reasons.append(f"{count} tracks — {ctx.expected} is the release "
-                           "group's own count, so this edition holds more than "
-                           "the album")
-        elif count >= ctx.expected:
-            reasons.append(f"{count}/{ctx.expected} tracks of the release group")
+            reasons.append(f"{count} tracks — {ctx.expected} is {album}, so this "
+                           "edition holds more than the album")
         else:
-            reasons.append(f"{count} of {ctx.expected} tracks — short of "
-                           + ("the release group's own count" if ctx.expected_stated
-                              else "the fullest edition offered"))
+            level_tracks = 1.0
+            reasons.append(f"{count} tracks — more than {album} ({ctx.expected})")
 
     # 7. date — the EARLIEST edition offered wins (see `_release_date_level`).
     level_date, date_reason = _release_date_level(date, ctx)
@@ -1179,6 +1335,11 @@ def rank_releases(release_group, releases, cfg=None, *, strict=False,
         if earliest_key is None or key < earliest_key:
             earliest_date = str(r.get("date") or "").strip()
             earliest_key, earliest_year = key, _year(r.get("date"))
+    # The album's own track count, and where it came from — ONE call, so the
+    # number the ranking measures against and the number its reason names
+    # cannot come from two different readings of the same list.
+    group_node = release_group if isinstance(release_group, Mapping) else {}
+    expected, expected_source = _expected_count(group_node, rows)
     ctx = _Context(
         order=tuple(conf["auto_import_medium_order"]),
         country=str(conf.get("prefer_release_country") or "").strip(),
@@ -1191,8 +1352,8 @@ def rank_releases(release_group, releases, cfg=None, *, strict=False,
         asked_type=asked_type,
         primary=primary,
         secondary=tuple(secondary),
-        expected=expected_tracks(release_group if isinstance(release_group, Mapping) else {}, rows),
-        expected_stated=bool(_stated_track_count(release_group)),
+        expected=expected,
+        expected_source=expected_source,
         first_date=first,
         first_year=first_year,
         earliest_date=earliest_date,

@@ -2325,14 +2325,28 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   video carriers ABOVE digital so a music video published on a disc outranks the
   same video published as a download, and digital last because a digital edition
   carries no catalog number and no pressing to match against; a format the list
-  does not name ranks after every configured one — see R246), the **box-set**
-  rule (an edition carrying video media BESIDE the album's own medium, or three
-  or more discs, sorts below the album's own CD/digital media, so a 3-CD
-  anniversary box no longer outranks the plain CD it contains — while an edition
-  whose own medium IS the video carrier, a single-disc DVD, is not that and
-  ranks on the medium order like any other — see `_set_level`), the
-  **disc-versus-re-encode** rule (R85), the **track count** (an
-  edition short of the release group's own count is penalised), the **release
+  does not name ranks after every configured one — see R246), the **box-set /
+  extended-edition** rule (an edition that is not the album as released sorts
+  below the album's own: one carrying video media BESIDE the album's own
+  medium, or three or more discs, and one NAMING itself an anniversary, deluxe,
+  expanded, bonus, box-set or "XX" edition — the signal a single-disc
+  bonus-track re-release leaves, since MusicBrainz files the 2012 "XX"
+  anniversary CD as ONE CD of 13 tracks — so a 3-CD anniversary box, or that
+  13-track "XX", no longer outranks the plain pressing it re-releases; while an
+  edition whose own medium IS the video carrier, a single-disc DVD, is not that
+  and ranks on the medium order like any other — see `_set_level` and
+  `is_expanded_edition`), the **disc-versus-re-encode** rule (R85), the **track
+  count** (a release is measured against the ALBUM'S OWN count — the release
+  group's own when it states one, else its FULLEST SINGLE-DISC pressing, i.e.
+  the normal shape carrying the most tracks, `expected_tracks` — so a partial
+  pressing is penalised in proportion and can never beat the album. Holding
+  MORE than that count is a penalty only when the release GROUP stated the
+  count, since that is MusicBrainz saying how many tracks the album has; a
+  count derived from the pressings' own shapes says nothing about a box set's
+  total, and the reported bug lived exactly there: the fallback used to be the
+  FULLEST edition offered, so a 5-disc box's 90 tracks became the "group
+  count", every ordinary pressing read as "short" of it, and the 13-track "XX"
+  won for being closer to a box nobody wanted), the **release
   date** — the EARLIEST edition wins, and the reference is the earliest edition
   the group OFFERS, not the group's own `first-release-date`: a pressing that
   predates that date is still the earlier record of the two, and an album whose
