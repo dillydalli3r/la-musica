@@ -1747,8 +1747,15 @@ export interface SlskQueueItem {
    *  only for rows whose work is OVER (a settled job, an imported wish, one
    *  nothing was found for) — a row still in the pipeline is CANCELLED instead,
    *  and a finished download waiting to be imported is not clearable at all
-   *  (its action is the import; its bytes are the staging card's). */
+   *  (its action is the import). */
   clearable: boolean;
+  /** Whether this row can DELETE its own bytes (POST /api/queue/discard) —
+   *  set on a finished download still sitting in the download folder (kind
+   *  "ready"), the one row whose files nobody else has taken. Its own word,
+   *  never a reuse of `clearable` (clearing touches no file): the row draws a
+   *  one-press Delete from this flag alone, and the route deletes only the
+   *  folder inside the download dir. */
+  discardable?: boolean;
   /** One line about what this row's state means right now. */
   note: string;
   /** True on a "pipeline" row: the release has NOT started. It is waiting for a
@@ -4111,6 +4118,18 @@ export const api = {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
+    }, 60000),
+  /** DELETE the bytes of ONE finished download still in the download folder —
+   *  a ready row's own one-press Delete (`item.id`, "ready:<path>"). The
+   *  folder inside the download dir goes, and nothing else: no library album
+   *  is ever reached. `files`/`bytes` are what was really deleted (the toast's
+   *  proof), and 400 refuses any row that is not a finished download or any
+   *  path outside the download dir. */
+  queueDiscard: (id: string) =>
+    json<{ ok: boolean; files: number; bytes: number }>(`${API}/queue/discard`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id }),
     }, 60000),
   /** Cancel EXACTLY these queue rows — the queue's own selection
    *  (`item.id`: "pipeline:<key>" for a release still waiting, "job:<id>" for

@@ -39,6 +39,7 @@ and calling it `queued` would say a download was on its way when nothing has
 been searched for yet.
 """
 import os
+import shutil
 import time
 
 from fastapi import APIRouter, HTTPException
@@ -46,6 +47,7 @@ from pydantic import BaseModel
 
 from mlo.config import load_config
 from server import pending_albums, soulseek_auto, wishes
+from server.api_common import _in_music_folder
 
 router = APIRouter()
 
@@ -64,9 +66,17 @@ router = APIRouter()
 # one that is still going: a running row is CANCELLED, which is a different
 # thing that happens to the item, not to the list. Two rows the user can still
 # act on are deliberately NOT clearable here: a finished download waiting in
-# the download folder (its clear would delete the bytes the user is about to
-# import — the staging card and the Downloads tab own that, and they say so),
-# and an import prompt (its own "Mark complete" dismisses it).
+# the download folder (its "clear" would take only the LIST row off while the
+# bytes stayed — the two are different things, so the row carries its own
+# `discardable` and its own one-press Delete that says it deletes files), and
+# an import prompt (its own "Mark complete" dismisses it).
+#
+# `discardable` is the THIRD per-row verdict, and it is deliberately its own
+# word, not a reuse of `clearable`: `clearable` is documented as "nothing on
+# disk is touched", and a ready row's Delete DOES touch disk. It is set on the
+# finished downloads still sitting in the download folder (see `_done_rows`) —
+# exactly the rows whose bytes nobody else has taken. `POST /api/queue/discard`
+# is the action, and it deletes ONLY the folder inside the download dir.
 
 
 def _clock(ts):
@@ -749,10 +759,18 @@ def _done_rows(ready):
             "updated_at": 0.0,
             "cancelable": False,      # nothing to cancel: the import is the action
             # Deliberately NOT clearable: "clear" on this row could only mean
-            # deleting the downloaded bytes the user is about to import. The
-            # staging card and the Downloads tab own those bytes and their own
-            # clear says what it deletes; this row's action is the import.
+            # deleting the downloaded bytes the user is about to import, and
+            # clear is documented as "nothing on disk is touched". The row's
+            # own verdict for what the user CAN do with those bytes is
+            # `discardable` — below.
             "clearable": False,
+            # ...and the row that DOES delete the bytes, in one press: a
+            # finished download sitting in the folder with nothing keeping it
+            # is exactly the thing nothing else on this list has an action for.
+            # `POST /api/queue/discard` deletes THIS folder (never the library),
+            # and the UI draws the row's red Delete from this flag alone — the
+            # client never guesses which rows own bytes.
+            "discardable": True,
             "log_tail": [],
         })
     return rows
@@ -1011,6 +1029,16 @@ class QueueClearRequest(BaseModel):
     scope: str = ""
 
 
+class QueueDiscardRequest(BaseModel):
+    """One finished download's own row to delete the bytes of.
+
+    `id` is the row's `build_queue` id, `"ready:<path>"` — never a bare path.
+    The route resolves it through `build_queue` (so only a row that really is
+    a finished download in the download folder can name one) and refuses
+    anything else by name."""
+    id: str
+
+
 def _drop_pipeline_item(item_id):
     """Take one release back out of the bulk queue (it has not started yet)."""
     return soulseek_auto.drop_queued(item_id.partition(":")[2])
@@ -1112,7 +1140,8 @@ def queue_clear(req: QueueClearRequest, before: float = 0.0):
     cancel is a different action with a different meaning, and "clear" must
     never be the button that quietly does it. A finished download sitting in the
     download folder is not clearable either: its row's action is the import, and
-    deleting those bytes is the staging card's job (which says so).
+    deleting those bytes is its OWN one-press Delete (`POST /api/queue/discard`,
+    the row's `discardable`) — clear never deletes a file.
 
     Answers how many rows went and which (``cleared``/``ids``), so the caller
     can refetch and say what happened."""
@@ -1177,6 +1206,99 @@ def queue_clear(req: QueueClearRequest, before: float = 0.0):
                 cleared += 1
                 ids.append(row["id"])
     return {"ok": True, "cleared": cleared, "ids": ids}
+
+
+@router.post("/api/queue/discard")
+def queue_discard(req: QueueDiscardRequest):
+    """DELETE one finished download's own bytes — the row's one-press Delete.
+
+    A finished download sitting in the download folder is not a history row:
+    its bytes are the album waiting to be imported. Clearing the row would take
+    only the LIST row off and leave the folder, and cancelling has nothing to
+    stop, so those two are deliberately not offered on it (see `_done_rows`).
+    This is the third action, and it is the one the row's red Delete presses:
+    the folder the download landed in — and nothing else — goes.
+
+    The id is resolved through `build_queue`, so the path is the SERVER's own
+    (`soulseek.ready_albums`, the same list the row was built from) and never a
+    path the client typed: only a row that really is a ready download can name
+    one, and anything else is refused by name.
+
+    What it refuses is the point: a path that is not inside
+    `soulseek.download_dir(cfg)` is refused (a symlink pointing out of the
+    folder is caught by that check — it resolves the real path first), so this
+    can never reach a library album that happens to share the drive. The
+    download dir is normally <music folder>/.mlo/downloads, but this route
+    makes no assumption about that: only the download dir itself is the
+    boundary.
+
+    It answers `{ok, files, bytes}` — the counts of what was really deleted,
+    taken BEFORE the tree goes, so the caller's toast is a report of what went
+    rather than a guess. Empty parents left behind are pruned up to (never
+    including) the download dir."""
+    from server import soulseek
+
+    item_id = str(req.id or "").strip()
+    kind, _, ref = item_id.partition(":")
+    if not kind or not ref:
+        raise HTTPException(400, "id must be '<kind>:<ref>'")
+    if kind != "ready":
+        raise HTTPException(
+            400, "only a finished download's own row (kind 'ready') can be "
+                 "discarded this way")
+    # Resolve through the payload: `id` names a row `build_queue` built, whose
+    # `path` is the server's own, not the client's.
+    sections = build_queue().get("sections", {})
+    rows = [r for section in sections.values() for r in section]
+    row = next((r for r in rows if r["id"] == item_id), None)
+    if row is None:
+        raise HTTPException(404, f"no queue row '{item_id}'")
+    if row.get("kind") != "ready" or not row.get("discardable"):
+        raise HTTPException(
+            400, "that row is not a finished download waiting in the "
+                 "download folder")
+    path = str(row.get("path") or "")
+    if not path:
+        raise HTTPException(400, "that row names no download folder to delete")
+    cfg = load_config()
+    try:
+        ddir = os.path.abspath(soulseek.download_dir(cfg))
+    except Exception as e:
+        raise HTTPException(400, f"the download folder is not known: {e}")
+    # Realpath: a symlink that points out of the download dir must not pass,
+    # and a path inside the LIBRARY that is not inside the download dir is
+    # refused here — this route never reaches a library album.
+    ap = os.path.realpath(os.path.normpath(path))
+    if not _in_music_folder(ap, ddir):
+        raise HTTPException(400, "that folder is outside the download dir")
+    if not os.path.isdir(ap):
+        raise HTTPException(404, "that download folder is not there any more")
+    files, total = 0, 0
+    for base, _dirs, names in os.walk(ap):
+        for n in names:
+            try:
+                total += os.path.getsize(os.path.join(base, n))
+                files += 1
+            except OSError:
+                continue
+    try:
+        shutil.rmtree(ap)
+    except OSError as e:
+        raise HTTPException(500, f"could not delete the download folder: {e}")
+    # Drop any parents the album was the only thing inside, up to (never
+    # including) the download dir: a per-user or per-query folder left empty
+    # is noise the next walk would have to skip anyway.
+    parent = os.path.dirname(ap)
+    while parent and _in_music_folder(parent, ddir) \
+            and os.path.normcase(os.path.abspath(parent)) != os.path.normcase(ddir):
+        try:
+            if not os.path.isdir(parent) or os.listdir(parent):
+                break
+            os.rmdir(parent)
+        except OSError:
+            break
+        parent = os.path.dirname(parent)
+    return {"ok": True, "files": files, "bytes": total}
 
 
 def clear_settled_queue(cfg=None, before: float = 0.0):
@@ -1299,8 +1421,8 @@ def _clear_refusal(row):
     """Why this row cannot be cleared, in the words of what it IS."""
     if row["kind"] == "ready":
         return ("this download is waiting to be imported — import it, or delete "
-                "its bytes from the staging card (the queue never deletes a "
-                "download)")
+                "its own folder with the Delete button on the row "
+                "(POST /api/queue/discard); clearing only ever removes the row")
     if row["kind"] == "prompt":
         return ("this album is already in the library — dismiss the prompt "
                 "instead of clearing it")
@@ -1385,9 +1507,11 @@ def queue_cancel(req: QueueCancelRequest):
             raise HTTPException(409, "no import run is in progress")
         return {"ok": True, "cancelled": item_id}
     if kind == "ready":
-        # A finished download has nothing to cancel: its action is the import,
-        # and its bytes are removed from the staging card, not from here.
-        raise HTTPException(409, "a finished download is imported, not cancelled")
+        # A finished download has nothing to cancel: its actions are the import
+        # and, when the bytes should go, the row's own Delete
+        # (POST /api/queue/discard).
+        raise HTTPException(409, "a finished download is imported or deleted, "
+                                 "not cancelled")
     if kind == "prompt":
         # An album an IMPORT could not finish: the album is in the library, so
         # there is no transfer to stop. Its own two actions are the wizard

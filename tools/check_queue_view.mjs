@@ -197,7 +197,16 @@ try {
     ["the Soulseek source chip", "Soulseek"],
     ["the per-item clear on a finished row", "Remove this row from the queue — nothing is searched for it again"],
     ["the section-wide clear", "Clear finished ("],
-    ["a section's own clear", "Take the finished rows off this list"],
+    ["a section that only clears finished rows stays one press",
+     "Clear this list: takes the 1 finished row(s) off this list"],
+    ["a section that cancels live work arms its own empty",
+     "Empty this list: cancels the 1 row(s) still running or waiting here"],
+    ["...and names the bytes the Completed section would delete",
+     "DELETES the 1 finished download(s) still in the download folder"],
+    ["...and says what the destructive press does not touch",
+     "Nothing in your library is touched."],
+    ["the finished download's own one-press Delete (no arm step)",
+     "from the download folder — its files go"],
     ["a finished job's own clear", "Take this finished row off the queue — nothing in your library is deleted"],
     ["the per-item cancel", "Cancel this item"],
     ["cancelling a waiting row", "Take it back off the queue"],
@@ -224,15 +233,20 @@ try {
       .filter((l) => /chip|Completed|Failed/.test(l)).slice(0, 20).join("\n"));
     process.exit(1);
   }
-  // ONE section-wide clear per list that has something to lose: this payload
-  // has a clearable row in completed, in failed and in needs-you (the imported
-  // job, the job that gave up, the wish nothing was found for), and none in
-  // queued / in progress — so the button is per section, not one global control
-  // wearing three labels.
-  const sectionClears = (flat.match(/Take the finished rows off this list/g) || []).length;
-  if (sectionClears !== 3) {
-    console.error("[queue] the section-wide clear rendered " + sectionClears +
-      " time(s) — expected one each for completed, failed and needs-you");
+  // ONE header button per list that has something to lose, and its label says
+  // which kind of press it is: a section that cancels live work or deletes
+  // downloaded bytes arms through a confirm ("Empty"), while one that only
+  // clears finished history rows stays a single press ("Clear finished"). This
+  // payload has 6 destructive sections — waiting, queued/searching, in
+  // progress, background, needs-you (the parked job) and completed (the
+  // finished download in the folder) — and exactly one plain clear (failed).
+  // The panel's own global "Clear finished" is the other plain button for the
+  // 4 clearable rows overall.
+  const sectionEmpties = (flat.match(/Empty \(/g) || []).length;
+  const sectionClears = (flat.match(/Clear finished \(/g) || []).length;
+  if (sectionEmpties !== 6 || sectionClears !== 2) {
+    console.error("[queue] header buttons rendered " + sectionEmpties +
+      " Empty and " + sectionClears + " Clear finished — expected 6 and 2");
     process.exit(1);
   }
   console.log(`ok  the Soulseek page renders the queue sections and their rows ` +

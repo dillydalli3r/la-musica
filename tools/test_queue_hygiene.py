@@ -559,6 +559,57 @@ with Patch(auto, jobs=REG.list, forget=REG.forget), \
           and wishes.get_wish(FAILED["id"]) is None, json.dumps(sorted(after)))
 
     # ----------------------------------------------------------------------- #
+    # 6b. a finished download still in the folder: its OWN one-press Delete
+    # ----------------------------------------------------------------------- #
+    print("\n== a finished download's own Delete (POST /api/queue/discard) ==")
+    READY_PARENT = os.path.join(DL, "peer-user")
+    READY_DIR = os.path.join(READY_PARENT, "An Album (2020)")
+    os.makedirs(READY_DIR)
+    with open(os.path.join(READY_DIR, "01 - Track.flac"), "wb") as fh:
+        fh.write(b"x" * 1234)
+    # The real `ready_albums` answers off the DISK; the stub must too, or the
+    # row would reappear after the delete instead of going with its folder.
+    ready_stub = lambda *a, **k: [READY_DIR] if os.path.isdir(READY_DIR) else []  # noqa: E731
+    with Patch(slsk, ready_albums=ready_stub):
+        index = rows_by_id()
+        rid = f"ready:{READY_DIR}"
+        check("a finished download in the folder is a ready row",
+              rid in index and index[rid][1]["kind"] == "ready", json.dumps(sorted(index)))
+        check("...carrying discardable (its own Delete), NOT clearable",
+              index[rid][1].get("discardable") is True
+              and index[rid][1]["clearable"] is False, json.dumps(index[rid][1]))
+        # Clear never deletes a file: the ready row is still refused by it.
+        r = client.post("/api/queue/clear", json={"id": rid})
+        check("clearing a ready row is still refused (clear touches no file)",
+              r.status_code == 409, r.text[:200])
+        # ...and only a ready row may be discarded.
+        r = client.post("/api/queue/discard", json={"id": "job:41"})
+        check("discarding a row that is not a finished download is refused",
+              r.status_code == 400, r.text[:200])
+        r = client.post("/api/queue/discard", json={"id": "ready:/nowhere/at/all"})
+        check("discarding a row that is not in the queue answers 404",
+              r.status_code == 404, r.text[:200])
+        # A path inside the MUSIC folder but NOT inside the download dir can
+        # never be reached by this route: the library is not a download.
+        with Patch(slsk, ready_albums=lambda *a, **k: [DONE]):
+            r = client.post("/api/queue/discard", json={"id": f"ready:{DONE}"})
+            check("a library album named as a ready row is refused (outside the download dir)",
+                  r.status_code == 400, r.text[:200])
+        check("...and that refusal left the library album alone", os.path.isdir(DONE))
+        # The one-press Delete.
+        r = client.post("/api/queue/discard", json={"id": rid})
+        body = r.json() if r.status_code == 200 else {}
+        check("discarding it reports the files and bytes it deleted",
+              r.status_code == 200 and body.get("ok") is True
+              and body.get("files") == 1 and body.get("bytes") == 1234, r.text[:200])
+        check("...the album folder is gone", not os.path.isdir(READY_DIR))
+        check("...and its now-empty parent is pruned up to the download dir",
+              not os.path.isdir(READY_PARENT) and os.path.isdir(DL))
+        check("...the row is off the list with its bytes",
+              f"ready:{READY_DIR}" not in rows_by_id(), json.dumps(sorted(rows_by_id())))
+    shutil.rmtree(READY_PARENT, ignore_errors=True)
+
+    # ----------------------------------------------------------------------- #
     # 7. the counts, and the one-section invariant, on every payload
     # ----------------------------------------------------------------------- #
     print("\n== the counts answer for the rows ==")

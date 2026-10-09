@@ -1050,7 +1050,7 @@ function AutoPanel({ initialMbid, running, onShowQueue }: {
     queryFn: api.queue,
     refetchInterval: running ? 3000 : 10000,
   });
-  const { cancel, retry, dismiss, doImport, clear } = useQueueActions(refetch, setBusyId);
+  const { cancel, retry, dismiss, doImport, clear, discard } = useQueueActions(refetch, setBusyId);
   const sections = data?.sections;
   // The releases WAITING for a free slot, in the order they will start, and the
   // rest of the "queued" section (a wish waiting for the network is being
@@ -1096,7 +1096,7 @@ function AutoPanel({ initialMbid, running, onShowQueue }: {
               rows={waitingRows} tone="border-amber-800 text-amber-300"
               empty=""
               busyId={busyId}
-              onCancel={cancel} onRetry={retry} onImport={doImport} onDismiss={dismiss}
+              onCancel={cancel} onRetry={retry} onImport={doImport} onDismiss={dismiss} onDiscard={discard}
               onClear={(item) => clear({ id: item.id }, item)}
             />
           )}
@@ -1106,7 +1106,7 @@ function AutoPanel({ initialMbid, running, onShowQueue }: {
             rows={lookingRows} tone="border-amber-800 text-amber-300"
             empty="nothing is being looked for — paste a release above"
             busyId={busyId}
-            onCancel={cancel} onRetry={retry} onImport={doImport} onDismiss={dismiss}
+            onCancel={cancel} onRetry={retry} onImport={doImport} onDismiss={dismiss} onDiscard={discard}
             onClear={(item) => clear({ id: item.id }, item)}
           />
           {queueRows(sections, "background").length > 0 && (
@@ -1116,7 +1116,7 @@ function AutoPanel({ initialMbid, running, onShowQueue }: {
               rows={queueRows(sections, "background")}
               tone="border-violet-800 text-violet-300"
               empty="" busyId={busyId}
-              onCancel={cancel} onRetry={retry} onImport={doImport} onDismiss={dismiss}
+              onCancel={cancel} onRetry={retry} onImport={doImport} onDismiss={dismiss} onDiscard={discard}
               onClear={(item) => clear({ id: item.id }, item)}
             />
           )}
@@ -1997,7 +1997,7 @@ function ReleaseChips({ r }: { r?: SlskReleaseIdentity }) {
 
 /** One row of the queue: where it came from, what it is doing, how far along,
  *  and the one action that makes sense for it right now. */
-function QueueRow({ item, busy, selected, onSelect, onCancel, onRetry, onImport, onDismiss, onClear }: {
+function QueueRow({ item, busy, selected, onSelect, onCancel, onRetry, onImport, onDismiss, onClear, onDiscard }: {
   item: SlskQueueItem;
   busy: boolean;
   /** Selection state, in select mode only (`onSelect` absent = no checkbox).
@@ -2011,6 +2011,9 @@ function QueueRow({ item, busy, selected, onSelect, onCancel, onRetry, onImport,
   onImport: () => void;
   onDismiss: () => void;
   onClear: () => void;
+  /** Delete a finished download's own bytes (`item.discardable`): one press,
+   *  no arm step, and the button says what goes (see the Delete below). */
+  onDiscard: () => void;
 }) {
   const navigate = useNavigate();
   const { t } = useI18n();
@@ -2202,6 +2205,18 @@ function QueueRow({ item, busy, selected, onSelect, onCancel, onRetry, onImport,
               {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ArrowDownToLine className="h-3.5 w-3.5" />} Import
             </button>
           )}
+          {/* The bytes THIS row owns: a finished download still sitting in the
+              download folder, whose only other action is the import. ONE press,
+              NO arm step — the label ("Delete") and the title say the files go,
+              so the press is never a surprise. The server deletes only that
+              folder (never anything in the library) and answers how many files
+              and bytes went, which the toast repeats. */}
+          {item.discardable && (
+            <button className="btn-ghost !py-1 text-xs text-red-300 tap" onClick={onDiscard} disabled={busy}
+              title={`Delete ${item.path || "this download"} from the download folder — its files go, and nothing in your library is touched`}>
+              {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />} Delete
+            </button>
+          )}
           {/* MANUAL COMPLETION for a stalled album: the wizard opens ON this
               album at the step that decides the first thing it is missing
               (?album=…&step=…&missing=…), which is the same link its
@@ -2279,7 +2294,7 @@ function QueueRow({ item, busy, selected, onSelect, onCancel, onRetry, onImport,
   );
 }
 
-function QueueSection({ title, hint, rows, tone, empty, busyId, selected, onSelect, onCancel, onRetry, onImport, onDismiss, onClear, onClearSection }: {
+function QueueSection({ title, hint, rows, tone, empty, busyId, selected, onSelect, onCancel, onRetry, onImport, onDismiss, onClear, onDiscard, onEmptySection }: {
   title: string;
   hint: string;
   rows: SlskQueueItem[];
@@ -2295,25 +2310,61 @@ function QueueSection({ title, hint, rows, tone, empty, busyId, selected, onSele
   onImport: (item: SlskQueueItem) => void;
   onDismiss: (item: SlskQueueItem) => void;
   onClear: (item: SlskQueueItem) => void;
-  /** Clear THIS section's finished rows (POST /api/queue/clear, scope = the
-   *  section). Absent for a section nothing may be cleared from. */
-  onClearSection?: () => void;
+  onDiscard: (item: SlskQueueItem) => void;
+  /** Empty THIS section (see `emptySection` in useQueueActions): the rows still
+   *  running or waiting are cancelled, the finished history rows go off the
+   *  list, and a finished download still in the folder has its bytes deleted.
+   *  The press is armed through ConfirmButton whenever that would CANCEL live
+   *  work or DELETE bytes, and stays one press when it only clears finished
+   *  history rows. Absent for a section nothing may be emptied from. */
+  onEmptySection?: () => void;
 }) {
-  // The rows the section can lose, counted off the rows it shows — never off a
-  // separate tally, so the button can never claim more than the list holds.
+  // What the section can lose, counted off the rows it shows — never off a
+  // separate tally, so the button can never claim more than the list holds. A
+  // row leaves by exactly ONE of the server's own verdicts, in this order, so
+  // it can never be counted (or acted on) twice: `clearable` → cleared (the
+  // list row goes, no file is touched); `cancelable` → cancelled (work that is
+  // still going is stopped, which is not the same as cleared); `discardable` →
+  // the bytes go (a finished download still in the download folder).
   const finished = rows.filter((r) => r.clearable).length;
+  const canceling = rows.filter((r) => r.cancelable && !r.clearable).length;
+  const discarding = rows.filter((r) => r.discardable).length;
+  const emptiable = finished + canceling + discarding;
+  // A press that cancels live work or deletes bytes is destructive: it wears
+  // ConfirmButton. One that only takes finished history rows off the list is
+  // not, and stays a single press (nothing on disk moves).
+  const destructive = canceling > 0 || discarding > 0;
+  // The title says EXACTLY what the press takes and what it does not touch —
+  // built from the same counts, so it can never describe a different list.
+  const what = [
+    canceling ? `cancels the ${canceling} row(s) still running or waiting here (that work is stopped — nothing on disk is deleted)` : "",
+    finished ? `takes the ${finished} finished row(s) off this list` : "",
+    discarding ? `DELETES the ${discarding} finished download(s) still in the download folder — their files go` : "",
+  ].filter(Boolean).join("; ");
+  const emptyTitle = `${destructive ? "Empty" : "Clear"} this list: ${what}. `
+    + (canceling || discarding
+      ? "Nothing in your library is touched."
+      : "Nothing in your library, and no download, is touched.");
   return (
     <div className="space-y-2">
       <div className="flex items-center gap-2 flex-wrap">
         <span className={`chip text-[10px] border ${tone}`}>{title} · {rows.length}</span>
         <span className="text-[11px] text-zinc-500">{hint}</span>
-        {finished > 0 && onClearSection && (
+        {emptiable > 0 && onEmptySection && (destructive ? (
+          <ConfirmButton
+            className="btn-ghost !py-0.5 !px-2 text-[10px] text-red-300 tap ml-auto"
+            onConfirm={onEmptySection} disabled={busyId !== null}
+            confirmLabel={`Empty ${emptiable}?`}
+            title={emptyTitle}>
+            <Trash2 className="h-3 w-3" /> Empty ({emptiable})
+          </ConfirmButton>
+        ) : (
           <button className="btn-ghost !py-0.5 !px-2 text-[10px] text-red-300 tap ml-auto"
-            onClick={onClearSection} disabled={busyId !== null}
-            title={`Take the finished rows off this list — the ${finished} the server marked clearable here. Nothing in your library is touched and nothing still running, waiting or parked goes; those are cancelled on their own row.`}>
-            <Trash2 className="h-3 w-3" /> Clear finished ({finished})
+            onClick={onEmptySection} disabled={busyId !== null}
+            title={emptyTitle}>
+            <Trash2 className="h-3 w-3" /> Clear finished ({emptiable})
           </button>
-        )}
+        ))}
       </div>
       {rows.length === 0
         ? <div className="text-[11px] text-zinc-600 px-1">{empty}</div>
@@ -2329,6 +2380,7 @@ function QueueSection({ title, hint, rows, tone, empty, busyId, selected, onSele
               onImport={() => onImport(item)}
               onDismiss={() => onDismiss(item)}
               onClear={() => onClear(item)}
+              onDiscard={() => onDiscard(item)}
             />
           ))}
     </div>
@@ -2453,8 +2505,76 @@ function useQueueActions(refetch: () => void, setBusyId: (id: string | null) => 
       setBusyId(null);
     }
   };
+  /** DELETE the bytes of ONE finished download (`item.discardable`): the ready
+   *  row's own one-press Delete (POST /api/queue/discard). The server removes
+   *  only the folder inside the download dir — never a library album — and
+   *  answers how many files and bytes went, which the toast repeats as the
+   *  proof of what it took. */
+  const discard = async (item: SlskQueueItem) => {
+    setBusyId(item.id);
+    try {
+      const r = await api.queueDiscard(item.id);
+      toast(`${item.title || "Download"} — deleted ${r.files} file(s) · ${fmtSize(r.bytes)}`);
+      refetch();
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setBusyId(null);
+    }
+  };
+  /** Empty ONE section, using the server's own per-row verdicts and nothing
+   *  guessed here: the rows still running or waiting are CANCELLED (one call,
+   *  by their ids), a finished download still in the folder has its bytes
+   *  DELETED, and the finished history rows are CLEARED off the list
+   *  (POST /api/queue/clear, scope = the section). A row is acted on by exactly
+   *  one of those — clearable first, then cancelable, then discardable (see
+   *  QueueSection's counts) — so nothing is taken twice. The caller only runs
+   *  this after confirming the destructive versions. */
+  const emptySection = async (name: SlskQueueScope, rows: SlskQueueItem[]) => {
+    const cancelRows = rows.filter((r) => r.cancelable && !r.clearable);
+    const discardRows = rows.filter((r) => r.discardable);
+    const clearCount = rows.filter((r) => r.clearable).length;
+    setBusyId("*");
+    try {
+      let cancelled = 0, cleared = 0, files = 0, bytes = 0;
+      // The bulk cancel knows a waiting release ("pipeline:<key>") and a
+      // running job ("job:<id>"); a WISH and an import RUN are ended by the
+      // row's own route (POST /api/queue/cancel), so they go one at a time —
+      // exactly what each row's own Cancel button sends, so no second meaning.
+      const bulk = cancelRows.filter((r) => r.kind === "job" || r.kind === "pipeline");
+      if (bulk.length) {
+        const r = await api.queueCancelIds(bulk.map((b) => b.id));
+        cancelled = r.cancelled;
+      }
+      for (const row of cancelRows) {
+        if (row.kind === "job" || row.kind === "pipeline") continue;
+        try { await api.queueCancel(row.id); cancelled += 1; }
+        catch { /* refused (already gone, or still running): it stays */ }
+      }
+      for (const row of discardRows) {
+        const r = await api.queueDiscard(row.id);
+        files += r.files;
+        bytes += r.bytes;
+      }
+      if (clearCount) {
+        const r = await api.queueClear({ scope: name });
+        cleared = r.cleared;
+      }
+      const parts = [
+        cancelled ? `${cancelled} cancelled` : "",
+        files ? `${files} file(s) deleted · ${fmtSize(bytes)}` : "",
+        cleared ? `${cleared} off the list` : "",
+      ].filter(Boolean);
+      toast(parts.join(" · ") || "Nothing to empty");
+      refetch();
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setBusyId(null);
+    }
+  };
 
-  return { cancel, retry, dismiss, doImport, clear };
+  return { cancel, retry, dismiss, doImport, clear, discard, emptySection };
 }
 
 /** "Look for this" — the one question the queue exists to answer.
@@ -2621,7 +2741,7 @@ function QueuePanel({ running }: { running: boolean }) {
   // The bar (paste → Add to queue), the wishes worker behind it and the five
   // row actions are shared with the Auto tab: one hook and one component, so
   // the two surfaces cannot drift.
-  const { cancel, retry, dismiss, doImport, clear } = useQueueActions(refetch, setBusyId);
+  const { cancel, retry, dismiss, doImport, clear, discard, emptySection } = useQueueActions(refetch, setBusyId);
   // The store's own worker log (GET /api/wishes): what the last passes did. The
   // bar polls the same key for its schedule line, so this shares that cache.
   const { data: store } = useQuery({
@@ -2843,8 +2963,9 @@ function QueuePanel({ running }: { running: boolean }) {
               busyId={busyId}
               selected={selectMode ? selected : undefined}
               onSelect={selectMode ? toggleSelected : undefined}
-              onCancel={cancel} onRetry={retry} onImport={doImport} onDismiss={dismiss}
+              onCancel={cancel} onRetry={retry} onImport={doImport} onDismiss={dismiss} onDiscard={discard}
               onClear={(item) => clear({ id: item.id }, item)}
+              onEmptySection={() => emptySection("queued", waitingRows)}
             />
           )}
           <QueueSection
@@ -2854,8 +2975,9 @@ function QueuePanel({ running }: { running: boolean }) {
             busyId={busyId}
             selected={selectMode ? selected : undefined}
             onSelect={selectMode ? toggleSelected : undefined}
-            onCancel={cancel} onRetry={retry} onImport={doImport} onDismiss={dismiss}
+            onCancel={cancel} onRetry={retry} onImport={doImport} onDismiss={dismiss} onDiscard={discard}
             onClear={(item) => clear({ id: item.id }, item)}
+            onEmptySection={() => emptySection("queued", queuedRows)}
           />
           <QueueSection
             title="In progress" hint="downloading, verifying, moving into the library, or running the import chain"
@@ -2864,8 +2986,9 @@ function QueuePanel({ running }: { running: boolean }) {
             busyId={busyId}
             selected={selectMode ? selected : undefined}
             onSelect={selectMode ? toggleSelected : undefined}
-            onCancel={cancel} onRetry={retry} onImport={doImport} onDismiss={dismiss}
+            onCancel={cancel} onRetry={retry} onImport={doImport} onDismiss={dismiss} onDiscard={discard}
             onClear={(item) => clear({ id: item.id }, item)}
+            onEmptySection={() => emptySection("in_progress", queueRows(sections, "in_progress"))}
           />
           {queueRows(sections, "background").length > 0 && (
             <QueueSection
@@ -2876,8 +2999,9 @@ function QueuePanel({ running }: { running: boolean }) {
               empty="" busyId={busyId}
               selected={selectMode ? selected : undefined}
               onSelect={selectMode ? toggleSelected : undefined}
-              onCancel={cancel} onRetry={retry} onImport={doImport} onDismiss={dismiss}
+              onCancel={cancel} onRetry={retry} onImport={doImport} onDismiss={dismiss} onDiscard={discard}
               onClear={(item) => clear({ id: item.id }, item)}
+              onEmptySection={() => emptySection("background", queueRows(sections, "background"))}
             />
           )}
           {queueRows(sections, "needs_attention").length > 0 && (
@@ -2887,9 +3011,9 @@ function QueuePanel({ running }: { running: boolean }) {
               empty="" busyId={busyId}
               selected={selectMode ? selected : undefined}
               onSelect={selectMode ? toggleSelected : undefined}
-              onCancel={cancel} onRetry={retry} onImport={doImport} onDismiss={dismiss}
+              onCancel={cancel} onRetry={retry} onImport={doImport} onDismiss={dismiss} onDiscard={discard}
               onClear={(item) => clear({ id: item.id }, item)}
-              onClearSection={() => clear({ scope: "needs_attention" })}
+              onEmptySection={() => emptySection("needs_attention", queueRows(sections, "needs_attention"))}
             />
           )}
           <QueueSection
@@ -2899,9 +3023,9 @@ function QueuePanel({ running }: { running: boolean }) {
             busyId={busyId}
             selected={selectMode ? selected : undefined}
             onSelect={selectMode ? toggleSelected : undefined}
-            onCancel={cancel} onRetry={retry} onImport={doImport} onDismiss={dismiss}
+            onCancel={cancel} onRetry={retry} onImport={doImport} onDismiss={dismiss} onDiscard={discard}
             onClear={(item) => clear({ id: item.id }, item)}
-            onClearSection={() => clear({ scope: "completed" })}
+            onEmptySection={() => emptySection("completed", queueRows(sections, "completed"))}
           />
           <QueueSection
             title="Failed" hint="gave up, with the reason — nothing searches these again by itself"
@@ -2910,9 +3034,9 @@ function QueuePanel({ running }: { running: boolean }) {
             busyId={busyId}
             selected={selectMode ? selected : undefined}
             onSelect={selectMode ? toggleSelected : undefined}
-            onCancel={cancel} onRetry={retry} onImport={doImport} onDismiss={dismiss}
+            onCancel={cancel} onRetry={retry} onImport={doImport} onDismiss={dismiss} onDiscard={discard}
             onClear={(item) => clear({ id: item.id }, item)}
-            onClearSection={() => clear({ scope: "failed" })}
+            onEmptySection={() => emptySection("failed", queueRows(sections, "failed"))}
           />
         </>
       )}
