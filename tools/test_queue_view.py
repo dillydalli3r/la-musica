@@ -288,13 +288,13 @@ client = _app()
 empty = _queue(client)
 assert empty["counts"]["total"] == 0, empty["counts"]
 assert sorted(empty["sections"]) == sorted(api_queue.SECTIONS), sorted(empty["sections"])
-assert empty["concurrency"] == CONCURRENCY, empty["concurrency"]
+assert empty["concurrency"] == 5, empty["concurrency"]
 # The three numbers the queue header reports, and what makes them coherent:
 # the app enforces its own two ceilings (releases at once, candidates per
-# release) and slskd's slot count is the product they need — 3 × 3 = 9 at the
+# release) and slskd's slot count is the product they need — 5 × 3 = 15 at the
 # defaults (see server.soulseek_auto._batch_width).
 assert empty["candidate_slots"] == 3, empty["candidate_slots"]
-assert empty["download_slots"] == 9, empty["download_slots"]
+assert empty["download_slots"] == 15, empty["download_slots"]
 
 with Patch(auto, load_config=lambda: dict(CFG),
            _search_queries=PIPE.search,

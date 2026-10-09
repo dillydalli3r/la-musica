@@ -1710,7 +1710,7 @@ finally:
 # (c) One release's candidates at once are the user's `soulseek_candidate_slots`
 #     (3 by default) — the app's own per-release ceiling — narrowed only when
 #     slskd's transfer slots cannot carry what releases × candidates promises:
-#     the shipped defaults need 3 × 3 = 9 slots, and a config with fewer gets
+#     the shipped defaults need 5 × 3 = 15 slots, and a config with fewer gets
 #     its batch narrowed (`slots // releases`) instead of queueing behind slskd.
 # The SHIPPED defaults, spelled out rather than passed as `{}`: an empty dict
 # is falsy, and these three read `load_config()` in that case — so `{}` would
@@ -1718,8 +1718,9 @@ finally:
 # an offline contract and must not depend on it).
 from mlo.config import DEFAULT_CONFIG as _SHIPPED  # noqa: E402
 
+assert soulseek_auto.concurrency(dict(_SHIPPED)) == 5, soulseek_auto.concurrency(dict(_SHIPPED))
 assert soulseek_auto.candidate_slots(dict(_SHIPPED)) == 3, soulseek_auto.candidate_slots(dict(_SHIPPED))
-assert soulseek_auto.download_slots(dict(_SHIPPED)) == 9, soulseek_auto.download_slots(dict(_SHIPPED))
+assert soulseek_auto.download_slots(dict(_SHIPPED)) == 15, soulseek_auto.download_slots(dict(_SHIPPED))
 assert soulseek_auto._batch_width(dict(_SHIPPED)) == 3, soulseek_auto._batch_width(dict(_SHIPPED))
 assert soulseek_auto._batch_width({"soulseek_candidate_slots": 2}) == 2
 assert soulseek_auto._batch_width({"soulseek_candidate_slots": 20}) == 3
@@ -3590,8 +3591,8 @@ from mlo.config import DEFAULT_CONFIG  # noqa: E402
 
 assert (DEFAULT_CONFIG["soulseek_search_concurrency"],
         DEFAULT_CONFIG["soulseek_candidate_slots"],
-        DEFAULT_CONFIG["soulseek_download_slots"]) == (3, 3, 9), \
-    "the shipped numbers ARE the promise: 3 releases x 3 candidates = 9 slots"
+        DEFAULT_CONFIG["soulseek_download_slots"]) == (5, 3, 15), \
+    "the shipped numbers ARE the promise: 5 releases x 3 candidates = 15 slots"
 print("  ok 3 candidates of one release together, from 3 different peers")
 
 print("== an import chain still running is In progress, not Completed ==")
@@ -3816,19 +3817,21 @@ assert ask.job["state"] == "error", ask.job
 assert (ask.enqueued, ask.imported) == ([], []), (ask.enqueued, ask.imported)
 
 # --------------------------------------------------------------------------- #
-# 9. THE FAST PASS. The owner's ask, twice: "auto-importing must act faster on a
-#    good find — it should not have to wait 60 s first — and it must keep
-#    searching other releases while that happens".
+# 9. THE SEARCH WINDOW AND THE EARLY START. Two owner asks pull in opposite
+#    directions and both must hold: a search must give the network real time to
+#    answer (a 30 s window, `soulseek_search_fast_seconds`, not the old 5 s), and
+#    a good folder must start downloading the moment it is readable — never held
+#    for the caller's own longer window.
 #
 #    slskd serves `/searches/{id}/responses` only once a search has ENDED, so
 #    the quiet timeout a query is POSTED with is the time before ANYTHING can be
-#    read at all. The job now asks with the short `soulseek_search_fast_seconds`
-#    and enqueues the first usable folder the moment it is readable; the long
-#    `soulseek_search_timeout_seconds` is the TOP-UP window, spent only when the
-#    fast pass found nothing usable, and it re-reads the searches phase 1 left
-#    running instead of cancelling them.
+#    read at all. The job posts every template with that window and enqueues the
+#    first usable folder the moment it is readable; the searches still running
+#    then are KEPT (not cancelled) and re-read only if the candidates in hand
+#    all fail. `soulseek_search_timeout_seconds` is the TOP-UP window, spent
+#    re-reading those leftovers.
 # --------------------------------------------------------------------------- #
-print("== the fast pass: a good find downloads in seconds, not in a window ==")
+print("== the search window: a 30 s search, an immediate download ==")
 
 
 class SlskdQuietModel(AutoSlsk):
@@ -3878,41 +3881,42 @@ class SlskdQuietModel(AutoSlsk):
         return [e for e in self.journal if e[1] == kind]
 
 
-# (a) ONE complete lossless folder, readable the moment the fast pass's own
-#     quiet window ends, with the WALKER's 60 s window handed in as the caller's
-#     own (`search_seconds` — exactly what server.wishes_worker passes per
-#     candidate). The download is enqueued at that moment, not 60 s later.
+# (a) A QUIET release: the folder becomes readable exactly when the app's own
+#     search window ends (slskd serves nothing before then), with the WALKER's
+#     60 s window handed in as the caller's own (`search_seconds` — exactly what
+#     server.wishes_worker passes per candidate). The download is enqueued the
+#     moment it is readable, not after that longer window elapses.
 run = run_job(JOB_RELEASE, ONE_DISC_ROWS, stub_cls=SlskdQuietModel,
               search_seconds=60)
 assert run.job["state"] == "done" and run.imported, run.job
-# The query went out with the SHORT window — 5000 ms, not the walker's 60000:
-# slskd hands searchTimeout to Soulseek.NET as MILLISECONDS, and it is the time
-# before anything can be read at all.
-assert [(q, t) for q, t, _l in run.stub.searches] == [("Job Album", 5000)], \
+# The query went out with the app's own search window — 30000 ms, not the
+# walker's 60000: slskd hands searchTimeout to Soulseek.NET as MILLISECONDS, and
+# it is the time before anything can be read at all.
+assert [(q, t) for q, t, _l in run.stub.searches] == [("Job Album", 30000)], \
     run.stub.searches
 # ...and the ORDERING the owner asked for, with no real sleep anywhere: posted
-# at t=0, ended by the stub 5 s later (slskd's own rule), enqueued THEN.
+# at t=0, ended by the stub 30 s later (slskd's own rule), enqueued THEN.
 _posts, _enqueues = run.stub.at("search"), run.stub.at("enqueue")
 assert _posts and _posts[0][0] == 0, run.stub.journal
 assert _enqueues, run.stub.journal
-assert _enqueues[0][0] >= 5, run.stub.journal        # the search had to end first
+assert _enqueues[0][0] >= 30, run.stub.journal       # the search had to end first
 assert _enqueues[0][0] < 60, run.stub.journal        # ...long before the top-up
-assert _enqueues[0][0] <= 5 + 2 * soulseek_auto._SEARCH_POLL_S, run.stub.journal
-# A usable folder was in hand, so the top-up window was never spent: one search,
-# no second window, and the running one was not cancelled either.
+assert _enqueues[0][0] <= 30 + 2 * soulseek_auto._SEARCH_POLL_S, run.stub.journal
+# A usable folder was in hand, so no second window was spent: one search, and
+# nothing had to be cancelled.
 assert len(run.stub.searches) == 1, run.stub.searches
 assert run.stub.cancelled_searches == [], run.stub.cancelled_searches
 assert os.path.basename(run.imported[-1]) == "Album", run.imported
 # The run's own lines name the phase they are in, and phase 2 never happened.
-assert any("fast pass" in e["msg"] for e in run.job["log"]), run.job["log"]
-assert not any("top-up: re-reading" in e["msg"] for e in run.job["log"]), run.job["log"]
+assert any("Searching Soulseek" in e["msg"] for e in run.job["log"]), run.job["log"]
+assert not any("re-reading" in e["msg"] for e in run.job["log"]), run.job["log"]
 
 # (b) A BUSY release: the network keeps answering, so the search is still
-#     running when the fast pass's window (5s + the grace tail) closes. It is
+#     running when the app's own window (30 s + the grace tail) closes. It is
 #     NOT cancelled and NOT forgotten — the top-up window re-reads it, so the
 #     album still lands, and it is read the moment it ends.
 run = run_job(JOB_RELEASE, ONE_DISC_ROWS,
-              stub_cls=lambda d, r: SlskdQuietModel(d, r, slow={"Job Album": 55.0}),
+              stub_cls=lambda d, r: SlskdQuietModel(d, r, slow={"Job Album": 85.0}),
               search_seconds=60)
 assert run.job["state"] == "done" and run.imported, run.job
 # ONE search was ever POSTED: the top-up took the outstanding one over
@@ -3921,21 +3925,20 @@ assert [q for q, _t, _l in run.stub.searches] == ["Job Album"], run.stub.searche
 assert run.stub.cancelled_searches == [], run.stub.cancelled_searches
 assert run.stub.at("search")[0][0] == 0, run.stub.journal
 _enq = run.stub.at("enqueue")
-assert _enq and 50 <= _enq[0][0] < 105, run.stub.journal
+assert _enq and 75 <= _enq[0][0] < 105, run.stub.journal
 assert os.path.basename(run.imported[-1]) == "Album", run.imported
 _msgs = [e["msg"] for e in run.job["log"]]
-assert any("fast pass" in m for m in _msgs), _msgs
-assert any("top-up: re-reading" in m for m in _msgs), _msgs
+assert any("Searching Soulseek" in m for m in _msgs), _msgs
+assert any("re-reading" in m for m in _msgs), _msgs
 
-# (c) A BETTER copy that only turns up in a search which is still running when
-#     the transfer starts does not cancel it. `LateBetter` answers the job's
-#     second configured template with a higher-scoring complete lossless folder,
-#     but 30 s after it was posted: the first template has already handed the job
-#     a usable folder, so its download starts at t≈5 and the job moves on. The
-#     better copy rides a search that is dropped at slskd, and nothing the job
-#     had already started is cancelled for it (before this change the job waited
-#     out the whole 60 s window, ranked the better copy first and cancelled the
-#     one it had started).
+# (c) A better copy arriving LATER does not cancel the transfer already started —
+#     and its still-running search is KEPT, not dropped. `LateBetter` answers the
+#     job's second configured template with a higher-scoring complete lossless
+#     folder, but only 45 s after it was posted: the first template ends at the
+#     app's 30 s window, hands the job a usable folder, so its download starts at
+#     t≈30 and the job moves on. The better copy's search outlives that start, so
+#     it is left running at slskd (kept for a retry, never waited out) and
+#     nothing the job had already started is cancelled for it.
 print("== a better copy arriving later does not cancel the transfer already started ==")
 
 
@@ -3959,16 +3962,16 @@ BETTER_ROWS = cd_folder("betterpeer", "Music/Better", slot=True, queue=0,
 
 class LateBetter(SlskdQuietModel):
     """SlskdQuietModel whose SECOND query answers with the better-scoring copy,
-    but only 30 s after it was posted (a busy release slskd keeps alive)."""
+    but only 45 s after it was posted (a busy release slskd keeps alive)."""
 
     def __init__(self, ddir, first_rows, better_rows, better_query="CAT-1"):
-        super().__init__(ddir, first_rows, slow={better_query: 30.0})
+        super().__init__(ddir, first_rows, slow={better_query: 45.0})
         self.better_rows, self.better_query = better_rows, better_query
 
     def search_results(self, sid):
         n = int(str(sid).split("-")[1]) - 1
         query = self.searches[n][0] if n < len(self.searches) else ""
-        if query == self.better_query and soulseek_auto.time.time() >= 30:
+        if query == self.better_query and soulseek_auto.time.time() >= 45:
             return {"state": "Completed", "isComplete": True,
                     "responses": self.better_rows}
         return super().search_results(sid)
@@ -3980,15 +3983,15 @@ run = run_job(JOB_RELEASE, WORSE_ROWS + BETTER_ROWS,
 assert run.job["state"] == "done" and run.imported, run.job
 assert [q for q, _t, _l in run.stub.searches] == ["Job Album", "CAT-1"], \
     run.stub.searches
-# The job started the folder it could READ: that enqueue went out at t≈5, long
-# before the better copy's search would have ended at t=30.
+# The job started the folder it could READ: that enqueue went out at t≈30, long
+# before the better copy's search would have ended at t=45.
 _enq = run.stub.at("enqueue")
-assert _enq and _enq[0][0] < 30, run.stub.journal
+assert _enq and _enq[0][0] < 45, run.stub.journal
 assert all(e[2] == "peer" for e in _enq), run.stub.journal
 # ...and nothing already started was cancelled for the marginally better copy:
-# its SEARCH was dropped at slskd (never waited out), its files were never
-# asked for, and the import is the folder whose transfer had started.
-assert run.stub.cancelled_searches == ["sid-2"], run.stub.cancelled_searches
+# its SEARCH was KEPT at slskd for a retry (never waited out), its files were
+# never asked for, and the import is the folder whose transfer had started.
+assert run.stub.cancelled_searches == [], run.stub.cancelled_searches
 assert run.stub.cancelled == [], run.stub.cancelled
 assert not any("Better" in f for f in run.submitted()), run.submitted()
 assert os.path.basename(run.imported[-1]) == "Album", run.imported
@@ -3996,7 +3999,7 @@ assert os.path.basename(run.imported[-1]) == "Album", run.imported
 # the better copy after its own transfer had started.
 assert len(run.stub.searches) == 2 and len(run.stub.at("search")) == 2, \
     run.stub.journal
-assert not any("top-up: re-reading" in e["msg"] for e in run.job["log"]), run.job["log"]
+assert not any("re-reading" in e["msg"] for e in run.job["log"]), run.job["log"]
 
 # (d) TWO releases at once: one job's transfer in flight — a peer that has the
 #     album but keeps us in slskd's queue — must not hold the other release's

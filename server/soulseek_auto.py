@@ -138,15 +138,16 @@ _tl = threading.local()
 _KEEP_SETTLED = 40
 
 # How many releases run at once when nothing is configured.
-_CONCURRENCY_DEFAULT = 3
+_CONCURRENCY_DEFAULT = 5
 # How many candidate downloads of ONE release run at once when nothing is
-# configured — three peers of one album transfer side by side, the first that
-# verifies good ends the batch.
+# configured — up to three peers of one album transfer side by side, the first
+# that verifies good ends the batch (narrowed to fit slskd's slots when five
+# releases are running at once).
 _CANDIDATE_SLOTS_DEFAULT = 3
 # slskd's own transfer ceiling when nothing is configured: the shipped default
-# is concurrency × candidate_slots (3 × 3), so the app's two ceilings can be
+# is concurrency × candidate_slots (5 × 3), so the app's two ceilings can be
 # honoured without slskd queueing the difference.
-_DOWNLOAD_SLOTS_DEFAULT = 9
+_DOWNLOAD_SLOTS_DEFAULT = 15
 
 # A job parked on a prompt waits here for the user's answer (confirm()):
 # "only lossy copies found" and "no usable results — add to wishes?".
@@ -316,7 +317,7 @@ def download_slots(cfg=None):
     is NOT how the two ceilings above are enforced — those are the app's own
     promise and the app keeps them. This one is the outer ceiling slskd puts on
     the transfers that promise produces, so the shipped default is exactly
-    concurrency × candidate_slots (3 × 3 = 9) and `_batch_width` narrows the
+    concurrency × candidate_slots (5 × 3 = 15) and `_batch_width` narrows the
     per-release batch when a config sets fewer slots than its other two
     settings need."""
     return _clamped_int(cfg, "soulseek_download_slots",
@@ -2431,18 +2432,19 @@ def _search_queries(slsk, queries, wait_s, usable=None, response_limit=0,
     the `[search id, query, last DTO]` a previous call put in `pending_out`,
     and they are polled here instead of being POSTed a second time — the
     network work is already out, only the reading was left. It is what the
-    auto-importer's TOP-UP window is made of: the first pass asks with the
-    SHORT quiet timeout (`soulseek_search_fast_seconds`) so a release the
-    network answers for becomes readable in seconds, and when nothing usable
-    came back the searches it could not finish are handed to that top-up
-    instead of being cancelled.
+    auto-importer's TOP-UP window is made of: the search phase posts with the
+    configured `soulseek_search_fast_seconds`, and the searches it could not
+    finish (or that the usable-folder shortcut stopped waiting for) are handed
+    to that top-up instead of being cancelled, so their candidates are tried
+    before the release is given up on.
 
     `pending_out`, when a list is given, receives exactly those entries instead
     of cancelling the searches they name: a search still running when THIS
-    window closes is left at slskd for the caller's next window. Without it, a
-    search that outlived its window is cancelled and reported as "did not
-    finish" — which is what every other caller wants, because nothing else has
-    a second window to read it in.
+    window closes — or one the `usable` shortcut stopped waiting for — is left
+    at slskd for the caller's next window. Without it, a search that outlived
+    its window is cancelled and reported as "did not finish", which is what
+    every other caller wants, because nothing else has a second window to read
+    it in.
 
     How long the wait REALLY was is kept for the caller on this thread
     (`_search_seconds`) — this function is the one place that knows when the
@@ -2512,13 +2514,16 @@ def _search_queries(slsk, queries, wait_s, usable=None, response_limit=0,
     for sid, q, res in watch:
         if not slsk.is_search_done(res or {}):
             # Still running when the window closed. Nothing readable will come
-            # out of it (responses are served only after a search ends), so it
-            # is cancelled rather than left occupying slskd's search slots —
+            # out of it yet (responses are served only after a search ends), so
+            # it is cancelled rather than left occupying slskd's search slots —
             # UNLESS the caller owns a second window (`pending_out`), which is
             # the one that reads it: cancelling there would throw away a search
-            # the network is still answering. A usable find and a user's Cancel
-            # need no second window, so those are still dropped at slskd.
-            if pending_out is not None and not early and not cancelled:
+            # the network is still answering. That includes a search the
+            # usable-folder shortcut stopped waiting for: the caller proceeds to
+            # download at once and re-reads it only if those choices fail. A
+            # user's Cancel is the one case with no second window — it drops
+            # every outstanding search at slskd.
+            if pending_out is not None and not cancelled:
                 pending_out.append([sid, q, res])
                 continue
             try:
@@ -3749,7 +3754,7 @@ def _batch_width(cfg=None):
     * `soulseek_download_slots` — the ceiling slskd itself enforces on
       transfers. The app never relies on it (the two above are the promise) but
       it must not be the smaller number either: the shipped default is exactly
-      concurrency × candidate_slots — 3 × 3 = 9 — and a config that sets fewer
+      concurrency × candidate_slots — 5 × 3 = 15 — and a config that sets fewer
       slots than its other two settings need gets its per-release width
       narrowed to fit (`slots // releases`), so the product can never be a claim
       the network layer refuses to serve.
@@ -5491,39 +5496,42 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
             # download, verify and import below keep the pipeline's own
             # ceilings, because nothing may cut a transfer short.
             search_wait = int(search_seconds
-                              or cfg.get("soulseek_auto_search_wait", 10) or 10)
-            # PHASE 1 asks with this SHORT quiet timeout, and that is the whole
-            # reason a good find no longer waits: slskd serves a search's
-            # responses only once the search has ENDED, so the window a query
-            # is POSTED with is the time before ANYTHING can be read at all. A
-            # release the network answers for (or does not answer for) goes
-            # quiet in seconds, ends, and becomes readable then — instead of
-            # sitting behind the top-up window below. Never longer than the
-            # window it precedes: the first pass is the short read, always.
-            fast_wait = min(int(cfg.get("soulseek_search_fast_seconds", 5) or 5),
+                              or cfg.get("soulseek_auto_search_wait", 30) or 30)
+            # The window the whole batch of templates shares. It is QUIET time
+            # (slskd ends a search when the network stops answering) and the
+            # response limit ends a query outright once that many peers have
+            # replied — a popular album never goes quiet, so the limit is what
+            # keeps it from sitting out the window. Both are ceilings, never
+            # floors.
+            fast_wait = min(int(cfg.get("soulseek_search_fast_seconds", 30) or 30),
                             search_wait)
             response_limit = int(cfg.get("soulseek_auto_response_limit", 15) or 15)
-            # Every template goes out at once and the merged responses are
-            # scored on each tick: the first complete+lossless folder ends the
-            # wait for ALL of them, so a weak template never costs another full
-            # window. `usable` is the same test the loop below applies.
+            # PHASE 1 posts every template at once with the SAME window and stops the
+            # wait the moment a complete lossless folder is readable: the
+            # download starts THEN, with no extra waiting (slskd serves a
+            # search's responses only once the search has ENDED, so a query is
+            # readable when its own quiet timer fires or it draws
+            # `response_limit` peers — never before). The searches still running
+            # at that moment are NOT cancelled: they are handed to `running` and
+            # re-read only if every candidate already in hand is rejected, so a
+            # release is never given up on (or a slower edition walked to) while
+            # folders a slower template would have added sit unread.
             def _usable(merged):
                 return [c for c in find_candidates(merged, release, cfg)
                         if c["complete"] and c["lossless"]]
 
             _stage("searching",
-                   f"Searching Soulseek (fast pass) with "
-                   f"{len(queries_built)} query template(s)…")
-            _log(f"Searching Soulseek (fast pass — a {int(fast_wait + _SEARCH_GRACE_S)}s "
-                 f"window, so a good folder is readable in seconds) with "
-                 f"{len(queries_built)} query template(s) in "
-                 f"parallel: “{'” · “'.join(queries_built)}” … (a good folder ends "
-                 f"the search at once, otherwise {response_limit} responses; if "
-                 f"nothing usable comes back, a {int(search_wait + _SEARCH_GRACE_S)}s "
-                 f"top-up re-reads whatever is still running)")
-            # Searches this pass could not finish are NOT cancelled here: the
-            # top-up window below re-reads them (they keep their own short quiet
-            # timeout at slskd, so they end by themselves).
+                   f"Searching Soulseek with {len(queries_built)} "
+                   f"query template(s)…")
+            _log(f"Searching Soulseek — a {int(fast_wait + _SEARCH_GRACE_S)}s "
+                 f"window with {len(queries_built)} query template(s) in "
+                 f"parallel: “{'” · “'.join(queries_built)}” … (the first "
+                 f"complete lossless folder starts downloading at once; a query "
+                 f"that draws {response_limit} responses ends early too)")
+            # Searches this pass could not finish — and any the usable-folder
+            # shortcut cut short — are NOT cancelled here: they are kept in
+            # `running` and re-read below only when the candidates already in
+            # hand have all been rejected.
             running = []
             results, search_failed, skipped = _search_queries(
                 slsk, queries_built, fast_wait, usable=_usable,
@@ -5541,37 +5549,37 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
             responses = [f for _q, res in results for f in (res.get("responses") or [])]
             candidates = find_candidates(responses, release, cfg)
             # The seconds this window really took, not the ceiling the line above
-            # advertises: a usable folder (or a quiet network) ends a search long
-            # before `fast_wait + _SEARCH_GRACE_S`, and the wish prompt reports
-            # this same measured number.
+            # advertises: a quiet network (or the response limit) ends the wait
+            # long before `fast_wait + _SEARCH_GRACE_S`, and the wish prompt
+            # reports this same measured number.
             _log(f"  {len(candidates)} candidate folder(s) from {len(responses)} "
                  f"result file(s) across {len(results)} search(es) in "
                  f"{int(searched_s)}s")
             candidates.sort(key=_rank)
             best = [c for c in candidates if c["complete"] and c["lossless"]]
-            if best and skipped:
-                _log(f"  Usable candidate found ({len(best)} complete lossless) — "
-                     f"a good copy is in hand, so the search stopped here and the "
-                     f"remaining {skipped} query template(s) were not waited out")
+            if best and running:
+                _log(f"  Usable candidate found — {len(running)} search(es) "
+                     f"still running are kept for a retry if this download "
+                     f"fails")
 
             # ---- PHASE 2: the top-up ------------------------------------------
-            # Only when the fast pass found nothing USABLE. What it left running
-            # at slskd is not thrown away: the caller's window (the walk's
-            # per-candidate `soulseek_search_timeout_seconds`, or
-            # `soulseek_auto_search_wait`) is spent RE-READING those searches,
+            # Only when phase 1 found nothing USABLE and left searches running.
+            # What it left running at slskd is not thrown away: the caller's
+            # window (the walk's per-candidate `soulseek_search_timeout_seconds`,
+            # or `soulseek_auto_search_wait`) is spent RE-READING those searches,
             # because a search a popular album keeps alive is exactly the one
-            # whose responses are still on their way — and slskd serves them
-            # the moment it ends. A usable folder found here ends the top-up at
-            # once, like every other window, and the broad second pass below
-            # still runs after it when nothing usable came back.
+            # whose responses are still on their way — and slskd serves them the
+            # moment it ends. A usable folder found here ends the top-up at
+            # once, and the broad second pass below still runs after it when
+            # nothing usable came back.
             if not best and running:
                 _stage("searching",
                        f"Top-up search: {len(running)} search(es) still running…")
-                _log(f"No usable folder from the fast pass — top-up: re-reading the "
-                     f"{len(running)} search(es) still running at slskd, up to "
+                _log(f"Top-up: re-reading the {len(running)} search(es) still "
+                     f"running at slskd, up to "
                      f"{int(search_wait + _SEARCH_GRACE_S)}s…")
                 more, more_failed, _more_skipped = _search_queries(
-                    slsk, [], search_wait, usable=_usable,
+                    slsk, [], search_wait,
                     response_limit=response_limit, cancel_check=_cancelled,
                     resume=running)
                 searched_s += _search_seconds()
@@ -5590,6 +5598,7 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
                 _log(f"  top-up: {len(candidates)} candidate folder(s) from "
                      f"{len(responses)} result file(s) across {len(results)} "
                      f"search(es) in {int(searched_s)}s")
+                running = []          # consumed: phase 2 owns the second window
 
             # ---- ONE broader query, run after the configured one(s) -----------
             # A DIGITAL release whose configured templates name it too
@@ -5817,14 +5826,58 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
         # (see _try_batch): three peers transferring in parallel, the first that
         # verifies good ends the batch — the losers are cancelled AND swept, not
         # left to keep arriving — and the next batch of up to three runs only
-        # when every peer in it was rejected. One entry per peer+folder
-        # (_dedupe_candidates), one attempt per entry: a folder this job already
-        # tried is never tried again.
+        # when every peer in it was rejected. Candidates are attempted in
+        # `_rank` order (best quality, then the FASTEST peer), so the quickest
+        # good copy is asked for first and the slower ones are the fallback.
+        # One entry per peer+folder (_dedupe_candidates), one attempt per entry:
+        # a folder this job already tried is never tried again.
+        def _more_candidates():
+            """Candidates from the searches phase 1 kept in hand for a retry.
+
+            They are read only here — after every candidate already scored has
+            been rejected — so a release is not given up on while peers a slower
+            template would have added are still answering. A folder this job
+            already tried is never offered again."""
+            nonlocal searched_s
+            if not running:
+                return []
+            tried = {(str(a.get("username") or "").lower(),
+                      str(a.get("dir") or "").replace("\\", "/").rstrip("/").lower())
+                     for a in _job["attempts"]}
+            _log(f"Every candidate in hand was rejected — reading the "
+                 f"{len(running)} search(es) still running at slskd for more…")
+            more, more_failed, _sk = _search_queries(
+                slsk, [], search_wait, response_limit=response_limit,
+                cancel_check=_cancelled, resume=running)
+            del running[:]
+            searched_s += _search_seconds()
+            _job_search_done()
+            for line in more_failed:
+                _log(f"  ✕ {line}")
+            fresh = find_candidates(
+                [f for _q, res in more for f in (res.get("responses") or [])],
+                release, cfg)
+            fresh = [c for c in _dedupe_candidates(fresh)
+                     if (str(c.get("username") or "").lower(),
+                         str(c.get("dir") or "").replace("\\", "/").rstrip("/").lower())
+                     not in tried]
+            fresh.sort(key=_rank)
+            if fresh:
+                _log(f"  {len(fresh)} more candidate folder(s) from the "
+                     f"still-running search(es)")
+            return fresh
+
         pool = _dedupe_candidates(candidates)
         width = _batch_width(cfg)
-        while pool:
+        while True:
             if _cancelled():
                 return _finish("cancelled")
+            if not pool:
+                # The candidates already scored are exhausted: read whatever
+                # phase 1 left running, once, before the release is abandoned.
+                pool = _more_candidates()
+                if not pool:
+                    break
             batch, pool = _take_batch(pool, width)
             _log(f"Batch of {len(batch)} candidate(s), downloading together: "
                  + " · ".join(f"{c['username']} (…{c['dir'][-40:]})" for c in batch))

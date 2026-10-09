@@ -311,7 +311,9 @@ print("ok  a MusicBrainz failure fails its job with a reason, frees the slot "
 # `wishes.owned_mbids` is the library's index of MusicBrainz release AND
 # release-group ids (from the album tags). A bulk import that ignores it
 # downloads the same album a second time, and the duplicate lands beside the
-# first in the library.
+# first in the library. A NAMED release is the exception: the user's own pick is
+# refused only when THAT release is already here, never because a sibling
+# edition of its group is.
 _OWNED_GROUP = "3e4d5c6b-7a89-0123-cdef-23456789abcd"
 _REL_DATA = {
     "id": MBID_RELEASE,
@@ -352,9 +354,19 @@ def _owns(group_id):
 try:
     intg.release_group_browse = _rgb_one_album
 
-    # a RELEASE id whose release group the library already holds: resolved, then
-    # refused — never queued
+    # a NAMED release whose GROUP the library holds but the release ITSELF does
+    # not: QUEUED — a manual pick may add a sibling pressing. The group-level
+    # skip below is the BULK paths' rule (a release group's editions, an
+    # artist's discography), never a named release's.
     wishes.owned_mbids = _owns(_OWNED_GROUP)
+    _patch_mb_transport([_Resp(200, dict(_REL_DATA))])
+    _rows, _skipped = _auto_targets(MBID_RELEASE, "release", "best")
+    assert [_r["mbid"] for _r in _rows] == [MBID_RELEASE], _rows
+    assert _skipped == [], _skipped
+
+    # ...but a NAMED release the library ALREADY holds is refused, never queued
+    wishes.owned_mbids = lambda cfg=None: {
+        MBID_RELEASE: os.path.join(REDIRECT, "Artists", "Some Album")}
     _patch_mb_transport([_Resp(200, dict(_REL_DATA))])
     _rows, _skipped = _auto_targets(MBID_RELEASE, "release", "best")
     assert _rows == [], _rows

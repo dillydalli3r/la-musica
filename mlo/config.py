@@ -1140,11 +1140,13 @@ DEFAULT_CONFIG = {
     # candidates, and the app's own enqueueing is what holds those two limits
     # (see server.soulseek_auto). slskd then takes the transfers they produce
     # off the network, and it can only have this many in flight — so the
-    # shipped default is exactly that product, 3 × 3 = 9. A config with fewer
-    # slots than its other two settings need still gets the guarantee: the
-    # per-release width is narrowed to fit (`_batch_width`), so the app never
-    # asks slskd for more than it will serve.
-    "soulseek_download_slots": 9,
+    # shipped default is exactly that product, 5 × 3 = 15: five albums
+    # download at once, each probing up to three peers for the fastest complete
+    # copy. A config with fewer slots than its other two settings need still
+    # gets the guarantee: the per-release width is narrowed to fit
+    # (`_batch_width`), so the app never asks slskd for more than it will
+    # serve.
+    "soulseek_download_slots": 15,
     "soulseek_upload_slots": 2,
     "soulseek_upload_limit_kib": 0,
     "soulseek_download_limit_kib": 0,
@@ -1249,7 +1251,9 @@ DEFAULT_CONFIG = {
     # rejection cap: a rejected peer costs only its own attempt, and stopping
     # early throws away candidates that would have verified).
     # Quiet seconds before slskd ends a search with too few replies to score.
-    "soulseek_auto_search_wait": 10,
+    # 30 by default: a peer that is slow to answer is still answering, and a
+    # short window ended the search before the network had its say.
+    "soulseek_auto_search_wait": 30,
     # THE FALLBACK WALK (spec R150-R153). An acquisition of a release GROUP
     # starts on the edition the release-choice policy ranks best; when the
     # network does not have it, the walk asks the next ranked edition, then the
@@ -1278,15 +1282,14 @@ DEFAULT_CONFIG = {
     # is what is left when that pass found nothing usable — it keeps reading the
     # searches still running at slskd (and the broad second pass still runs
     # after it).
-    "soulseek_search_timeout_seconds": 60,
-    # The FIRST pass's quiet window, and the reason a good find starts
-    # downloading in seconds: every configured query template is POSTed with
-    # this timeout, so a release the network answers for (or does not answer for
-    # at all) goes quiet and ENDS in seconds and its responses become readable —
-    # the moment one complete lossless folder is readable its download is
-    # enqueued and the job moves on. The long window above is only spent when
-    # this pass found nothing usable. Never longer than the window it precedes.
-    "soulseek_search_fast_seconds": 5,
+    "soulseek_search_timeout_seconds": 30,
+    # The FIRST pass's quiet window. Every configured query template is POSTed
+    # with this timeout, so the whole batch shares ONE window and every peer
+    # that answers within it has its folder scored — 30 s by default, so a
+    # quiet release is not cut off before the network replies. A query that
+    # draws enough peers ends early on the response limit below, and once the
+    # searches end every candidate they turned up is tried in rank order.
+    "soulseek_search_fast_seconds": 30,
     # Peers that must answer before the search is scored instead of waiting on
     # slskd's quiet timer: a popular album never goes quiet, and slskd only
     # hands back its responses once a search has ENDED — this is what stops a
@@ -1303,7 +1306,8 @@ DEFAULT_CONFIG = {
     # and it starts by itself when one of the running ones finishes) instead of
     # being refused. Searching is mostly waiting on the network, so one album
     # at a time left the page showing a queue that only ever moved one item.
-    "soulseek_search_concurrency": 3,
+    # FIVE, so five albums are searched, downloaded and imported at once.
+    "soulseek_search_concurrency": 5,
     # How many candidate downloads of ONE release run at the same time — three
     # peers of one album transfer side by side, the first that verifies good
     # becomes the import and the others are cancelled and swept, and the NEXT
@@ -1417,7 +1421,10 @@ DEFAULT_CONFIG = {
     # closed (see server/events.py) — switching a kind off here silences it on
     # every device, which is what "do not tell me about this" has to mean.
     "notify_wish_found": True,
-    "notify_soulseek_download_start": True,
+    # OFF by default: "a Soulseek transfer began" is work in progress, and the
+    # pipeline emits it per candidate. The outcome kinds above are what a user
+    # acts on.
+    "notify_soulseek_download_start": False,
     "notify_soulseek_upload_start": True,
 
     # Size cap on the app's remove-from-library bin (<music>/.mlo/trash),
@@ -1895,11 +1902,18 @@ DEFAULT_CONFIG = {
     # for a device that is closed (see server/events.py) — switching a kind
     # off here silences it on every device, which is what "do not tell me
     # about this" has to mean.
+    # A finished DOWNLOAD and a finished IMPORT are the two outcomes worth a
+    # notice, and they ride their own kinds. The two "it began" frames —
+    # "an album is ready to import" (notify_import_ready) and "the import
+    # chain picked it up" (notify_import_start) — are OFF by default: they
+    # announce work in progress, not a result, and the auto-import pipeline
+    # emits them per album. Turn them on to narrate the middle, off (the
+    # shipped default) to hear only the outcome.
     "notify_download_done": True,
-    "notify_import_ready": True,
+    "notify_import_ready": False,
     # The import phase itself: started when the chain picks the album up, done
     # when it has been over it (the chain's own one-line summary rides along).
-    "notify_import_start": True,
+    "notify_import_start": False,
     "notify_import_done": True,
     # UI language for the web app and the client shells. English is the
     # shipped language and the fallback for every key a locale does not
@@ -1945,9 +1959,8 @@ _INT_RANGES = {
     # search window allows.
     "soulseek_fallback_candidates": (1, 10),
     "soulseek_search_timeout_seconds": (5, 300),
-    # The first pass's own window: short by definition (the whole point is a
-    # readable answer in seconds), and never longer than the top-up window it
-    # precedes.
+    # The search window itself: the time every query is given to draw answers,
+    # and never longer than the top-up window it may precede.
     "soulseek_search_fast_seconds": (2, 60),
     "soulseek_auto_response_limit": (5, 500),
     # How many of a release's tracks the MBID-driven queries chase (see the key

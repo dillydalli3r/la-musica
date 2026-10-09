@@ -165,7 +165,10 @@ def _group_edition_targets(group_mbid, release_mbid, mode, cfg=None):
         from mlo.config import load_config
         from server import wishes
         owned = wishes.owned_mbids(cfg or load_config())
-        if rid.lower() in owned or (belongs and belongs in owned):
+        # The user PICKED this edition: it is refused only when the very same
+        # release is already in the library, never because a sibling edition of
+        # the group is — a manual pick may add a second pressing.
+        if rid.lower() in owned:
             return [], [{"mbid": rid, "reason": "already in the library"}]
     except Exception:
         pass

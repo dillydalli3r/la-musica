@@ -7449,8 +7449,13 @@ def auto_import_targets(mbid, kind=None, mode="best", types=None,
                                                  "release group matches this ID"}]
         if not rel:
             return [], [{"mbid": rid, "reason": _NO_EDITION}]
-        rg = str(rel.get("release_group_id") or "").strip().lower()
-        if rg and rg in owned:
+        # A NAMED release is the user's OWN pick (the release page's "add this
+        # pressing", a manual grab): it is refused only when THAT release is
+        # already in the library, never because a sibling edition of the same
+        # release group is. The group-level skip belongs to the bulk paths
+        # below — a release GROUP's editions or an artist's discography — where
+        # an album the library already holds must not be fetched again.
+        if rid.lower() in owned:
             return [], [{"mbid": rid, "reason": "already in the library"}]
         # ONE candidate: the caller named THIS pressing, so there is no second
         # best to fall back to — the fallback belongs to a release GROUP, whose

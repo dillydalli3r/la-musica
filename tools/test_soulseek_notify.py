@@ -97,25 +97,35 @@ check("every peer is counted on its own",
 check("...counting only what is still in flight",
       [f["files"] for f in started] == [1, 1], str(started))
 
-print("== the two switches ==")
-check("both kinds are published by default",
-      events_mod._notify_configured("download_started", DEFAULT_CONFIG) is True
+print("== the 'it began' switches: OFF by default ==")
+# The owner's ask: the import pipeline narrates an OUTCOME, not progress — a
+# notice when it fails entirely, or when the album is imported. So the two "it
+# began" frames (a Soulseek download's first bytes, and the import chain picking
+# the album up) and the "ready to import" halfway frame ship OFF; switching one
+# on narrates the middle again.
+check("the download-start kind ships OFF",
+      DEFAULT_CONFIG.get("notify_soulseek_download_start") is False
+      and events_mod._notify_configured("download_started", DEFAULT_CONFIG) is False)
+check("the import-start kind ships OFF",
+      DEFAULT_CONFIG.get("notify_import_start") is False
+      and events_mod._notify_configured("import_started", DEFAULT_CONFIG) is False)
+check("the album-ready-to-import kind ships OFF",
+      DEFAULT_CONFIG.get("notify_import_ready") is False)
+check("the upload kind still ships on",
+      DEFAULT_CONFIG.get("notify_soulseek_upload_start") is True
       and events_mod._notify_configured("upload_started", DEFAULT_CONFIG) is True)
-check("both keys ship in DEFAULT_CONFIG, on",
-      DEFAULT_CONFIG.get("notify_soulseek_download_start") is True
-      and DEFAULT_CONFIG.get("notify_soulseek_upload_start") is True)
-check("switching the download kind off silences it",
+check("turning the download kind on publishes it",
       events_mod._notify_configured(
-          "download_started", {"notify_soulseek_download_start": False}) is False)
+          "download_started", {"notify_soulseek_download_start": True}) is True)
 check("switching the upload kind off silences it",
       events_mod._notify_configured(
           "upload_started", {"notify_soulseek_upload_start": False}) is False)
-check("the existing switches still silence their own kinds",
+check("the outcome switches still silence their own kinds",
       events_mod._notify_configured("wish_found", {"notify_wish_found": False}) is False
       and events_mod._notify_configured("download_done",
                                         {"notify_download_done": False}) is False
-      and events_mod._notify_configured("import_ready",
-                                        {"notify_import_ready": False}) is False)
+      and events_mod._notify_configured("import_done",
+                                        {"notify_import_done": False}) is False)
 drain()
 events_mod.emit("upload_started", "kept back", config={"notify_soulseek_upload_start": False})
 check("...and the frame really never reaches the wire", frames() == [], str(frames()))
@@ -168,6 +178,17 @@ try:
 finally:
     slsk.is_running, slsk.web_up, slsk.uploads_state = real
     main_mod._ULSK_STATE = {}
+
+# The machinery below is exercised with the "it began" kinds turned back ON —
+# the pipeline's frames are what these cases are about, and the OFF-by-default
+# gate is asserted just above. `emit` resolves the config at call time, so
+# patching `load_config` is what turns them on for these cases.
+from mlo import config as _config_mod  # noqa: E402
+
+_real_load_config = _config_mod.load_config
+_config_mod.load_config = lambda *a, **k: dict(
+    DEFAULT_CONFIG, notify_soulseek_download_start=True,
+    notify_import_start=True, notify_import_ready=True)
 
 print("== a download whose first bytes move ==")
 
@@ -331,6 +352,8 @@ check("a failed download names the artist and the year as well",
 check("...and a failure is not mistaken for a completion",
       [e for e in frames() if e["event"] in COMPLETION_KINDS] == [],
       str([e["event"] for e in frames()]))
+
+_config_mod.load_config = _real_load_config
 
 print(f"\n{len(FAILED)} failure(s)")
 sys.exit(1 if FAILED else 0)

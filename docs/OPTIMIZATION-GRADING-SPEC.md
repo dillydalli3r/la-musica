@@ -3351,8 +3351,11 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   queue), and it emits two events through `server.events`: `import_started` on the
   way in and `import_done` where every path ends (`_report_gaps`), carrying the
   chain's own one-line summary (`chain_summary`). Both are switchable
-  (`notify_import_start` / `notify_import_done`, Settings → Notifications, ON by
-  default), like `notify_download_done`, `notify_import_ready` and the add-time
+  (`notify_import_start` / `notify_import_done`, Settings → Notifications);
+  `notify_import_done` is ON, `notify_import_start` ships OFF — the pipeline
+  narrates an OUTCOME, not progress, so a notice appears when an import fails
+  entirely or when it finishes. So do `notify_import_ready` and
+  `notify_soulseek_download_start` (both OFF) and the add-time
   `album_pending`; a kind with no key in
   `events._notify_configured` is unconditional by design (an outcome the user
   Notifications go to the persisted tray for every kind,
