@@ -44,6 +44,7 @@ import traceback
 
 from mlo import atomic
 from mlo import paths as pathmod
+from mlo.artistdata import DESCRIPTION_NAME
 from mlo.config import load_config
 from mlo.paths import library_root
 
@@ -439,14 +440,98 @@ def _revive(wish, cfg):
     return False
 
 
-def _prune_empty_parent(parent):
-    """Remove *parent* when it is empty — the artist folder a provisional
-    folder's guess can leave behind (`Radiohead []`)."""
+def _prune_empty_parent(parent, cfg=None):
+    """Remove the ARTIST folder a removed placeholder left nothing in.
+
+    The user's own rule: cancel a download and, when no other album of that
+    artist is left, the artist folder goes too. It is the one directory this
+    app creates AROUND an album, and one with no album under it is scaffolding.
+
+    What it may never do is delete something real, so it refuses unless
+    everything below *parent* is the app's own:
+
+    * *parent* must be strictly INSIDE the library root — never the library
+      root itself, the music folder, or anything outside it, so a removal can
+      never cascade above the artist level;
+    * no AUDIO anywhere below it (`LIB_AUDIO_EXTS`, the library's own list): a
+      folder holding one track is another album, and the artist folder stays;
+    * no framework MARKER below it (`pathmod.load_pending`): an empty folder
+      carrying one is another download's landing place, still in flight;
+    * no file that is not the app's own artist folder content — the artist image
+      (`artist.jpg`/`.png`, mlo.artistdata's own stems), or a description the
+      app FETCHED (its provider is recorded in the provenance map; a description
+      the user typed has none). Any other file is somebody's, and the artist
+      folder stays with it.
+
+    Returns True when the folder is gone. Never raises: this runs after a
+    placeholder has already been removed, and a folder that cannot be pruned is
+    not an error the caller can act on.
+    """
+    root = library_root((cfg or load_config()).get("music_folder"))
+    if not root or not parent:
+        return False
     try:
-        if parent and os.path.isdir(parent) and not os.listdir(parent):
-            os.rmdir(parent)
+        root_abs = os.path.normcase(os.path.abspath(root))
+        here = os.path.normcase(os.path.abspath(parent))
     except OSError:
-        pass
+        return False
+    if here == root_abs or not here.startswith(root_abs + os.sep):
+        return False
+    if not os.path.isdir(parent):
+        return False
+    app_files = 0
+    from mlo.stats import LIB_AUDIO_EXTS
+    try:
+        for base, dirs, files in os.walk(parent):
+            for d in dirs:
+                if pathmod.load_pending(os.path.join(base, d)):
+                    return False
+            for name in files:
+                if os.path.splitext(name)[1].lower() in LIB_AUDIO_EXTS:
+                    return False
+                if not _artist_own_file(name, base, cfg):
+                    return False
+                app_files += 1
+    except OSError:
+        return False
+    try:
+        shutil.rmtree(parent)
+    except OSError:
+        traceback.print_exc()
+        return False
+    print(f"[mlo] removed the artist folder {os.path.basename(os.path.normpath(parent))} "
+          "— no album of theirs is left"
+          + (f" ({app_files} app-provided file(s) went with it)" if app_files else ""))
+    return True
+
+
+# The app's own artist-folder files are read from mlo.artistdata (its image
+# stems/extensions) and, for a description, its PROVENANCE map — `PROVENANCE_NAME`
+# is a file in the APP DATA dir, not in the artist folder, so a folder holding
+# an artwork.json of its own is somebody's and must not be claimed.
+def _artist_own_file(name, folder="", cfg=None):
+    """Whether *name* is a file the APP puts in an artist folder, never a user's.
+
+    An artist image (`artist.jpg`, `Artist.PNG` — mlo.artistdata's own stems and
+    extensions), or a description THE APP FETCHED (the provenance map records
+    the provider it came from: `description_source`). A description the user
+    typed carries no such source, and neither does any other file — that is what
+    keeps `_prune_empty_parent` from removing the folder it sits in.
+    """
+    from mlo import artistdata
+
+    node = str(name or "")
+    stem, ext = os.path.splitext(node)
+    if ext.lower() in artistdata.ARTIST_IMAGE_EXTS \
+            and stem.strip().lower() in artistdata.ARTIST_IMAGE_STEMS:
+        return True
+    if node.strip().lower() == DESCRIPTION_NAME.lower():
+        try:
+            prov = artistdata.read_provenance(folder, cfg)
+        except Exception:
+            return False
+        return bool(prov.get("description_source"))
+    return False
 
 
 def _adopt_deferred(deferred, folder):
@@ -948,15 +1033,17 @@ def _drop_other_placeholder(folder, cfg=None):
             continue                # a placeholder for a DIFFERENT release
         if _audio_files(other):
             continue
-        remove_folder(other)
+        remove_folder(other, cfg=cfg)
 
 
-def remove_folder(folder, *, force=False):
-    """Delete a framework folder, and the artist folder it empties.
+def remove_folder(folder, *, force=False, cfg=None):
+    """Delete a framework folder, and the artist folder it leaves empty.
 
     Refuses a folder that holds audio (the import filled it — that is a real
     album) and one whose marker is gone, unless *force*. Returns True when the
-    folder is gone.
+    folder is gone. The artist folder goes with it when nothing of the user's
+    is left in it (`_prune_empty_parent`, which is also where the refusal to
+    touch anything outside the library root lives).
     """
     folder = os.path.normpath(str(folder or ""))
     if not folder or not os.path.isdir(folder):
@@ -972,7 +1059,7 @@ def remove_folder(folder, *, force=False):
     except OSError:
         traceback.print_exc()
         return False
-    _prune_empty_parent(parent)     # an artist folder of nothing is not a row
+    _prune_empty_parent(parent, cfg)   # an artist folder of nothing is not a row
     return True
 
 
@@ -992,12 +1079,12 @@ def remove_for_wish(wish_id, cfg=None):
     wish = wishes.get_wish(wid) if wid is not None else None
     folder = str((wish or {}).get("album_path") or "")
     if folder and _pending_for(folder, wid):
-        return remove_folder(folder)
+        return remove_folder(folder, cfg=cfg)
     if wid is None:
         return False
     for cand in _scan_pending(library_root((cfg or load_config()).get("music_folder"))):
         if _pending_for(cand, wid):
-            return remove_folder(cand)
+            return remove_folder(cand, cfg=cfg)
     return False
 
 

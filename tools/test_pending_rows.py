@@ -83,6 +83,7 @@ from fastapi.testclient import TestClient                      # noqa: E402
 
 from mlo import naming                                         # noqa: E402
 from mlo.config import load_config                             # noqa: E402
+from mlo.paths import library_root                             # noqa: E402
 from server import api_query as aq                             # noqa: E402
 from server import artcache, pending_albums, tagcache           # noqa: E402
 from server import integrations as intg_mod                    # noqa: E402
@@ -372,6 +373,97 @@ ok(not pending_albums.remove_folder(kept_folder),
    "a folder holding audio is never removed by cancelling")
 ok(os.path.isfile(os.path.join(kept_folder, "1-01 One.flac")),
    "and its audio is still there")
+
+# …and the ARTIST folder the add created goes with the album, when no other
+# album of that artist is left. That folder holds the app's own artist image
+# (mlo.artistdata) beside the albums, so "it is empty" was never true for an
+# artist with a picture — which is exactly the leftover this rule is for.
+def framework(title, artist, rid, rgid="99999999-7777-7777-7777-777777777777"):
+    """A framework album under *artist*, without touching the network."""
+    return pending_albums.create(
+        dict(RELEASE, id=rid, release_group_id=rgid, title=title,
+             artists=[dict(RELEASE["artists"][0], name=artist)]), CFG, prefetch=False)
+
+
+ROOT_DIR = library_root(MF)
+
+solo = framework("Only Album", "Solo Artist", "aaaaaaa1-1111-1111-1111-111111111111")
+solo_folder = solo["album_path"].replace("/", os.sep)
+solo_artist = os.path.dirname(solo_folder)
+ok(pending_albums.remove_folder(solo_folder, cfg=CFG), "cancelling removes the album")
+ok(not os.path.isdir(solo_artist),
+   "…and the artist folder, with no other album of theirs left in it")
+
+# The app's OWN artist folder content goes too (it is the app's, and it can be
+# fetched again): an artist folder holding only its image is still scaffolding.
+imaged = framework("Imaged Album", "Imaged Artist", "aaaaaaa2-2222-2222-2222-222222222222")
+imaged_folder = imaged["album_path"].replace("/", os.sep)
+imaged_artist = os.path.dirname(imaged_folder)
+with open(os.path.join(imaged_artist, "artist.jpg"), "wb") as fh:
+    fh.write(b"\xff\xd8\xff\xe0jpeg")
+ok(pending_albums.remove_folder(imaged_folder, cfg=CFG), "cancelling removes the album")
+ok(not os.path.isdir(imaged_artist),
+   "…and the artist folder that held nothing but the artist image")
+
+# A file of the USER'S keeps the folder — and is never deleted. This is the
+# whole safety property: only the app's own scaffolding may go.
+noted = framework("Noted Album", "Noted Artist", "aaaaaaa3-3333-3333-3333-333333333333")
+noted_folder = noted["album_path"].replace("/", os.sep)
+noted_artist = os.path.dirname(noted_folder)
+with open(os.path.join(noted_artist, "my notes.txt"), "w", encoding="utf-8") as fh:
+    fh.write("mine")
+ok(pending_albums.remove_folder(noted_folder, cfg=CFG), "cancelling removes the album")
+ok(os.path.isdir(noted_artist), "…but the artist folder keeps a file of the user's")
+ok(os.path.isfile(os.path.join(noted_artist, "my notes.txt")),
+   "…and that file is untouched")
+
+# Another download still in flight keeps it too: its own placeholder carries the
+# marker, and that folder is where its audio is going to land.
+busy = framework("First Album", "Busy Artist", "aaaaaaa4-4444-4444-4444-444444444444",
+                 "99999999-8888-8888-8888-888888888888")
+other = framework("Second Album", "Busy Artist", "aaaaaaa5-5555-5555-5555-555555555555",
+                  "99999999-9999-9999-9999-999999999999")
+busy_folder = busy["album_path"].replace("/", os.sep)
+other_folder = other["album_path"].replace("/", os.sep)
+busy_artist = os.path.dirname(busy_folder)
+ok(pending_albums.remove_folder(busy_folder, cfg=CFG), "cancelling removes this album")
+ok(os.path.isdir(busy_artist), "…but the artist folder stays for the download in flight")
+ok(os.path.isdir(other_folder) and bool(pathmod.load_pending(other_folder)),
+   "…and that download's own framework album is still there")
+
+# The library ROOT is never a candidate: a placeholder sitting directly inside
+# it is removed, and the root itself survives (removal never climbs above an
+# artist folder).
+root_child = os.path.join(ROOT_DIR, "Root Child")
+os.makedirs(root_child, exist_ok=True)
+pathmod.save_pending(root_child, {"pending": True, "release_id": "root-child",
+                                  "title": "Root Child"})
+ok(pending_albums.remove_folder(root_child, cfg=CFG), "a placeholder in the root goes")
+ok(os.path.isdir(ROOT_DIR), "…and the library root is never removed")
+
+# A description is the app's only when the app FETCHED it (the provenance map
+# records the provider): one the user typed is theirs, and it keeps the folder.
+from mlo import artistdata as _ardata                          # noqa: E402
+
+typed = framework("Typed Album", "Typed Artist", "aaaaaaa6-6666-6666-6666-666666666666")
+typed_folder = typed["album_path"].replace("/", os.sep)
+typed_artist = os.path.dirname(typed_folder)
+with open(os.path.join(typed_artist, "description.txt"), "w", encoding="utf-8") as fh:
+    fh.write("typed by hand")
+ok(pending_albums.remove_folder(typed_folder, cfg=CFG), "cancelling removes the album")
+ok(os.path.isdir(typed_artist), "…and a description the user typed keeps the artist folder")
+ok(os.path.isfile(os.path.join(typed_artist, "description.txt")),
+   "…with the text untouched")
+
+fetched = framework("Fetched Album", "Fetched Artist", "aaaaaaa7-7777-7777-7777-777777777777")
+fetched_folder = fetched["album_path"].replace("/", os.sep)
+fetched_artist = os.path.dirname(fetched_folder)
+with open(os.path.join(fetched_artist, "description.txt"), "w", encoding="utf-8") as fh:
+    fh.write("a provider's bio")
+_ardata.write_provenance(fetched_artist, {"description_source": "rym"}, kind="artist", cfg=CFG)
+ok(pending_albums.remove_folder(fetched_folder, cfg=CFG), "cancelling removes the album")
+ok(not os.path.isdir(fetched_artist),
+   "…and a description the APP fetched goes with the artist folder")
 
 print()
 if FAILED:
