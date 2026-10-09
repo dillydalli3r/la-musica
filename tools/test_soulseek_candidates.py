@@ -118,29 +118,39 @@ assert only_lossless(folder("u2", "A", "m4a")) is False, "m4a/AAC must be lossy"
 assert only_lossless(folder("u3", "A", "wav")) is True, "wav must be lossless"
 assert only_lossless(folder("u4", "A", "flac")) is True, "flac must be lossless"
 
-# 3. The rank's precedence, table-driven: lossless, then the score, then the
-#    FASTEST peer (the user's "download from the fastest good source first"),
-#    then its queue — and a total order, so a job's candidate order is
-#    reproducible run to run. A fast WRONG folder never overtakes a slower
-#    complete one: the codec bucket is the first key and the score the second,
-#    and the score's own speed bonus is capped below one matched track.
+# 3. The rank's precedence, table-driven: lossless, then the score, then how
+#    soon the peer will really DELIVER the album, and the peer+folder names
+#    last — a total order, so a job's candidate order is reproducible run to
+#    run. A fast WRONG folder never overtakes a slower complete one: the codec
+#    bucket is the first key and the score the second, and the score's own speed
+#    bonus is capped below one matched track.
 def rankable(user, *, score=90.0, speed=1_000_000, queue=0, lossless=True,
-             folder=None):
+             folder=None, size=40 * 1024 * 1024, files=10):
     return {"username": user, "dir": folder or f"Music/{user.title()}/",
-            "score": score, "speed": speed, "queue": queue, "lossless": lossless}
+            "score": score, "speed": speed, "queue": queue, "lossless": lossless,
+            "total_size": size, "files": [{}] * files}
 
 
 def rank_order(*rows):
     return [c["username"] for c in sorted(rows, key=soulseek_auto._rank)]
 
 
-# faster wins the tie between equally scored lossless folders, and a queue only
-# breaks a speed tie (all four share the score, so the table is exactly the
-# user's question).
+# The delivery key is the album's bytes PLUS the files the search reports queued
+# ahead of us, both at the peer's own rate: the peer that finishes first wins the
+# tie between equally scored lossless folders, so `busy` — the same quick link as
+# `fast` with 40 files ahead of us — comes after `fast` but well before the
+# genuinely slow one, and a peer that reported no rate at all is measured at the
+# old 200 kB/s floor and ranks last (all four share the score, so the table is
+# exactly the user's question).
 _ranked = [rankable("slow", speed=300_000), rankable("fast", speed=9_000_000),
            rankable("busy", speed=9_000_000, queue=40), rankable("unknown", speed=0)]
 assert [c["username"] for c in sorted(_ranked, key=soulseek_auto._rank)] == \
     ["fast", "busy", "slow", "unknown"], _ranked
+# ...and a peer at the END of a long queue is not a fast download: a quick link
+# with 500 files ahead of us loses to an idle peer a tenth of its speed, which is
+# the whole point of measuring rather than ranking on throughput alone.
+assert rank_order(rankable("queued", speed=9_000_000, queue=500),
+                  rankable("idle", speed=900_000)) == ["idle", "queued"]
 # ...and the keys above speed still outrank it: a lossy folder with the best
 # score and the fastest peer in the network loses to the slowest lossless one,
 # and a fast folder that matches fewer tracks loses to a slow complete one.
@@ -739,6 +749,52 @@ try:
         got = soulseek_auto._wait_for_files(failed, _wait_dir, "peer", WANTED, 400.0)
         assert got == {}, got
         assert fork.now == 0.0, fork.now
+
+        # 16. A file COMPLETING is not a peer going quiet. The bytes already
+        #     seen are kept per file (a high-water mark), so the totals cannot
+        #     fall by a finished file's size — which used to freeze the stall
+        #     clock until the next file had transferred that much again, and
+        #     abandoned a healthy download 180 s after a big file landed.
+        #     Here a 600-byte first file is accepted and the second trickles at
+        #     3 B/s for 3 kB: nothing but the monotonic total can tell those
+        #     179 quiet-looking ticks apart from a dead peer.
+        put_file(_wait_dir, "Music", "A", "01 - X.flac", body=b"x" * 600)
+        os.utime(os.path.join(_wait_dir, "Music", "A", "01 - X.flac"),
+                 (100.0, 100.0))
+        TWO = [{"filename": "Music/A/01 - X.flac", "size": 600},
+               {"filename": "Music/A/02 - Y.flac", "size": 3000}]
+
+        class TwoFilePeer:
+            """Two transfers: the first terminal and on disk, the second
+            trickling — the shape that used to read as a stall."""
+
+            finished_transfer = staticmethod(soulseek.finished_transfer)
+
+            def __init__(self):
+                self.polls, self.cancelled = 0, []
+
+            def downloads_state(self):
+                self.polls += 1
+                return [{"username": "peer", "directories": [{"files": [
+                    {"id": "t1", "filename": TWO[0]["filename"],
+                     "state": "Completed, Succeeded", "bytesTransferred": 600,
+                     "size": 600, "percentComplete": 100, "averageSpeed": 0,
+                     "remainingTime": 0},
+                    {"id": "t2", "filename": TWO[1]["filename"],
+                     "state": "InProgress", "bytesTransferred": 3 * self.polls,
+                     "size": 3000, "percentComplete": 0, "averageSpeed": 3,
+                     "remainingTime": 0}]}]}]
+
+            def cancel_downloads(self, username, transfer_ids):
+                self.cancelled.extend(transfer_ids)
+                return True
+
+        fork.now = 200.0           # the planted file is old enough to trust
+        two = TwoFilePeer()
+        got = soulseek_auto._wait_for_files(two, _wait_dir, "peer", TWO, 900.0)
+        assert list(got) == [TWO[0]["filename"]], got
+        assert fork.now >= 900.0 + 200.0, \
+            f"a slow second file was read as a stall at t={fork.now - 200.0}s"
     finally:
         soulseek_auto.time = saved_time
 finally:
@@ -1692,8 +1748,8 @@ class QueuedPeer(AutoSlsk):
 
 
 # (b) The first-ranked peer never delivers while a later one has the album: the
-#     batch hands the job over instead of waiting the slow peer out — not even
-#     its own queue budget, let alone the hours a stalled peer could cost.
+#     batch hands the job over instead of waiting the slow peer out at all — the
+#     arrival of a mate, not a clock, is what ends each candidate's wait.
 run = run_job(JOB_RELEASE, BATCH_ROWS, stub_cls=QueuedPeer, keep_dir=True)
 try:
     assert run.job["state"] == "done" and run.imported, run.job
@@ -1744,6 +1800,60 @@ try:
     assert sorted(_tree_files(run.ddir)) == batch_files("B"), _tree_files(run.ddir)
     # It did not sit out peerA's .log window at all: the gate's own clock says so.
     assert run.clock.now < soulseek_auto._LOG_TIMEOUT_S, run.clock.now
+finally:
+    shutil.rmtree(run.ddir, ignore_errors=True)
+
+class QueuedForeverPeer(AutoSlsk):
+    """AutoSlsk where NOTHING a peer was asked for ever leaves its queue: every
+    transfer sits in slskd's own Queued state for as long as the job looks. The
+    case `soulseek_queue_wait` exists for — a batch of peers whose upload queues
+    are hours long."""
+
+    def downloads_state(self):
+        state = super().downloads_state()
+        for entry in state:
+            for d in entry["directories"]:
+                for f in d["files"]:
+                    f["state"] = "Queued, Remotely"
+                    f["bytesTransferred"] = 0
+                    f["percentComplete"] = 0
+                    f["averageSpeed"] = 0
+        return state
+
+
+# (b3) NO peer's queue ever moves: the batch is enqueued together, so the job
+#      gives up on it after ONE `soulseek_queue_wait` — not one window per
+#      candidate, and not the candidate's own ceiling (7200 s for the queue
+#      these peers advertise). Each candidate is rejected with its own reason,
+#      every queued transfer is cancelled, and the job ENDS instead of holding
+#      one peer for hours with nothing transferred.
+QUEUE_ROWS = []
+for _u in ("peerA", "peerB", "peerC"):
+    for _r in (row(_u, f"Music/Batch {_u[-1].upper()}/01 - Alpha.flac", queue=40),
+               row(_u, f"Music/Batch {_u[-1].upper()}/02 - Beta.flac", 210.0, queue=40)):
+        _r["speed"] = 100_000          # the long-queue link these peers advertise
+        QUEUE_ROWS.append(_r)
+run = run_job(DIGITAL_RELEASE, QUEUE_ROWS, stub_cls=QueuedForeverPeer,
+              cfg=dict(JOB_CFG, soulseek_queue_wait=120), keep_dir=True)
+try:
+    assert run.job["state"] == "error", run.job
+    reasons = [a["reason"] for a in run.job["attempts"]]
+    assert len(reasons) == 3, run.job["attempts"]
+    assert all("missing" in r and "timed out" in r for r in reasons), reasons
+    _msgs = [e["msg"] for e in run.job["log"]]
+    assert sum(1 for m in _msgs if "still queued" in m) == 3, \
+        [m for m in _msgs if "queued" in m]
+    # ONE window for the whole batch: the first candidate is dropped at the
+    # patience and the other two at once, because they were queued at the same
+    # moment — the shared `queued_since` that keeps a run of queued peers from
+    # costing the patience once each.
+    assert 120 < run.clock.now < 400, run.clock.now
+    # The peers' planted files never counted (slskd says Queued, so they are
+    # leftovers, not arrivals), every queued transfer was cancelled, and the
+    # sweep took what the job had staged.
+    assert run.cancelled and set(run.cancelled) == set(run.submitted()), \
+        (sorted(set(run.cancelled)), sorted(run.submitted()))
+    assert _tree_files(run.ddir) == [], _tree_files(run.ddir)
 finally:
     shutil.rmtree(run.ddir, ignore_errors=True)
 
@@ -2848,10 +2958,10 @@ finally:
 
 
 # --------------------------------------------------------------------------- #
-# 2. A peer whose transfers are ALL Queued is busy, not dead: it is held for
-#    its OWN queue budget (_queue_budget) instead of being abandoned at the
-#    180 s stall threshold — while a transfer that moved bytes and then went
-#    quiet still is.
+# 2. A peer whose transfers are ALL Queued is not waited out: `soulseek_queue_wait`
+#    bounds how long one candidate may sit with NOTHING arriving, so a job is
+#    never parked on a peer that is hours behind its own queue — while a transfer
+#    that moved bytes and then went quiet still gets the 180 s stall rule.
 # --------------------------------------------------------------------------- #
 class PeerQueue:
     """One transfer of "peer" for WANTED[0]: `state` is reported on every poll
@@ -2877,49 +2987,63 @@ class PeerQueue:
         return True
 
 
-# 4 files the size of this release's average file queued ahead, at the rate the
-# search advertised: 204.8 s of waiting this peer's own queue is worth — the
-# same figures _est_timeout budgets the queued part of its deadline from.
-_QB_CAND = {"total_size": 10 * _MB, "speed": 100 * _KB, "queue": 4, "files": [{}, {}]}
-_budget = soulseek_auto._queue_budget(_QB_CAND)
-assert abs(_budget - 204.8) < 1e-6, _budget
-assert _budget > soulseek_auto._STALL_AFTER_S, _budget
-# a peer that reported no queue at all keeps the old grace, not an instant drop
-assert soulseek_auto._queue_budget({"total_size": 10 * _MB, "speed": 100 * _KB,
-                                    "queue": 0, "files": [{}, {}]}) == \
-    soulseek_auto._STALL_AFTER_S
+# The configured patience, and the range it is clamped to whatever the file holds.
+assert soulseek_auto.queue_wait({"soulseek_queue_wait": 240}) == 240
+assert soulseek_auto.queue_wait({}) == soulseek_auto._QUEUE_WAIT_DEFAULT
+assert soulseek_auto.queue_wait({"soulseek_queue_wait": 5}) == 60
+assert soulseek_auto.queue_wait({"soulseek_queue_wait": 99999}) == 3600
 
 _qb_dir = tempfile.mkdtemp(prefix="mlo-queue-")
 _qb_clock = FakeClock()
 _qb_saved = soulseek_auto.time
 soulseek_auto.time = _qb_clock
 try:
-    # (a) every transfer Queued, none InProgress: the stall window is the wrong
-    #     rule here — the peer is intact and we are simply behind its queue, so
-    #     the candidate gets its own budget (204.8 s), not 180 s.
+    # (a) every transfer Queued, not a byte: the peer is intact but we are at
+    #     the end of its queue — the candidate is dropped at the patience the
+    #     caller passed, never at the per-candidate ceiling, and its transfer
+    #     is cancelled so slskd does not keep re-requesting what was deleted.
     q = PeerQueue("Queued")
     got = soulseek_auto._wait_for_files(q, _qb_dir, "peer", WANTED, 400.0,
-                                        queue_budget_s=_budget)
+                                        queue_wait_s=240)
     assert got == {}, got
-    assert 200 < _qb_clock.now < 210, f"a queued peer was dropped at t={_qb_clock.now}s"
+    assert 240 < _qb_clock.now < 250, f"a queued peer was dropped at t={_qb_clock.now}s"
     assert q.cancelled == ["t1"], q.cancelled
 
-    # ...and with no caller budget the old grace still applies, so the .log gate
-    # (deliberately cheap and bounded) is not left waiting out a queue.
+    # (a2) ...and the window is measured from the moment the transfers were
+    #      ASKED for: a candidate already queued longer than the patience when
+    #      its turn to be waited for comes round is given up on at once, so a
+    #      batch of queued peers costs ONE window rather than one each.
+    _qb_clock.now = 400.0
+    q2 = PeerQueue("Queued")
+    got = soulseek_auto._wait_for_files(q2, _qb_dir, "peer", WANTED, 900.0,
+                                        queue_wait_s=240, queued_since=100.0)
+    assert got == {}, got
+    assert _qb_clock.now == 400.0, f"a long-queued peer was waited on again (t={_qb_clock.now}s)"
+
+    # (a3) a peer that DID deliver bytes keeps its patience from the last byte
+    #      it sent, so a queue that closes around a partial transfer is still a
+    #      queue wait, not an instant drop.
+    _qb_clock.now = 0.0
+    soulseek_auto._wait_for_files(PeerQueue("Queued", moving_polls=5),
+                                  _qb_dir, "peer", WANTED, 900.0, queue_wait_s=240)
+    assert 240 < _qb_clock.now < 250, _qb_clock.now
+
+    # (a4) with no caller patience the old grace still applies, so the .log gate
+    #      (deliberately cheap and bounded) is not left waiting out a queue.
     _qb_clock.now = 0.0
     soulseek_auto._wait_for_files(PeerQueue("Queued"), _qb_dir, "peer", WANTED, 400.0)
     assert 180 < _qb_clock.now < 190, _qb_clock.now
 
     # (b) a transfer that DID move bytes and then went quiet is a dead peer: the
-    #     stall rule wins even with the generous queue budget in hand.
+    #     stall rule wins even with the generous queue patience in hand.
     _qb_clock.now = 0.0
     stalled = PeerQueue("InProgress", moving_polls=10)
     got = soulseek_auto._wait_for_files(stalled, _qb_dir, "peer", WANTED, 400.0,
-                                        queue_budget_s=_budget)
+                                        queue_wait_s=240)
     assert got == {}, got
     assert 180 < _qb_clock.now < 200, \
         f"a stalled transfer was waited out (t={_qb_clock.now}s)"
-    assert _qb_clock.now < _budget, _qb_clock.now
+    assert _qb_clock.now < 240, _qb_clock.now
 finally:
     soulseek_auto.time = _qb_saved
     shutil.rmtree(_qb_dir, ignore_errors=True)
@@ -4066,8 +4190,9 @@ HELD_RELEASE = dict(JOB_RELEASE, id="44444444-5555-6666-7777-888888888888",
 FAST_RELEASE = dict(JOB_RELEASE, id="55555555-6666-7777-8888-999999999999",
                     title="Fast Album", medium_formats=["Digital Media"])
 # The held peer is slow AND queued, so its album transfer sits in slskd's queue
-# for its own queue budget (queue x the average file, at its own rate) — the
-# "transfer in flight" the other release must not be held behind.
+# for the queue patience (`soulseek_queue_wait`, which this config leaves at its
+# ten-minute default) — the "transfer in flight" the other release must not be
+# held behind.
 HELD_ROWS = two_track_rows("heldpeer", "Music/Held", size=30_000_000, slot=False,
                            queue=40, speed=100_000)
 FAST_ROWS = two_track_rows("fastpeer", "Music/Fast")

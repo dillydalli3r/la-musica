@@ -182,8 +182,8 @@ class Pipeline:
         }]
 
     def wait_for_files(self, slsk_, ddir, username, wanted, timeout_s,
-                       cancel_check=None, phase="download", queue_budget_s=None,
-                       on_start=None):
+                       cancel_check=None, phase="download", queue_wait_s=None,
+                       queued_since=None, on_start=None):
         job_id, label, t0 = self._enter("downloading")
         try:
             self._gate("downloading")

@@ -1315,6 +1315,26 @@ DEFAULT_CONFIG = {
     # the app's own enqueueing; `soulseek_download_slots` is only the outer
     # ceiling slskd puts on the transfers it produces (see that key).
     "soulseek_candidate_slots": 3,
+    # How long ONE candidate may sit at the end of a peer's queue with NOTHING
+    # arriving before the app gives up on that peer and moves to the next
+    # candidate. Ten minutes.
+    #
+    # Soulseek is full of peers whose folders are right but whose upload queue
+    # is hours long: the search response reports the files queued ahead of us,
+    # and a candidate's own ceiling (`_est_timeout`) budgeted all of it — so a
+    # job could hold ONE peer for two hours having transferred nothing while the
+    # batch's other candidates and the peers behind them went untried. This is
+    # the bound on that wait: no bytes for this long and the candidate is
+    # rejected (cancelled, its partials swept) and the next one takes its place.
+    #
+    # It bounds the WAIT FOR BYTES, never the transfer: a peer that has
+    # delivered anything restarts the clock, and a candidate still downloading
+    # is bounded by its own per-candidate ceiling instead. A batch is enqueued
+    # together and shares one window, so a run of queued peers costs this much
+    # in total rather than this much each. The release is never lost to it: the
+    # job keeps trying its remaining candidates (and reads the searches again
+    # when they run out), and an unattended release stays on the wish list.
+    "soulseek_queue_wait": 600,
     # Park an interactive job that found no usable folder and ask the user
     # whether to add the release to the wishes list, instead of failing the job
     # outright: a rare album is worth watching for, and the background wishes
@@ -1968,6 +1988,11 @@ _INT_RANGES = {
     "soulseek_auto_mbid_tracks": (1, 10),
     "soulseek_search_concurrency": (1, 8),
     "soulseek_candidate_slots": (1, 20),
+    # The queue patience (see the key in DEFAULT_CONFIG): a minute at the very
+    # least — below that a peer is given up on before any real queue can move —
+    # and an hour at the most, since a wait longer than that is the per-candidate
+    # ceiling's job, not this one's.
+    "soulseek_queue_wait": (60, 3600),
     "wishes_interval_hours": (1, 168),
     "wishes_max_attempts": (0, 1000),
     # The not-found budget and the retry backoff's step (see the wishes block

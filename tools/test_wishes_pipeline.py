@@ -175,8 +175,8 @@ class Pipeline:
         }]
 
     def wait_for_files(self, slsk_, ddir, username, wanted, timeout_s,
-                       cancel_check=None, phase="download", queue_budget_s=None,
-                       on_start=None):
+                       cancel_check=None, phase="download", queue_wait_s=None,
+                       queued_since=None, on_start=None):
         root = os.path.join(ddir, username, "album")
         got = {}
         for w in wanted:
@@ -782,7 +782,8 @@ def _per_peer_candidates(results, release, cfg):
 
 
 def _gated_wait(slsk_, ddir, username, wanted, timeout_s, cancel_check=None,
-                phase="download", queue_budget_s=None, on_start=None):
+                phase="download", queue_wait_s=None, queued_since=None,
+                on_start=None):
     ev = GATES.get(str(username))
     if ev is not None:
         ev.wait(60)

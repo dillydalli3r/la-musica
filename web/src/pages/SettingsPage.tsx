@@ -1047,6 +1047,10 @@ export default function SettingsPage() {
           help: "How many candidate peers of ONE release may download at the same time (3 by default). The first that verifies good becomes the import and the others are cancelled and swept, and the NEXT candidate is only asked for when one of them lands or fails — so however many candidates a search turns up, one release never talks to more peers than this. Enforced by the app's own enqueueing; slskd's download slots (Soulseek group above) are only the outer ceiling on the transfers it produces.",
         },
         {
+          k: "soulseek_queue_wait", label: "Queue wait before trying another peer (seconds)", type: "number", min: 60, max: 3600,
+          help: "How long one candidate may sit at the end of a peer's upload queue with NOTHING arriving before the app gives up on that peer and moves to the next candidate (10 minutes by default). Soulseek is full of folders whose queue is hours long: without this a job could hold one peer for its whole per-candidate ceiling — up to two hours — having transferred nothing, while the batch's other candidates went untried. It bounds the wait for BYTES, never the transfer: a peer that has delivered anything restarts the clock, and a batch of queued peers shares one window. The release is never lost to it — the next candidate is tried, and a release that ends up with nothing stays in the background queue.",
+        },
+        {
           k: "soulseek_search_concurrency", label: "Releases searched / downloaded at once", type: "number", min: 1, max: 8,
           help: "Over this ceiling a release is NOT refused: it takes its place in the queue (Queue → Waiting, with its position) and starts by itself the moment one of the running releases finishes. The wishes worker fills up to this many wishes per pass, and a bulk auto-import run keeps this many jobs in flight. What it does not do on its own is open more connections: that is what `soulseek_candidate_slots` (per release) and slskd's own download slots add up to.",
         },

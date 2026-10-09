@@ -148,6 +148,13 @@ _CANDIDATE_SLOTS_DEFAULT = 3
 # is concurrency × candidate_slots (5 × 3), so the app's two ceilings can be
 # honoured without slskd queueing the difference.
 _DOWNLOAD_SLOTS_DEFAULT = 15
+# How long ONE candidate may sit at the end of a peer's queue with nothing
+# moving before the app stops waiting on it and tries the next candidate
+# (`soulseek_queue_wait`). Ten minutes: a peer that has not handed over a single
+# byte by then is behind a queue this job should not be parked on — the batch's
+# other candidates and the peers behind them are the answer, and the release
+# keeps its place in the background queue either way.
+_QUEUE_WAIT_DEFAULT = 600
 
 # A job parked on a prompt waits here for the user's answer (confirm()):
 # "only lossy copies found" and "no usable results — add to wishes?".
@@ -322,6 +329,28 @@ def download_slots(cfg=None):
     settings need."""
     return _clamped_int(cfg, "soulseek_download_slots",
                         _DOWNLOAD_SLOTS_DEFAULT, 1, 20)
+
+
+def queue_wait(cfg=None):
+    """How long ONE candidate may sit at the end of a peer's queue before the
+    app gives up on that peer (60..3600 s, ten minutes by default).
+
+    A peer is a QUEUE, not a download, until its bytes move: a search response
+    reports how many of its files are queued ahead of us, and a background
+    uploader may be hours away from serving ours. Waiting that out is what made
+    a job look stuck — it held one candidate for its whole per-candidate
+    `_est_timeout` (up to two hours) with nothing transferred, while the batch's
+    other candidates and the peers behind them went untried. This is the bound:
+    no bytes for this long and the candidate is rejected, its transfers
+    cancelled, and the next candidate takes its place.
+
+    It measures the WAIT FOR BYTES, never the transfer: a peer that has
+    delivered anything at all restarts the clock (`_wait_for_files` measures
+    from its last byte seen, not from the start of the wait), so only a queue
+    that never moved is given up on, and the batch shares ONE window — every
+    candidate is enqueued together, so a run of queued peers costs this much in
+    total rather than this much each."""
+    return _clamped_int(cfg, "soulseek_queue_wait", _QUEUE_WAIT_DEFAULT, 60, 3600)
 
 
 def job_stage(job):
@@ -2040,8 +2069,8 @@ def _video_rank(c):
 
 def _rank(c):
     """Candidate order: audio before music video, lossless next, then the
-    score, then the FASTEST peer, its queue, and finally the peer+folder names
-    so the order is total.
+    score, then how soon the peer will really deliver the album, and finally
+    the peer+folder names so the order is total.
 
     A candidate that would satisfy the tracklist with a music video is not the
     album (see `_video_rank`), so it sorts below every audio-only one however
@@ -2055,23 +2084,25 @@ def _rank(c):
     matched track), so a fast wrong folder can never buy its way past a slower
     complete one.
 
-    The speed key is the user's "download from the fastest good source first":
-    it decides between folders the score rates equal (a verdict that has to come
-    from the search response, because two equally scored folders are otherwise
-    indistinguishable). `speed` is the folder's SLOWEST file — a folder is only
-    as fast as its worst peer (see find_candidates) — and a peer that reported
-    none ranks last among equals rather than first. The peer's own queue
-    position only breaks a speed tie: _est_timeout/_queue_budget already budget
-    that wait from the candidate's own numbers, and a folder that is still the
-    best copy tomorrow is worth waiting in line for today.
+    The delivery key is the user's "download from the source that will finish
+    soonest": it decides between folders the score rates equal (a verdict that
+    has to come from the search response, because two equally scored folders are
+    otherwise indistinguishable). It is `_eta_seconds` — the album at the peer's
+    advertised rate, plus the files the search reported queued ahead of us at
+    that same rate — so a fast link behind a five-hundred-file queue no longer
+    outranks an idle peer that can start now: the faster DOWNLOAD is the one
+    that finishes first, not the one with the faster transfer. `speed` is the
+    folder's SLOWEST file — a folder is only as fast as its worst peer (see
+    find_candidates) — and a peer that reported none is measured at
+    `_MIN_RATE`, which ranks it after the peers whose rate is known.
 
     The names are the last key so the order is TOTAL and reproducible run to
     run: two candidates the search reports identically (same user, same figures)
     still come back in one fixed order, which is what makes a job's attempts —
     and the tests that pin them — deterministic."""
     return (_video_rank(c), not c["lossless"], -c["score"],
-            -float(c.get("speed") or 0),
-            int(c.get("queue") or 0), str(c.get("username") or ""),
+            _eta_seconds(c),
+            str(c.get("username") or ""),
             str(c.get("dir") or ""))
 
 
@@ -2772,33 +2803,35 @@ _LOG_TIMEOUT_S = 180.0
 _MIN_RATE = 200 * 1024
 
 
+def _eta_seconds(cand):
+    """How long this candidate should take to deliver the album, in seconds,
+    from the candidate's OWN numbers: the bytes at the peer's advertised rate,
+    plus the files the search reported queued ahead of us at the same rate
+    (each one the size of an average file of the folder).
+
+    The raw, unclamped figure — it is what `_est_timeout` turns into the wait's
+    ceiling and what `_rank` orders competing candidates by, and both want the
+    peer that will really finish soonest rather than the one with the best
+    throughput: a peer with a 500-file queue is not the faster download just
+    because its link is quick. `_MIN_RATE` stands in for a peer that reported no
+    speed at all."""
+    size = float(cand.get("total_size") or 0)
+    rate = float(cand.get("speed") or 0) or _MIN_RATE
+    files = len(cand.get("files") or []) or 1
+    queued = int(cand.get("queue") or 0) * (size / files)
+    return (size + queued) / rate
+
+
 def _est_timeout(cand):
-    """Per-candidate download timeout from the candidate's OWN numbers.
+    """Per-candidate download timeout from the candidate's OWN numbers (see
+    `_eta_seconds`).
 
     The fixed 200 kB/s guess gave a 2 h ceiling to an album a 5 MB/s peer
-    fetches in two minutes, and cut off a slow-but-honest peer mid-file. The
-    search response carries the peer's upload speed and the number of files
-    queued ahead of us, so the wait is the album at that speed plus what the
-    queue costs at the same rate (each file ahead the size of an average file
-    of the folder). Floor 900 s, cap 7200 s, as before."""
-    size = float(cand.get("total_size") or 0)
-    rate = float(cand.get("speed") or 0) or _MIN_RATE
-    files = len(cand.get("files") or []) or 1
-    queued = int(cand.get("queue") or 0) * (size / files)
-    return int(min(7200, max(900, (size + queued) / rate)))
-
-
-def _queue_budget(cand):
-    """How long this candidate's own queue is worth waiting for: the files the
-    search reported queued ahead of us, at the peer's rate — the same figures
-    _est_timeout budgets the queued part of its total from. Floored at
-    _STALL_AFTER_S so a peer that reported no queue at all still gets the old
-    grace, and capped by the wait's own deadline either way."""
-    rate = float(cand.get("speed") or 0) or _MIN_RATE
-    size = float(cand.get("total_size") or 0)
-    files = len(cand.get("files") or []) or 1
-    queued = int(cand.get("queue") or 0) * (size / files)
-    return max(_STALL_AFTER_S, queued / rate)
+    fetches in two minutes, and cut off a slow-but-honest peer mid-file. Floor
+    900 s, cap 7200 s, as before: this is the ceiling for a candidate that IS
+    transferring (a queue that never moves is given up on much sooner — see
+    `queue_wait`)."""
+    return int(min(7200, max(900, _eta_seconds(cand))))
 
 
 def _progress_snapshot(username, wanted, got, transfers, phase, speed=None):
@@ -3163,7 +3196,8 @@ def _log_fail_reason(name, score, state, min_score, why=""):
 
 
 def _wait_for_files(slsk, ddir, username, wanted, timeout_s, cancel_check=None,
-                    phase="download", queue_budget_s=None, on_start=None):
+                    phase="download", queue_wait_s=None, queued_since=None,
+                    on_start=None):
     """Poll until every wanted remote path is present locally AND slskd vouches
     for it.
 
@@ -3199,11 +3233,22 @@ def _wait_for_files(slsk, ddir, username, wanted, timeout_s, cancel_check=None,
         waiting files, or a transfer that is still moving, is never abandoned
         early.
       * no live transfer is InProgress at all (every one Queued, a dropped
-        request, or no record) — the peer is simply busy, and `_est_timeout`
-        has always budgeted that queue wait, so the candidate is held for
-        `queue_budget_s` (its own queue budget, see _queue_budget) instead of
-        180 s. Defaults to `_STALL_AFTER_S` when the caller has no candidate
-        budget (the .log gate, which is deliberately cheap and bounded).
+        request, or no record) — the peer is simply busy, and that is the
+        difference between a download and a QUEUE: the candidate is held for
+        `queue_wait_s` seconds with nothing moving (`queue_wait`, the configured
+        patience) instead of the per-candidate ceiling, so a job is never parked
+        on a peer that is hours away from serving it. Defaults to
+        `_STALL_AFTER_S` when the caller passes none (the .log gate, which is
+        deliberately cheap and bounded).
+
+    Both stall rules measure from the last byte SEEN, never from the start of
+    the wait: bytes are tracked per file and only ever rise (`seen`), so a
+    finished file leaving the pending set cannot look like a peer going quiet,
+    and a peer that delivered most of the album before its queue closed is not
+    dropped on the strength of the time it has been waiting overall. `queued_since`
+    carries the moment the candidate's transfers were ASKED for, so a batch's
+    candidates — all enqueued together — share ONE patience window rather than
+    each restarting it when its own wait begins.
 
     Each tick publishes the download progress payload (phase 'logging' while
     the .log gate is being fetched, 'download' for the album) and clears it
@@ -3225,7 +3270,6 @@ def _wait_for_files(slsk, ddir, username, wanted, timeout_s, cancel_check=None,
     (the CD .log gate, then the album) passes an announcer of its own so that
     only the first of them speaks (see _start_once)."""
     deadline = time.time() + timeout_s
-    started = time.time()
     from server.soulseek import _user_transfers
     shown = list(wanted)
     pending = {w["filename"]: w for w in wanted}
@@ -3237,12 +3281,24 @@ def _wait_for_files(slsk, ddir, username, wanted, timeout_s, cancel_check=None,
     got = {}
     live = []
     started_announced = False
-    last_bytes = -1
-    last_progress = time.time()
+    # 0, not -1: a tick that reports no bytes at all must not read as the first
+    # byte seen — that would reset `last_progress` to the tick's own time and
+    # throw away the queue patience a `queued_since` carries into the wait.
+    last_bytes = 0
+    # The last byte SEEN, never the start of the wait: a stall is "nothing has
+    # moved since here", so a finished file leaving the totals, or the time a
+    # candidate spent queued before this wait began (queued_since), cannot read
+    # as a peer going quiet.
+    last_progress = queued_since if queued_since else time.time()
     rate = None            # measured bytes/s between the last two ticks
     disp_bytes = None
     disp_time = None
-    queue_ceiling = _STALL_AFTER_S if queue_budget_s is None else queue_budget_s
+    # Per-file high-water mark: slskd reports a finished transfer's full size,
+    # and a record it drops entirely must not subtract bytes we already saw
+    # arrive, or the totals would fall by a file the moment it completed —
+    # which is exactly what a peer that has stopped sending looks like.
+    seen = {}
+    queue_patience = _STALL_AFTER_S if queue_wait_s is None else queue_wait_s
     try:
         while time.time() < deadline and pending:
             tick = time.time()
@@ -3289,7 +3345,15 @@ def _wait_for_files(slsk, ddir, username, wanted, timeout_s, cancel_check=None,
             # Instantaneous throughput from the byte delta between ticks: slskd's
             # per-transfer averageSpeed is a LIFETIME average, so finished files
             # kept inflating the reported rate long after they stopped moving.
-            moved_shown = sum(t["bytes"] for t in live)
+            # The per-file high-water marks are what make these totals rise
+            # monotonically — a file that completes (or whose record slskd
+            # prunes) keeps the bytes it delivered instead of subtracting them
+            # from the sum, which used to read as a stall in the middle of a
+            # healthy download.
+            for t in live:
+                seen[t["filename"]] = max(seen.get(t["filename"], 0),
+                                          int(t["bytes"] or 0))
+            moved_shown = sum(seen.values())
             if disp_bytes is not None and tick > disp_time:
                 rate = max(0.0, (moved_shown - disp_bytes) / (tick - disp_time))
             disp_bytes, disp_time = moved_shown, tick
@@ -3300,7 +3364,6 @@ def _wait_for_files(slsk, ddir, username, wanted, timeout_s, cancel_check=None,
             moving = [t for t in live if t["filename"] in pending]
             if any(any(x in t["state"] for x in _FAILED_TRANSFER_STATES) for t in moving):
                 break
-            moved = sum(t["bytes"] for t in moving)
             inprog = [t for t in moving if "InProgress" in t["state"]]
             if inprog and not started_announced:
                 # Bytes are actually moving for this candidate — the one
@@ -3308,8 +3371,8 @@ def _wait_for_files(slsk, ddir, username, wanted, timeout_s, cancel_check=None,
                 # the same news (see _notify_download_start).
                 started_announced = True
                 (on_start or _notify_download_start)(username, len(wanted))
-            if moved > last_bytes:
-                last_bytes, last_progress = moved, time.time()
+            if moved_shown > last_bytes:
+                last_bytes, last_progress = moved_shown, time.time()
             elif inprog:
                 # every live transfer InProgress and none moving = a peer that
                 # stopped sending. A mix (one file moving, another still
@@ -3319,13 +3382,15 @@ def _wait_for_files(slsk, ddir, username, wanted, timeout_s, cancel_check=None,
                     _log(f"  transfer stalled for {int(_STALL_AFTER_S)}s with no "
                          f"progress — moving on")
                     break
-            elif tick - started > queue_ceiling:
-                # nothing InProgress at all: the peer is intact, we are just
-                # behind its queue (or slskd never started the transfer). The
-                # candidate's own queue budget — the wait _est_timeout already
-                # paid for — is the only reason to give up on it.
-                _log(f"  still queued after {int(queue_ceiling)}s (this peer's own "
-                     f"queue budget) — moving on")
+            elif tick - last_progress > queue_patience:
+                # nothing InProgress and not a byte since `queue_patience`: the
+                # peer is intact, we are just at the end of its queue (or slskd
+                # never started the transfer). Waiting the per-candidate ceiling
+                # out is how a job used to sit hours on one peer while the
+                # batch's others and the peers behind them went untried.
+                _log(f"  still queued {int(tick - last_progress)}s after the "
+                     f"search reported it — nothing has arrived (the "
+                     f"{int(queue_patience)}s queue wait) — moving on")
                 break
             time.sleep(_TRANSFER_POLL_S)
     finally:
@@ -3991,6 +4056,13 @@ def _try_batch(slsk, ddir, batch, release, cfg, is_cd, min_score):
     arrived is graded before one whose peer is stalled — a ready candidate must
     not wait its turn behind a slow peer (see `_log_gate_cancel_check`).
 
+    A candidate whose peer never hands over a BYTE is not waited out either: the
+    album wait gives the batch one `soulseek_queue_wait` (`queue_wait`, measured
+    from the moment the transfers were asked for, so all of its candidates share
+    that one window), and a peer still at the end of its queue when it expires is
+    rejected — transfers cancelled, partials swept — and the next candidate
+    takes its place.
+
     Returns {"candidate", "username", "dir", "wanted", "got", "root"} for the
     winner, the string "cancelled" when the job was cancelled mid-flight, or
     None when every candidate in the batch was tried and rejected."""
@@ -4016,6 +4088,12 @@ def _try_batch(slsk, ddir, batch, release, cfg, is_cd, min_score):
             "wanted": wanted, "logs": logs,
             "album_wanted": [w for w in wanted if w["filename"] not in log_names],
             "got": {}, "state": "queued",
+            # When this candidate's transfers were last ASKED for: the wait
+            # measures a stalled queue from here, so a batch enqueued together
+            # shares ONE patience window instead of each candidate restarting
+            # it when its own turn to be waited for comes round (see
+            # `queue_wait` and _wait_for_files' queued_since).
+            "queued_at": time.time(),
             "leaves": {_leaf_of(w["filename"]) for w in wanted} - {""},
             # One "download started" frame per CANDIDATE, however many waits it
             # takes to fetch it (see _start_once).
@@ -4049,6 +4127,7 @@ def _try_batch(slsk, ddir, batch, release, cfg, is_cd, min_score):
         _job_search_done()
         _job_progress(_progress_snapshot(a["username"], first, set(), [], "queued"))
         a["state"] = "logging" if a["logs"] else "downloading"
+        a["queued_at"] = time.time()
 
     # --- the .log gate (CD): each candidate's own log decides for itself ---
     # The whole batch's logs were queued above, so they download in parallel.
@@ -4129,9 +4208,15 @@ def _try_batch(slsk, ddir, batch, release, cfg, is_cd, min_score):
             continue
         a["got"] = dict(got_logs)          # the logs are already on disk
         a["state"] = "downloading"
+        a["queued_at"] = time.time()       # the album's bytes were asked for now
 
     # --- the album: every peer's bytes are in flight, the first good one wins --
     order = [a for a in attempts if a["state"] == "downloading"]
+    # One patience window per candidate, measured from the moment ITS transfers
+    # were asked for (a batch queued together therefore shares the window): a
+    # peer at the end of a long queue costs this much and no more, and the next
+    # candidate takes its place (see queue_wait).
+    patience = queue_wait(cfg)
     while order:
         a = order[0]
         est_timeout = _est_timeout(a["cand"])
@@ -4144,7 +4229,7 @@ def _try_batch(slsk, ddir, batch, release, cfg, is_cd, min_score):
                               timeout_s=est_timeout, cancel_check=_batch_cancel_check(
                                   slsk, ddir, a,
                                   [o for o in order if o is not a]),
-                              queue_budget_s=_queue_budget(a["cand"]),
+                              queue_wait_s=patience, queued_since=a["queued_at"],
                               on_start=a["announce"])
         # The CD gate's logs are already on disk with terminal transfers, and the
         # album wait above did not cover them (they went out in the first call,
@@ -4954,7 +5039,7 @@ def fetch_video_on_soulseek(artist, title, dest, cfg, seconds=None):
     local = str(_wait_for_files(slsk, slsk.download_dir(cfg), cand["username"],
                                 wanted, timeout_s=_est_timeout(cand),
                                 cancel_check=_cancelled,
-                                queue_budget_s=_queue_budget(cand)).get(
+                                queue_wait_s=queue_wait(cfg)).get(
                                     cand["file"]) or "")
     if not local or not os.path.isfile(local):
         return None
