@@ -776,4 +776,130 @@ ok(os.path.isdir(os.path.join(MF, "Downloads"))
    and os.path.isdir(os.path.join(MF, "Artists", ".stfolder")),
    "…and both are still exactly where they were")
 
+# --------------------------------------------------------------------------- #
+# refresh — one routine, four triggers, one clock (server.library_refresh)
+# --------------------------------------------------------------------------- #
+# "Refresh" is both halves now: drop the assembled payloads AND re-run the
+# layout scan + store its report, so the Library page's warning is about the
+# folder as it is NOW. This section drives the module directly (the routes and
+# the lifespan only delegate to it), with its own clock and config.
+import time  # noqa: E402
+
+from server import library_refresh as LREF  # noqa: E402
+from server import tagcache as tcmod  # noqa: E402
+
+REFRESH_CFG = {"music_folder": MF, "naming_script": SCRIPT}
+FIVE_MIN_CFG = dict(REFRESH_CFG, library_refresh_minutes=5)
+OFF_CFG = dict(REFRESH_CFG, library_refresh_minutes=0)
+
+# A fresh album with one stray file — the finding a refresh must report and
+# then drop when the file goes.
+album("Artists/Refresh/Refresh Album", tags("Refresh", "Refresh Album"))
+STRAY = os.path.join(MF, "Artists", "Refresh", "Refresh Album", "stray.nfo")
+with open(STRAY, "wb") as f:
+    f.write(b"junk")
+
+print("== refresh_now: the full pass stores a report and resets the clock ==")
+LREF._last = 0.0
+res1 = LREF.refresh_now("test manual", REFRESH_CFG)
+snap = layoutmod.load_report(REFRESH_CFG)
+ok(res1["ok"] and res1["reason"] == "test manual", f"refresh_now reports ok ({res1})")
+ok(bool(snap.get("exists")) and isinstance(snap.get("report"), dict),
+   "refresh_now stored a layout report")
+ok(res1["findings"] == snap["report"]["total"],
+   f"the finding count it reports IS the stored report's total "
+   f"({res1['findings']} vs {snap['report']['total']})")
+ok(snap["report"]["total"] > 0
+   and any(i["path"] == "Artists/Refresh/Refresh Album/stray.nfo"
+           for i in snap["report"]["issues"]),
+   "the stored report names the stray file that is there NOW")
+ok(LREF.last_refresh() > 0, "refresh_now stamped the interval clock")
+
+os.remove(STRAY)
+res2 = LREF.refresh_now("test manual", REFRESH_CFG)
+ok(res2["findings"] == res1["findings"] - 1,
+   f"a second refresh reflects the folder NOW — the stray is gone "
+   f"({res1['findings']} -> {res2['findings']})")
+
+print("== mark_stale: cheap half now, ONE deferred scan for a burst ==")
+_calls = {"scan": 0, "drop": 0}
+_real_scan = layoutmod.scan_library
+_real_drop = tcmod.invalidate_library_payloads
+
+
+def _counting_scan(cfg=None, stats=None):
+    _calls["scan"] += 1
+    return _real_scan(cfg, stats)
+
+
+def _counting_drop():
+    _calls["drop"] += 1
+    return _real_drop()
+
+
+layoutmod.scan_library = _counting_scan
+tcmod.invalidate_library_payloads = _counting_drop
+try:
+    _calls["scan"] = _calls["drop"] = 0
+    LREF._debounce_at = 0.0
+    LREF._last = 0.0
+    LREF.mark_stale("test run", REFRESH_CFG)
+    ok(_calls["drop"] >= 1, "mark_stale drops the assembled payload caches now")
+    ok(_calls["scan"] == 0, "mark_stale does NOT scan inline")
+    ok(LREF.last_refresh() > 0, "mark_stale stamps the clock immediately")
+    ok(LREF._debounce_at > time.time(), "…and schedules the scan in the future")
+    # A bulk import runs MANY chains: every one calls mark_stale, and they
+    # coalesce into the one pending scan instead of one scan each.
+    LREF.mark_stale("test run", REFRESH_CFG)
+    LREF.mark_stale("test run", REFRESH_CFG)
+    ok(_calls["scan"] == 0, "repeated mark_stale calls still scan nothing inline")
+    LREF._tick(now=LREF._debounce_at + 0.1, cfg=REFRESH_CFG)
+    ok(_calls["scan"] == 1,
+       f"the debounce fires exactly ONE scan for the whole burst "
+       f"({_calls['scan']})")
+    ok(LREF._debounce_at == 0.0, "…and the pending scan is cleared")
+finally:
+    layoutmod.scan_library = _real_scan
+    tcmod.invalidate_library_payloads = _real_drop
+
+print("== the interval trigger, measured from the LAST refresh of ANY kind ==")
+layoutmod.scan_library = _counting_scan   # keep counting below
+_calls["scan"] = 0
+LREF._debounce_at = 0.0
+_now = time.time()
+LREF._last = _now - 301          # just over five minutes ago
+LREF._tick(now=_now, cfg=FIVE_MIN_CFG)
+ok(_calls["scan"] == 1, "5 minutes after the last refresh, the interval fires")
+
+# …and a refresh of any OTHER kind pushes the next automatic one out.
+LREF.refresh_now("test manual", REFRESH_CFG)          # _last = now
+_after_manual = _calls["scan"]
+LREF._tick(now=time.time(), cfg=FIVE_MIN_CFG)
+ok(_calls["scan"] == _after_manual,
+   "a manual refresh just now pushes the interval out — it does not fire again")
+
+# 0 turns the interval trigger off, however stale the clock is.
+LREF._last = time.time() - 100000
+LREF._tick(now=time.time(), cfg=OFF_CFG)
+ok(_calls["scan"] == _after_manual,
+   "library_refresh_minutes = 0 leaves the interval trigger off")
+
+print("== a refresh scans the WHOLE library, even with the caller's targets ==")
+# A scoped /api/run (and the import chain) leaves the album it is working on in
+# the config, and `scan_library` would CONFINE its walk to that album — the
+# stored report is what the Library's warning reads as the library's own state,
+# so it must never describe one album. `refresh_now` clears `targets` first.
+SCOPED = dict(REFRESH_CFG, targets=[os.path.join(MF, "Artists", "Refresh")])
+LREF.refresh_now("test scoped", SCOPED)
+scoped_snap = layoutmod.load_report(REFRESH_CFG)
+scoped_paths = [i["path"] for i in scoped_snap["report"]["issues"]]
+ok("Downloads" in scoped_paths,
+   f"a refresh whose config carried a run's targets still reports the music-folder "
+   f"root (a scoped walk would not) ({sorted(set(p.split('/')[0] for p in scoped_paths))})")
+ok(scoped_snap["report"]["artists"] > 1,
+   f"…and the whole library's artists ({scoped_snap['report']['artists']})")
+ok(scoped_snap["stale"] is False,
+   "the stored report is not marked stale by the refresh's own config")
+layoutmod.scan_library = _real_scan
+
 print(f"\nAll {passed} checks passed.")

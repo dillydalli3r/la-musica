@@ -619,6 +619,8 @@ export const CONFIG_GROUPS: CfgGroup[] = [
         { k: "lyrics_format", label: "Where lyrics are stored", type: "select", options: [["EMBEDDED", "Embedded in the audio file"], ["LRC", "LRC sidecar"], ["BOTH", "Both"]] },
         { k: "worker_limit", label: "Worker threads (0 = every core)", type: "number", min: 0, max: 64,
           help: "How many files a script works on at once, and how many CPU threads each of those gets. 0 uses every core this machine has (a script may keep a lower safe ceiling of its own, e.g. its native tool already saturates the disk); 1 makes every script work on one file at a time." },
+        { k: "library_refresh_minutes", label: "Refresh the library every N minutes (0 = off)", type: "number", min: 0, max: 1440,
+          help: "How often the app refreshes the library by itself — the same full pass the Home/Library Refresh button runs: it re-walks the music folder and re-runs the file-structure scan, so a file added, moved or missed outside the app is noticed without a press. The timer restarts whenever a refresh happens for any other reason (a manual press, a script or import run, the startup pass), so the next automatic one is a full interval after that. 0 turns the automatic pass off; pressing Refresh still works." },
       ],
     },
     {

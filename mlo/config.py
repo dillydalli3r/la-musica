@@ -1666,6 +1666,16 @@ DEFAULT_CONFIG = {
 
     # Home — the library highlight shelves on the sidebar's Home section.
     "home_recent_count": 12,
+    # How often the library refreshes ITSELF, in minutes (server.library_refresh).
+    # A refresh re-walks the library, re-runs the file-structure (layout) scan
+    # and stores its report — the same full pass the Home/Library Refresh button
+    # runs — so the app notices a change made outside it (a new file dropped in,
+    # a folder moved by hand) without anyone pressing anything. The timer is
+    # restarted by ANY refresh: a manual press, a script/import run and the
+    # startup pass all push the next automatic one a full interval out. 0 turns
+    # the interval trigger off (the manual press, script runs and startup still
+    # refresh); the bounds table caps it at a day.
+    "library_refresh_minutes": 5,
     # Discovery — the external music APIs behind artist artwork and
     # descriptions (Deezer, ListenBrainz, iTunes, TheAudioDB, Wikipedia).
     # Empty source lists = the built-in order; every feature walks its list and
@@ -1980,6 +1990,8 @@ _INT_RANGES = {
     "cover_png_target_size": (0, 4000),
     "cover_jxl_target_size": (0, 4000),
     "home_recent_count": (4, 60),
+    # The self-refresh interval (0 = off, see DEFAULT_CONFIG).
+    "library_refresh_minutes": (0, 1440),
     "artist_image_target_size": (0, 4000),
     "discovery_timeout_s": (3, 30),
     "import_bulk_concurrency": (1, 16),

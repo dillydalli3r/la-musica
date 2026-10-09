@@ -1340,9 +1340,23 @@ def run_chain(cfg, ids, targets=None, force=None, progress=None, wait=False,
             if text:
                 _bar_frame(bar, done, total, text, job=job, steps=steps)
             with _chain_scan(cfg, targets) as scan_owner:
-                return _run_chain_locked(cfg, ids, targets=targets, force=force,
-                                         progress=progress, final=final, job=job,
-                                         bar=bar, scan=scan_owner)
+                try:
+                    return _run_chain_locked(cfg, ids, targets=targets, force=force,
+                                             progress=progress, final=final, job=job,
+                                             bar=bar, scan=scan_owner)
+                finally:
+                    # The library tells the truth about itself after ANY run,
+                    # however it ended: a chain that raised, was cancelled or
+                    # was interrupted changed the folder before it stopped, and
+                    # what it did is unknown (server.library_refresh.mark_stale
+                    # — the cheap half, so a bulk import's many chains coalesce
+                    # into one deferred scan). Never let this break the run's
+                    # own result or exception.
+                    try:
+                        from server import library_refresh
+                        library_refresh.mark_stale("a script run")
+                    except Exception:
+                        pass
 
 
 def _prune_empty_target_dirs(cfg):

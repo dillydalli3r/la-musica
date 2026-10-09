@@ -160,6 +160,12 @@ export function useGradesSummary(initial?: GradeSummary): GradeSummary | undefin
     queryKey: ["gradesSummary"],
     queryFn: api.gradesSummary,
     staleTime: 5 * 60_000,
+    // The library refreshes ITSELF on an interval (server.library_refresh), and
+    // a refresh re-derives this summary — so re-read it on the same cadence
+    // rather than only when the reader navigates or presses Refresh. A plain
+    // poll costs one cached GET; a hidden tab stops asking (the interval's own
+    // default), and refocus refetches.
+    refetchInterval: 60_000,
     initialData: initial,
   });
   return data;

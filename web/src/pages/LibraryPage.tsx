@@ -9,7 +9,7 @@ import {
   ListFilter, ListPlus, Play, RefreshCw, Search, Tag, Trash2, Wand2, X,
 } from "lucide-react";
 import { api } from "../api";
-import { rescanLayout } from "../lib/layoutScan";
+import { LAYOUT_REPORT_KEY, rescanLayout } from "../lib/layoutScan";
 import { SCRIPTS, DEFAULT_RUN_ALL, isScriptId } from "../lib/scripts";
 import { toast, useStore } from "../store";
 import {
@@ -374,17 +374,29 @@ export default function LibraryPage() {
   const refresh = () => {
     forceRefresh.current = true;
     // The walk is SERVER-side (`?refresh=1` drops the library, home and
-    // recommendation caches), so every read DERIVED from it has to be re-asked
-    // too. This page's own payload comes back with the refetch below, but the
-    // grading strip reads its own summary (`GET /api/grades/summary`,
-    // `useGradesSummary`) and kept quoting the counts from before the walk for
-    // its whole 5-minute staleTime — the "Refresh does not update the warning"
-    // report. Just that key: `invalidateLibrary` would also invalidate
+    // recommendation caches AND re-runs the file-structure scan), so every
+    // read DERIVED from it has to be re-asked too — but only ONCE THAT REQUEST
+    // HAS RETURNED. The grading strip reads its own summary
+    // (`GET /api/grades/summary`, `useGradesSummary`) and the layout warning
+    // reads the stored report; asking either in PARALLEL with the press raced
+    // the very request that drops the caches and stores the report, so the
+    // answer the client cached could be the one from BEFORE the press — the
+    // strip then quoted the old counts (and the old scan) until its own poll
+    // came round, which is the "even after pressing Refresh this warning
+    // doesn't get updated" report all over again.
+    //
+    // Just these two keys: `invalidateLibrary` would also invalidate
     // ["library"], and the refetch below is the one that must carry
     // `?refresh=1` — a second, flagless refetch would answer from the very
     // cache this press just dropped.
-    qc.invalidateQueries({ queryKey: ["gradesSummary"] });
-    void refetch();
+    void refetch().then(() => {
+      qc.invalidateQueries({ queryKey: ["gradesSummary"] });
+      // The FILE-STRUCTURE warning is the report of its own query, not this
+      // payload: the press's server-side pass IS a scan (`library_refresh`),
+      // and re-asking this key reads the report that press just stored — no
+      // second scan.
+      qc.invalidateQueries({ queryKey: LAYOUT_REPORT_KEY });
+    });
   };
   const { data: config } = useQuery({ queryKey: ["config"], queryFn: api.config });
   // The layout report the last scan stored (script 20's own scan or apply).
@@ -392,7 +404,7 @@ export default function LibraryPage() {
   // library-wide condition on every visit without scanning the library for
   // it — and `exists: false` is what keeps a warning off the screen until a
   // scan has actually run.
-  const { data: layout } = useQuery({ queryKey: ["layout-report"], queryFn: api.libraryLayoutReport });
+  const { data: layout } = useQuery({ queryKey: ["layout-report"], queryFn: api.libraryLayoutReport, refetchInterval: 60_000 });
   const runAllIds = Array.isArray(config?.run_all_order) && config.run_all_order.length
     ? config.run_all_order.filter((n: number) => isScriptId(n))
     : DEFAULT_RUN_ALL;

@@ -1153,9 +1153,13 @@ export default function SettingsPage() {
     {
       title: "Home",
       blurb:
-        "The Home section in the sidebar — its shelves are built from the library itself (recently added, best graded, top artists, favorites, wants, needs attention) with nothing fetched online.",
+        "The Home section in the sidebar — its shelves are built from the library itself (recently added, best graded, top artists, favorites, wants, needs attention) with nothing fetched online. How often the app refreshes the library by itself lives here too: a refresh is what keeps those shelves, the grading strips and the Library's file-structure warning describing the folder as it is now.",
       fields: [
         { k: "home_recent_count", label: "Recently-added albums shown", type: "number", min: 4, max: 60 },
+        {
+          k: "library_refresh_minutes", label: "Refresh the library every N minutes (0 = off)", type: "number", min: 0, max: 1440,
+          help: "How often the app refreshes the library by itself — the same full pass the Home/Library Refresh button runs: it re-walks the music folder and re-runs the file-structure scan, so a file added, moved or missed outside the app is noticed without a press. The timer restarts whenever a refresh happens for any other reason (a manual press, a script or import run, the startup pass), so the next automatic one is a full interval after that. 0 turns the automatic pass off; pressing Refresh still works.",
+        },
       ],
     },
     {

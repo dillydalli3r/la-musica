@@ -6095,7 +6095,10 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
     measured 29-52 ms on the 144-file scratch library against a cold rebuild of
     the whole ladder. `invalidate_all` stays for the cases that really
     invalidate everything: a settings save and the "affected set is unknown"
-    fallback in `imports._invalidate_caches`.
+    fallback in `imports._invalidate_caches`. The drop is now only HALF of what
+    a Refresh means: it also re-runs the file-structure (layout) scan and stores
+    its report, and the same full pass is what the app's own startup, post-run
+    and interval triggers run (R380).
   * **`/api/library` is serialized once per build, and answers 304.** The
     tree's own JSON bytes and ETag are derived where the tree is derived
     (`tagcache._json_document`, stored beside the payload in `_lib_body`), so
@@ -6724,6 +6727,49 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   `scanned_at` with no Rescan press, and a folder deleted on disk behind the
   app's back (the owner's actual case) is gone from both the report and the
   panel when the page is reopened.
+
+- **R380 — a REFRESH is one routine with four triggers, and any refresh resets
+  the interval clock.** "Refresh" used to mean one thing — `?refresh=1` dropping
+  the assembled payloads so the next build re-walked the library
+  (`invalidate_library_payloads` + mbresolve + recommendations) — which said
+  nothing about the FILE STRUCTURE: that is a separate walk whose STORED report
+  the Library page's warning reads, so a misplaced file nothing had re-scanned
+  for stayed invisible until a manual rescan. Both halves now live in
+  `server.library_refresh`, and a refresh is both: drop the assembled payloads
+  AND re-run `mlo.layout.scan_library` + `save_report`, so one pass tells the
+  truth about tags, files AND structure. It has **four triggers**:
+  (a) the manual press — `?refresh=1` on `/api/library` or `/api/home`
+  (`server.main._refresh_library_caches` delegates here) is the full pass, run
+  inline because the user asked for it; (b) APP START — `start()`'s worker runs
+  `refresh_now("startup")` once in its own thread, so startup never waits for
+  the walk; (c) AFTER A SCRIPT/IMPORT RUN — `server.script_runners.run_chain`
+  calls `mark_stale` in a `finally` around its locked body, so a chain that
+  raised, was cancelled or was interrupted still refreshes (what it changed
+  before it stopped is unknown): `mark_stale` is the **cheap half** — the
+  payload caches are dropped and the clock stamped immediately (the change is
+  known NOW) while the scan is **debounced** `library_refresh.DEBOUNCE_S` (a few
+  seconds) into the future, and repeated calls coalesce into ONE pending scan,
+  so a 200-album bulk import's many chains cost a single scan after the run has
+  settled; (d) an INTERVAL — the worker runs the full pass when
+  `now - _last >= library_refresh_minutes * 60` (`library_refresh_minutes`,
+  default 5, bounds 0-1440; `0` turns this trigger off while the others stay).
+  **The interval clock is RESET by every trigger**, not only by the interval
+  pass: `_last` is stamped by the manual press, the startup pass and every
+  `mark_stale` too, so a user (or a run) who just refreshed pushes the next
+  automatic one a full interval out instead of it firing again off a stale
+  stamp. The scan always covers the WHOLE library: `refresh_now` clears any
+  `targets` the caller's config carried (a scoped `/api/run`/import copy) before
+  scanning, so the stored report can never describe one album while the warning
+  presents it as the library. Everything is best-effort: a scan that cannot run
+  leaves the stored report in place and logs it, and the AUTOMATIC triggers are
+  all off the critical path — startup, the interval pass and a script run never
+  wait for a scan (the manual press is the one that runs it INLINE, on purpose:
+  the press's own answer is the report it just stored). The Library page's
+  stored-report and grade-summary queries re-read on a 60 s interval so an
+  automatic refresh becomes visible without navigating, and the press re-asks
+  both only AFTER its own request has returned (`?refresh=1` is what drops the
+  caches and stores the report — asking in parallel raced it and cached the
+  pre-press answer). Pinned by `tools/test_layout_case.py`.
 
 ## 8. Recommended runbook
 

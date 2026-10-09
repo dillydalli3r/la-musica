@@ -259,14 +259,18 @@ export default function HomePage() {
     forceRefresh.current = true;
     // The walk is SERVER-side (`?refresh=1` drops the library, home and
     // recommendation caches), so the reads DERIVED from it must be re-asked
-    // too. This payload carries `grade_warning`, but the strip and the dot read
-    // their own summary (`GET /api/grades/summary`, `useGradesSummary`), whose
-    // cache this page only ever SEEDS from that field — so a re-walk left the
-    // strip quoting the counts from before it for a whole staleTime. One key,
-    // not `invalidateLibrary`: that helper also invalidates ["home"], and the
-    // refetch below is the one that must carry `?refresh=1`.
-    qc.invalidateQueries({ queryKey: ["gradesSummary"] });
-    void refetch();
+    // too — but only ONCE THAT REQUEST HAS RETURNED. This payload carries
+    // `grade_warning`, but the strip and the dot read their own summary
+    // (`GET /api/grades/summary`, `useGradesSummary`), whose cache this page
+    // only ever SEEDS from that field; asking it in parallel with the press
+    // raced the request that drops the caches, so the summary cached could be
+    // the one from BEFORE the press and the strip quoted the old counts for a
+    // whole staleTime. One key, not `invalidateLibrary`: that helper also
+    // invalidates ["home"], and the refetch below is the one that must carry
+    // `?refresh=1`.
+    void refetch().then(() => {
+      qc.invalidateQueries({ queryKey: ["gradesSummary"] });
+    });
   };
   const [gridSize, pickGridSize] = useGridSize();
   const { selectMode, toggleSelectMode } = useSelectMode();

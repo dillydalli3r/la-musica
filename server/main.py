@@ -168,6 +168,17 @@ async def _lifespan(app: FastAPI):
         cache_caps.start()
     except Exception as e:
         print(f"[mlo] cache caps worker failed to start: {e}")
+    # Library refresh: one routine that tells the truth about the library NOW —
+    # the assembled payloads re-derived AND the file-structure scan re-run and
+    # stored (server.library_refresh). Its worker runs that pass once at startup
+    # (in its own thread — startup never waits for the walk) and then on the
+    # configured interval, and it is also what the Refresh buttons and every
+    # script/import run go through.
+    try:
+        from server import library_refresh
+        library_refresh.start()
+    except Exception as e:
+        print(f"[mlo] library refresh worker failed to start: {e}")
     # The storage snapshot (the Home page's own card polls it): its FIRST
     # request after a restart is the one that pays the walk, because only a
     # STALE entry is served off the request path and a fresh process has none.
@@ -264,6 +275,11 @@ async def _lifespan(app: FastAPI):
     try:
         from server import cache_caps
         cache_caps.stop()
+    except Exception:
+        pass
+    try:
+        from server import library_refresh
+        library_refresh.stop()
     except Exception:
         pass
     try:
@@ -3136,25 +3152,27 @@ def ai_test(req: AiTestRequest):
 
 
 def _refresh_library_caches():
-    """Make the next library/home build re-walk the music folder.
+    """Tell the truth about the library now — the Refresh buttons' one routine.
 
     Both payloads are CACHED — the library tree in `tagcache`'s own entry
     (`get_library`, TTL), Home's for 15 minutes — and Home is built FROM the
     library, so a Refresh that only re-asked answered with the same rows for
     minutes, which reads exactly like a dead button (the reason `/api/home`
-    grew its own `?refresh=1`). This is the one place that drops them, shared
-    by the Library's and Home's Refresh buttons so the two cannot drift:
-    `invalidate_library_payloads` drops the ASSEMBLED trees while keeping every
-    cache keyed on the files themselves (tags by stat, indexed album payloads
-    by folder signature), so the rebuild re-walks the folder and re-reads every
-    stat the payload depends on — a file added, removed or retagged since is
-    still seen — while unchanged files are not re-parsed and unchanged albums
-    are not re-graded. The identity and recommendation caches go with them.
+    grew its own `?refresh=1`). And neither payload says anything about the
+    FILE STRUCTURE, which is a separate walk whose STORED report is what the
+    Library page's layout warning reads — so a structure problem nothing had
+    re-scanned for stayed invisible until a manual rescan.
+
+    Both halves are now `server.library_refresh.refresh_now`, shared by the
+    Library's and Home's Refresh buttons (and by the app's own startup, post-run
+    and interval triggers) so nothing can drift: it drops the ASSEMBLED trees
+    while keeping every cache keyed on the files themselves, and re-runs the
+    layout scan + stores its report, so one press detects tag, file AND
+    structure problems. It keeps the caller's config (and never a run-scoped
+    `targets` — see `library_refresh._whole_library_cfg`).
     """
-    tagcache.invalidate_library_payloads()
-    mbresolve.invalidate()
-    from server import recommendations
-    recommendations.invalidate()
+    from server import library_refresh
+    library_refresh.refresh_now("a manual refresh", load_config())
 
 
 @app.get("/api/library")
