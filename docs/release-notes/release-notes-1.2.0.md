@@ -1,4 +1,4 @@
-# la musica 1.1.0 — the grading tells the truth, and the writes stop colliding
+# la musica 1.2.0 — the grading tells the truth, and the writes stop colliding
 
 The second round of the owner using 1.0.0 and reporting what it got wrong —
 twelve reports, each traced to a cause in the code rather than a symptom.
@@ -215,5 +215,5 @@ this release:
   from the archived snapshot, which the panel now says out loud.
 - **Folders dragged into the wizard before this release were moved, not
   copied.** Their contents are in the library (nothing was lost) but no longer
-  at the drop location; from 1.1.0 on, a chosen folder is always copied and the
+  at the drop location; from 1.2.0 on, a chosen folder is always copied and the
   originals stay where they are.
