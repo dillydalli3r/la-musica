@@ -85,6 +85,30 @@ port2, close2 = serve(200, b'{"user":{}}')
 assert soulseek.instance_owner(cfg(port2)) == (True, None, ""), soulseek.instance_owner(cfg(port2))
 
 # --------------------------------------------------------------------------- #
+# 1b. only THIS host's slskd build may answer for the app
+# --------------------------------------------------------------------------- #
+# One library can be read by two hosts at once (the Docker container's /music
+# is the same folder a Windows install writes), and upstream's per-host builds
+# land in the SAME `slskd v<version>` folder: a bare `slskd` for Linux, an
+# `slskd.exe` for Windows. Taking "whichever of the two names is there"
+# returned the LINUX binary on Windows, and `subprocess.Popen` on it raised
+# `OSError: [WinError 193] %1 is not a valid Win32 application` out of
+# `/api/soulseek/start` — the owner's "Error: Internal Server Error", with
+# nothing on screen naming the wrong-architecture file. The rule pinned here
+# fails on either host if that lookup ever widens again.
+_real_installed_path = soulseek.installed_path
+for _host_name in ("slskd", "slskd.exe"):
+    _d = tempfile.mkdtemp()
+    with open(os.path.join(_d, _host_name), "w") as f:
+        f.write("binary\n")
+    soulseek.installed_path = lambda key, _folder=_d: _folder
+    _got = soulseek.slskd_exe()
+    _which = "slskd.exe" if os.name == "nt" else "slskd"
+    _want = os.path.join(_d, _host_name) if _host_name == _which else None
+    assert _got == _want, (_host_name, _got, _want)
+soulseek.installed_path = _real_installed_path
+
+# --------------------------------------------------------------------------- #
 # 2. start() must refuse a foreign listener instead of adopting it
 # --------------------------------------------------------------------------- #
 spawned = []
@@ -181,6 +205,28 @@ ok, msg = soulseek.start(cfg(free_port2))
 assert ok is False, (ok, msg)
 assert "already running" in msg, msg
 assert "one slskd can run at a time" in msg, msg
+
+# --------------------------------------------------------------------------- #
+# 4b. a spawn that cannot happen is a MESSAGE, not a 500
+# --------------------------------------------------------------------------- #
+# The same wrong-architecture file, one layer up: whatever `Popen` refuses
+# (WinError 193 on another host's build, EACCES on a mount that forbids
+# execution, ENOEXEC), `/api/soulseek/start` must answer with the reason —
+# the route turns a False into a 400 the page shows — instead of letting the
+# OSError escape as a bare Internal Server Error.
+class _RefuseSpawn:
+    def __init__(self, *a, **kw):
+        raise OSError(193, "%1 is not a valid Win32 application")
+
+soulseek.subprocess.Popen = _RefuseSpawn
+soulseek._proc["proc"] = None
+free_port3, close_fp3 = serve(200, b"{}")
+close_fp3()
+ok3, msg3 = soulseek.start(cfg(free_port3))
+assert ok3 is False, (ok3, msg3)
+assert "could not be started" in msg3, msg3
+assert "193" in msg3, msg3
+soulseek.subprocess.Popen = _real_popen
 
 # --------------------------------------------------------------------------- #
 # 5. the reported symptom: the status endpoint must NOT say "running, not

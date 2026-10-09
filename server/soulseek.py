@@ -49,13 +49,25 @@ def config_path():
 # Binary + config
 # --------------------------------------------------------------------------- #
 def slskd_exe():
+    """The slskd build THIS host can run, or None.
+
+    The tools folder is shared by every install that reads the library, and one
+    library can be read by two hosts at once (the Docker container's /music is
+    the same folder a Windows install writes). Upstream ships one build per
+    host, they land in the SAME `slskd v<version>` folder, and neither can run
+    on the other's host: a bare `slskd` is the Linux (ELF) build and
+    `slskd.exe` the Windows one. Taking "either name, whichever is there"
+    returned the ELF on Windows, and `subprocess.Popen` on it raised
+    `OSError: [WinError 193] %1 is not a valid Win32 application` straight out
+    of `/api/soulseek/start` — an Internal Server Error for a tool that is
+    simply the other host's copy, with nothing on screen to say so.
+    """
     d = installed_path("slskd")
-    if d:
-        for name in ("slskd.exe", "slskd"):
-            p = os.path.join(d, name)
-            if os.path.isfile(p):
-                return p
-    return None
+    if not d:
+        return None
+    name = "slskd.exe" if os.name == "nt" else "slskd"
+    p = os.path.join(d, name)
+    return p if os.path.isfile(p) else None
 
 
 def slskd_installed():
@@ -664,13 +676,31 @@ def start(cfg=None):
             logf = open(log, "wb")
         except OSError:
             logf = subprocess.DEVNULL
-        proc = subprocess.Popen(
-            [exe, "--config", config_path(), "--no-logo"],
-            cwd=os.path.dirname(exe),
-            stdout=logf,
-            stderr=subprocess.STDOUT,
-            **kwargs,
-        )
+        try:
+            proc = subprocess.Popen(
+                [exe, "--config", config_path(), "--no-logo"],
+                cwd=os.path.dirname(exe),
+                stdout=logf,
+                stderr=subprocess.STDOUT,
+                **kwargs,
+            )
+        except OSError as e:
+            # A spawn that never happened is a MESSAGE, not a 500: the route
+            # turns this into a 400 the page shows. The measured case is a
+            # tools folder shared with another host (a Linux build on Windows
+            # raised WinError 193 out of this call and `/api/soulseek/start`
+            # answered with a bare Internal Server Error) — see slskd_exe().
+            # Whatever the cause (a wrong-architecture or half-copied binary, a
+            # mount that refuses execution, no permission), the file to look at
+            # is the one named here.
+            try:
+                logf.close()
+            except Exception:
+                pass
+            return False, (f"slskd could not be started ({type(e).__name__}: "
+                           f"{e}) — {exe} may be another host's build: delete "
+                           f"{os.path.dirname(exe)} and install slskd again "
+                           f"from Dependencies")
         if hasattr(logf, "close"):
             logf.close()  # the child keeps its own handle
         # slskd allows ONE instance per machine. When another slskd is

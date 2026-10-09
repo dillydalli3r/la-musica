@@ -1238,6 +1238,51 @@ with tempfile.TemporaryDirectory() as tmp:
         restore_deps(real[0])
 
 
+# --------------------------------------------------------------------------- #
+# 6. the Soulseek daemon is an installable row, on both hosts
+# --------------------------------------------------------------------------- #
+# The Soulseek page's empty state tells the user to install slskd from
+# Dependencies ("key: slskd"), so the key has to BE there. It was dropped with
+# the feature and never came back, which left a Windows host holding the LINUX
+# build (installed by the container reading the same library) with no way to
+# install the one it can run — and `/api/soulseek/start` answering 500 out of
+# Popen on that ELF (see server.soulseek.slskd_exe and
+# tools/test_soulseek_ownership.py section 1b).
+import re  # noqa: E402
+
+check("slskd is a Dependencies row", "slskd" in fetchdeps.DISPLAY_NAMES)
+check("slskd installs into a `slskd v<version>` folder",
+      fetchdeps.INSTALL_PREFIX.get("slskd") == "slskd")
+check("slskd has a pinned release and a Windows asset",
+      "slskd" in fetchdeps.PINNED and fetchdeps.PINNED["slskd"]["asset"])
+_v = fetchdeps.PINNED["slskd"]["version"]
+check("the pinned slskd asset matches its Windows pattern",
+      any(re.match(p, fetchdeps.PINNED["slskd"]["asset"], re.I)
+          for p in fetchdeps.ASSET_PATTERNS["slskd"]))
+check("the Windows marker is the .exe of that release",
+      fetchdeps.markers("slskd", platform="windows") == ("slskd.exe",))
+check("the Linux marker is the bare binary",
+      fetchdeps.markers("slskd", platform="linux") == ("slskd",))
+_lp = fetchdeps._linux_pattern("slskd", machine="x86_64")
+check("slskd has a Linux asset pattern for x86-64",
+      bool(_lp) and bool(re.match(_lp, f"slskd-{_v}-linux-x64.zip", re.I)))
+check("slskd has a Linux asset pattern for arm64",
+      bool(fetchdeps._linux_pattern("slskd", machine="aarch64")))
+check("slskd is installable on Windows",
+      fetchdeps.installable("slskd", platform="windows", machine="x86_64"))
+check("slskd is installable on Linux",
+      fetchdeps.installable("slskd", platform="linux", machine="x86_64"))
+check("slskd's Windows run name is the .exe",
+      fetchdeps.run_name("slskd", platform="windows") == "slskd.exe")
+check("slskd's Linux run name is the bare binary",
+      fetchdeps.run_name("slskd", platform="linux") == "slskd")
+check("a Linux marker never answers the Windows run-name question",
+      fetchdeps.run_name("rsgain", platform="windows") == "rsgain.exe"
+      and fetchdeps.run_name("chromaprint", platform="windows") == "fpcalc.exe")
+check("the cuetools launcher still answers on Linux",
+      fetchdeps.run_name("cuetools", platform="linux") == "CUETools.ARCUE"
+      and fetchdeps.run_name("cuetools", platform="windows") == "CUETools.ARCUE.exe")
+
 if FAILURES:
     print(f"{len(FAILURES)} failure(s)")
     sys.exit(1)

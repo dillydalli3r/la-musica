@@ -291,6 +291,24 @@ const API_PATHS = new Set([
  *  page asks for it. */
 const STATIC_RE = /^\/(assets\/|fonts\/|icon\.png|favicon|manifest|apple-touch)/;
 
+/** The DEV server's module graph, which never exists in a production build.
+ *
+ *  `npm run dev` (and dev.py, and the compose bed) serves `web/src/**` as
+ *  individual ES modules with cache-busting query strings — there is no bundle
+ *  to precache. With the vite process gone (it was stopped, or the machine went
+ *  offline), a lazy route's `import()` therefore failed outright: the owner's
+ *  report was exactly that, "Error loading dynamically imported module:
+ *  http://127.0.0.1:5181/src/pages/LibraryPage.tsx", and it is why the app
+ *  "doesn't work that well offline" in a dev run.
+ *
+ *  NETWORK-FIRST, deliberately: a dev module served from the cache would be the
+ *  stale module HMR exists to replace. The cache is the offline fallback only,
+ *  filled on the way through — so a page the reader HAS opened in this run keeps
+ *  working with vite down, and an unopened one fails with a 504 rather than a
+ *  network error. A built app never asks for these paths (its modules are the
+ *  hashed /assets/* files above), so this branch is dead in production. */
+const DEV_MODULE_RE = /^\/(src\/|@vite\/|@id\/|@react-refresh|node_modules\/\.vite\/)/;
+
 self.addEventListener("fetch", (event) => {
   const req = event.request;
   if (req.method !== "GET") return;
@@ -340,6 +358,32 @@ self.addEventListener("fetch", (event) => {
         const resp = await fetch(req);
         if (resp.ok) await cache.put(req, resp.clone());
         return resp;
+      })()
+    );
+    return;
+  }
+
+  // The dev server's module graph (see DEV_MODULE_RE): network-first, cached
+  // as the offline fallback so a dev run survives vite going away.
+  if (sameOrigin && DEV_MODULE_RE.test(url.pathname)) {
+    event.respondWith(
+      (async () => {
+        const cache = await caches.open(SHELL_CACHE);
+        try {
+          const resp = await fetch(req);
+          if (resp.ok) await cache.put(req, resp.clone());
+          return resp;
+        } catch {
+          // `ignoreVary`: the stored response is vite's, and it carries
+          // `Vary: Origin` — so a lookup by a request that does not carry the
+          // same Origin header MISSES the entry my own `cache.put(req, …)`
+          // just wrote, which read as "offline and not cached" for a module
+          // that was demonstrably in the cache (measured: LibraryPage.tsx and
+          // main.tsx missed, a module precacheShell stored as a bare URL hit).
+          // One origin serves these paths, so the vary header is noise here.
+          const hit = await cache.match(req, { ignoreVary: true });
+          return hit ?? new Response("offline and not cached", { status: 504 });
+        }
       })()
     );
     return;

@@ -320,6 +320,16 @@ def _detect_system_tools():
         if ytdlp:
             tools["yt-dlp"] = _system_entry("yt-dlp", ytdlp_exe=ytdlp)
 
+    # slskd: the Soulseek daemon, which this app RUNS rather than invokes
+    # (server/soulseek.py spawns it). A copy on PATH is listed so the row can
+    # say it is there; its version is not probed — slskd has no version flag
+    # that does not fall through to starting the daemon — so a PATH copy is
+    # reported without one, and the app's own install in a tools folder (the
+    # `_detect_deps_native` pass below) carries the real number.
+    slskd = shutil.which("slskd")
+    if slskd:
+        tools["slskd"] = {"version": None, "slskd_exe": slskd}
+
     # A native install in a tools folder LAST, so it wins over a copy on
     # PATH: it is the versioned one the Dependencies page reports and updates,
     # and without this the app could install oxipng and still call it missing.
@@ -350,6 +360,11 @@ _DEPS_NATIVE_FIELDS = {
     "chromaprint": ("fpcalc_exe", ()),
     "libjxl": ("cjxl_exe", (("djxl_exe", "djxl"),)),
     "libjpeg_turbo": ("jpegtran_exe", ()),
+    # slskd: the daemon server/soulseek.py runs. Its Linux build is a bare
+    # `slskd` (the Windows asset of the same release is `slskd.exe`), and
+    # without this entry an install into the tools folder would be invisible
+    # to the Dependencies row that offered it.
+    "slskd": ("slskd_exe", ()),
 }
 
 
@@ -568,11 +583,26 @@ def detect_all_tools():
                 "dir": d,
             }
 
+    # slskd: the Soulseek daemon (server/soulseek.py spawns it). `slskd.exe`
+    # is what the Windows asset of the release carries — a bare `slskd` in
+    # this folder is the LINUX build of a library two hosts share, and it must
+    # never be reported as an install here (that wrong answer is what made
+    # /api/soulseek/start spawn an ELF and answer 500).
+    sv, sf, deps_root = _detect_tool_dirs("slskd")
+    if sf:
+        d = os.path.join(deps_root, sf)
+        if os.path.isfile(os.path.join(d, "slskd.exe")):
+            tools["slskd"] = {
+                "version": sv,
+                "slskd_exe": os.path.join(d, "slskd.exe"),
+            }
+
     # Fill gaps from system packages (Linux/macOS/Docker) so each tool
     # category resolves even when no tool has been downloaded yet.
     system = _detect_system_tools()
     for key in ("flac", "libjxl", "libjpeg_turbo", "oxipng", "ffmpeg",
-                "rsgain", "chromaprint", "yt-dlp", "php", "logchecker"):
+                "rsgain", "chromaprint", "yt-dlp", "php", "logchecker",
+                "slskd"):
         if key not in tools and key in system:
             tools[key] = system[key]
 
