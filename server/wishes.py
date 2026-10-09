@@ -810,14 +810,44 @@ def walked_rows(wish, cfg=None):
     return release_choice.rank_stored(rows, cfg)
 
 
+def walk_split(wish, cfg=None):
+    """The candidates this wish's walk really asks: (kept, duplicates).
+
+    `walked_rows` re-ranked and capped by `fallback_limit`, then narrowed to
+    DISTINCT PRESSINGS (`mlo.release_choice.distinct_pressings`): two editions
+    that state the same catalog number are ONE search — the number is what a
+    CD search is keyed on, and MusicBrainz really does carry one pressing as two
+    releases. The dropped rows come back second, so the caller that logs the
+    skip has them.
+
+    EVERY reader of the walk goes through here — the worker's order, the row's
+    "Release 2 of 5", `advance_candidate`'s next step, the end-of-walk report —
+    because the position a surface shows and the edition the worker is really
+    asking have to come from ONE list. Reading the un-narrowed list here is how
+    a row came to name edition 2 while edition 3 was being searched, and to
+    count a walk of four as five.
+    """
+    rows = [r for r in walked_rows(wish, cfg)[:fallback_limit(cfg)]
+            if str(r.get("mbid") or "").strip()]
+    if len(rows) < 2:
+        return rows, []
+    from mlo.release_choice import distinct_pressings
+
+    return distinct_pressings(rows)
+
+
+def walk_rows(wish, cfg=None):
+    """The candidates the walk asks, in the order it asks them (see walk_split)."""
+    return walk_split(wish, cfg)[0]
+
+
 def walk_length(wish, cfg=None):
-    """How many candidates this wish's walk really has, capped by the setting.
+    """How many candidates this wish's walk really has.
 
     Len < 2 is not a walk: the wish's own key is its one candidate, and the row
     shows nothing about positions (see `candidate_state`).
     """
-    rows = walked_rows(wish, cfg)
-    return min(len(rows), fallback_limit(cfg)) if rows else 0
+    return len(walk_rows(wish, cfg))
 
 
 def candidate_state(wish, cfg=None):
@@ -839,7 +869,7 @@ def candidate_state(wish, cfg=None):
     total = walk_length(wish, cfg)
     if total < 2:
         return None
-    rows = walked_rows(wish, cfg)
+    rows = walk_rows(wish, cfg)
     try:
         index = max(0, int((wish or {}).get("candidate") or 0))
     except (TypeError, ValueError):
@@ -967,8 +997,8 @@ def advance_candidate(wid, cfg=None):
     so instead of sitting in `searching` while the walk moves on.
     """
     before = get_wish(int(wid)) or {}
-    rows = walked_rows(before, cfg)
-    total = walk_length(before, cfg)
+    rows = walk_rows(before, cfg)
+    total = len(rows)
     try:
         index = max(0, int(before.get("candidate") or 0))
     except (TypeError, ValueError):
@@ -1049,8 +1079,8 @@ def walk_report(wish, err, cfg=None):
     — and its classification (`outcome_of`) — survives.
     """
     state = candidate_state(wish, cfg)
-    rows = walked_rows(wish, cfg)
-    total = walk_length(wish, cfg) or len(rows)
+    rows = walk_rows(wish, cfg)
+    total = len(rows)
     if state:
         asked = state["tried"] + [{"mbid": state["mbid"], "title": state["title"]}]
     else:

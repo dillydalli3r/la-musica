@@ -1023,6 +1023,18 @@ _kept, _skipped = release_choice.distinct_pressings(_WALK["candidates"])
 check("the list builder drops exactly what the walk drops",
       [c["title"] for c in _kept] == [c["title"] for c in walk]
       and len(_skipped) == 1, json.dumps([c["title"] for c in _skipped]))
+# …and the row's own POSITION is counted over that same narrowed walk: a walk of
+# three editions reads "Release 1 of 3", never a count that includes an edition
+# the walk never asks. This is the owner's "it jumps from 1 of 5 to 3 of 5" —
+# the badge counted the un-narrowed list (4 here) while the worker asked the
+# narrowed one (3), so the position and the edition went out of step.
+check("the row counts the walk the worker actually asks",
+      wishes.walk_length(_WALK, _walk_cfg) == 3
+      and (wishes.candidate_state(_WALK, _walk_cfg) or {}).get("total") == 3
+      and (wishes.candidate_state(_WALK, _walk_cfg) or {}).get("mbid")
+      == _WALK["candidates"][0]["mbid"],
+      json.dumps({"length": wishes.walk_length(_WALK, _walk_cfg),
+                  "state": wishes.candidate_state(_WALK, _walk_cfg)}))
 check("a catalog number's identity is its digits and letters, not its spelling",
       release_choice.catalog_key("ged 24425") == release_choice.catalog_key("GED24425")
       == release_choice.catalog_key("G.E.D-24425"),

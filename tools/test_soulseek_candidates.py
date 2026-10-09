@@ -1707,6 +1707,46 @@ try:
 finally:
     shutil.rmtree(run.ddir, ignore_errors=True)
 
+class StalledLogPeer(AutoSlsk):
+    """AutoSlsk where one peer's rip LOG sits in slskd's queue forever: the
+    first candidate in rank order never produces its .log, while a later peer's
+    .log is already on disk. The .log gate must grade the ready candidate
+    instead of waiting the stalled peer out for the whole .log window."""
+
+    def __init__(self, ddir, rows, user="peerA"):
+        super().__init__(ddir, rows)
+        self.user = user
+
+    def downloads_state(self):
+        state = super().downloads_state()
+        for entry in state:
+            if entry["username"] != self.user:
+                continue
+            for d in entry["directories"]:
+                for f in d["files"]:
+                    if str(f["filename"]).lower().endswith(".log"):
+                        f["state"] = "Queued, Remotely"
+        return state
+
+
+# (b2) The first-ranked peer never delivers its .log while a later peer's .log
+#      is ALREADY on disk: the gate grades the ready candidate at once instead
+#      of sitting out the stalled peer for `_LOG_TIMEOUT_S` (180 s). Every
+#      candidate's log is fetched in parallel; a ready one must not queue behind
+#      a stalled one (see _log_gate_cancel_check).
+run = run_job(JOB_RELEASE, BATCH_ROWS, stub_cls=StalledLogPeer, keep_dir=True)
+try:
+    assert run.job["state"] == "done" and run.imported, run.job
+    _log_slow, _lost = run.job["attempts"]
+    assert _log_slow["username"] == "peerA" and "delivered its log first" in _log_slow["reason"], _log_slow
+    assert _lost["username"] == "peerC", run.job["attempts"]
+    assert os.path.basename(run.imported[0]) == "Batch B", run.imported
+    assert sorted(_tree_files(run.ddir)) == batch_files("B"), _tree_files(run.ddir)
+    # It did not sit out peerA's .log window at all: the gate's own clock says so.
+    assert run.clock.now < soulseek_auto._LOG_TIMEOUT_S, run.clock.now
+finally:
+    shutil.rmtree(run.ddir, ignore_errors=True)
+
 # (c) One release's candidates at once are the user's `soulseek_candidate_slots`
 #     (3 by default) — the app's own per-release ceiling — narrowed only when
 #     slskd's transfer slots cannot carry what releases × candidates promises:

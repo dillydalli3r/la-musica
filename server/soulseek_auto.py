@@ -3839,6 +3839,128 @@ def _batch_cancel_check(slsk, ddir, current, others):
     return check
 
 
+def _logs_hint(ddir, attempt):
+    """Whether every .log of `attempt` already sits on disk at the reported size
+    inside THAT candidate's own trees — the cheap half of the log gate's
+    readiness test (see _logs_arrived), asking slskd nothing."""
+    logs = attempt.get("logs") or []
+    if not logs:
+        return False
+    leaves = {_leaf_of(w["filename"]) for w in logs} - {""}
+    index = _index_download_tree(ddir, attempt["username"], leaves)
+    for w in logs:
+        if not _local_download_candidates(ddir, attempt["username"], w["filename"],
+                                          int(w.get("size") or 0), index=index):
+            return False
+    return True
+
+
+def _logs_arrived(slsk, ddir, attempt):
+    """Whether every .log of `attempt` is on disk AND vouched for by slskd.
+
+    The .log gate's own readiness test, over the logs alone: the batch's logs
+    are all queued at once, so one that has really arrived must be able to be
+    graded without waiting out a sibling whose peer has stalled. Same rule as
+    `_batch_arrived` (disk plus slskd's vouch)."""
+    if not _logs_hint(ddir, attempt):
+        return False
+    from server.soulseek import _user_transfers
+    left = {w["filename"] for w in attempt["logs"]}
+    ok = {t["filename"] for t in _user_transfers(slsk, attempt["username"], left)
+          if _transfer_ok(t["state"])}
+    return left <= ok
+
+
+def _log_gate_cancel_check(slsk, ddir, current, others):
+    """The cancel_check that lets a READY candidate's .log be graded first.
+
+    The whole batch's logs are queued at once but graded one candidate at a
+    time, in rank order. Without this, a peer that never delivers its .log held
+    the gate for `_LOG_TIMEOUT_S` while another candidate's .log already sat on
+    disk waiting its turn. `_wait_for_files` asks this every tick: once another
+    logging candidate's logs have really arrived it is flagged `_logs_ready` (so
+    the gate takes it next) and the current wait yields — exactly as the album
+    phase yields to a mate that already holds the album (see
+    `_batch_cancel_check`). `current`'s own logs are tested first, so a
+    candidate that has itself arrived keeps its wait and is graded normally."""
+    def check():
+        if _cancelled():
+            return True
+        if _logs_arrived(slsk, ddir, current):
+            return False
+        for o in others:
+            if (o.get("state") == "logging" and not o.get("_logs_ready")
+                    and _logs_arrived(slsk, ddir, o)):
+                o["_logs_ready"] = True
+                current["_log_yielded_to"] = o["username"]
+                return True
+        return False
+    return check
+
+
+def _candidate_got(ddir, attempt):
+    """{remote: local path} for `attempt`'s wanted files that are on disk.
+
+    The same resolution `_batch_hint`/`_wait_for_files` use (this candidate's own
+    album trees, at the size the peer reported), returned as the map a batch
+    winner carries. A candidate the batch did not itself wait on (it arrived
+    while another was being waited) has no `got` of its own; this rebuilds it."""
+    index = _index_download_tree(ddir, attempt["username"], attempt["leaves"])
+    out = dict(attempt.get("got") or {})
+    for w in attempt["wanted"]:
+        if w["filename"] in out:
+            continue
+        for p in _local_download_candidates(ddir, attempt["username"],
+                                            w["filename"], int(w.get("size") or 0),
+                                            index=index):
+            out[w["filename"]] = p
+            break
+    return out
+
+
+def _verify_group(slsk, ddir, group, cfg, is_cd):
+    """Verify several candidates' albums AT ONCE: [(o, root, ok, problems)].
+
+    The .log-vs-track CRC check (CD) and the decode check (digital) are the
+    heaviest step of a batch, and a batch can hold several COMPLETE candidates.
+    Verifying them one after another made the first good copy wait on the decode
+    of every candidate ranked above it that fails. Each runs on its OWN album
+    folder in its own thread (bounded by the group), and `_stamp_media` writes
+    that folder before it is verified, so nothing is shared but the read-only
+    release payload. A candidate whose files did not land in one folder answers
+    with root None and the problem."""
+    media = "CD" if is_cd else "Digital Media"
+    from concurrent.futures import ThreadPoolExecutor
+
+    # The batch job's own id, captured HERE (the submitting thread): a worker
+    # thread must write its stage/log lines into the job that owns the batch,
+    # not into whatever the primary job happens to be (see _CurrentJob).
+    jid = getattr(_tl, "jid", None)
+
+    def one(o):
+        _tl.jid = jid
+        try:
+            root = _local_album_root(ddir, list(_candidate_got(ddir, o).values()))
+            if not root:
+                return (o, None, False,
+                        ["downloaded files did not land in one album folder "
+                         "under the download dir"])
+            _stamped, tag_problems = _stamp_media(root, media, cfg)
+            ok, problems = _verify_album(root, cfg, is_cd)
+            problems = list(tag_problems) + list(problems)
+            return (o, root, ok and not tag_problems, problems)
+        except Exception as e:
+            return (o, None, False, [str(e)[:120]])
+        finally:
+            _tl.jid = None      # a pooled thread must not keep this job
+
+    # Bounded on purpose: each candidate's own track checks fan out again
+    # (verify_album_checksums decodes in parallel), so a big batch must not
+    # multiply its way into a thread storm. The batch's own width is small.
+    with ThreadPoolExecutor(max_workers=max(1, min(len(group), 4))) as ex:
+        return list(ex.map(one, group))
+
+
 def _try_batch(slsk, ddir, batch, release, cfg, is_cd, min_score):
     """Work up to `len(batch)` candidates of ONE release at once.
 
@@ -3864,11 +3986,10 @@ def _try_batch(slsk, ddir, batch, release, cfg, is_cd, min_score):
     candidates the winning one ends are swept the same way: "if one is good that
     it just deletes the others".
 
-    The .log gate itself is graded one candidate at a time and NOT probed (its
-    wait is over a few kB and bounded by _LOG_TIMEOUT_S): the logs of the whole
-    batch are queued at once, so they arrive in parallel, and the few seconds one
-    peer is slower than another cost nothing next to the album transfer the
-    probe exists for.
+    The .log gate's own readiness is the same shape: the whole batch's logs are
+    queued at once (`_logs_arrived`), and a candidate whose log has ALREADY
+    arrived is graded before one whose peer is stalled — a ready candidate must
+    not wait its turn behind a slow peer (see `_log_gate_cancel_check`).
 
     Returns {"candidate", "username", "dir", "wanted", "got", "root"} for the
     winner, the string "cancelled" when the job was cancelled mid-flight, or
@@ -3930,9 +4051,13 @@ def _try_batch(slsk, ddir, batch, release, cfg, is_cd, min_score):
         a["state"] = "logging" if a["logs"] else "downloading"
 
     # --- the .log gate (CD): each candidate's own log decides for itself ---
-    for a in attempts:
-        if a["state"] != "logging":
-            continue
+    # The whole batch's logs were queued above, so they download in parallel.
+    # They are graded here, and a candidate whose log has ALREADY arrived goes
+    # first (`_logs_ready`) — a stalled peer must not hold the gate while a
+    # ready candidate's log waits its turn (see _log_gate_cancel_check).
+    logging = [a for a in attempts if a["state"] == "logging"]
+    while logging:
+        a = next((o for o in logging if o.get("_logs_ready")), logging[0])
         # exactly one log per disc (candidate selection), so this wait is over
         # the wanted logs alone: it returns the moment they are all local
         # instead of waiting out a junk extra log's timeout. They are also the
@@ -3940,14 +4065,20 @@ def _try_batch(slsk, ddir, batch, release, cfg, is_cd, min_score):
         # them and nothing else.
         _stage("downloading", "Downloading the rip log(s) first…")
         _log("Downloading .log file(s) first for a quality check…")
-        got_logs = _wait_for_files(slsk, ddir, a["username"], a["logs"],
-                                   timeout_s=_LOG_TIMEOUT_S,
-                                   cancel_check=_cancelled, phase="logging",
-                                   on_start=a["announce"])
+        got_logs = _wait_for_files(
+            slsk, ddir, a["username"], a["logs"],
+            timeout_s=_LOG_TIMEOUT_S,
+            cancel_check=_log_gate_cancel_check(
+                slsk, ddir, a, [o for o in logging if o is not a]),
+            phase="logging", on_start=a["announce"])
+        logging.remove(a)
         if len(got_logs) < len(a["logs"]):
+            yielded = a.get("_log_yielded_to")
             _reject(a["username"], a["dir"],
-                    f"{len(got_logs)} of {len(a['logs'])} log(s) arrived within "
-                    f"{int(_LOG_TIMEOUT_S)}s — trying the next candidate")
+                    (f"stopped waiting for the rip log — {yielded} delivered its "
+                     f"log first" if yielded else
+                     f"{len(got_logs)} of {len(a['logs'])} log(s) arrived within "
+                     f"{int(_LOG_TIMEOUT_S)}s — trying the next candidate"))
             # The log is the only thing this candidate queued, but the WHOLE
             # wanted set is dropped: a partial log, a transfer record or a temp
             # file the peer is still flushing all live under this candidate's own
@@ -4068,24 +4199,54 @@ def _try_batch(slsk, ddir, batch, release, cfg, is_cd, min_score):
         # skip every file, so it is a verification problem, never a warning.
         problems = list(tag_problems) + list(problems)
         ok = ok and not tag_problems
+        # Every candidate the batch verified, this one first: {id: (o, root, ok,
+        # problems)}. The winner is the FIRST in rank order that verified good.
+        verdicts = {id(a): (a, local_root, ok, problems)}
         if not ok:
-            for pr in problems[:6]:
+            # THIS candidate failed its checks. Before decoding the next one IN
+            # RANK ORDER and waiting on it in turn, verify every OTHER candidate
+            # whose album is already on disk — AT ONCE. The .log-vs-track CRC
+            # (CD) and the decode checks are the heaviest step of a batch, and
+            # the first good copy should be known without one decode after
+            # another (see _verify_group). The winner is unchanged: the first in
+            # rank order that verifies good.
+            mates = [o for o in order
+                     if o is not a and o["state"] != "dropped"
+                     and _batch_arrived(slsk, ddir, o)]
+            if mates:
+                _log(f"Verifying {len(mates)} other complete candidate(s) at once…")
+                for o, root, ok_o, probs in _verify_group(slsk, ddir, mates, cfg, is_cd):
+                    verdicts[id(o)] = (o, root, ok_o, probs)
+        # Reject every candidate the batch verified and found wanting — the
+        # reason names the cause, not just the count: a CD rip is judged on its
+        # log/CRC evidence, so "which candidate failed and why" is the difference
+        # between a peer worth retrying and one that never had the pressing.
+        for o in list(order):
+            v = verdicts.get(id(o))
+            if v is None or v[2]:
+                continue
+            _, root, _ok_o, probs = v
+            for pr in probs[:6]:
                 _log("  ✕ " + pr)
-            # The reason names the cause, not just the count: a CD rip is judged
-            # on its log/CRC evidence, so "which candidate failed and why" is
-            # the difference between a peer worth retrying and one that never
-            # had the pressing.
-            _reject(a["username"], a["dir"],
-                    f"verification failed ({len(problems)} problem(s))"
-                    + (f": {problems[0]}" if problems else "")
+            _reject(o["username"], o["dir"],
+                    f"verification failed ({len(probs)} problem(s))"
+                    + (f": {probs[0]}" if probs else "")
                     + " — trying the next candidate")
             # the album root is this candidate's own (resolved from its own files
             # below the download dir) — a junk file it also dropped there goes
             # with it, and the sweep still runs afterwards
-            _drop_candidate(slsk, ddir, a["username"], a["wanted"],
-                            remove_root=local_root)
-            order.remove(a)
+            _drop_candidate(slsk, ddir, o["username"], o["wanted"],
+                            remove_root=root)
+            order.remove(o)
+        winner = next((o for o in order if o["state"] != "dropped"
+                       and id(o) in verdicts and verdicts[id(o)][2]), None)
+        if winner is None:
             continue
+        if winner is not a:
+            # A mate won: its root and file map come from the group's own
+            # verification (it was never waited on by this loop).
+            a, local_root = winner, verdicts[id(winner)][1]
+            got = _candidate_got(ddir, a)
 
         # --- the batch is decided: this album is the import --------------------
         for o in order:

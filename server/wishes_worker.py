@@ -401,33 +401,29 @@ def _walk_candidates(wish, cfg):
     catalog number are one search — the number is what a CD search is keyed on,
     and MusicBrainz really does carry one pressing as two releases (a label
     change, a reissue, a country variant) — so asking the second can only find
-    the folders the first already found. What was dropped is LOGGED, because a
-    fallback that silently loses a ranked edition is exactly the kind of
-    quiet shortcut this walk exists to avoid. Filtering here (and not only
-    where the list is written) also fixes a list stored before the rule
-    existed: an older wish's walk is deduplicated on its next attempt.
+    the folders the first already found. The cap and the narrowing live in ONE
+    place (`wishes.walk_split`), which this worker and every reader of the walk
+    share, so the edition asked for and the row's "Release 2 of 5" cannot
+    disagree. What was dropped is LOGGED, because a fallback that silently loses
+    a ranked edition is exactly the kind of quiet shortcut this walk exists to
+    avoid. Filtering there also fixes a list stored before the rule existed: an
+    older wish's walk is deduplicated on its next attempt.
     """
-    out = [dict(r) for r in
-           wishes.walked_rows(wish, cfg)[:wishes.fallback_limit(cfg)]
-           if str(r.get("mbid") or "").strip()]
+    kept, duplicates = wishes.walk_split(wish, cfg)
+    out = [dict(r) for r in kept]
     if not out:
         here = wishes.candidate_of(wish) or {}
         if here.get("mbid"):
             out = [{"mbid": here["mbid"], "title": here.get("title") or "",
                     "catalog_numbers": [str(n) for n in
                                         (here.get("catalog_numbers") or [])]}]
-    if len(out) > 1:
-        from mlo.release_choice import distinct_pressings
-
-        kept, duplicates = distinct_pressings(out)
-        if duplicates:
-            names = ", ".join(str(d.get("title") or d.get("mbid")) for d in duplicates[:3])
-            wishes.log("info",
-                       f"{str(wish.get('album') or wish.get('title') or '').strip() or 'Wish'}: "
-                       f"{len(duplicates)} ranked edition(s) share a catalog number with "
-                       f"one already being tried ({names}) — the same search, so they "
-                       f"are skipped")
-        out = kept
+    if duplicates:
+        names = ", ".join(str(d.get("title") or d.get("mbid")) for d in duplicates[:3])
+        wishes.log("info",
+                   f"{str(wish.get('album') or wish.get('title') or '').strip() or 'Wish'}: "
+                   f"{len(duplicates)} ranked edition(s) share a catalog number with "
+                   f"one already being tried ({names}) — the same search, so they "
+                   f"are skipped")
     return out
 
 
