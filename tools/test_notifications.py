@@ -112,6 +112,64 @@ import_autonomy.raise_prompt(album_dir, {}, {}, mode="automatic", reason="missin
 check("an import that resolved the gap withdraws the prompt silently", len(frames("import_needs_data")) == 1)
 check("...and the prompt is gone", import_autonomy.for_album(album_dir) == {})
 
+print("== an import RUN: its steps become ONE notice ==")
+# The owner's ask: a run of albums must not narrate itself album by album. The
+# per-album SUCCESS and the "import all downloads" tally are steps of one run
+# (server.events.import_step): they are counted, and the run earns ONE frame
+# when it goes quiet — which one it is depends on what the run WAS.
+drain()
+events_mod.flush_coalesced()          # nothing pending from the blocks above
+drain()
+for i in range(3):
+    events_mod.import_step("import_done", f"Imported Album {i}", "2 scripts ran.",
+                           {"link": f"/album/Album {i}"})
+check("three imported albums publish nothing on their own", frames() == [], str(frames()))
+events_mod.flush_coalesced()
+run = frames("import_done")
+check("...and ONE frame when the run goes quiet", len(run) == 1, str(len(run)))
+check("...counting what happened", bool(run) and run[0]["title"] == "Imported 3 albums",
+      run[0]["title"] if run else "")
+check("...with a queue link the client can navigate",
+      bool(run) and run[0]["data"]["link"].startswith("/") and run[0]["data"]["import_summary"],
+      str(run[0]["data"]) if run else "")
+
+# ONE album in the run: the notice is that album's own frame, verbatim — the
+# same words and the same album link, a moment later.
+drain()
+events_mod.import_step("import_done", "Imported Kind of Blue", "21 scripts ran.",
+                       {"link": "/album/Kind of Blue", "album_path": "/music/Kind of Blue"})
+events_mod.flush_coalesced()
+one = frames("import_done")
+check("a single album speaks in its own words",
+      len(one) == 1 and one[0]["title"] == "Imported Kind of Blue"
+      and one[0]["body"] == "21 scripts ran." and one[0]["data"]["link"] == "/album/Kind of Blue",
+      str(one))
+
+# The run's OWN tally (the "Import all downloads" frame) is what a run that has
+# one ends up saying — its numbers, not a count of counts.
+drain()
+events_mod.import_step("download_done", "Imported 4 albums", "all done — 4 of 4 finished",
+                       {"link": "/library"})
+events_mod.import_step("import_done", "Imported Album 1", "x", {"link": "/album/1"})
+events_mod.flush_coalesced()
+own = frames("import_done")
+check("a run with its own summary reports itself",
+      len(own) == 1 and own[0]["title"] == "Imported 4 albums"
+      and own[0]["body"] == "all done — 4 of 4 finished", str(own))
+
+# PROGRESS is not a notice at all, and a run whose albums all FAILED says
+# nothing here: each failure spoke for itself (see the failing-download frame).
+drain()
+events_mod.import_step("download_started", "Download started: An Album", "1 file(s)")
+events_mod.import_step("import_ready", "An Album", "in the download folder")
+events_mod.flush_coalesced()
+check("progress alone publishes nothing, ever", frames() == [], str(frames()))
+drain()
+events_mod.emit("download_failed", "Download failed: An Album", "no candidate delivered it")
+events_mod.flush_coalesced()
+check("...and a failed run does not add a summary to the failure that spoke",
+      [f["event"] for f in frames()] == ["download_failed"], str([f["event"] for f in frames()]))
+
 print("== a finished script run (/api/run) ==")
 import server.script_runners as script_runners  # noqa: E402
 

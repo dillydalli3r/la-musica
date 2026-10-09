@@ -279,7 +279,11 @@ def _run(work, on_done=None):
             # say WHICH album this run finished — a downloaded folder's name is
             # a peer's spelling of it, or a bare UUID.
             album_label = imports.album_identity_label(only) if only else ""
-            events.emit(
+            # The run's own summary — counted rather than published at once
+            # (see server.events.import_step): it is what the run's ONE notice
+            # ends up saying, so "Import all downloads" reports itself with
+            # its own tally instead of that tally AND a second summary.
+            events.import_step(
                 "download_done",
                 f"Imported {album_label}" if album_label
                 else f"Imported {imported} album" + ("s" if imported != 1 else ""),
@@ -294,7 +298,7 @@ def _run(work, on_done=None):
         elif failed:
             # Nothing was imported: the downloads are still waiting, so the
             # wizard (which lists them) is the page to send the user to.
-            events.emit("download_done", "Import finished with errors",
+            events.import_step("download_done", "Import finished with errors",
                         f"{failed} of {total} album(s) could not be imported",
                         {"link": "/import",
                          "errors": [str(e)[:300] for e in (_job["errors"] or [])[:3]]})

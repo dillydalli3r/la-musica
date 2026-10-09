@@ -188,6 +188,169 @@ def _notify_configured(kind: str, cfg: dict) -> bool:
     return bool(cfg.get(key, True))
 
 
+# ── Import steps, coalesced into ONE notice per run ────────────────────────
+#
+# An acquisition run is MANY albums, and every album used to raise its own
+# frames: one when a candidate's bytes started moving (`download_started` — one
+# per candidate), one when the album appeared in the download folder
+# (`import_ready`), one when the import picked it up (`import_started`), and one
+# when its chain finished (`import_done`, an OS popup — so a five-album run
+# popped five times). The owner's report is that this is noise: what they want
+# is a word when the work is DONE.
+#
+# So the sites that report an album's SUCCESS, and the "import all downloads"
+# run's own tally, call `import_step` instead of `emit`: the step is COUNTED
+# here, and once nothing has happened for `_COALESCE_QUIET_S` the run earns ONE
+# frame — its own per-album wording when it was a single album, the run's own
+# summary when it was that one, and otherwise a count. Nothing is lost: every
+# step is still on the queue view (the queue IS the progress bar).
+#
+# PROGRESS is not in here on purpose. The frames that narrate the middle — a
+# candidate's first bytes (`download_started`), the chain picking an album up
+# (`import_started`), an album waiting in the download folder (`import_ready`)
+# — already ship OFF and are the user's own switch to turn back on, and a
+# switch that says "narrate the middle" has to mean it: those keep going out
+# immediately (or stay silent) exactly as they did.
+#
+# What is NOT coalesced, deliberately:
+#   * `download_failed` — every candidate for a release tried and rejected. The
+#     owner asked for exactly this one immediately, and it is the only word that
+#     a release they asked for did not arrive.
+#   * `import_needs_data` — an album the import could not finish without a
+#     person. A decision is not progress: it is the app saying it is stuck on
+#     this album, and it must reach the user while they can still act.
+#   * `wish_not_found` / `wish_failed` — a wish's terminal ends, same reason.
+#   * `wish_found` — a wish landing is the outcome the whole feature exists for
+#     (a release the user asked for days ago has arrived), and it is rare: it
+#     keeps its own frame and its own timing.
+_IMPORT_STEPS = {
+    "import_done": "imported",
+    "download_done": "run",
+}
+# The quiet window: how long nothing has to happen before the run is over and
+# its notice goes out. An album's steps are seconds apart and a chain outlives
+# the job that started it, so the window is what makes "finished" mean the
+# whole run rather than the last album's import.
+_COALESCE_QUIET_S = 20.0
+_coalesce_lock = threading.Lock()
+_coalesce_tally = {}       # bucket -> count
+_coalesce_last = {}        # bucket -> the newest frame of that bucket
+_coalesce_timer = None
+
+
+def _coalesce_arm() -> None:
+    """(Re)start the quiet window. Caller holds `_coalesce_lock`."""
+    global _coalesce_timer
+    if _coalesce_timer is not None:
+        _coalesce_timer.cancel()
+    _coalesce_timer = threading.Timer(_COALESCE_QUIET_S, _coalesce_fire)
+    _coalesce_timer.daemon = True
+    _coalesce_timer.start()
+
+
+def _coalesce_fire() -> None:
+    """The window closed in a timer thread: publish, and never raise.
+
+    A timer thread that raises is a stack trace nobody reads and a notice
+    nobody gets; `flush_coalesced` keeps its own failures to itself for the
+    same reason `emit` does."""
+    try:
+        flush_coalesced()
+    except Exception:
+        pass
+
+
+def import_step(kind: str, title: str, body: str = "", data: dict = None,
+                config: dict = None) -> dict:
+    """Report one step of an acquisition run, held for the run's ONE notice.
+
+    The step's own frame is what a single-album run is finally told with (see
+    `flush_coalesced`), so the wording and the link a caller passes are kept
+    verbatim. Never raises and never blocks, exactly like `emit`.
+    """
+    payload = {
+        "type": "event",
+        "event": str(kind or ""),
+        "title": str(title or ""),
+        "body": str(body or ""),
+        "data": data or {},
+        "at": time.time(),
+    }
+    bucket = _IMPORT_STEPS.get(payload["event"])
+    if bucket is None:
+        # Not a run's own outcome (progress, a wish landing, anything else):
+        # there is nothing to hold, and the switch is `emit`'s own business —
+        # it resolves the config exactly the same way, so a kind that is not
+        # coalesced behaves here precisely as it did before.
+        return emit(kind, title, body, data, config)
+    try:
+        if config is None:
+            from mlo.config import load_config
+            config = load_config()
+        if not _notify_configured(payload["event"], config):
+            return payload
+    except Exception:
+        # A config that cannot be read must not silence the step; the switches
+        # are a preference, not a permission.
+        pass
+    global _coalesce_last
+    with _coalesce_lock:
+        _coalesce_tally[bucket] = _coalesce_tally.get(bucket, 0) + 1
+        _coalesce_last[bucket] = payload
+        _coalesce_arm()
+    return payload
+
+
+def coalesce_summary(tally: dict, last: dict) -> tuple:
+    """(title, body) for a run's ONE frame — see `flush_coalesced`.
+
+    Its own words when the run has them (the "Import all downloads" run states
+    its own tally; one album states its own name and chain summary) and counts
+    otherwise. Kept apart from the publishing so the wording is testable.
+    """
+
+    run = (last or {}).get("run") or {}
+    if run:
+        return str(run.get("title") or "Import finished"), str(run.get("body") or "")
+    imported = int(tally.get("imported") or 0)
+    one = (last or {}).get("imported") or {}
+    if imported == 1 and one:
+        return str(one.get("title") or "Import finished"), str(one.get("body") or "")
+    if imported:
+        return (f"Imported {imported} albums",
+                "They are in your library — see the queue for the details.")
+    # Progress only: a run that has not produced an outcome yet says nothing,
+    # and neither does one whose albums all failed (each failure spoke itself).
+    return "", ""
+
+
+def flush_coalesced() -> dict:
+    """Publish the ONE frame a batch of import steps earns, if any.
+
+    Called by the quiet-window timer, and directly by a caller (a test, a
+    shutdown) that wants it now. Returns the published payload, or {} when
+    there was nothing to say: a run whose albums all FAILED announces nothing
+    here, because each failure already spoke for itself.
+    """
+    global _coalesce_tally, _coalesce_last, _coalesce_timer
+    with _coalesce_lock:
+        tally, last = dict(_coalesce_tally), dict(_coalesce_last)
+        _coalesce_tally, _coalesce_last = {}, {}
+        if _coalesce_timer is not None:
+            _coalesce_timer.cancel()
+            _coalesce_timer = None
+    title, body = coalesce_summary(tally, last)
+    if not title:
+        return {}
+    source = (last.get("run") or last.get("imported") or {})
+    data = {**(source.get("data") or {}), "import_summary": tally}
+    data.setdefault("link", "/soulseek")
+    # The config is read HERE rather than carried from the counted steps: a
+    # switch the user flipped during the window has to decide this notice, and
+    # `emit` is where that decision lives.
+    return emit("import_done", title, body, data)
+
+
 # ── Web Push ────────────────────────────────────────────────────────────────
 #
 # The second transport for the same frames: RFC 8030 (delivery) + RFC 8291

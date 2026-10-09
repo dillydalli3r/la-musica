@@ -935,6 +935,72 @@ finally:
     _intg.resolve_advisory_route = _real_resolve_advisory
 
 # --------------------------------------------------------------------------- #
+# The ALBUM's genre, for a track the chain had nothing for
+# --------------------------------------------------------------------------- #
+# The owner's failing case: ONE file of an album graded GENRE_MISSING while the
+# album itself carried genres. The stamp only ever writes into an empty slot, so
+# nothing stopped it filling that slot from the ALBUM's own genre — the chain's
+# release-wide summary when it has one, else what the album's other tracks ended
+# up with. Every branch below, including the two that must NOT change: a track
+# with its own genre keeps it, and an album with no genre anywhere invents none.
+print()
+print("== a track the genre chain had nothing for takes the album's genre ==")
+from mlo.autotag import genre_count as _genre_count
+from mlo.genres import normalize_genres as _normalize
+
+_GENRE_CAP = _genre_count(CFG)
+_GENRE_RELEASE = {
+    "id": "rel-g", "release_group_id": "rg-g", "title": "Genre Album",
+    "artists": [{"name": "Test Artist", "mbid": "art-g"}],
+    "media": [{"disc": 1, "position": 1, "title": "One",
+               "recording_mbid": "rec-g1"},
+              {"disc": 1, "position": 2, "title": "Two",
+               "recording_mbid": "rec-g2"}],
+}
+_audio.AudioFile = _FakeAudio
+for _label, _stub, _want_two, _seed in (
+    # the release-wide summary answers for the track the per-track pass missed
+    ("the chain's release-wide summary",
+     {"per_track": {(1, 1): ["Shoegaze"]}, "genres": ["Dream Pop"],
+      "sources": {}, "levels": {}}, ["Dream Pop"], None),
+    # no summary at all: what the album's OTHER tracks got is the album's genre
+    ("the album's other tracks",
+     {"per_track": {(1, 1): ["Shoegaze"]}, "sources": {}, "levels": {}},
+     ["Shoegaze"], None),
+    # nothing anywhere: nothing is invented
+    ("no genre anywhere",
+     {"per_track": {}, "sources": {}, "levels": {}}, [], None),
+    # the track states its own: the album's genre never replaces it
+    ("a track that states its own",
+     {"per_track": {(1, 1): ["Shoegaze"]}, "genres": ["Dream Pop"],
+      "sources": {}, "levels": {}}, None, ["Techno"]),
+):
+    _album = staging_album(f"Genre {_label}")
+    _written.clear()
+    if _seed:
+        _written.setdefault("02 - track.wav", {})["GENRE"] = list(_seed)
+    _intg.genre_chain = lambda **kw: _stub
+    try:
+        imports._stamp_release(_album, _GENRE_RELEASE, CFG)
+    finally:
+        _intg.genre_chain = _real_chain
+    _got = _written.get("02 - track.wav", {}).get("GENRE")
+    _want = list(_seed) if _seed else (
+        _normalize(_want_two, _GENRE_CAP) if _want_two else None)
+    assert _got == _want, (_label, _got, _want)
+    # ...and the track the chain DID answer keeps its own name either way
+    if _stub["per_track"].get((1, 1)):
+        assert _written["01 - track.wav"]["GENRE"] == \
+            _normalize(["Shoegaze"], _GENRE_CAP), (_label, _written["01 - track.wav"])
+    else:
+        # nothing to say about this track either: no genre is invented for it
+        assert "GENRE" not in _written["01 - track.wav"], \
+            (_label, _written["01 - track.wav"])
+# the real writer goes back on before the next block tags real files
+_audio.AudioFile = _real_audiofile
+print("genre fallback: all assertions passed")
+
+# --------------------------------------------------------------------------- #
 # What an import does NOT keep: the peer's lyric, genre, advisory and art
 # --------------------------------------------------------------------------- #
 # `finish_album`'s first pass over an album that just landed is
@@ -1933,18 +1999,30 @@ _notice_file = _NoticeFLAC(notice_track)
 _notice_file["DATE"] = "1996-06-11"
 _notice_file.save()
 _notice_said = []
+# The coalescer holds a run's steps until its window closes, and the blocks
+# above imported albums of their own: whatever they counted is published (and
+# discarded) here, so this block's tally is about ITS album alone.
+_events.flush_coalesced()
 _real_emit_fn = _events.emit
 _events.emit = lambda kind, title, body, data=None, **kw: _notice_said.append(
     (kind, title, body, data))
 try:
     imports._announce_import("import_started", _notice_folder, cfg=IDENT_CFG)
+    # The "picked it up" frame is progress and goes out at once (it is the
+    # user's own switch, OFF by default); the SUCCESS is a step of the run and
+    # is held until the run goes quiet, so the window is closed the way the
+    # timer would (see server.events.import_step).
     imports._announce_import("import_done", _notice_folder,
                              {"chained": True, "scripts": [1], "errors": [],
                               "chain": [1]}, cfg=IDENT_CFG)
+    _events.flush_coalesced()
 finally:
     _events.emit = _real_emit_fn
 assert [row[0] for row in _notice_said] == ["import_started", "import_done"], _notice_said
 assert _notice_said[0][1] == "Importing Test Artist — Peer Album (1996)", _notice_said[0]
+# ONE album in the run: the run's notice is that album's own frame, verbatim —
+# the same words, the same link, a moment later (instead of one OS popup per
+# album of a run).
 assert _notice_said[1][1] == "Imported Test Artist — Peer Album (1996)", _notice_said[1]
 # …and the identity helper is what both read: the folder is a bare UUID here, so
 # a by-the-folder name would be that UUID.

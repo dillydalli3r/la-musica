@@ -930,6 +930,13 @@ def check_done_notice_moment():
     events.emit = spy_emit
     try:
         res = imports.finish_album(folder, CFG)
+        # The success notice is a STEP of a run now (see server.events): it is
+        # held with the run's other outcomes and published when the run goes
+        # quiet, so the window is closed here the way the timer would. What
+        # this case pins — that it is the LAST thing the pipeline says, and that
+        # the prompt is already listed when it speaks — still holds: the flush
+        # is what the timer does, not a different message.
+        events.flush_coalesced()
     finally:
         import_policy.gaps = real_gaps
         import_autonomy.raise_prompt = real_prompt
@@ -1214,6 +1221,10 @@ def check_page_download_auto_import():
         while import_queue.running() and time.time() < deadline:
             time.sleep(0.05)
         ok(not import_queue.running(), "the import run finished")
+        # The run's own frame is a STEP (see server.events): the "Import all
+        # downloads" tally is what the run's ONE notice ends up saying, so the
+        # quiet window is closed here the way the timer would.
+        events.flush_coalesced()
     finally:
         mlo_main.organize = real_organize
         mlo_main._tag_media_for_albums = real_tag
@@ -1235,8 +1246,12 @@ def check_page_download_auto_import():
         eq(calls[0]["ids"], imports.chain_for(CFG), "with the configured ids")
     ok(os.path.isdir(PAGE_FINAL), "the album really is in the library")
     ok(not os.path.isdir(PAGE_ALBUM), "and no longer in the download folder")
+    # The run reports itself ONCE, and with its own words: the per-album
+    # "Importing…" progress and the "Import all downloads" tally are steps of
+    # one run (server.events.import_step), so what a client gets is the single
+    # frame below — a run of ten albums no longer raises ten OS popups.
     eq([e[0] for e in emitted if e[0] in ("import_started", "import_done", "download_done")],
-       ["import_started", "import_done", "download_done"],
+       ["import_started", "import_done"],
        "the notification sequence is the pipeline's own, ending on its completion")
     ok("Page Album" in emitted[-1][2] or "Imported" in emitted[-1][1],
        "whose last frame is the pipeline's own report", emitted[-1])

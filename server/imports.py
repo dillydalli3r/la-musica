@@ -1459,7 +1459,10 @@ def _announce_import(kind, path, out=None, cfg=None):
                         data={"path": path, "link": f"/album/{path}"}, config=cfg)
             return
         summary = chain_summary(out or {}) or "Import finished."
-        events.emit("import_done", f"Imported {label}", summary,
+        # The success step: counted, and it is what a SINGLE-album run is
+        # finally told with — the same words and the same album link, a moment
+        # later, instead of one OS popup per album of a run.
+        events.import_step("import_done", f"Imported {label}", summary,
                     data={"path": path, "link": f"/album/{path}"}, config=cfg)
     except Exception:
         traceback.print_exc()
@@ -4296,6 +4299,15 @@ def _stamp_release(album_dir, release, cfg, force_ids=False):
     why an IMPORT clears the arrived genre first (``drop_arrived_values``): for
     an import the release's genres are the album's, and they land here because
     the slot was emptied before this ran, not because this writer replaced it.
+
+    A track the chain had NOTHING for takes the ALBUM's genre instead: the
+    release-wide summary the chain returns (``genres``), or, when it has no
+    such summary either, what the album's other tracks ended up with. Without
+    it a release whose sources answered nine of its ten tracks landed with that
+    tenth file graded GENRE_MISSING while the album's own genre sat in the very
+    payload the stamp was built from — a gap the user could only close by hand.
+    Still an EMPTY slot only, so a genre the track states still wins, and the
+    names go through the same canonicalisation and cap as any other track's.
     """
     from mlo.audio import AudioFile
     from mlo.autotag import genre_count, trim_genres
@@ -4314,6 +4326,7 @@ def _stamp_release(album_dir, release, cfg, force_ids=False):
     # fail.
     cap = genre_count(cfg)
     genres = {}
+    album_genres = []
     if rel.get("release_group_id") or rel.get("id"):
         try:
             # The FULL per-track chain (RateYourMusic → ListenBrainz →
@@ -4328,6 +4341,26 @@ def _stamp_release(album_dir, release, cfg, force_ids=False):
                 album=rel.get("title") or "",
                 release=rel, limit=cap, cfg=cfg, files=files)
             genres = chain.get("per_track") or {}
+            # THE ALBUM'S OWN GENRE, for a track the chain had nothing to say
+            # about. `genres` above is keyed by (disc, position) and holds what
+            # each TRACK's own merge produced; a source that only answered for
+            # nine of ten tracks (or a track the chain could not key at all — a
+            # file whose name states no number) leaves that one file with no
+            # genre, and the album landed graded GENRE_MISSING however much the
+            # other nine carried. The chain's release-wide summary is the union
+            # of everything the sources said about THIS release (per-track
+            # answers included, see `genre_chain`), so it is what "the album's
+            # genre" means here — the same artist/album the user is looking at.
+            album_genres = [str(g).strip() for g in (chain.get("genres") or [])
+                            if str(g).strip()]
+            if not album_genres:
+                # No release-wide summary either: fall back to what the album
+                # as a whole ended up with, so one unkeyed file still gets its
+                # album's genre rather than none at all.
+                for names in genres.values():
+                    for name in names or []:
+                        if str(name).strip():
+                            album_genres.append(str(name).strip())
         except Exception:
             traceback.print_exc()
 
@@ -4356,6 +4389,14 @@ def _stamp_release(album_dir, release, cfg, force_ids=False):
                 tags = {}
                 disc, pos = _parse_trackno(path)
                 names = genres.get((disc, pos)) or []
+                if not names:
+                    # THE ALBUM'S GENRE, when the track itself has none to be
+                    # had: a release whose sources answered nine of its ten
+                    # tracks used to leave the tenth graded GENRE_MISSING with
+                    # the album's own genre sitting in the very same payload.
+                    # Only ever into an EMPTY slot (below), so a genre the
+                    # track states — or the user typed — still wins.
+                    names = album_genres
                 if names and not str(af.get_tag("GENRE") or "").strip():
                     # Canonical, and a LIST: `normalize_genres` resolves each
                     # name to MusicBrainz's own spelling, derives the family
