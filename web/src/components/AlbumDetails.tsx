@@ -1,8 +1,9 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Disc3, FileText, Gauge, Info, Loader2 } from "lucide-react";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { api } from "../api";
-import type { Album } from "../types";
+import type { Album, Track } from "../types";
+import { toast } from "../store";
 import Modal from "./Modal";
 import LogReport from "./LogReport";
 import DownloadButton from "./DownloadButton";
@@ -28,6 +29,88 @@ const ALBUM_INFO_KEYS = [
 ];
 
 const yesNo = (v: boolean | null | undefined) => (v ? "yes" : "no");
+
+/** The album-wide AudioAuditor verdict: REAL / FAKE / Auto, written to EVERY
+ *  track's `AUDIOAUDITOR_OVERRIDE` tag in ONE request (`api.mbAssign` takes a
+ *  path→tags map, so a 20-track album costs one write, not twenty modals).
+ *
+ *  Read back from the album payload's own `values`, so the buttons show what
+ *  the grade sees: a value is "current" only when EVERY track carries it —
+ *  a mixed album reads as Auto rather than claiming a verdict half its tracks
+ *  do not have. Clearing writes the empty value, which is how the tag is
+ *  deleted (see api_mb's assign: a blank value is a delete). */
+function AlbumAuditOverride({ paths, tracks }: { paths: string[]; tracks: Track[] }) {
+  const qc = useQueryClient();
+  const [busy, setBusy] = useState(false);
+  const stored = useMemo(() => {
+    const vals = tracks.map((tr) =>
+      String(tr.values?.AUDIOAUDITOR_OVERRIDE ?? "").trim().toUpperCase());
+    if (!vals.length) return null;
+    return vals.every((v) => v === vals[0]) && (vals[0] === "REAL" || vals[0] === "FAKE")
+      ? vals[0]
+      : null;
+  }, [tracks]);
+  const set = async (v: "REAL" | "FAKE" | null) => {
+    if (!paths.length) return;
+    setBusy(true);
+    try {
+      const patch: Record<string, Record<string, string | null>> = {};
+      for (const p of paths) patch[p] = { AUDIOAUDITOR_OVERRIDE: v };
+      await api.mbAssign(patch);
+      toast(v
+        ? `AudioAuditor forced to ${v} for ${paths.length} track${paths.length === 1 ? "" : "s"} — it survives forced re-audits`
+        : "Album override cleared — AudioAuditor decides again");
+      qc.invalidateQueries({ queryKey: ["album"] });
+      qc.invalidateQueries({ queryKey: ["library"] });
+      qc.invalidateQueries({ queryKey: ["tags"] });
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="mt-2 space-y-1">
+      <div className="flex flex-wrap items-center gap-1">
+        <span className="text-xs text-zinc-400">Audit override — all {paths.length || 0} tracks</span>
+        {(["REAL", "FAKE"] as const).map((v) => (
+          <button
+            key={v}
+            className={`px-2 py-0.5 rounded text-[10px] border ${
+              stored === v
+                ? v === "REAL"
+                  ? "bg-emerald-900/60 text-emerald-300 border-emerald-800"
+                  : "bg-red-900/60 text-red-300 border-red-800"
+                : "bg-panel text-zinc-400 border-border hover:border-accent/50"
+            }`}
+            disabled={busy}
+            onClick={() => set(stored === v ? null : v)}
+            title={stored === v
+              ? "Click to clear the override on every track"
+              : `Force every track of this album to report ${v}`}
+          >
+            {v}
+          </button>
+        ))}
+        <button
+          className={`px-2 py-0.5 rounded text-[10px] border ${
+            !stored ? "bg-accent on-accent border-accent" : "bg-panel text-zinc-400 border-border hover:border-accent/50"
+          }`}
+          disabled={busy}
+          onClick={() => set(null)}
+          title="Let AudioAuditor decide for every track"
+        >
+          Auto
+        </button>
+      </div>
+      <div className="text-[10px] text-zinc-500">
+        {stored
+          ? `Every track is forced ${stored} — this beats the audit verdict, and Audit Library keeps it.`
+          : "AudioAuditor decides. Force REAL when you have verified a download yourself — a digital-media album has no rip log for it to read."}
+      </div>
+    </div>
+  );
+}
 
 /** Album details: the whole stored readout for one album, built from the ALBUM
  *  PAGE'S OWN PAYLOAD (`GET /api/album`) — metadata, technical summary,
@@ -130,6 +213,13 @@ export function AlbumDetails({ album, onClose }: { album: Album; onClose: () => 
 
       <DetailSection icon={Gauge} title="Grading & audit">
         <DetailRows rows={gradeRows} />
+        {/* One verdict for the whole album. A DIGITAL-MEDIA album has no rip
+            log, so "Missing AUDIT tag" has no other way out than the user's
+            own call — and doing that track by track, one modal at a time, is
+            the wait this removes. It writes AUDIOAUDITOR_OVERRIDE, which the
+            grader applies after every derived verdict (mlo.grader, spec R25)
+            and which Audit Library now writes back instead of overruling. */}
+        <AlbumAuditOverride paths={paths} tracks={album.tracks} />
       </DetailSection>
 
       {/* The rip log the grading above was read off. Scoring a log and never

@@ -626,6 +626,16 @@ evidence matters.
   writes it; when it is set, per-track verdicts and the album's all-REAL gate
   both agree with it, and a forced re-audit reproduces the user's call instead of
   erasing it. *Auto* clears the tag and hands the track back to the detectors.
+  It is the verdict for the AUDIT REQUIREMENT as well, not only for the
+  verdicts derived beside it: an override of REAL satisfies `grade_check_audit`
+  for a track with no AUDIT tag — the case a **digital-media** download hits,
+  since it has no rip log for the audit to read — and it skips a CD's
+  *deferred* log/AccurateRip requirement, which is why the album details pane
+  carries one REAL/FAKE/Auto control for every track of the album at once
+  (`AlbumDetails`). An override of FAKE still FAILS: it is a verdict, not a
+  bypass. Script 6 keeps it too — its AUDIT write takes the file's own
+  override as the value to write, so the next Audit Library run cannot put the
+  detectors' answer back over a hand-set one.
 - **R26 — the readout and the written verdict are the same rule.** For a CD the
   live readout (library, album and track pages) computes the same three legs
   R21 does: all three pass → `REAL`, any leg fails → `FAKE` with the leg named,

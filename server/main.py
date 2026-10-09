@@ -201,14 +201,33 @@ async def _lifespan(app: FastAPI):
             detect_all_tools()
         except Exception as e:
             print(f"[mlo] tool probe warm-up failed: {e}")
+        tree = None
         try:
             from server import library
-            library.build_library(load_config())
+            tree = library.build_library(load_config())
         except Exception as e:
             print(f"[mlo] library warm-up failed: {e}")
         # The tree is up: now the storage walk, on a disk nobody else is
         # reading (see the snapshot's note above — this is the chain).
         _warm_storage_snapshot()
+        # …and, last of the chain so it does not contend with that walk, the
+        # ROW thumbnails the library page is about to ask for (`GET /api/cover`
+        # at `w=160`). Without this the first visit after a restart starts
+        # those requests ~95 ms after `/api/library` has answered and pays one
+        # decode per album in the browser's own low-priority queue (measured on
+        # a 23-album scratch library). Its own daemon thread, because the tree
+        # above is already built and must not be held by a decode; the pass
+        # itself is bounded (server.artcache.WARM_CAP / WARM_BUDGET_S), so a
+        # huge library warms what is cheap and returns.
+        if tree:
+            def _warm_covers(tree=tree):
+                try:
+                    from server import artcache
+                    print(f"[mlo] cover warm-up: {artcache.warm_thumbs(tree, w=artcache.WARM_WIDTHS)}")
+                except Exception as e:
+                    print(f"[mlo] cover warm-up failed: {e}")
+            threading.Thread(target=_warm_covers, daemon=True,
+                             name="cover-warm").start()
     threading.Thread(target=_warm_library, daemon=True,
                      name="library-warm").start()
     # …and the Home payload the landing page asks for: its build walks the

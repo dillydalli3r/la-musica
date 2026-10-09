@@ -2614,6 +2614,21 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
         # required on every track of every media type, REAL to pass (skipped if AUDIT disabled for this filetype).
         audit_val = af.get_tag("AUDIT")
         audit_clean = str(audit_val).strip() if audit_val is not None else ""
+        # The track editor's own verdict (AUDIOAUDITOR_OVERRIDE) IS the AUDIT
+        # verdict where one is set. It is applied after every derived verdict
+        # (spec R25), so it has to satisfy the AUDIT REQUIREMENT here too: a
+        # digital track the user has already decided has no tag to "miss", and
+        # a CD the user has decided needs no .log to be re-derived. Without
+        # this, the override only patched the verdict afterwards and both
+        # "Missing AUDIT tag" branches still failed and counted the check —
+        # which is exactly the case a digital-media library hits, since a
+        # download has no log to audit. Read from the file already open.
+        audit_override = str(
+            af.get_tag("AUDIOAUDITOR_OVERRIDE") or "").strip().upper()
+        if audit_override not in ("REAL", "FAKE"):
+            audit_override = ""
+        track["audit_override"] = audit_override or None
+        audit_clean = audit_override or audit_clean
         track["audit"] = audit_clean or None
         if (
             should_write_audio_tag(cfg, "AUDIT", filepath=ap)
@@ -2623,7 +2638,7 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
             and cfg.get("grade_check_audit", False)
             and not is_video_track
         ):
-            if _is_cd(media_clean):
+            if _is_cd(media_clean) and not audit_override:
                 # A CD rip's integrity is decided by its own verification
                 # (.log CRC / .accurip), which is only read AFTER this loop —
                 # so this verdict is DEFERRED. AudioAuditor's spectrogram

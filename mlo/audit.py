@@ -701,6 +701,16 @@ def _write_audit_tag(path, value):
         if af.audio is None:
             return False, 0, 0, f"load: {af.error}"
 
+        # The user's own verdict beats the tool's. AUDIOAUDITOR_OVERRIDE is
+        # what the GRADER applies after every derived verdict (spec R25), so a
+        # run that wrote the tool's answer here would leave the AUDIT tag
+        # contradicting the verdict the library is graded by — and the next
+        # Audit Library run is exactly when a hand-set value would be lost.
+        # Writing what the user decided keeps the tag truthful to it.
+        ov = str(af.get_tag("AUDIOAUDITOR_OVERRIDE") or "").strip().upper()
+        if ov in ("REAL", "FAKE"):
+            value = ov
+
         cur = af.get_tag("AUDIT")
         cur_clean = str(cur).strip() if cur is not None else ""
         need_audit = cur_clean.lower() != value.lower()

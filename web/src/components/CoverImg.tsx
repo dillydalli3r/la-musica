@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Disc3 } from "lucide-react";
 import { api, isOffline } from "../api";
 import { offlineArtworkUrl, useCachedArtwork } from "../lib/mediaCache";
@@ -62,6 +62,43 @@ export default function CoverImg({
   // Answered from the cached-track snapshot (lib/mediaCache), never by opening
   // Cache Storage here: it is the one question the probe below is gated on.
   const artworkDownloaded = useCachedArtwork(albumPath);
+  const imgRef = useRef<HTMLImageElement | null>(null);
+
+  /** Start the cover WITH its row, not one layout pass later.
+   *
+   * The `<img>` below keeps `loading="lazy"` so a long, un-virtualised list
+   * (the Library page mounts every filtered row) does not begin by fetching
+   * every cover behind the fold — but lazy means the browser only requests an
+   * image after it has LAID OUT the page and then decided, on a later frame,
+   * that the element is near the viewport. Measured on a 23-album scratch
+   * library: `/api/library` ends at ~200 ms and the first `?w=160` request
+   * starts at ~295 ms, with the row's own text already painted — 95 ms of
+   * blank art the user watches.
+   *
+   * A bare `Image()` is not subject to that gate: setting its `src` kicks the
+   * fetch at commit time, and Chromium joins the `<img>`'s later request to
+   * the same in-flight one (same URL, same memory-cache entry), so this costs
+   * no second transfer. The rect test keeps the eager kick for the covers a
+   * reader can actually see — a row far below the fold stays lazy — which is
+   * exactly the wholesale `loading="eager"` de-optimisation this avoids.
+   * Sized covers only (`w` set): those are the small bucketed thumbnails a row,
+   * card or pane draws, where 95 ms of latency is the whole cost; an
+   * unsized `w` fetches the multi-megabyte master and keeps default priority.
+   */
+  useEffect(() => {
+    if (!networkUrl || offlineUrl) return;
+    const el = imgRef.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    const vh = window.innerHeight || document.documentElement.clientHeight || 0;
+    if (r.bottom < -vh * 0.5 || r.top > vh * 1.5) return;   // not near the fold
+    const pre = new Image();
+    // Same hint as the `<img>`; the property may be missing in older DOM
+    // typings, and the attribute is what the browser reads either way.
+    if (w) pre.setAttribute("fetchpriority", "high");
+    pre.decoding = "async";
+    pre.src = networkUrl;
+  }, [networkUrl, offlineUrl, w]);
 
   useEffect(() => {
     if (!networkUrl) return;
@@ -97,11 +134,17 @@ export default function CoverImg({
   }
   return (
     <div className={wrapperClass}>
+      {/* A sized request is a small bucketed thumb (~4 KB at w=160, see
+          `artcache.THUMB_SIZES`) and belongs to the page's first paint, so it
+          must not sit in the browser's default queue behind everything else;
+          an unsized `w` pulls the multi-megabyte master and keeps default. */}
       <img
+        ref={imgRef}
         src={offlineUrl ?? networkUrl}
         alt=""
         loading="lazy"
         decoding="async"
+        fetchPriority={w ? "high" : undefined}
         onError={() => setFailedUrl(networkUrl)}
         className="h-full w-full object-cover"
       />

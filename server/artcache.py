@@ -30,6 +30,7 @@ import hashlib
 import json
 import os
 import tempfile
+import threading
 import time
 
 import httpx
@@ -646,3 +647,193 @@ def cover_thumb(path, w):
         return None
     _write(key, d, blob, tctype, "thumb", path)
     return blob, tctype, hashlib.md5(blob).hexdigest()
+
+
+# --------------------------------------------------------------------------- #
+# Warming the row thumbnails a library page is about to ask for.
+#
+# `/api/library` answers in milliseconds, but the cover requests it implies
+# only START once React has committed the rows and the browser has laid them
+# out: measured on a 23-album scratch library, the data ends at ~200 ms and the
+# first `?w=160` request starts at ~295 ms — ~95 ms of a page whose text has
+# already painted. A cold library then pays one decode per album on the
+# client's own (low) priority and bounded concurrency, and the visible first
+# screen waits for the tail of that queue.
+#
+# The sized-thumb cache (`cover_thumb`) exists exactly so those requests are a
+# disk read — so it is filled HERE, in the background, the moment the library
+# tree is up, at the width a row draws. Bounded twice over so a huge library
+# degrades to "warm as much as is cheap": a cap on albums per pass and a wall
+# budget for the pass. A thumb already on disk is skipped (the pass is
+# idempotent across restarts), and covers too small to be shrunk are skipped
+# too — `cover_thumb` serves those as their own bytes and never writes an
+# entry, so asking would only re-read the master every start.
+# --------------------------------------------------------------------------- #
+# The width a track/album ROW draws — web/src/components/CoverImg.tsx's
+# ROW_COVER_W. The row's cover and the player bar's thumb are the SAME request
+# at this width (see THUMB_SIZES' note), which is what makes warming it warm
+# both surfaces.
+WARM_WIDTH = 160
+# …and the width the LIBRARY page's default view asks. `/library` opens in the
+# grid (`lib/libraryView.ts`) at the stored cover size, whose default is "m" =
+# 320 (`AlbumCard.GRID_COVER_W`); the list/table view's rows ask 160. Both
+# surfaces are one visit apart, both are small thumbs, so the pass fills both —
+# measured 23 albums × 2 widths ≈ 40 ms. A single width here would leave
+# whichever view the user does NOT open cold on their first visit.
+WARM_WIDTHS = (WARM_WIDTH, 320)
+# Albums per pass. A cold first screen asks for the first ~30 rows and a bit of
+# scrolling; 500 covers the visible library comfortably, and every later pass
+# skips what a former one wrote, so a bigger library warms a prefix of itself
+# per start rather than walking itself into a stall.
+WARM_CAP = 500
+# Wall-clock ceiling for one pass, belt beside the cap above: on a slow (or
+# network-mounted) library even the cap's decodes add up, and the warm thread
+# must never be the thing holding a restart or a shutdown.
+WARM_BUDGET_S = 20.0
+
+
+def thumb_path(path, w):
+    """Where the thumb for the cover FILE *path* at bucketed width *w* lives,
+    or None when there can be no thumb (no width, or the file is gone).
+
+    `cover_thumb`'s own destination, split out so the warmer can ask "is this
+    already encoded?" with one stat and never decode to find out. It MUST stay
+    the same key `cover_thumb` writes — both derive it from the file's stat
+    (`_thumb_key`) under `thumb_dir()`.
+    """
+    w = thumb_width(w)
+    if not w:
+        return None
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return os.path.join(thumb_dir(), _thumb_key(path, w, st) + ".bin")
+
+
+def _warm_pairs(rows):
+    """(album folder, cover file) for every album row in *rows*.
+
+    *rows* is whatever is cheap to enumerate: the dict
+    `server.library.build_library` returns (`artists` → `albums`), an iterable
+    of such album ROWS, or an iterable of (folder, file) pairs. A row with no
+    cover file is skipped — the client draws no cover for it either
+    (`CoverImg` renders the placeholder when `coverFile` is falsy).
+    """
+    if isinstance(rows, dict):
+        rows = (alb for ar in rows.get("artists", []) or []
+                for alb in ar.get("albums", []) or [])
+    for row in rows:
+        if isinstance(row, dict):
+            folder, file = row.get("path"), row.get("cover_file")
+        else:
+            folder, file = row[0], row[1]
+        if folder:
+            yield str(folder), (str(file) if file else None)
+
+
+def warm_thumbs(tree, w=WARM_WIDTH, cap=WARM_CAP, workers=None, budget=WARM_BUDGET_S):
+    """Pre-encode the row/grid thumbs for *tree*, in the background.
+
+    *tree* is a `server.library.build_library` tree, an iterable of album rows,
+    or an iterable of (folder, file) pairs (see `_warm_pairs`). *w* is one
+    bucketed width or an iterable of them — the surfaces a library page draws
+    ask for more than one (rows 160, the default grid 320), and warming a
+    width nobody asks for is the same as warming nothing. Blocking — the CALLER
+    owns the thread (server.main runs it on its own daemon thread after the
+    library tree is up); this function itself is what makes the pass bounded,
+    never the caller.
+
+    Returns a summary dict:
+
+      ``warmed``    thumbs this pass newly encoded and wrote to disk
+      ``skipped``   covers that need no thumb (already here, no cover, or a
+                    master at/below the asked width, served as its own bytes)
+      ``failed``    covers that could not be decoded at all
+      ``capped``    (cover, width) pairs this pass did not reach — over *cap*
+                    or past *budget*
+      ``seconds``   wall time the pass took
+
+    Concurrency is `mlo.stats.worker_count` — the one pool-width knob, so a
+    user's "Worker threads" setting bounds this pass too — capped at 8 lanes
+    (the work is a small decode; more lanes only fight over one disk).
+    """
+    import time as _time
+    from concurrent.futures import ThreadPoolExecutor
+
+    from mlo.stats import worker_count
+
+    start = _time.monotonic()
+    deadline = start + max(0.0, float(budget or 0)) if budget else None
+    try:
+        widths = [thumb_width(x) for x in w]          # a sequence of widths
+    except TypeError:
+        widths = [thumb_width(w)]
+    widths = [x for x in widths if x] or [0]
+    jobs, seen = [], set()
+    for folder, file in _warm_pairs(tree):
+        for width in widths:
+            key = (os.path.normcase(os.path.join(folder, file or "")), width)
+            if key in seen:
+                continue
+            seen.add(key)
+            jobs.append((folder, file, width))
+    cap = max(1, int(cap or 1))
+    capped = max(0, len(jobs) - cap)
+    jobs = jobs[:cap]
+
+    stats = {"warmed": 0, "skipped": 0, "failed": 0, "capped": capped,
+             "seconds": 0.0}
+    if not widths[0]:
+        stats["skipped"] = len(jobs)
+        stats["seconds"] = round(_time.monotonic() - start, 3)
+        return stats
+    lock = threading.Lock()
+
+    def _one(job):
+        folder, file, width = job
+        if deadline and _time.monotonic() > deadline:
+            with lock:
+                stats["capped"] += 1
+            return
+        try:
+            from server import tagcache
+            p = tagcache.cover_path(folder, file)
+        except Exception:
+            p = None
+        if not p:
+            with lock:
+                stats["skipped"] += 1
+            return
+        dest = thumb_path(p, width)
+        if dest and os.path.exists(dest):
+            with lock:
+                stats["skipped"] += 1
+            return
+        size = _source_size(p)
+        if size is None:
+            with lock:
+                stats["failed"] += 1
+            return
+        if max(size) <= width:
+            # Served as its own bytes, no cache entry (`cover_thumb`).
+            with lock:
+                stats["skipped"] += 1
+            return
+        thumb = cover_thumb(p, width)
+        with lock:
+            if thumb is None:
+                stats["failed"] += 1
+            elif dest and os.path.exists(dest):
+                stats["warmed"] += 1
+            else:
+                stats["skipped"] += 1
+
+    if jobs:
+        lanes = workers or worker_count(None, maximum=min(8, os.cpu_count() or 1),
+                                        items=len(jobs))
+        with ThreadPoolExecutor(max_workers=max(1, int(lanes))) as pool:
+            list(pool.map(_one, jobs))
+
+    stats["seconds"] = round(_time.monotonic() - start, 3)
+    return stats
