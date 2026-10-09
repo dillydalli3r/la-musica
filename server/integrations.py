@@ -6209,18 +6209,26 @@ def genre_chain(artist="", album="", release=None, limit=None, sources=None,
 
     for track in tracks:
         genres, contributors, level, picks, dropped = merge(track)
-        if not genres:
-            continue
         # The sources are the candidates (best first) and the model ranks
         # them into the hierarchy; a track the model has nothing to say about
         # keeps the merged order untouched. It is only ASKED when the sources
         # could not settle the track themselves (`_genre_needs_ai`).
+        #
+        # An EMPTY merge is that case in its purest form and is asked too: the
+        # sources answered nothing for this track, so the model is the only
+        # move left — and with `ai_genre_research` (on by default) it may name
+        # a genre they did not. This used to `continue` on an empty list, which
+        # made the model unreachable exactly when it was the last resort: a
+        # track no source could answer for stayed genre-less with a model
+        # configured to look one up.
         ranked = (_genre_ai_rank(cfg, artist, album, track.get("title"),
                                  genres, limit, extra)
                   if _genre_needs_ai(genres, limit, picks) else None)
         if ranked:
             genres = ranked
             contributors = list(dict.fromkeys(contributors + ["ai"]))
+        if not genres:
+            continue
         key = (int(track.get("disc") or 1), int(track.get("position") or 0))
         per_track[key] = genres
         per_track_sources[key] = contributors

@@ -1331,4 +1331,74 @@ finally:
     _shutil.rmtree(JOB_MUSIC, ignore_errors=True)
     _shutil.rmtree(JOB_OUTSIDE, ignore_errors=True)
 
+# --------------------------------------------------------------------------- #
+# 6) NO source answered: the MODEL is the fallback (the owner's ask)
+# --------------------------------------------------------------------------- #
+# The sources are the first move and the model is the second, and an empty
+# merged list is the case that made it unreachable: `genre_chain` used to skip
+# a track nothing answered for, so a model configured to research a genre was
+# never asked about exactly the track that needed it. With `ai_genre_research`
+# (on by default) the model may NAME the genres, and its answer must be a real
+# MusicBrainz genre to survive (`server.genre_ai`).
+print()
+print("== no source answered: the model researches the genre ==")
+from server import ai as _ai_mod
+from server import genre_ai as _genre_ai
+_real_ai_configured, _real_infer = _ai_mod.ai_configured, _genre_ai.infer_genres
+_ai_calls = []
+
+
+def _ai_configured(cfg=None):
+    return bool((cfg or {}).get("ai_genre_inference", True))
+
+
+def _infer(*, artist="", album="", title="", candidates=None, count=2, extra=None):
+    _ai_calls.append({"artist": artist, "album": album, "title": title,
+                      "candidates": list(candidates or []), "count": count})
+    # The model's own order, most specific first — what a researching answer
+    # looks like next to the empty candidate list it was asked with.
+    return ["Shoegaze", "Dream Pop"]
+
+
+def _silent_sources():
+    """Every source stubbed to answer NOTHING (RYM's page included: no
+    cookie, so not even one request)."""
+    clear()
+    stub_rym({})
+    stub_json(lambda url, params: None)
+    stub_apple(apple_router({}))
+    stub_mb({})
+
+
+_ai_mod.ai_configured = _ai_configured
+_genre_ai.infer_genres = _infer
+try:
+    _silent_sources()
+    _ai_calls.clear()
+    got = intg.genre_chain(artist="Test Artist", album="Test Album",
+                           release=BARE_RELEASE, cfg=dict(CFG, ai_genre_inference=True),
+                           limit=3, files=[FILE_ONE, FILE_TWO],
+                           sources=["musicbrainz", "listenbrainz"])
+    assert _ai_calls, "the model was never asked about a track nothing answered for"
+    assert got["per_track"][(1, 1)] and got["per_track"][(1, 2)], got["per_track"]
+    assert "shoegaze" in [g.casefold() for g in got["per_track"][(1, 1)]], got["per_track"]
+    assert "ai" in got["per_track_sources"][(1, 1)], got["per_track_sources"]
+    # The ask carries the track's own identity, which is what lets the model
+    # research the right song rather than the album's general sound.
+    assert _ai_calls[0]["title"] == "Track One", _ai_calls[0]
+    assert _ai_calls[0]["candidates"] == [], _ai_calls[0]
+
+    # ...and with the model switched OFF nothing is invented: an album whose
+    # sources answered nothing stays that way.
+    _silent_sources()
+    _ai_calls.clear()
+    off = intg.genre_chain(artist="Test Artist", album="Test Album",
+                           release=BARE_RELEASE, cfg=dict(CFG, ai_genre_inference=False),
+                           limit=3, files=[FILE_ONE, FILE_TWO],
+                           sources=["musicbrainz", "listenbrainz"])
+    assert off["per_track"] == {}, off["per_track"]
+    assert _ai_calls == [], _ai_calls
+finally:
+    _ai_mod.ai_configured, _genre_ai.infer_genres = _real_ai_configured, _real_infer
+
 print("genres: all assertions passed")
