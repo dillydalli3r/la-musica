@@ -21,13 +21,20 @@ interface Props {
   max: number;
   className?: string;
   onChange: (t: number) => void;
+  /** The drag's own edges, for the caller that HOLDS the sound for its length
+   *  (the player pauses on a press and resumes on the release — see
+   *  PlayerBar's `beginScrub`). Optional: a caller with nothing to hold still
+   *  gets the seek bar it had. */
+  onScrubStart?: () => void;
+  onScrubEnd?: () => void;
 }
 
 /** The fullscreen seek bar. For a video it grows a scrub preview: the frame
  *  at the hovered/dragged position, above the cursor, with a m:ss label. If a
  *  cut fails (or has not arrived yet) the label stands alone — a scrub never
  *  raises a toast or blocks the drag. */
-export default function ScrubSeek({ videoPath, value, max, className, onChange }: Props) {
+export default function ScrubSeek({ videoPath, value, max, className, onChange,
+                                       onScrubStart, onScrubEnd }: Props) {
   const boxRef = useRef<HTMLDivElement>(null);
   const timer = useRef<number | null>(null);
   const inflight = useRef<AbortController | null>(null);
@@ -94,7 +101,15 @@ export default function ScrubSeek({ videoPath, value, max, className, onChange }
       ref={boxRef}
       className={`relative ${className ?? ""}`}
       onPointerMove={track}
-      onPointerDown={track}
+      onPointerDown={(e) => {
+        // The press starts the HOLD (the caller pauses) before the preview
+        // work: a drag that the user has begun must not keep sounding while
+        // the frame cut is being fetched.
+        onScrubStart?.();
+        track(e);
+      }}
+      onPointerUp={() => onScrubEnd?.()}
+      onPointerCancel={() => onScrubEnd?.()}
       onPointerLeave={() => setTip(null)}
     >
       <input

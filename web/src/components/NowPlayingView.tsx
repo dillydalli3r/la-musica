@@ -130,6 +130,10 @@ interface Props {
   loop: boolean;
   onTogglePlay: () => void;
   onSeek: (t: number) => void;
+  /** The seek bar's drag edges: the player holds the sound for the
+   *  length of the gesture (pause on the press, resume on the release). */
+  onScrubStart: () => void;
+  onScrubEnd: () => void;
   onStep: (d: 1 | -1) => void;
   onToggleShuffle: () => void;
   onToggleLoop: () => void;
@@ -1920,6 +1924,8 @@ export default function NowPlayingView(p: Props) {
         value={dispTime}
         max={duration || 0}
         onChange={p.onSeek}
+        onScrubStart={p.onScrubStart}
+        onScrubEnd={p.onScrubEnd}
         className="flex-1 min-w-0"
       />
       {/* the divider sits dead-center between the duration and volume

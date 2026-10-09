@@ -365,6 +365,12 @@ export default function PlayerBar() {
     // the smoking gun this whole black box exists for.
     const asked = appPaused.current.el === el && Date.now() - appPaused.current.at < 2000;
     note("pause", { ...elFacts(el, pathOf(el)), asked, why: asked ? appPaused.current.why : null });
+    // A SCRUB's pause is a hold, not a stop: the track is still the one
+    // playing (see `beginScrub`), so the store keeps saying so and the release
+    // that ends the drag needs no state change anywhere else — while a pause
+    // the app asked for for any OTHER reason (a track change, the sleep timer,
+    // a lock-screen press) is still the stop this handler exists to record.
+    if (asked && appPaused.current.why === "scrub") return;
     const p = useStore.getState().playing;
     if (p && elementFor(p) !== el) return;
     // The owner's report, decided: the page could not see the screen while the
@@ -448,6 +454,54 @@ export default function PlayerBar() {
       );
     });
     return started;
+  };
+
+  /** A DRAG on a seek bar HOLDS the sound, and letting go puts it back.
+   *
+   *  The rule for a scrub: audio stops while the bar is dragged and resumes
+   *  when the pointer is released, at the position the drag ended on. So the
+   *  gesture pauses the element it started on and the release starts that
+   *  SAME element again — only if it was really playing, so scrubbing a paused
+   *  track never starts it, and never twice for one gesture (a pointerup the
+   *  bar and the window both see, a pointercancel, a second bar taking over
+   *  the hold).
+   *
+   *  It is a HOLD, not a stop: the pause event it causes is deliberately not
+   *  allowed to clear the store's `playing` (see `handlePause`), because the
+   *  track is still the playing one. The bar, the fullscreen player, the
+   *  media session and the next-track preload all keep reading it as such, so
+   *  nothing downstream (the analyser, the EQ graph, the preload) is torn down
+   *  and rebuilt for a second-long gesture.
+   *
+   *  The release is listened for on the WINDOW as well as on the bar itself: a
+   *  drag that ends with the pointer off the control — the pointer leaving the
+   *  8-pixel track, a touch lifting over the transport — must still put the
+   *  sound back, and a browser that only delivers the up event to the element
+   *  under the cursor would otherwise leave the track paused for good. */
+  const scrub = useRef<{ el: HTMLMediaElement | null; wasPlaying: boolean }>({
+    el: null, wasPlaying: false,
+  });
+  const finishScrub = (why: "release" | "cancel" | "superseded") => {
+    const held = scrub.current;
+    if (!held.el) return;
+    scrub.current = { el: null, wasPlaying: false };
+    window.removeEventListener("pointerup", scrubRelease);
+    window.removeEventListener("pointercancel", scrubRelease);
+    note("scrub-end", { ...elFacts(held.el, pathOf(held.el)), why, resume: held.wasPlaying });
+    if (held.wasPlaying && held.el.paused) startElement(held.el, pathOf(held.el));
+  };
+  const scrubRelease = () => finishScrub("release");
+  const beginScrub = (el: HTMLMediaElement | null) => {
+    if (!el || scrub.current.el === el) return;
+    if (scrub.current.el) finishScrub("superseded");
+    scrub.current = { el, wasPlaying: !el.paused && !el.ended };
+    note("scrub-start", { ...elFacts(el, pathOf(el)), playing: scrub.current.wasPlaying });
+    // The same function reference goes on both listeners and comes off both:
+    // an arrow written twice would leave the window holding a listener that
+    // nothing can remove.
+    window.addEventListener("pointerup", scrubRelease);
+    window.addEventListener("pointercancel", scrubRelease);
+    if (scrub.current.wasPlaying) pauseApp(el, "scrub");
   };
 
   /** The element's own `error` — the only witness that a stream never loaded.
@@ -2257,6 +2311,7 @@ export default function PlayerBar() {
               onPointerDown={() => {
                 const a = media();
                 dragFrom.current = a ? a.currentTime : null;
+                beginScrub(a);
               }}
               onChange={(e) => {
                 const a = media();
@@ -2269,7 +2324,9 @@ export default function PlayerBar() {
                 const a = media();
                 if (a && dragFrom.current !== null) noteJump(a, dragFrom.current, a.currentTime);
                 dragFrom.current = null;
+                finishScrub("release");
               }}
+              onPointerCancel={() => finishScrub("cancel")}
               /* The scrub is the one bar control that answers while a bar
                  flyout is open. Every popover in this bar drops a
                  full-viewport outside-click catcher (components/Popover's z-40
@@ -2948,6 +3005,8 @@ export default function PlayerBar() {
                   setTime(t);
                   noteJump(a, from, t);
                 }}
+                onScrubStart={() => beginScrub(media())}
+                onScrubEnd={() => finishScrub("release")}
                 onStep={step}
                 onToggleShuffle={() => setShuffle(!shuffle)}
                 onToggleLoop={() => setLoop(!loop)}
