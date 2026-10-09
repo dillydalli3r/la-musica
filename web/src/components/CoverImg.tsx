@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Disc3 } from "lucide-react";
 import { api, isOffline } from "../api";
 import { offlineArtworkUrl, useCachedArtwork } from "../lib/mediaCache";
@@ -11,6 +11,62 @@ import { offlineArtworkUrl, useCachedArtwork } from "../lib/mediaCache";
  *  blurred ambient layer shares. */
 export const ROW_COVER_W = 160;
 export const PANE_COVER_W = 640;
+
+/** How long to wait before asking for a cover again after its request failed,
+ *  per failed attempt. Three retries over ~4.6 s, then the surface's own
+ *  placeholder is the answer.
+ *
+ *  A cover request can fail for reasons that clear on their own — the file is
+ *  being replaced at that instant (a cover write, script 5's re-encode), an
+ *  import has not written it yet, a scanner or anti-malware pass holds it — and
+ *  an <img> whose `src` stays the same never asks again. That is what made a
+ *  transient miss PERMANENT for the track on screen: the player's art slot kept
+ *  the disc glyph for the whole track however well the album's cover sat on
+ *  disk. The delays grow so a genuinely absent cover costs three requests, not
+ *  a loop, while a lock that clears in a moment is caught by the first one. */
+const COVER_RETRY_DELAYS = [400, 1200, 3000];
+
+/** One cover URL, re-asked on failure a bounded number of times.
+ *
+ *  Returns the `src` to draw (the URL itself, then the same URL with a retry
+ *  counter the server ignores — a NEW url is the only way an <img> asks
+ *  again, both for the element and for any cache that answered the failure),
+ *  the `onError` to hand it, and `failed` once the last retry has been waited
+ *  out and the surface should show its placeholder. The counter is remembered
+ *  WITH the url it belongs to, so a row recycled onto another album starts at
+ *  a first attempt instead of inheriting the previous cover's failures. */
+export function useCoverRetry(url: string | null): {
+  src: string | null;
+  onError: () => void;
+  failed: boolean;
+} {
+  const [cover, setCover] = useState({ url: null as string | null, failed: 0, released: 0 });
+  const cur = cover.url === url ? cover : { url, failed: 0, released: 0 };
+
+  // One timer per failure: the retry goes out after its delay, never in the
+  // same tick the first request failed in.
+  useEffect(() => {
+    if (cur.failed <= cur.released) return;
+    const delay = COVER_RETRY_DELAYS[cur.released];
+    if (delay === undefined) return;
+    const t = setTimeout(
+      () => setCover((s) => (s.url === url ? { ...s, released: s.released + 1 } : s)),
+      delay
+    );
+    return () => clearTimeout(t);
+  }, [cur.failed, cur.released, url]);
+
+  const onError = useCallback(() => {
+    setCover((s) => {
+      const b = s.url === url ? s : { url, failed: 0, released: 0 };
+      return { ...b, failed: b.failed + 1 };
+    });
+  }, [url]);
+
+  const spent = cur.failed > COVER_RETRY_DELAYS.length;
+  const src = url && cur.released > 0 ? `${url}&r=${cur.released}` : url;
+  return { src: spent ? null : src, onError, failed: spent };
+}
 
 /** Cover thumbnail with a graceful fallback when the art is missing or
  *  fails to load. `wrapperClass` sizes the box; the image fills it.
@@ -50,14 +106,16 @@ export default function CoverImg({
   staged?: boolean;
   wrapperClass?: string;
 }) {
-  // Remembered per URL, not as a bare flag: a row recycled onto another album
-  // must not inherit the previous cover's failure.
-  const [failedUrl, setFailedUrl] = useState<string | null>(null);
+  // The art's address, and the one to DRAW: a failed request is asked again a
+  // bounded few times before the disc glyph is the answer (see
+  // `useCoverRetry` — an <img> whose src never changes never asks again, which
+  // is what used to make a transient miss permanent for the track on screen).
   // A write that changed this cover's bytes gives it a new URL (see
-  // lib/invalidate): a different src is what re-fetches it, and it also clears
-  // a remembered failure, so a cover that was missing and then uploaded loads
-  // without a reload.
+  // lib/invalidate): a different src is what re-fetches it, and the retry
+  // state is keyed on the URL, so it clears a remembered failure too — a cover
+  // that was missing and then uploaded loads without a reload.
   const networkUrl = coverFile ? api.coverUrl(albumPath, coverFile, { staged, w }) : null;
+  const cover = useCoverRetry(networkUrl);
   const [offlineUrl, setOfflineUrl] = useState<string | null>(null);
   // Answered from the cached-track snapshot (lib/mediaCache), never by opening
   // Cache Storage here: it is the one question the probe below is gated on.
@@ -125,7 +183,7 @@ export default function CoverImg({
   // A blob URL from Cache Storage still wins over a failed network load: the
   // request that failed was made precisely because the cached copy was not
   // consulted first.
-  if (!networkUrl || (failedUrl === networkUrl && !offlineUrl)) {
+  if (!networkUrl || (cover.failed && !offlineUrl)) {
     return (
       <div className={`${wrapperClass} flex items-center justify-center text-zinc-700`}>
         <Disc3 className="h-1/2 w-1/2 max-h-5 max-w-5" />
@@ -140,12 +198,12 @@ export default function CoverImg({
           an unsized `w` pulls the multi-megabyte master and keeps default. */}
       <img
         ref={imgRef}
-        src={offlineUrl ?? networkUrl}
+        src={offlineUrl ?? cover.src ?? undefined}
         alt=""
         loading="lazy"
         decoding="async"
         fetchPriority={w ? "high" : undefined}
-        onError={() => setFailedUrl(networkUrl)}
+        onError={cover.onError}
         className="h-full w-full object-cover"
       />
     </div>

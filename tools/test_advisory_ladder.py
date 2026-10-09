@@ -132,14 +132,19 @@ try:
                    "stage": "instrumental", "fallback": False}, out
     assert calls == [], "the AI is not asked about an instrumental"
     # the setting off means the rule does not fire — the ladder continues, and
-    # with nobody having stated anything the AI is what answers
-    ai_mod.ai_chat = lambda *a, **k: "1"
+    # with nobody having stated anything the AI is what answers. Its `0` (not
+    # explicit) is taken as it stands…
+    ai_mod.ai_chat = lambda *a, **k: "0"
     out = advisory.decide_advisory(
         cfg(auto_zero_advisory_for_instrumental=False), af=af_inst, lyrics="")
-    assert out["stage"] == "ai" and out["value"] == 1, out
+    assert out["stage"] == "ai" and out["value"] == 0, out
 
     # ----------------------------------------------------------------------- #
-    # 3) Every source silent + the AI configured: the AI decides.
+    # 3) Every source silent + the AI configured: the AI's 0/2 is what is
+    #    written, but its `1` is NOT — an explicit flag needs a REAL source to
+    #    state the track is explicit (the owner's rule: a guess must never be
+    #    the only reason a track reads explicit). An AI-only "1" falls through
+    #    to the neutral fallback.
     # ----------------------------------------------------------------------- #
     sent = {}
 
@@ -152,8 +157,8 @@ try:
         cfg(),
         af=FakeAudioFile({"ARTIST": "Rihanna", "TITLE": "S&M", "ALBUM": "Loud"}),
         lyrics="sticks and stones may break my bones")
-    assert out == {"value": 1, "source": "ai-lyrics", "stage": "ai",
-                   "fallback": False}, out
+    assert out == {"value": 0, "source": "fallback", "stage": "fallback",
+                   "fallback": True}, out
     assert "sticks and stones may break my bones" in sent["user"], sent
     assert "Rihanna" in sent["user"] and "S&M" in sent["user"], sent
     # The prompt IS the rubric, and the parser only accepts 0/1/2 (3 falls
@@ -165,16 +170,31 @@ try:
     assert all(f"{digit} =" in rubric for digit in "0123"), sent
     assert "mild" in rubric and "explicit" in rubric, sent
 
-    # the answer IS the value's source when the AI is who answered: the reply's
-    # per-source map names it, beside the providers (which said nothing)
+    # the AI's answer IS the value's source when it is one the ladder may
+    # take (`0` here): the reply's per-source map names it, beside the
+    # providers (which said nothing)
+    ai_mod.ai_chat = lambda *a, **k: "0"
     track_answers = {}
     out = advisory.decide_advisory(cfg(), answers=track_answers, lyrics="whatever")
-    assert out["stage"] == "ai" and out["value"] == 1, out
-    assert track_answers == {"ai-lyrics": 1}, track_answers
+    assert out["stage"] == "ai" and out["value"] == 0, out
+    assert track_answers == {"ai-lyrics": 0}, track_answers
+    # ... and an AI-only "1" leaves `answers` empty: the model did not decide.
+    ai_mod.ai_chat = lambda *a, **k: "1"
+    track_answers = {}
+    out = advisory.decide_advisory(cfg(), answers=track_answers, lyrics="whatever")
+    assert out["stage"] == "fallback" and out["value"] == 0, out
+    assert track_answers == {}, track_answers
 
     # with no words in the file the source says so ("ai", not "ai-lyrics")
+    ai_mod.ai_chat = lambda *a, **k: "0"
     out = advisory.decide_advisory(cfg(), lyrics="")
-    assert out == {"value": 1, "source": "ai", "stage": "ai",
+    assert out == {"value": 0, "source": "ai", "stage": "ai",
+                   "fallback": False}, out
+    # the AI's `2` (a clean edition it claims to know) is still written as it
+    # stands — the rule blocks an explicit GUESS, not every guess
+    ai_mod.ai_chat = lambda *a, **k: "2"
+    out = advisory.decide_advisory(cfg(), lyrics="")
+    assert out == {"value": 2, "source": "ai", "stage": "ai",
                    "fallback": False}, out
 
     # ----------------------------------------------------------------------- #
@@ -226,15 +246,17 @@ try:
 
         def disk_chat(cfg_, system, user, timeout=None):
             read["user"] = user
-            return "1"
+            return "0"
 
         ai_mod.ai_chat = disk_chat
         out = advisory.decide_advisory(cfg(), path=track, af=FakeAudioFile())
-        assert out == {"value": 1, "source": "ai-lyrics", "stage": "ai",
+        assert out == {"value": 0, "source": "ai-lyrics", "stage": "ai",
                        "fallback": False}, out
         assert "i dont give a fuck about you" in read["user"], read
         # a provider's stated value stops the ladder at step 1, so the AI is
-        # not asked and nothing is read for it
+        # not asked and nothing is read for it — and THAT is the owner's rule
+        # made mechanical: a real source saying the track is NOT explicit ends
+        # the question, whatever a model would have said about its lyrics.
         read.clear()
         out = advisory.decide_advisory(cfg(), value=0, source="apple-album",
                                        path=track, af=FakeAudioFile())

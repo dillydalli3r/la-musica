@@ -201,11 +201,13 @@ interface ImportFile {
   staged?: string | null;
   /** The absolute path of a file the DESKTOP SHELL handed over (an OS drop
    *  says where the file is, not what is in it). Committed through the ingest
-   *  route, which moves it — the single-file case of a folder ingest. */
+   *  route, which COPIES it — the file is the user's, the single-file case of
+   *  a folder ingest. */
   native?: string | null;
   /** The folder on this server a `native` file was SCANNED from. A dropped
-   *  folder keeps its own path here: the group is committed by moving the
-   *  subfolder it names, exactly as the folder picker's albums are. */
+   *  folder keeps its own path here: the group is committed by handing the
+   *  subfolder it names to the ingest route, which copies it (the user's
+   *  folder stays where it was), exactly as the folder picker's albums are. */
   nativeRoot?: string | null;
 }
 
@@ -1581,11 +1583,13 @@ export default function ImportWizard() {
   };
 
   const doImport = async (auto = false) => {
-    // Excluded files are dropped here, before anything is uploaded or moved:
+    // Excluded files are dropped here, before anything is uploaded or placed:
     // that is what makes a PARTIAL album import (one track of twelve) work.
-    // The native/folder import MOVES the source directory, so there is no
-    // subset to move — exclusion only exists for the files the app places one
-    // by one (an upload, an unpacked archive, a file the shell handed over).
+    // A native/folder group is committed AS-IS — its whole folder goes to the
+    // ingest route in one call (which COPIES it into the library, leaving the
+    // user's own folder alone), so there is no per-file subset to drop;
+    // exclusion only exists for the files the app places one by one (an
+    // upload, an unpacked archive, a file the shell handed over).
     const asIs = (g: AlbumGroup) =>
       !g.files.some((f) => f.file || f.staged || f.native) && g.files.some((f) => f.nativeRoot);
     const included = (g: AlbumGroup) =>

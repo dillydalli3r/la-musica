@@ -154,8 +154,15 @@ def _measure_with_rust(path, ffmpeg_exe, helper, *, block_seconds=BLOCK_SECONDS,
     except subprocess.TimeoutExpired:
         return TrackDR(None, f"ffmpeg did not finish within "
                              f"{DECODE_TIMEOUT // 60} minutes", True)
-    except OSError as e:
-        return TrackDR(None, f"the mlo-audio helper could not be started: {e}", True)
+    except OSError:
+        # The binary is there (`rust_helper` found it) but will not start: a
+        # stale or half-copied build, a missing DLL, no execute permission.
+        # That is a broken INSTALL, not a verdict about this track, so return
+        # None and let the numpy block math below measure it — the fallback
+        # this function's contract promises. Returning a failed TrackDR here
+        # would mark every track of every album unmeasured on a build whose
+        # helper merely cannot launch, which is exactly what used to happen.
+        return None
     lines = [ln for ln in (proc.stdout or "").splitlines() if ln.strip()]
     if not lines:
         return None

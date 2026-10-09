@@ -28,6 +28,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .accurip import _canonical_accurip_text
+from .atomic import replace_locked
 from .audio import AudioFile
 from .autotag import genre_count, trim_genres
 from .config import _ext_to_audio_type, should_write_audio_tag
@@ -285,7 +286,7 @@ def _format_accurip_file(path, cfg=None, force=False):
                 os.fsync(out.fileno())
             except Exception:
                 pass
-        os.replace(tmp, path)
+        replace_locked(tmp, path)
         # Ensure directory entry is durable
         fsync_dir(os.path.dirname(path))
         return (path, True, None)
@@ -332,7 +333,7 @@ def _format_cue_file(path, cfg, force=False):
                 os.fsync(out.fileno())
             except Exception:
                 pass
-        os.replace(tmp, path)
+        replace_locked(tmp, path)
         fsync_dir(os.path.dirname(path))
         return (path, True, None)
     except Exception as e:
@@ -396,7 +397,7 @@ def _format_lrc_file(path, cfg):
                 os.fsync(out.fileno())
             except Exception:
                 pass
-        os.replace(tmp, path)
+        replace_locked(tmp, path)
         fsync_dir(os.path.dirname(path))
         return (path, True, None)
     except Exception as e:

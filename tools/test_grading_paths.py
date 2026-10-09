@@ -172,6 +172,12 @@ ISO_CFG = {
 
 tmp = tempfile.mkdtemp(prefix="mlo_naming_test_")
 
+# The grader now reads the app's RATING store (store row vs file tag). Point
+# that store at this test's temp dir BEFORE the first grade, so no real
+# ratings.db is created or opened.
+from server import ratings as _ratings_mod               # noqa: E402
+_ratings_mod.db_path = lambda: os.path.join(tmp, "grade_ratings.db")
+
 # ----------------------------------------------------------------------
 # _naming_mismatch pure cases
 # ----------------------------------------------------------------------
@@ -1549,6 +1555,232 @@ ok(len(_crc_keys) == 1 and "2-05 Song B.flac" in res["issues"][_crc_keys[0]],
    f"({res['issues']})")
 
 # ----------------------------------------------------------------------
+# XLD rip logs: the owner's own log, read and compared like an EAC one
+# ----------------------------------------------------------------------
+print("== XLD rip logs ==")
+# The owner's log verbatim (Radiohead - A Moon Shaped Pool, XLD 20151214):
+# its TOC separates the FRAMES field with ':' ("00:00:00" / "03:41:34") where
+# EAC uses '.' ("0:00.00" / "3:13.27"), and each track prints THREE CRC32
+# lines, of which only the plain `CRC32 hash` is the decoded PCM's CRC-32
+# (EAC's "Copy CRC").
+# `Filename` names the RIPPER's Mac folder, not the file on disk. The
+# AccurateRip summary, per-track gain/peak, statistics and the XLD signature
+# block are elided: no reader touches them.
+XLD_SAMPLE = """\
+X Lossless Decoder version 20151214 (149.1)
+
+XLD extraction logfile from 2016-06-16 12:47:40 -0400
+
+Radiohead / A Moon Shaped Pool
+
+Used drive : MATSHITA DVD-R   UJ-8A8 (revision HA13)
+Media type : Pressed CD
+
+TOC of the extracted CD
+     Track |   Start  |  Length  | Start sector | End sector 
+    ---------------------------------------------------------
+        1  | 00:00:00 | 03:41:34 |         0    |    16608   
+        2  | 03:41:34 | 06:24:41 |     16609    |    45449   
+        3  | 10:06:00 | 04:41:00 |     45450    |    66524   
+        4  | 14:47:00 | 03:44:44 |     66525    |    83368   
+        5  | 18:31:44 | 06:07:26 |     83369    |   110919   
+        6  | 24:38:70 | 02:52:72 |    110920    |   123891   
+        7  | 27:31:67 | 04:26:48 |    123892    |   143889   
+        8  | 31:58:40 | 05:45:67 |    143890    |   169831   
+        9  | 37:44:32 | 05:06:42 |   169832    |   192823   
+       10  | 42:50:74 | 05:03:61 |    192824    |   215609   
+       11  | 47:54:60 | 04:45:38 |    215610    |   237022   
+
+Track 01
+    Filename : /Users/baconfat/Desktop/XLD rips/Radiohead - A Moon Shaped Pool (2016) [FLAC]/01 Burn the Witch.flac
+    Pre-gap length : 00:02:00
+
+    CRC32 hash (test run)    : B03E4096
+    CRC32 hash               : B03E4096
+    CRC32 hash (skip zero)   : C8A48455
+    AccurateRip v1 signature : 2E9F2E06
+
+Track 02
+    Filename : /Users/baconfat/Desktop/XLD rips/Radiohead - A Moon Shaped Pool (2016) [FLAC]/02 Daydreaming.flac
+
+    CRC32 hash (test run)    : 97984411
+    CRC32 hash               : 97984411
+    CRC32 hash (skip zero)   : BC43CB3E
+    AccurateRip v1 signature : 48690D6A
+
+Track 03
+    Filename : /Users/baconfat/Desktop/XLD rips/Radiohead - A Moon Shaped Pool (2016) [FLAC]/03 Decks Dark.flac
+
+    CRC32 hash (test run)    : D8CA4842
+    CRC32 hash               : D8CA4842
+    CRC32 hash (skip zero)   : 07877CFE
+    AccurateRip v1 signature : 4C49EFB9
+
+Track 04
+    Filename : /Users/baconfat/Desktop/XLD rips/Radiohead - A Moon Shaped Pool (2016) [FLAC]/04 Desert Island Disk.flac
+
+    CRC32 hash (test run)    : FA6BE23A
+    CRC32 hash               : FA6BE23A
+    CRC32 hash (skip zero)   : 19571766
+    AccurateRip v1 signature : 311ECF77
+
+Track 05
+    Filename : /Users/baconfat/Desktop/XLD rips/Radiohead - A Moon Shaped Pool (2016) [FLAC]/05 Ful Stop.flac
+
+    CRC32 hash (test run)    : 98C9C7E1
+    CRC32 hash               : 98C9C7E1
+    CRC32 hash (skip zero)   : 40A68EB9
+    AccurateRip v1 signature : 4AFC0E03
+
+Track 06
+    Filename : /Users/baconfat/Desktop/XLD rips/Radiohead - A Moon Shaped Pool (2016) [FLAC]/06 Glass Eyes.flac
+
+    CRC32 hash (test run)    : BDF00174
+    CRC32 hash               : BDF00174
+    CRC32 hash (skip zero)   : 8F050E1A
+    AccurateRip v1 signature : 715CBE19
+
+Track 07
+    Filename : /Users/baconfat/Desktop/XLD rips/Radiohead - A Moon Shaped Pool (2016) [FLAC]/07 Identikit.flac
+
+    CRC32 hash (test run)    : 8FDF7B74
+    CRC32 hash               : 8FDF7B74
+    CRC32 hash (skip zero)   : C32AD1B6
+    AccurateRip v1 signature : FA54AA56
+
+Track 08
+    Filename : /Users/baconfat/Desktop/XLD rips/Radiohead - A Moon Shaped Pool (2016) [FLAC]/08 The Numbers.flac
+    Pre-gap length : 00:01:67
+
+    CRC32 hash (test run)    : 3CFA6ED7
+    CRC32 hash               : 3CFA6ED7
+    CRC32 hash (skip zero)   : F28A74F9
+    AccurateRip v1 signature : 9B7B80B1
+
+Track 09
+    Filename : /Users/baconfat/Desktop/XLD rips/Radiohead - A Moon Shaped Pool (2016) [FLAC]/09 Present Tense.flac
+    Pre-gap length : 00:01:65
+
+    CRC32 hash (test run)    : A3661996
+    CRC32 hash               : A3661996
+    CRC32 hash (skip zero)   : D1891229
+    AccurateRip v1 signature : 529DB860
+
+Track 10
+    Filename : /Users/baconfat/Desktop/XLD rips/Radiohead - A Moon Shaped Pool (2016) [FLAC]/10 Tinker Tailor Soldier Sailor Rich Man Poor Man Beggar Thief.flac
+    Pre-gap length : 00:01:62
+
+    CRC32 hash (test run)    : 7A9222A7
+    CRC32 hash               : 7A9222A7
+    CRC32 hash (skip zero)   : 5A2FDF70
+    AccurateRip v1 signature : 8069EDD4
+
+Track 11
+    Filename : /Users/baconfat/Desktop/XLD rips/Radiohead - A Moon Shaped Pool (2016) [FLAC]/11 True Love Waits.flac
+
+    CRC32 hash (test run)    : FFFA8D15
+    CRC32 hash               : FFFA8D15
+    CRC32 hash (skip zero)   : B19E75A4
+    AccurateRip v1 signature : A50951E4
+
+No errors occurred
+
+End of status report
+"""
+_XLD_CRCS = {1: "B03E4096", 2: "97984411", 3: "D8CA4842", 4: "FA6BE23A",
+             5: "98C9C7E1", 6: "BDF00174", 7: "8FDF7B74", 8: "3CFA6ED7",
+             9: "A3661996", 10: "7A9222A7", 11: "FFFA8D15"}
+_XLD_SECS = {1: 221.45, 2: 384.55, 3: 281.0, 4: 224.59, 5: 367.35,
+             6: 172.96, 7: 266.64, 8: 345.89, 9: 306.56, 10: 303.81, 11: 285.51}
+ok(_discs.parse_log_checksums(XLD_SAMPLE) == _XLD_CRCS,
+   f"an XLD log's per-track CRC is the plain `CRC32 hash` "
+   f"({_discs.parse_log_checksums(XLD_SAMPLE)})")
+ok(_discs.parse_log_checksums(XLD_SAMPLE)[1] != "C8A48455"
+   and _discs.parse_log_checksums(XLD_SAMPLE)[1] != "2E9F2E06",
+   "`CRC32 hash (skip zero)` and the AccurateRip signature are never read "
+   "as the track's CRC")
+ok({k: round(v, 2)
+    for k, v in _discs.parse_log_track_seconds(XLD_SAMPLE).items()} == _XLD_SECS,
+   "the XLD TOC (mm:ss:ff) states each playtime "
+   f"({_discs.parse_log_track_seconds(XLD_SAMPLE)})")
+ok(abs(_discs.parse_log_toc_seconds(XLD_SAMPLE) - 3160.3066666666666) < 1e-6,
+   f"and totals the disc ({_discs.parse_log_toc_seconds(XLD_SAMPLE)})")
+ok([round(r["seconds"], 2) for r in _discs.log_track_rows(XLD_SAMPLE)]
+   == [_XLD_SECS[i] for i in range(1, 12)],
+   "so a tracklist row read off the XLD log carries its playtime, like EAC's")
+# The ripper's own Mac path still names the local file: the pairing is by the
+# normalised name, so "01 Burn the Witch.flac" and "01 - Burn the Witch.flac"
+# are the same track. Nothing in the CRC chain reads filenames anyway.
+ok(_discs._norm_name(_discs.parse_log_track_files(XLD_SAMPLE)[1])
+   == _discs._norm_name("01 - Burn the Witch.flac"),
+   "the RIPPER's own Filename still names the local file once normalised")
+
+# …and the TOC is what attributes a log to its disc when its NAME does not
+# (rename_logs_for_discs step 3, which the real owner's log needs): the two
+# discs below are named D-TT, the log carries no disc number, and the playtime
+# totals are distinct by far more than the tolerance.
+xld_dir = os.path.join(music, "Artists", "Artist", "XLD Discs (2016)")
+os.makedirs(xld_dir, exist_ok=True)
+for _name in ("1-01 Track.flac", "1-02 Track.flac",
+              "2-01 Track.flac", "2-02 Track.flac"):
+    _p = os.path.join(xld_dir, _name)
+    make_flac(_p)
+    set_tags(_p, dict(FULL, MEDIA="CD", DISCNUMBER=_name[0], DISCTOTAL="2"))
+with open(os.path.join(xld_dir, "Radiohead - A Moon Shaped Pool.log"),
+          "w", encoding="utf-8") as fh:
+    fh.write(XLD_SAMPLE)
+_orig_asec = _discs._audio_seconds
+try:
+    # disc 1 really is the log's disc (3160.31 s), disc 2 is another one
+    _discs._audio_seconds = lambda paths: (
+        3160.3066666666666 if any("1-01" in p for p in paths) else 2938.85)
+    _xld_notes = _discs.rename_logs_for_discs(
+        xld_dir, config={"discs_rename_enabled": True,
+                         "discs_rename_single_fallback": True})
+finally:
+    _discs._audio_seconds = _orig_asec
+ok(("Radiohead - A Moon Shaped Pool.log", "CD-1.log") in _xld_notes,
+   f"the XLD TOC attributes the log to its own disc ({_xld_notes})")
+
+# The grader then compares that log's CRC against the audio, exactly as it
+# does an EAC one — coverage by number, then the VALUE.
+if _FFMPEG:
+    _real_crc_cd = _discs._audio_crc32(_FFMPEG, cd_flac)
+
+    def _write_xld_log(plain, test_run, skip_zero):
+        with open(log_path, "w", encoding="utf-8") as fh:
+            fh.write(
+                "X Lossless Decoder version 20151214 (149.1)\n\n"
+                "XLD extraction logfile from 2016-06-16 12:47:40 -0400\n\n"
+                "Artist / Album\n\nTOC of the extracted CD\n"
+                "     Track |   Start  |  Length  | Start sector"
+                " | End sector \n"
+                "    -------------------------------------------------"
+                "---------\n"
+                "        1  | 00:00:00 | 00:03:00 |         0    |"
+                "     2249   \n\n"
+                "Track 01\n"
+                "    Filename : /Users/someone/Desktop/XLD rips/01 Song.flac\n\n"
+                f"    CRC32 hash (test run)    : {test_run}\n"
+                f"    CRC32 hash               : {plain}\n"
+                f"    CRC32 hash (skip zero)   : {skip_zero}\n"
+                "    AccurateRip v1 signature : DEADBEEF\n")
+
+    _write_xld_log(_real_crc_cd, _real_crc_cd, "00000000")
+    res = _grade_album(cd_dir, "EMBEDDED", _crc_cfg)
+    ok("CRC" not in res["tracks"][0]["issues"],
+       f"an XLD log covers and matches the track ({res['tracks'][0]['issues']})")
+    _write_xld_log("00000000", "00000000", _real_crc_cd)
+    res = _grade_album(cd_dir, "EMBEDDED", _crc_cfg)
+    ok("CRC_MISMATCH" in res["tracks"][0]["issues"],
+       "a wrong plain CRC32 hash fails even when `(skip zero)` holds the real "
+       f"value ({res['tracks'][0]['issues']})")
+    _write_xld_log("00000000", _real_crc_cd, "00000000")
+    res = _grade_album(cd_dir, "EMBEDDED", _crc_cfg)
+    ok("CRC_MISMATCH" in res["tracks"][0]["issues"],
+       "and `(test run)` does not stand in for the plain line either")
+
+# ----------------------------------------------------------------------
 # beets config: directory: is the library root, not the music folder
 # ----------------------------------------------------------------------
 print("== beets config ==")
@@ -1872,6 +2104,125 @@ ok(printed_pct(3, 3) == 100.0 and printed_pct(2, 3) == 66.7,
    "ordinary scores are rounded as before")
 ok(printed_pct(0, 0) is None and printed_pct(5, 0) is None,
    "a score with no checks has no percentage")
+
+# ----------------------------------------------------------------------
+# an unreadable folder is reported on its own album, not as a blanket error
+# ----------------------------------------------------------------------
+print("== an unreadable folder ==")
+un_music = os.path.join(tmp, "Unreadable", "Music")
+un_good = os.path.join(un_music, "Artists", "Okay", "Album (2020)")
+os.makedirs(un_good)
+_un_good_flac = os.path.join(un_good, "01 - Song.flac")
+make_flac(_un_good_flac)
+set_tags(_un_good_flac, BASE_TAGS)
+un_bad = os.path.join(un_music, "Artists", "Denied", "Album (2020)")
+os.makedirs(un_bad)
+make_flac(os.path.join(un_bad, "01 - Song.flac"))   # a real album the walk finds
+
+UN_CFG = dict(ISO_CFG, music_folder=un_music, grade_check_naming=False,
+              grade_check_key_bpm=False, grade_verbose=False,
+              grade_check_empty_folders=False)
+
+_real_listdir = os.listdir
+_denied = os.path.normcase(os.path.normpath(un_bad))
+
+
+def _deny_bad(path):
+    if os.path.normcase(os.path.normpath(path)) == _denied:
+        raise PermissionError(13, "Access is denied")
+    return _real_listdir(path)
+
+
+os.listdir = _deny_bad
+try:
+    un_stats, un_lines = graded(dict(UN_CFG))
+finally:
+    os.listdir = _real_listdir
+
+un_bad_rel = os.path.relpath(un_bad, un_music)
+un_good_rel = os.path.relpath(un_good, un_music)
+_bad_row = row_line(un_lines, un_bad_rel)
+ok(un_stats["issue_counts"].get(grader.UNREADABLE_FOLDER) == 1,
+   f"a folder whose listing is denied is reported on its OWN album "
+   f"({un_stats['issue_counts']})")
+ok(_bad_row is not None,
+   f"the denied album is still a graded row, not a skipped one ({_bad_row})")
+ok(any(f"issues: {grader.UNREADABLE_FOLDER}" in l for l in un_lines),
+   "the denied album's row NAMES the issue instead of a blanket error")
+ok(not un_stats["errors"],
+   f"...and it is not a run-level error that hides the album "
+   f"({un_stats['errors']})")
+ok(row_line(un_lines, un_good_rel) is not None,
+   "the readable sibling album is still graded")
+
+# Directly: the result is a graded row (one failed check), NOT {'error': True}.
+os.listdir = _deny_bad
+try:
+    un_res = _grade_album(un_bad, "EMBEDDED", dict(UN_CFG))
+finally:
+    os.listdir = _real_listdir
+ok(not un_res.get("error") and un_res["total_checks"] == 1
+   and un_res["pass_count"] == 0
+   and grader.UNREADABLE_FOLDER in un_res["issues"],
+   f"_grade_album returns a graded row for an unreadable folder ({un_res})")
+ok(any("could not be read" in str(n) for n in un_res["notes"]),
+   f"the reason travels in the row's notes ({un_res['notes']})")
+
+# ----------------------------------------------------------------------
+# the app's rating store vs the file's RATING tag
+# ----------------------------------------------------------------------
+print("== RATING store vs tag ==")
+rt_music = os.path.join(tmp, "RatingLib", "Music")
+rt_album = os.path.join(rt_music, "Artists", "Artist", "Album (2020)")
+os.makedirs(rt_album)
+
+
+def _rt(name, rating=None, tag=None):
+    p = os.path.join(rt_album, name)
+    make_flac(p)
+    set_tags(p, dict(BASE_TAGS, **({"RATING": tag} if tag is not None else {})))
+    if rating is not None:
+        _ratings_mod.set_rating(p, rating)
+    return p
+
+
+_rt("1-01 Match.flac", rating=4, tag="40")   # store 4 (40) == tag 40
+_rt("1-02 Wrong.flac", rating=5, tag="30")   # store 5 (50) != tag 30
+_rt("1-03 Bare.flac", tag="70")              # a tag, NO store row
+_rt("1-04 Missing.flac", rating=3)           # a store row, no tag
+
+RT_CFG = dict(ISO_CFG, music_folder=rt_music, grade_check_naming=False,
+              grade_check_key_bpm=False, grade_verbose=False)
+_rt_res = _grade_album(rt_album, "EMBEDDED", dict(RT_CFG))
+_rt_issues = {k: v for k, v in _rt_res["issues"].items() if "RATING" in k}
+
+
+def _blamed(name):
+    return any(name.lower() in [str(x).lower() for x in v]
+               for v in _rt_issues.values())
+
+
+ok(not _blamed("1-01 Match.flac"),
+   f"a store row and a tag that MATCH is not a failure ({_rt_issues})")
+ok(_blamed("1-02 Wrong.flac"),
+   f"a store value the tag CONTRADICTS fails grading ({_rt_issues})")
+ok(_blamed("1-04 Missing.flac"),
+   f"a store row with NO tag fails grading ({_rt_issues})")
+ok(not _blamed("1-03 Bare.flac"),
+   f"a tag the app never adopted is NOT a divergence ({_rt_issues})")
+ok(any("re-rate" in k for k in _rt_issues),
+   f"the failure names the fix ({_rt_issues})")
+
+# Clearing the store rows removes the requirement (convergence deletes the tag;
+# a grade is not where "unrate" is enforced).
+for _p in (os.path.join(rt_album, "1-01 Match.flac"),
+           os.path.join(rt_album, "1-02 Wrong.flac"),
+           os.path.join(rt_album, "1-04 Missing.flac")):
+    _ratings_mod.set_rating(_p, 0)
+_rt_res2 = _grade_album(rt_album, "EMBEDDED", dict(RT_CFG))
+_rt_issues2 = {k: v for k, v in _rt_res2["issues"].items() if "RATING" in k}
+ok(not _rt_issues2,
+   f"with no store row nothing RATING-related fails ({_rt_issues2})")
 
 print(f"\nAll {passed} checks passed.")
 shutil.rmtree(tmp, ignore_errors=True)

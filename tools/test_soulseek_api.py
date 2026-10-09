@@ -458,7 +458,10 @@ assert os.path.isfile(os.path.join(ROOT, "01 - Track.flac")), _r
 assert os.path.isfile(os.path.join(ROOT, "cover.jpg"))       # leftover swept along
 assert not os.path.exists(os.path.join(MF2, "Some Artist")), "album landed in the music-folder root"
 
-# ingest: the album folder is created under Artists/
+# ingest: the album folder is created under Artists/ — and a folder the APP did
+# not stage (this test planted it) is COPIED, never moved: what the wizard hands
+# the route is a path the USER dragged or picked, so it must survive the import
+# (server/main.py import_ingest -> mlo.paths.copy_path).
 SRC_ING = os.path.join(REDIRECT, "incoming", "Ingested Album")
 os.makedirs(SRC_ING)
 with open(os.path.join(SRC_ING, "01 - x.flac"), "wb") as f:
@@ -467,10 +470,15 @@ ing = mlo_main.import_ingest(source=SRC_ING, target="Ingested Album")
 DEST = os.path.join(MF2, "Artists", "Ingested Album")
 assert os.path.normcase(ing["path"]) == os.path.normcase(DEST.replace("\\", "/")), ing
 assert os.path.isfile(os.path.join(DEST, "01 - x.flac"))
-assert not os.path.exists(SRC_ING)
+assert ing.get("copied") is True, ing
+assert os.path.isfile(os.path.join(SRC_ING, "01 - x.flac")), \
+    "the user's folder survives the ingest — the import copies it"
+with open(os.path.join(SRC_ING, "01 - x.flac"), "rb") as f:
+    assert f.read() == b"\0" * 2048, "…byte-identical"
 
-# ...and a name collision is deduped inside Artists/ too
-os.makedirs(SRC_ING)
+# ...and a name collision is deduped inside Artists/ too. The source is still
+# there (it was copied), so the second import reads it again.
+os.makedirs(SRC_ING, exist_ok=True)
 with open(os.path.join(SRC_ING, "02 - y.flac"), "wb") as f:
     f.write(b"\0" * 2048)
 ing2 = mlo_main.import_ingest(source=SRC_ING, target="Ingested Album")

@@ -792,6 +792,22 @@ assert own["directories"] == [{
                "size": TRACK_SIZE}]}], own["directories"]
 assert not [c for c in fake.calls if "/browse" in c[1]], fake.calls
 assert ("GET", "/shares/contents") in fake.calls, fake.calls
+# a full read is not truncated: the flag says the read finished, not that a
+# share is small (the modal must only claim a cut-off on the cut-off path)
+assert own["truncated"] is False, own
+
+# an index bigger than the app's one-shot cap is CUT OFF, not empty: the flag
+# has to come back on the answer — with an empty `directories` and no error —
+# or the modal reads the empty list as "shares no folders", a lie about a share
+# slskd is serving. `refresh=1` keeps this out of the local browse cache.
+cap = soulseek._LOCAL_BROWSE_MAX_BYTES
+try:
+    soulseek._LOCAL_BROWSE_MAX_BYTES = 1
+    cut = srv_main.soulseek_browse("tester", refresh=1)
+finally:
+    soulseek._LOCAL_BROWSE_MAX_BYTES = cap
+assert cut["local"] is True and cut["truncated"] is True, cut
+assert cut["directories"] == [], cut["directories"]
 
 # any OTHER username is still slskd's browse over the peer network
 fake.calls.clear()
@@ -879,6 +895,205 @@ assert soulseek.uploads_summary(CFG) == []
 
 print("ok  the upload history groups per peer with file sizes, totals and a "
       "bounded file list; an empty tree stays an empty list")
+
+
+# --------------------------------------------------------------------------- #
+# 6) the SHARE's own totals: what this install OFFERS
+# --------------------------------------------------------------------------- #
+ready()
+# two folders, three files: the count and byte total sum from the SAME index a
+# peer browses (`/shares/contents`), never from a walk of the library on disk
+fake.contents = [
+    {"name": "Artists\\Some Artist\\Some Album (1999)", "files": [
+        {"filename": "01 - A Track.flac", "size": 1000, "extension": "flac"},
+        {"filename": "02 - B Track.flac", "size": 2000, "extension": "flac"}]},
+    {"name": "Artists\\Other", "files": [
+        {"filename": "c.mp3", "size": 3000, "extension": "mp3"}]},
+]
+totals = soulseek.share_totals(CFG, use_cache=False)
+assert totals == {"files": 3, "bytes": 6000, "truncated": False}, totals
+# ...and the route answers the same thing
+srv_main.load_config = lambda: CFG
+assert srv_main.soulseek_share_totals() == totals
+
+# an index bigger than the app's one-shot read is reported as TOO BIG TO COUNT
+# — nulls plus the flag — never as the total of the part that happened to fit
+cap = soulseek._LOCAL_BROWSE_MAX_BYTES
+try:
+    soulseek._LOCAL_BROWSE_MAX_BYTES = 1
+    cut = soulseek.share_totals(CFG, use_cache=False)
+finally:
+    soulseek._LOCAL_BROWSE_MAX_BYTES = cap
+assert cut == {"files": None, "bytes": None, "truncated": True}, cut
+
+# an unreadable index is slskd's own words, not an empty share
+fake.statuses["GET /shares/contents"] = 503
+try:
+    soulseek.share_totals(CFG, use_cache=False)
+except RuntimeError as e:
+    assert "slskd is unhappy" in str(e), e
+else:
+    raise AssertionError("an unreadable share index answered with totals")
+fake.statuses.pop("GET /shares/contents", None)
+
+# a down daemon is a 503 from the route, not a share with nothing in it
+_real_running, _real_web_up = soulseek.is_running, soulseek.web_up
+soulseek.is_running = lambda cfg=None: False
+soulseek.web_up = lambda cfg=None: False
+try:
+    srv_main.soulseek_share_totals()
+except Exception as e:
+    assert getattr(e, "status_code", None) == 503, e
+else:
+    raise AssertionError("share totals answered with slskd down")
+finally:
+    soulseek.is_running, soulseek.web_up = _real_running, _real_web_up
+
+print("ok  the share's own totals sum the index slskd serves, and an index "
+      "bigger than the read cap is said to be uncountable, not undercounted")
+
+
+# --------------------------------------------------------------------------- #
+# 7) clearing the history at file / folder / user / whole — RECORDS only
+# --------------------------------------------------------------------------- #
+# slskd owns the upload tree and has no per-folder or per-user delete, and its
+# one DELETE route CANCELS a live upload — so a clear here is an app-side forget
+# list: the history view hides the matching rows and nothing else changes. The
+# test proves each granularity narrows exactly what it says, that hiding never
+# reaches into slskd's tree, and that a LATER download is shown again.
+def _hist():
+    return [
+        {"username": "peer one", "directories": [
+            {"directory": "Music\\Album A", "files": [
+                {"filename": "Music\\Album A\\01.flac", "size": 10,
+                 "state": "Completed, Succeeded", "endedAt": "2026-01-02T00:00:00Z"},
+                {"filename": "Music\\Album A\\02.flac", "size": 20,
+                 "state": "Completed, Succeeded", "endedAt": "2026-01-02T00:00:00Z"}]},
+            {"directory": "Music\\Album B", "files": [
+                {"filename": "Music\\Album B\\03.flac", "size": 30,
+                 "state": "Completed, Succeeded", "endedAt": "2026-01-02T00:00:00Z"}]}]},
+        {"username": "peer two", "directories": [
+            {"directory": "Music\\Album A", "files": [
+                {"filename": "Music\\Album A\\x.flac", "size": 40,
+                 "state": "Completed, Succeeded", "endedAt": "2026-01-03T00:00:00Z"}]}]},
+    ]
+
+
+# the config seams are stubbed: a clear must never write the real install
+_real_load, _real_save = soulseek.load_config, soulseek.save_config
+cfg = dict(CFG)
+cfg["soulseek_upload_forget"] = []
+soulseek.load_config = lambda: cfg
+soulseek.save_config = lambda c: True
+try:
+    fake.uploads = _hist()
+
+    def shown():
+        return {p["username"]: p for p in soulseek.uploads_summary(cfg)}
+
+    def clear(scope, **sel):
+        cfg["soulseek_upload_forget"] = []      # independent granularities
+        soulseek.forget_uploads(scope, cfg=cfg, **sel)
+
+    assert [p["username"] for p in soulseek.uploads_summary(cfg)] == ["peer two", "peer one"]
+
+    # PER FILE: one transfer goes; its size leaves the peer's totals, and the
+    # other files of the same album stay
+    clear("file", username="peer one", directory="Music\\Album A",
+          filename="Music\\Album A\\01.flac")
+    p1 = shown()["peer one"]
+    assert p1["files"] == 2 and p1["bytes"] == 50, p1
+    assert [i["filename"].split("\\")[-1] for i in p1["items"]] == ["02.flac", "03.flac"], p1["items"]
+
+    # PER FOLDER: the rest of Album A; Album B stays
+    clear("folder", username="peer one", directory="Music\\Album A")
+    p1 = shown()["peer one"]
+    assert p1["files"] == 1 and p1["bytes"] == 30, p1
+
+    # PER USER: peer one is gone entirely, peer two untouched
+    clear("user", username="peer one")
+    assert list(shown()) == ["peer two"]
+
+    # WHOLE HISTORY: nothing is left ...
+    clear("all")
+    assert soulseek.uploads_summary(cfg) == []
+    # ...and slskd's own tree is untouched: hiding a RECORD reaches no transfer
+    assert len(fake.uploads) == 2, fake.uploads
+
+    # a transfer stamped AFTER the clear is shown again — this clears what is
+    # there now, it does not block a peer forever
+    fake.uploads = _hist() + [{"username": "peer three", "directories": [
+        {"directory": "Music\\New", "files": [
+            {"filename": "Music\\New\\n.flac", "size": 50,
+             "state": "Completed, Succeeded", "endedAt": "2030-01-01T00:00:00Z"}]}]}]
+    assert list(shown()) == ["peer three"], shown()
+
+    # the ROUTE writes the same list and needs no daemon (the forget list is the
+    # app's own config), and a missing selector is the caller's 400
+    cfg["soulseek_upload_forget"] = []
+    fake.uploads = _hist()
+    srv_main.load_config = lambda: cfg
+    res = srv_main.soulseek_uploads_forget(
+        srv_main.SoulseekForgetRequest(scope="user", username="peer one"))
+    assert res["ok"] is True and res["forget"][-1]["user"] == "peer one", res
+    assert list(shown()) == ["peer two"]
+    try:
+        srv_main.soulseek_uploads_forget(srv_main.SoulseekForgetRequest(scope="file"))
+    except Exception as e:
+        assert getattr(e, "status_code", None) == 400, e
+    else:
+        raise AssertionError("a file clear with no file was accepted")
+finally:
+    soulseek.load_config, soulseek.save_config = _real_load, _real_save
+
+print("ok  clearing the history narrows to the file / folder / peer / whole asked "
+      "for, touches no transfer, and lets later downloads show again")
+
+
+# --------------------------------------------------------------------------- #
+# 8) a share rescan is DEFERRED while a job writes under the share, never skipped
+# --------------------------------------------------------------------------- #
+# slskd's scan reads the library files it indexes; the app's atomic tag write
+# renames its temp over the destination, and on Windows a reader holding that
+# destination is a WinError 5. So the app's own rescan must wait for a write in
+# flight (`job_locks`) instead of firing into it — and must still be delivered
+# once the claim clears.
+import server.job_locks as job_locks
+from server.main import soulseek_shares_rescan
+
+_ready_running, _ready_web_up = soulseek.is_running, soulseek.web_up
+_ready_load = soulseek.load_config
+soulseek.is_running = lambda cfg=None: True
+soulseek.web_up = lambda cfg=None: True
+soulseek.load_config = lambda: CFG
+ready()
+fake.calls.clear()
+
+album = os.path.join(ARTISTS, "Some Artist", "Some Album (1999)")
+with job_locks.holding([album], kind="tags", label="Bulk tag write"):
+    assert soulseek.share_write_in_flight(CFG), "a held album was read as free"
+    # The debounced refresh, fired by hand (its own Timer calls the same
+    # function): a write holds the album, so no PUT reaches slskd...
+    soulseek._refresh_shares_now()
+    assert ("PUT", "/shares") not in fake.calls, fake.calls
+    # ...and it is re-armed, not dropped: the pending timer is the delivery.
+    assert soulseek._SHARE_REFRESH_TIMER["timer"] is not None, \
+        soulseek._SHARE_REFRESH_TIMER
+
+    # The rescan ROUTE defers too, reporting it instead of starting a scan.
+    srv_main.load_config = lambda: CFG
+    res = soulseek_shares_rescan()
+    assert res.get("deferred") is True, res
+    assert ("PUT", "/shares") not in fake.calls, fake.calls
+
+# The claim cleared: the deferred refresh delivers the scan.
+soulseek._refresh_shares_now()
+assert ("PUT", "/shares") in fake.calls, fake.calls
+
+soulseek.is_running, soulseek.web_up = _ready_running, _ready_web_up
+soulseek.load_config = _ready_load
+print("ok  a share rescan waits for a write in flight under the share and is "
+      "delivered once the claim clears, never started into the write")
 
 
 shutil.rmtree(_TMP, ignore_errors=True)

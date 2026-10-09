@@ -3,6 +3,7 @@ import copy
 import json
 import os
 import tempfile
+import time
 from functools import lru_cache
 
 from .paths import (CONFIG_FILE, REPO_CONFIG_FILE, DEFAULT_DIGITAL_SOURCE, app_data_dir,
@@ -1195,6 +1196,19 @@ DEFAULT_CONFIG = {
     # SEARCH never clears anything, and nothing on disk is ever deleted (see
     # server.api_queue.clear_completed_for_new_import).
     "soulseek_clear_completed_on_import": True,
+    # Upload-history entries the owner has CLEARED, as hide selectors the
+    # history view respects. slskd owns the upload tree (`GET /transfers/uploads`)
+    # and offers no per-folder or per-user delete, while its one DELETE route
+    # cancels a LIVE upload — so "clear history" here forgets RECORDS, never a
+    # transfer and never a file: nothing is unshared, no audio is touched and no
+    # library entry changes, and slskd's own records are left exactly as they
+    # were (the daemon reads its history the same way; only this view hides the
+    # matching rows). Each entry {user, dir, file, before} hides transfers
+    # matching the selectors ("", "" ,"" = the whole history) whose newest stamp
+    # is at or before `before` (epoch seconds), so a download that arrives LATER
+    # shows again instead of being blocked forever (server.soulseek.
+    # uploads_summary applies it; server.soulseek.forget_uploads writes it).
+    "soulseek_upload_forget": [],
     "soulseek_download_dir": "",
     # Size caps on the app's two TRANSIENT stores: the download/staging pair
     # above (finished transfers waiting to be imported, plus slskd's in-flight
@@ -2939,9 +2953,32 @@ def _move_state_dir(src, dst, copy=False):
             if os.path.exists(d) and not (os.path.isfile(s) and _is_empty_db(d)):
                 continue
             if copy:
-                shutil.copy2(s, d)
-            else:
-                shutil.move(s, d)
+                try:
+                    shutil.copy2(s, d)
+                except OSError as e:
+                    # One file another program holds must not abort the rest of
+                    # the migration: the log showed this exact shape — slskd
+                    # keeps its OWN slskd.log open, and the first state move
+                    # died on it (WinError 32), stranding every later file.
+                    print(f"WARNING: could not copy app state {name}: {e}")
+                continue
+            # A same-volume move is an os.replace, which Windows refuses while
+            # anything has the file open (slskd on slskd.log again). Retry it
+            # briefly, then SKIP just this file so the rest of the state still
+            # follows the library rather than the whole move failing.
+            blocked = None
+            for attempt in range(1, 5):
+                try:
+                    shutil.move(s, d)
+                    blocked = None
+                    break
+                except OSError as e:
+                    blocked = e
+                    if attempt < 4:
+                        time.sleep(0.25)
+            if blocked is not None:
+                print(f"WARNING: could not move app state {name}: {blocked} "
+                      f"(it is open in another program — left in place)")
         if not copy:
             try:
                 os.rmdir(src)  # only when nothing was left behind (tray.lock, skipped)

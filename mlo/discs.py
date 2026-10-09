@@ -29,6 +29,7 @@ import tempfile
 import shutil
 import threading
 
+from .atomic import replace_locked
 from .audio import AudioFile
 from .config import should_write_audio_tag
 from . import naming
@@ -67,19 +68,32 @@ CUE_INDEX_RE = re.compile(
     r"^\s*INDEX\s+01\s+(\d{1,3}):(\d{2}):(\d{2})", re.MULTILINE | re.IGNORECASE
 )
 
-# EAC TOC rows: "     1  |  0:00.00  |  3:13.27  | ..." (length column)
+# A TOC playtime, in CD sectors (75/s). The FRAMES separator is the ripper's
+# own spelling: EAC writes "0:00.00" / "3:13.27" (mm:ss.ff), XLD writes
+# "00:00:00" / "03:41:34" (mm:ss:ff). Reading only the EAC dot left every XLD
+# log with NO TOC at all — its total-duration disc match (rename_logs_for_discs,
+# the audit's orphan mapping), its per-track playtimes and the playtime guard
+# log_crc_map keeps were all silently blind. Both separators are the same time.
+_TOC_TIME = r"\d+:\d{2}[.:]\d{2}"
+
+# EAC TOC rows: "     1  |  0:00.00  |  3:13.27  | ..." (length column),
+# XLD TOC rows: "     1  | 00:00:00 | 03:41:34 | ..." (length column).
 TOC_ROW_RE = re.compile(
-    r"^\s*\d+\s*\|\s*\d+:\d{2}\.\d{2}\s*\|\s*(\d+):(\d{2})\.(\d{2})\s*\|",
+    rf"^\s*\d+\s*\|\s*{_TOC_TIME}\s*\|\s*(\d+):(\d{{2}})[.:](\d{{2}})\s*\|",
     re.MULTILINE,
 )
 
 # Per-track CRC-32 checksums in rip logs (hex, 8 digits):
 #   EAC: "Test CRC 3F2A51A2" / "Copy CRC 3F2A51A2" / "Accurately ripped
 #        (confidence 10)  [3F2A51A2]"
-#   XLD: "CRC32 hash (test run) : 3F2A51A2" / "CRC32 hash : 3F2A51A2"
+#   XLD: "CRC32 hash : 3F2A51A2" — the decoded PCM's CRC-32, EAC's "Copy CRC" —
+#        written a second time as "CRC32 hash (test run) : 3F2A51A2" and a
+#        third, DIFFERENT "CRC32 hash (skip zero) : ..." that is never read
+#        (it skips zero samples, so it describes no file on disk).
 COPY_CRC_RE = re.compile(r"^Copy CRC\s+([0-9A-Fa-f]{8})")
 TEST_CRC_RE = re.compile(r"^Test CRC\s+([0-9A-Fa-f]{8})")
-XLD_CRC_RE = re.compile(r"^CRC32 hash(?:\s+\(test run\))?\s*:\s*([0-9A-Fa-f]{8})")
+XLD_CRC_RE = re.compile(r"^CRC32 hash\s*:\s*([0-9A-Fa-f]{8})")
+XLD_TEST_CRC_RE = re.compile(r"^CRC32 hash\s+\(test run\)\s*:\s*([0-9A-Fa-f]{8})")
 ACCURATE_CRC_RE = re.compile(r"\[([0-9A-Fa-f]{8})\]")
 
 # A cue sheet's own tracklist: "  TRACK 01 AUDIO", the TITLE/PERFORMER lines
@@ -91,7 +105,7 @@ ACCURATE_CRC_RE = re.compile(r"\[([0-9A-Fa-f]{8})\]")
 CUE_TRACK_LINE_RE = re.compile(r"^\s*TRACK\s+(\d{1,3})\s+\S+", re.IGNORECASE)
 CUE_TITLE_LINE_RE = re.compile(r'^\s*TITLE\s+"?([^"\r\n]*?)"?\s*$', re.IGNORECASE)
 TOC_TRACK_ROW_RE = re.compile(
-    r"^\s*(\d{1,3})\s*\|\s*\d+:\d{2}\.\d{2}\s*\|\s*(\d+):(\d{2})\.(\d{2})\s*\|",
+    rf"^\s*(\d{{1,3}})\s*\|\s*{_TOC_TIME}\s*\|\s*(\d+):(\d{{2}})[.:](\d{{2}})\s*\|",
     re.MULTILINE,
 )
 LOG_FILENAME_RE = re.compile(r"^\s*Filename\s+(.+?)\s*$", re.IGNORECASE)
@@ -338,7 +352,17 @@ def parse_log_toc_seconds(text):
 def parse_log_checksums(text):
     """Map track number -> CRC-32 hex (8 chars, uppercase) from a rip log.
 
-    Walks the "Track  N" sections; prefers Copy CRC over Test CRC over XLD over AccurateRip.
+    Walks the "Track  N" sections — EAC writes "Track  1", XLD "Track 01".
+
+    The EXTRACTION's CRC outranks a test run's, because that is the one that
+    describes the bytes on disk: EAC's "Copy CRC" over its "Test CRC", and
+    XLD's plain `CRC32 hash` over `CRC32 hash (test run)`. XLD writes the test
+    run FIRST, so at equal priority a track whose first read had to be
+    re-read (the CRCs then differ) was compared by the failed pass's value
+    instead of the audio's. The priorities are Copy CRC 4, EAC Test CRC 3,
+    XLD's plain CRC 2, XLD test run 1, an AccurateRip bracket 0. `CRC32 hash
+    (skip zero)` matches NONE of them: it skips zero samples, so it is a
+    different number and describes no file.
     """
     per_track = {}
     priority = {}  # track -> priority level
@@ -353,18 +377,25 @@ def parse_log_checksums(text):
             continue
         m = COPY_CRC_RE.match(line)
         if m:
-            # Copy is highest priority 3
+            # Copy is the extraction's own CRC: highest priority 4
+            if priority.get(current, -1) < 4:
+                per_track[current] = m.group(1).upper()
+                priority[current] = 4
+            continue
+        m = TEST_CRC_RE.match(line)
+        if m:
             if priority.get(current, -1) < 3:
                 per_track[current] = m.group(1).upper()
                 priority[current] = 3
             continue
-        m = TEST_CRC_RE.match(line)
+        m = XLD_CRC_RE.match(line)
         if m:
+            # XLD's extraction CRC: outranks its own test run (below)
             if priority.get(current, -1) < 2:
                 per_track[current] = m.group(1).upper()
                 priority[current] = 2
             continue
-        m = XLD_CRC_RE.match(line)
+        m = XLD_TEST_CRC_RE.match(line)
         if m:
             if priority.get(current, -1) < 1:
                 per_track[current] = m.group(1).upper()
@@ -464,7 +495,13 @@ def parse_log_track_seconds(text):
 
 def parse_log_track_files(text):
     """Track number -> audio file name, from a log's per-track Filename
-    lines (EAC writes them; XLD does not)."""
+    lines.
+
+    Both rippers write them; the path is the RIPPER's own (XLD names the Mac
+    folder it ripped to, EAC its Windows one), so the name only places a local
+    file when the library kept it. `mlo.paths._same_name` (via `_norm_name`)
+    decides that, and the per-track CRC pairing never uses this at all — it
+    matches by number, then by order (`log_crc_map`)."""
     out = {}
     current = None
     for raw in text.splitlines():
@@ -1023,9 +1060,9 @@ def _rename(src, dst, notes):
             if src == dst:
                 return False
             tmp = src + ".mlo_case_tmp"
-            os.replace(src, tmp)
+            replace_locked(src, tmp)
             try:
-                os.replace(tmp, dst)
+                replace_locked(tmp, dst)
             except OSError:
                 os.replace(tmp, src)  # roll back, surface the error
                 raise
@@ -1948,7 +1985,7 @@ def _fix_cue_filenames_locked(album_dir, log_fn, config):
                         os.fsync(fh.fileno())
                     except Exception:
                         pass
-                os.replace(tmp, path)
+                replace_locked(tmp, path)
                 fsync_dir(os.path.dirname(path))
             except OSError as e:
                 notes.append(f"{cue}: write failed ({e})")

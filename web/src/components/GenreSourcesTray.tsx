@@ -136,18 +136,29 @@ export default function GenreSourcesTray({
                   {/* A source that needs a credential says so HERE and stays
                       tickable: the chain skips an unconfigured one and says
                       why, and unticking it for the user would quietly change
-                      the list they saved. */}
-                  {r.needs.length > 0 && !r.configured && (
-                    <span
-                      className="chip bg-amber-950/30 border border-amber-900/40 text-amber-300/90"
-                      title={`The ticked source is skipped until you set: ${needsText(
-                        r.needs,
-                        ", "
-                      )}`}
-                    >
-                      needs {needsText(r.needs, " + ")}
-                    </span>
-                  )}
+                      the list they saved. A need with a SECOND route (RYM's
+                      archived snapshot) is named but not called "skipped":
+                      the source still answers. */}
+                  {r.needs.length > 0 && !r.configured && (() => {
+                    const optional = r.optional_needs ?? [];
+                    const blocked = r.needs.filter((k) => !optional.includes(k));
+                    const title = blocked.length
+                      ? `The ticked source is skipped until you set: ${needsText(blocked, ", ")}`
+                      : `Read without it — ${needsText(r.needs, ", ")} upgrades this source when set`;
+                    return (
+                      <span
+                        className={`chip ${
+                          blocked.length
+                            ? "bg-amber-950/30 border border-amber-900/40 text-amber-300/90"
+                            : "bg-white/5 border border-white/10 text-zinc-400"
+                        }`}
+                        title={title}
+                      >
+                        needs {needsText(r.needs, " + ")}
+                        {blocked.length === 0 ? " (optional)" : ""}
+                      </span>
+                    );
+                  })()}
                 </span>
                 <span className="block text-[11px] text-zinc-500 leading-snug">
                   {r.provides}

@@ -25,6 +25,7 @@ from fastapi import APIRouter, File, HTTPException, Query, Request, Response, Up
 from pydantic import BaseModel
 
 from mlo import cover_choice
+from mlo.atomic import replace_locked
 from mlo.paths import clear_track_covers, set_track_covers
 from server import artcache, integrations as intg, job_locks, mbresolve, tagcache
 from server.api_common import _guard_folder, re_safe_filename, load_config
@@ -59,6 +60,14 @@ def get_cover(request: Request, album: str = Query(...), file: Optional[str] = Q
     a different one — see `api.coverUrl`'s `v` — so an in-app replacement is
     still a fresh fetch), and its ETag is the thumbnail's own bytes, so a
     revalidation is a 304 whichever entry the client holds.
+
+    **How the art is resolved** (`file` is a hint, never a demand): the named
+    file while it exists, else the album's own cover by the standard names
+    (`tagcache.cover_path` — a payload that predates a re-encode's rename
+    still resolves), else the embedded picture of the track that file named,
+    or of the album's first track (`tagcache.embedded_cover_bytes`; there is no
+    file to shrink there, so a `w` request serves that picture whole). The 404
+    is what is left when the album has no art in either place.
     """
     alb = os.path.normpath(mbresolve.resolve_album(album) or album)
     if not os.path.isdir(alb):
@@ -81,6 +90,14 @@ def get_cover(request: Request, album: str = Query(...), file: Optional[str] = Q
                    "Accept-Ranges": "bytes"}
     else:
         data, ctype, etag = tagcache.cover_bytes(alb, file)
+        if data is None:
+            # No cover FILE at all — but an album's art can live inside its
+            # audio (`embed_covers`, or a folder the import's cover step has
+            # not reached yet). Serve the track's own picture rather than
+            # nothing: the player has no other way to draw the album, and a
+            # blank slot is the fact the owner reported. Only reached when
+            # `cover_bytes` found no file, so a sidecar is never masked.
+            data, ctype, etag = tagcache.embedded_cover_bytes(alb, file)
         headers = {"Cache-Control": "no-cache", "Accept-Ranges": "bytes"}
     if data is None:
         raise HTTPException(404, "no cover")
@@ -371,7 +388,7 @@ def _write_cover_bytes(alb: str, stem: str, ext: str, data: bytes):
                 os.fsync(f.fileno())
             except Exception:
                 pass
-        os.replace(tmp, dest)
+        replace_locked(tmp, dest)
     except Exception as e:
         try:
             if os.path.exists(tmp):
@@ -734,18 +751,10 @@ def cover_info(album: str = Query(...), file: str = Query(None),
     data, ctype, _etag = tagcache.cover_bytes(alb, file)
     if data is None:
         raise HTTPException(404, "no cover")
-    # Resolve the on-disk path for the file name (cache is keyed by stat).
-    p = None
-    if file:
-        cand = os.path.normpath(os.path.join(alb, os.path.basename(file)))
-        if os.path.isfile(cand):
-            p = cand
-    if p is None:
-        for cand in ("cover.jpg", "cover.jpeg", "cover.png", "cover.jxl", "cover.webp", "cover.bmp"):
-            full = os.path.join(alb, cand)
-            if os.path.isfile(full):
-                p = full
-                break
+    # The file the bytes came from — the ONE resolution rule (`cover_path`:
+    # the named file while it exists, else the album's own cover), so a stale
+    # name reports the file that really answered.
+    p = tagcache.cover_path(alb, file)
     info = {"file": os.path.basename(p) if p else None,
             "format": (ctype or "image").split("/")[-1].upper(),
             "bytes": len(data),

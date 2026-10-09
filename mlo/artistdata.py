@@ -69,6 +69,7 @@ try:
 except ImportError:
     ImageOps = None
 
+from .atomic import replace_locked
 from .paths import album_sidecar_copy, MLO_DATA_DIR_NAME, MLO_DIR_NAME, app_data_dir, library_root
 
 # Stems an artist image may use ("artist.jpg", "Artist.PNG", ...).
@@ -212,7 +213,7 @@ def _save_map(cfg, data, folder=None):
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(data, fh, indent=1, sort_keys=True)
-        os.replace(tmp, path)
+        replace_locked(tmp, path)
     except OSError:
         try:
             os.remove(tmp)
@@ -593,7 +594,7 @@ def _save_normalized(folder, img, ext, cfg):
                 except (TypeError, ValueError):
                     quality = 90
                 img.save(fh, "JPEG", quality=quality, optimize=True)
-        os.replace(tmp, dest)
+        replace_locked(tmp, dest)
     except Exception:
         try:
             os.remove(tmp)
@@ -975,7 +976,7 @@ def write_description(folder, text, cfg=None, source=None, source_url=None,
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(body)
-        os.replace(tmp, dest)
+        replace_locked(tmp, dest)
     except OSError:
         try:
             os.remove(tmp)

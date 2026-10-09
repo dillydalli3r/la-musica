@@ -15,7 +15,9 @@ import time
 import traceback
 from collections import OrderedDict
 
+from mlo.atomic import read_bytes_locked
 from mlo.audio import AudioFile
+from mlo.paths import LIB_AUDIO_EXTS
 
 _TAG_MAX = 16384
 _LIB_TTL = 60.0  # seconds; tag writes/renames bust via invalidate calls
@@ -56,6 +58,9 @@ _lib_drop_gen = 0
 _payload_cache = {}  # (kind, path, config key) -> (built_at, payload)
 _cover_cache = OrderedDict()
 _color_cache = OrderedDict()  # cover stat key -> "#rrggbb"
+# audio file stat key -> (bytes, ctype) of its embedded picture, or () for
+# "this file was read and carries none" (see `embedded_cover_bytes`).
+_embedded_cache = OrderedDict()
 
 
 def _stat_key(path):
@@ -112,34 +117,42 @@ def read_track(path, tag_list=None):
             return dict(hit[0]), dict(hit[1])
     af = AudioFile(path)
     if af.audio is None:
-        tags, tech = {}, {}
+        # An UNREADABLE file is not an empty one. A lock held by an antivirus
+        # pass, a scanner or a concurrent replace made this read fail; caching
+        # the empty result (as this used to) served a stale "untagged" row for
+        # the track and its album until the file's stat happened to change —
+        # the read error the owner saw as missing tags rather than as an error.
+        # Answer THIS call empty, cache NOTHING so the next read tries again,
+        # and carry the reason so a caller can tell a failed read from a
+        # genuinely tagless track (the empty `tags` stays the same shape every
+        # caller already handles).
+        return {}, ({"error": str(af.error)} if af.error else {})
+    if tag_list is None:
+        tags = af.all_tags() or {}
     else:
-        if tag_list is None:
-            tags = af.all_tags() or {}
-        else:
-            tags = {t: af.get_tag(t) for t in tag_list}
-        tech = {}
-        if getattr(af, "is_video", False):
-            # Video containers carry their tech from ffprobe (video codec,
-            # dimensions, duration) instead of mutagen stream info.
-            tech.update(getattr(af, "tech", {}) or {})
-        else:
-            info = af.audio.info
-            if info is not None:
-                for attr in ("length", "bitrate", "sample_rate", "bits_per_sample", "channels"):
-                    try:
-                        v = getattr(info, attr, None)
-                        if v is not None:
-                            tech[attr] = round(float(v), 3) if isinstance(v, (int, float)) else str(v)
-                    except Exception:
-                        pass
-            # Codec (FLAC / MP3 / ALAC / …) shown next to bitrate and depth.
-            try:
-                codec = _detect_codec(path, af)
-                if codec:
-                    tech["codec"] = codec
-            except Exception:
-                pass
+        tags = {t: af.get_tag(t) for t in tag_list}
+    tech = {}
+    if getattr(af, "is_video", False):
+        # Video containers carry their tech from ffprobe (video codec,
+        # dimensions, duration) instead of mutagen stream info.
+        tech.update(getattr(af, "tech", {}) or {})
+    else:
+        info = af.audio.info
+        if info is not None:
+            for attr in ("length", "bitrate", "sample_rate", "bits_per_sample", "channels"):
+                try:
+                    v = getattr(info, attr, None)
+                    if v is not None:
+                        tech[attr] = round(float(v), 3) if isinstance(v, (int, float)) else str(v)
+                except Exception:
+                    pass
+        # Codec (FLAC / MP3 / ALAC / …) shown next to bitrate and depth.
+        try:
+            codec = _detect_codec(path, af)
+            if codec:
+                tech["codec"] = codec
+        except Exception:
+            pass
     with _lock:
         _tag_cache[key] = (tags, tech)
         _tag_cache.move_to_end(key)
@@ -161,6 +174,8 @@ def invalidate_path(path):
         keys = [k for k in _tag_cache if k[0] == norm]
         for k in keys:
             del _tag_cache[k]
+        for key in [k for k in _embedded_cache if k[0] == norm]:
+            del _embedded_cache[key]
         _lib_dirty.update(_lib_cache)
         _lib_write_gen += 1
         _payload_cache.clear()
@@ -189,6 +204,7 @@ def invalidate_all():
         _tag_cache.clear()
         _cover_cache.clear()
         _color_cache.clear()
+        _embedded_cache.clear()
         _lib_cache.clear()
         _lib_body.clear()
         _lib_dirty.clear()
@@ -268,6 +284,8 @@ def invalidate_album(*folders):
             del _tag_cache[key]
         for key in [k for k in _cover_cache if any(_inside(k[0], r) for r in roots)]:
             del _cover_cache[key]
+        for key in [k for k in _embedded_cache if any(_inside(k[0], r) for r in roots)]:
+            del _embedded_cache[key]
         for key in [k for k in _color_cache if any(_inside(k[0], r) for r in roots)]:
             del _color_cache[key]
         _lib_dirty.update(_lib_cache)
@@ -465,9 +483,30 @@ def cached_payload(kind, path, cfg, builder, ttl=_PAYLOAD_TTL):
     return payload
 
 
+# The canonical album cover names, the order the folder's own art is picked in,
+# and the content type each container is served as.
+_COVER_NAMES = ("cover.jpg", "cover.jpeg", "cover.png", "cover.jxl",
+                "cover.webp", "cover.bmp")
+_COVER_TYPES = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+                ".jxl": "image/jxl", ".webp": "image/webp", ".bmp": "image/bmp"}
+
+
 def cover_path(album, file=None):
     """The cover image FILE an album serves: *file* when it is really in the
     folder, else the first of the standard names that exists, else None.
+
+    *file* is a HINT, not a demand. It arrives off a payload that can predate
+    what is on disk: every writer here replaces a cover in place under the
+    canonical name — `server.api_cover._write_cover_bytes` drops the old
+    extension after a PNG→JPEG re-encode, and script 5 renames the folder's own
+    cover candidate (`mlo.images._rename_to_cover`: `front.jpg`/`folder.jpg`/
+    `cover.png` → `cover.jpg`) — so a queue row, a page or an offline cache that
+    still names `cover.png` after the write that turned it into `cover.jpg` was
+    asking for a file that no longer exists. Answering None there left the one
+    surface that cannot recover on its own — the player's artwork — on the disc
+    placeholder for the whole track, however well the album's cover sat on
+    disk. A missing *file* therefore falls through to the album's own cover:
+    the stale name still resolves, to the album's own art.
 
     Split out of `cover_bytes` because the sized-thumb path (see
     `artcache.cover_thumb`) has to know WHICH file it is shrinking — the
@@ -477,8 +516,7 @@ def cover_path(album, file=None):
         cand = os.path.normpath(os.path.join(album, os.path.basename(file)))
         if os.path.isfile(cand):
             return cand
-        return None
-    for cand in ("cover.jpg", "cover.jpeg", "cover.png", "cover.jxl", "cover.webp", "cover.bmp"):
+    for cand in _COVER_NAMES:
         full = os.path.join(album, cand)
         if os.path.isfile(full):
             return full
@@ -486,9 +524,16 @@ def cover_path(album, file=None):
 
 
 def cover_bytes(album, file=None):
-    """Return (bytes, ctype, etag) for an album cover file, cached."""
-    import hashlib
+    """Return (bytes, ctype, etag) for an album cover file, cached.
 
+    An unreadable file is NOT an empty one. The read is retried through a
+    transient denial — the window in which a writer has just replaced the file,
+    a scanner or an anti-malware pass holds it open (`mlo.atomic
+    .read_bytes_locked`, the read-side twin of the retry every writer's final
+    swap already goes through) — and a read that really fails caches NOTHING,
+    so the next request asks again instead of serving a failure that a later,
+    healthy read could never displace.
+    """
     p = cover_path(album, file)
     if p is None:
         return None, None, None
@@ -499,23 +544,114 @@ def cover_bytes(album, file=None):
             _cover_cache.move_to_end(key)
             return hit
     try:
-        with open(p, "rb") as f:
-            data = f.read()
-        etag = hashlib.md5(data).hexdigest()
-        ext = os.path.splitext(p)[1].lower()
-        ctype = {
-            ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
-            ".jxl": "image/jxl", ".webp": "image/webp", ".bmp": "image/bmp",
-        }.get(ext, "image/jpeg")
-        hit = (data, ctype, etag)
+        data = read_bytes_locked(p)
     except OSError:
         return None, None, None
+    if not data:
+        return None, None, None
+    hit = (data, _COVER_TYPES.get(os.path.splitext(p)[1].lower(), "image/jpeg"),
+           hashlib.md5(data).hexdigest())
     with _lock:
         _cover_cache[key] = hit
         _cover_cache.move_to_end(key)
         while len(_cover_cache) > _COVER_MAX:
             _cover_cache.popitem(last=False)
     return hit
+
+
+def _image_ctype(data, mime=""):
+    """The content type for embedded image bytes: the container's own mime when
+    the tagger states one, else the one the bytes really are."""
+    m = str(mime or "").split(";")[0].strip().lower()
+    if m.startswith("image/"):
+        return "image/jpeg" if m == "image/jpg" else m
+    if data[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return "image/jpeg"
+
+
+def _cover_audio_candidates(album, file=None):
+    """The album's audio files to read embedded art from, best first.
+
+    The track the caller named leads: a per-track sidecar is that track's
+    basename plus an image extension, so its audio file is the same stem with
+    an audio extension. The album's own tracks follow, in name order.
+    """
+    out, seen = [], set()
+    stem = os.path.splitext(os.path.basename(str(file or "")))[0] if file else ""
+    if stem:
+        for ext in LIB_AUDIO_EXTS:
+            p = os.path.join(album, stem + ext)
+            if os.path.isfile(p):
+                out.append(p)
+                seen.add(os.path.normcase(p))
+    try:
+        names = sorted(n for n in os.listdir(album)
+                       if os.path.splitext(n)[1].lower() in LIB_AUDIO_EXTS)
+    except OSError:
+        names = []
+    for n in names:
+        p = os.path.join(album, n)
+        if os.path.normcase(p) not in seen:
+            out.append(p)
+    return out
+
+
+def embedded_cover_bytes(album, file=None):
+    """(bytes, ctype, etag) for the album's EMBEDDED cover art, cached, or None.
+
+    The last resort BEHIND `cover_path`/`cover_bytes`, for the case those
+    cannot answer while the UI still has a track to draw: the art lives in the
+    audio files (the library's `embed_covers` policy allows either way), the
+    import's cover step has not written the sidecar yet, or the folder is being
+    filled right now. A song whose own art is inside it beats a blank slot, and
+    it can never mask a sidecar, because callers ask for this ONLY after
+    `cover_bytes` found no file at all.
+
+    Cached on the AUDIO file's stat, so a re-tagged file is a miss and a file
+    whose picture was stripped stops answering it. The cache distinguishes the
+    two reasons a file yields no picture: a file that was READ and carries none
+    is a fact about that file (cached; the file's own stat expires it), while a
+    file that could not be read at all (`AudioFile.audio is None` — a lock, a
+    denied share) caches NOTHING, so the next ask reads it again instead of
+    remembering a failure.
+    """
+    for path in _cover_audio_candidates(album, file):
+        key = _stat_key(path)
+        with _lock:
+            hit = _embedded_cache.get(key)
+            if hit is not None:
+                _embedded_cache.move_to_end(key)
+        if hit is None:
+            try:
+                af = AudioFile(path)
+            except Exception:
+                continue                      # not even openable: next track
+            if af.audio is None:
+                continue                      # unreadable ≠ pictureless
+            try:
+                pics = af.embedded_pictures() or []
+            except Exception:
+                pics = []
+            hit = ()
+            for mime, blob in pics:
+                if blob:
+                    blob = bytes(blob)
+                    hit = (blob, _image_ctype(blob, mime))
+                    break
+            with _lock:
+                _embedded_cache[key] = hit
+                _embedded_cache.move_to_end(key)
+                while len(_embedded_cache) > _COVER_MAX:
+                    _embedded_cache.popitem(last=False)
+        if hit:
+            data, ctype = hit
+            return data, ctype, hashlib.md5(data).hexdigest()
+    return None, None, None
 
 
 def cover_color(album, file=None):

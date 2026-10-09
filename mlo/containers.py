@@ -10,6 +10,7 @@ import re
 import tempfile
 import zlib
 
+from .atomic import replace_locked
 from .config import DEFAULT_CONFIG, should_write_audio_tag
 from .deps import FLAC
 
@@ -29,7 +30,7 @@ def _atomic_write(target_path, data: bytes):
                 os.fsync(f.fileno())
             except Exception:
                 pass
-        os.replace(tmp, target_path)
+        replace_locked(tmp, target_path)
         tmp = None
     finally:
         if fd is not None:

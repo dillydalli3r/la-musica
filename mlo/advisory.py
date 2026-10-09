@@ -19,9 +19,13 @@ must not be invented without evidence. The ladder, in order:
    with its lyrics when they exist (the rubric in `_SYSTEM_PROMPT` reads them).
    It is asked ONLY here — when every source above came up with nothing at all
    — and never to second-guess one that stated something: the model is what
-   answers the unanswerable, not a competing opinion. 3 means "cannot tell" and
-   falls through — the value space this app stores is 0/1/2, and a stored 3
-   would fail the grader on every track that carried one.
+   answers the unanswerable, not a competing opinion. Its `1` is NOT written,
+   though: an explicit flag needs a real source to say the TRACK is explicit,
+   so a model that answers explicit on its own leaves the track at the
+   fallback (the owner's rule — a guess must never be the only reason a track
+   reads explicit). Its `0`/`2` stand. 3 means "cannot tell" and falls through
+   — the value space this app stores is 0/1/2, and a stored 3 would fail the
+   grader on every track that carried one.
 3. **`advisory_fallback`** — what to store when every step above was silent:
    `"0"` (the shipped default: not explicit), `"2"` (clean edition) or
    `"none"` (write nothing at all, leaving the track unrated).
@@ -172,7 +176,8 @@ def _ai_verdict(cfg, af=None, lyrics="") -> Optional[Dict]:
     None means it said nothing usable — switched off, not configured, no reply,
     or an answer that is not a rating (3 = "cannot tell": the value space this
     app stores is 0/1/2, and a stored 3 would fail the grader on every track
-    carrying one).
+    carrying one). The DECISION to drop an explicit `1` is `decide_advisory`'s
+    (a model may state 0/2, but never make a track read explicit on its own).
     """
     if not (cfg or {}).get("advisory_ai_classify", True):
         return None
@@ -220,8 +225,10 @@ def decide_advisory(cfg, *, value=None, source="", answers=None, path="", af=Non
        INSTRUMENTAL=1, so it is 0 under `auto_zero_advisory_for_instrumental`.
        An instrumental has no words to be explicit with, and costs no AI call.
     3. The AI (`_ai_verdict`), asked only now — every source came up with
-       nothing at all — and fed the track's words when they exist. Its 0/1/2
-       is the answer; 3 or garbage is not, and falls through.
+       nothing at all — and fed the track's words when they exist. Its 0/2 is
+       the answer; its 1 is NOT (an explicit flag needs a real source to state
+       the TRACK is explicit — the model is a reading, never the only voice for
+       `1`), and 3 or garbage is not either: all three fall through.
     4. `advisory_fallback`, the last resort.
     """
     if value is not None:
@@ -234,6 +241,16 @@ def decide_advisory(cfg, *, value=None, source="", answers=None, path="", af=Non
 
     text = _lyrics_text(path, af, lyrics)
     verdict = _ai_verdict(cfg, af=af, lyrics=text)
+    if verdict is not None and int(verdict.get("value") or 0) == 1:
+        # The model's READING is not a statement. An explicit flag needs a real
+        # source to say the TRACK is explicit (Deezer/Spotify by ISRC, Apple's
+        # trackExplicitness); the model is the app's last reader, never the
+        # only voice for `1`. Asked here because every provider was silent, a
+        # model that answers explicit leaves the track at the neutral fallback
+        # — the app must not label a track explicit on a guess. Its `0` (not
+        # explicit) is still taken: it agrees with the neutral answer, and the
+        # ladder's fallback is where an explicit-only guess would land anyway.
+        verdict = None
     if verdict is not None:
         # No provider spoke, so the model's answer is what the reply reports as
         # the value's source, beside whatever the providers said (nothing).

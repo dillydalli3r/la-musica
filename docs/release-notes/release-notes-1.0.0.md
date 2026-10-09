@@ -46,6 +46,15 @@ break a filesystem spelled a folder the OS refused.
   that album's own name and summary when the run was a single album. Progress
   keeps its switches (off by default, and on means at once), and a FAILED
   download still speaks the moment every candidate has been rejected.
+- **The shared history card says what the SHARE holds, and can be cleared.**
+  Beside the uploads' own totals (`N files · X given`) the card now shows the
+  share's OFFER — the file count and byte size of the index slskd serves (the
+  configured share folders and excludes, not the library on disk; an index too
+  big to read is said to be uncountable, never undercounted) — and clears the
+  history at the granularity asked for: one file, one folder, one peer, or the
+  whole list. A clear forgets RECORDS only — it cancels no upload, deletes no
+  file and changes nothing about the share (slskd keeps its own transfer tree);
+  a download that arrives later shows again.
 
 ## Every form of CD is a CD
 
@@ -111,6 +120,24 @@ hold, not a stop: the pause never clears what is playing, so the bar, the
 fullscreen player, the media session and the next-track preload are untouched
 by a one-second gesture, and the release is listened for on the window as well
 as on the bar so a drag that ends off the track still puts the sound back.
+
+## The cover the bar shows
+
+The artwork could go missing for a whole track and stay missing. A cover's URL
+is its album folder plus a FILE NAME, and the app's own writers rename that
+file inside a folder that does not move — script 5 takes the folder's cover
+candidate to `cover.jpg`, and a write that re-encodes a PNG to JPEG drops the
+old extension — so a queue row or a page payload built before the rename asked
+for a file that no longer existed. Answering "nothing" there was permanent,
+because the surface remembered the failure and never asked again. A cover
+request now treats the name as a hint: the album's own cover answers it when
+the named file is gone, a read the OS denies for a moment (a writer's replace
+window, a scanner, an anti-malware pass) is waited out the way every write
+already was rather than served as "no cover", and an album whose art lives
+inside its tracks serves that picture instead of a blank slot. The player
+itself re-asks a cover that failed, three times over the next five seconds,
+instead of keeping the disc glyph for the rest of the track.
+`tools/test_cover_preview.py` pins all of it.
 
 ## Sharing and export
 

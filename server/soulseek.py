@@ -28,7 +28,7 @@ from urllib.parse import quote
 
 import httpx
 
-from mlo.config import load_config
+from mlo.config import load_config, save_config
 from mlo.discs import is_disc_parent
 from mlo.fetchdeps import installed_path
 from mlo.naming import sanitize_segment
@@ -1823,12 +1823,92 @@ def _utc_epoch(value):
     return dt.timestamp()
 
 
+# ── Clearing the upload history ──────────────────────────────────────────
+# slskd owns the upload tree (`GET /transfers/uploads`): this app reads it and
+# groups it, but the records live in the daemon and it is where they come back
+# from until it restarts. slskd's API CAN drop uploads — `DELETE
+# /transfers/uploads/all/completed` removes every completed one, and
+# `DELETE /transfers/uploads/{username}/{id}` cancels one transfer (with
+# `?remove=true` it also untracks it) — but there is NO per-folder and NO
+# per-user delete, and the per-transfer route CANCELS A LIVE UPLOAD (it stops
+# a peer's download mid-transfer), which is not "clearing a record". So a clear
+# here is an app-side FORGET LIST: the history view hides the matching rows and
+# nothing else changes — no transfer is cancelled, no file is deleted, no share
+# is altered, and slskd keeps its own records untouched. Never claim a delete
+# the daemon did not perform.
+#
+# One entry hides a set of transfers: {user, dir, file, before}. A blank
+# selector means "any", so a single entry clears one file ({user, dir, file}),
+# one folder ({user, dir}), one peer ({user}) or the whole history ({}). The
+# `before` epoch cutoff is what makes this a HISTORY clear rather than a
+# permanent block: a transfer stamped LATER than `before` shows again, so a peer
+# who downloads something new after you cleared them is visible, not hidden
+# forever.
+_FORGET_SCOPES = ("file", "folder", "user", "all")
+
+
+def _forget_entries(cfg=None):
+    """The owner's cleared-upload-history selectors, defensively read.
+
+    A hand-edited config must not crash the 5 s poll, so anything that is not
+    a dict with parseable fields is dropped rather than trusted. Selectors are
+    lower-cased here (Soulseek names do not distinguish case) and a missing
+    `before` is 0 (an entry with no cutoff hides only what has no stamp)."""
+    cfg = cfg if isinstance(cfg, dict) else load_config()
+    out = []
+    for raw in cfg.get("soulseek_upload_forget") or []:
+        if not isinstance(raw, dict):
+            continue
+        try:
+            before = float(raw.get("before") or 0)
+        except (TypeError, ValueError):
+            before = 0.0
+        out.append({
+            "user": str(raw.get("user") or "").strip().lower(),
+            "dir": str(raw.get("dir") or "").strip().lower(),
+            "file": str(raw.get("file") or "").strip().lower(),
+            "before": before,
+        })
+    return out
+
+
+def _forgotten(user, directory, filename, stamp, entries):
+    """True when one upload transfer is hidden by the forget list.
+
+    A blank selector in an entry means "any"; the entry hides a transfer only
+    when this transfer is stamped at or before the entry's cutoff, so a later
+    download by the same peer is not swallowed by an older clear."""
+    if not entries:
+        return False
+    u = str(user or "").strip().lower()
+    d = str(directory or "").strip().lower()
+    f = str(filename or "").strip().lower()
+    when = stamp or 0
+    for e in entries:
+        if when > e["before"]:
+            continue
+        if e["user"] and e["user"] != u:
+            continue
+        if e["dir"] and e["dir"] != d:
+            continue
+        if e["file"] and e["file"] != f:
+            continue
+        return True
+    return False
+
+
 def uploads_summary(cfg=None, timeout=30.0):
     """slskd's upload tree grouped ONE ENTRY PER PEER, newest activity first.
 
+    Rows the owner has CLEARED (`soulseek_upload_forget`, see forget_uploads)
+    are left out of the grouping entirely, so a peer's `files`/`bytes`/
+    `transferred` describe only what is still shown and a peer with nothing
+    left is dropped. The forgetting hides RECORDS only: slskd's own tree and
+    every transfer in it are untouched.
+
     Each entry describes a peer and what they took from this share:
       username     the peer
-      files        every transfer slskd has for them (live and finished)
+      files        every VISIBLE transfer slskd has for them (live and finished)
       active       how many of those are still running
       bytes        the sum of the FILES' own sizes (never the partial bytes
                    moved so far — that is what the panel shows per file)
@@ -1841,6 +1921,7 @@ def uploads_summary(cfg=None, timeout=30.0):
     At most _UPLOAD_PEERS_MAX peers are returned (newest activity first), so a
     share with hundreds of past downloaders cannot make the poll unbounded.
     """
+    entries = _forget_entries(cfg)
     peers = {}
     for entry in uploads_state(cfg, timeout=timeout) or []:
         if not isinstance(entry, dict):
@@ -1863,6 +1944,8 @@ def uploads_summary(cfg=None, timeout=30.0):
                 stamp = next((t for t in
                               (_utc_epoch(f.get(k)) for k in _UPLOAD_STAMP_KEYS)
                               if t is not None), None)
+                if _forgotten(user, directory, f.get("filename"), stamp, entries):
+                    continue
                 peer["files"] += 1
                 peer["bytes"] += size
                 peer["transferred"] += done
@@ -1880,6 +1963,8 @@ def uploads_summary(cfg=None, timeout=30.0):
                 })
     out = []
     for peer in peers.values():
+        if peer["files"] <= 0:
+            continue        # every one of this peer's rows was cleared
         # Newest transfer first inside the peer, then keep only the most recent
         # few; the omitted ones are still counted in `files`/`bytes`.
         peer["items"].sort(key=lambda i: i["last"] or 0, reverse=True)
@@ -1888,6 +1973,61 @@ def uploads_summary(cfg=None, timeout=30.0):
         out.append(peer)
     out.sort(key=lambda p: p["last"] or 0, reverse=True)
     return out[:_UPLOAD_PEERS_MAX]
+
+
+def forget_uploads(scope, username="", directory="", filename="", cfg=None):
+    """Clear upload HISTORY at one granularity; returns the new forget list.
+
+    `scope` is one of _FORGET_SCOPES:
+      file    — one transfer of one peer in one folder
+      folder  — every transfer of one peer in one folder
+      user    — every transfer of one peer
+      all     — the whole history
+
+    This forgets RECORDS, never files: no upload is cancelled, no shared folder
+    changes, nothing on disk is read or written, and slskd keeps its own tree —
+    only `uploads_summary` stops showing the matching rows (see the comment
+    above `_FORGET_SCOPES`). The selector is stamped with `now`, so a download
+    that arrives LATER is shown again.
+
+    An entry this one subsumes (same or narrower selectors, an equal or earlier
+    cutoff) is dropped, so a whole-history clear collapses the list to one
+    entry and repeated clears of the same peer do not grow it without bound.
+    Raises ValueError on a scope or a missing selector the caller must supply."""
+    scope = str(scope or "").strip().lower()
+    if scope not in _FORGET_SCOPES:
+        raise ValueError(f"unknown scope {scope!r} — expected one of "
+                         f"{', '.join(_FORGET_SCOPES)}")
+    entry = {"user": "", "dir": "", "file": "", "before": time.time()}
+    if scope in ("file", "folder", "user"):
+        entry["user"] = str(username or "").strip().lower()
+        if not entry["user"]:
+            raise ValueError("a username is required to clear one peer's history")
+    if scope in ("file", "folder"):
+        entry["dir"] = str(directory or "").strip().lower()
+        if not entry["dir"]:
+            raise ValueError("a folder is required to clear a folder's history")
+    if scope == "file":
+        entry["file"] = str(filename or "").strip().lower()
+        if not entry["file"]:
+            raise ValueError("a filename is required to clear one file's history")
+
+    cfg = cfg if isinstance(cfg, dict) else load_config()
+
+    def subsumes(a, b):
+        # does entry `a` hide everything entry `b` would? (a no narrower, no
+        # earlier cutoff)
+        return (a["before"] >= b["before"]
+                and (not a["user"] or a["user"] == b["user"])
+                and (not a["dir"] or a["dir"] == b["dir"])
+                and (not a["file"] or a["file"] == b["file"]))
+
+    entries = [e for e in _forget_entries(cfg) if not subsumes(entry, e)]
+    entries.append(entry)
+    cfg["soulseek_upload_forget"] = entries
+    if not save_config(cfg):
+        raise RuntimeError("could not save the cleared upload history")
+    return entries
 
 
 def upload_start_frames(prev, uploads):
@@ -2036,7 +2176,7 @@ def is_own_username(username, cfg=None):
 
 
 def local_browse(cfg=None, use_cache=True):
-    """This app's OWN share in the browse shape -> [{directory, files:[…]}].
+    """This app's OWN share in the browse shape -> ([{directory, files:[…]}], truncated).
 
     The one browse the peer network cannot answer from here: the Soulseek
     server hands every client the address it published for the account — on
@@ -2048,8 +2188,11 @@ def local_browse(cfg=None, use_cache=True):
     receives is one local read away (`GET /shares/contents`), with nothing
     walked from disk and nothing invented.
 
-    Cached like `browse()`: the endpoint has no pagination — a large library is
-    a large document — while a modal that opens twice in a minute asks the same
+    `truncated` is `_share_contents`'s cap flag: the index is bigger than the
+    bytes this app will read at once, so `rows` is empty and the caller must
+    say so rather than report a share with nothing in it. Cached like
+    `browse()`: the endpoint has no pagination — a large library is a large
+    document — while a modal that opens twice in a minute asks the same
     question. Raises slskd's own words when the index cannot be read."""
     key = os.path.normcase(str((cfg or {}).get("music_folder") or ""))
     now = time.time()
@@ -2058,18 +2201,72 @@ def local_browse(cfg=None, use_cache=True):
             hit = _local_browse_cache.get(key)
         if hit and now - hit[0] < _LOCAL_BROWSE_TTL:
             return hit[1]
-    rows, _truncated, error = _share_contents(
+    rows, truncated, error = _share_contents(
         cfg, limit_bytes=_LOCAL_BROWSE_MAX_BYTES)
     if error:
         raise RuntimeError(error)
     if use_cache and key:
         with _local_browse_lock:
-            _local_browse_cache[key] = (now, rows)
+            _local_browse_cache[key] = (now, (rows, truncated))
             if len(_local_browse_cache) > 4:
                 oldest = min(_local_browse_cache.items(),
                              key=lambda kv: kv[1][0])[0]
                 _local_browse_cache.pop(oldest, None)
-    return rows
+    return rows, truncated
+
+
+# The share's OWN totals (what this install OFFERS) move only when the share
+# changes and slskd rescans it, so this read is cached longer than a browse.
+# The cap is `local_browse`'s own — ONE truncation story — so an index bigger
+# than the app will read at once comes back as `truncated` with NO totals,
+# never a count of the part that happened to fit (a wrong total is worse than
+# an honest "too big to count").
+_SHARE_TOTALS_TTL = 300.0
+_share_totals_cache: dict = {}
+_share_totals_lock = threading.Lock()
+
+
+def share_totals(cfg=None, use_cache=True):
+    """What this install OFFERS -> {"files", "bytes", "truncated"}.
+
+    The share's file count and byte total, summed from the index slskd serves
+    (`GET /shares/contents` via `_share_contents`) — the SAME tree a peer
+    browses and `local_browse` answers from, never a walk of the library, so it
+    is exactly the share (the configured share dirs and excludes), not every
+    file on disk. `bytes` sums each indexed file's own `size`.
+
+    `truncated` is honest: a share whose index exceeds the read cap returns
+    `{"files": None, "bytes": None, "truncated": True}` instead of a total of
+    the part that fit. Raises slskd's own words when the index cannot be read."""
+    key = os.path.normcase(str((cfg or {}).get("music_folder") or ""))
+    now = time.time()
+    if use_cache:
+        with _share_totals_lock:
+            hit = _share_totals_cache.get(key)
+        if hit and now - hit[0] < _SHARE_TOTALS_TTL:
+            return hit[1]
+    rows, truncated, error = _share_contents(
+        cfg, limit_bytes=_LOCAL_BROWSE_MAX_BYTES)
+    if error:
+        raise RuntimeError(error)
+    if truncated:
+        out = {"files": None, "bytes": None, "truncated": True}
+    else:
+        files = 0
+        total = 0
+        for row in rows:
+            for f in row.get("files") or []:
+                files += 1
+                total += max(0, int(f.get("size") or 0))
+        out = {"files": files, "bytes": total, "truncated": False}
+    if use_cache and key:
+        with _share_totals_lock:
+            _share_totals_cache[key] = (now, out)
+            if len(_share_totals_cache) > 4:
+                oldest = min(_share_totals_cache.items(),
+                             key=lambda kv: kv[1][0])[0]
+                _share_totals_cache.pop(oldest, None)
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -3116,21 +3313,82 @@ def share_audit(cfg=None, probe=False):
 # rewrites hundreds of paths in minutes. slskd indexes shares at boot and only
 # picks changes up from a rescan, so without this other users keep browsing the
 # file list the library had when the daemon last started.
+#
+# The rescan is DEFERRED while a write is in flight. slskd's scan reads the
+# library files it indexes; on Windows a reader holding the file the app is
+# about to rename its atomic temp over is a `WinError 5`, and the writer only
+# tolerates a transient one. So while `job_locks` reports a job holding a path
+# under the share, the refresh re-arms instead of firing and is delivered the
+# moment the claim clears. A bounded wait keeps a wedged job from postponing it
+# forever, and it is never silently dropped — only late (the writer's own retry
+# is the backstop).
 _SHARE_REFRESH_LOCK = threading.Lock()
 _SHARE_REFRESH_TIMER = {"timer": None}
+# Between re-arms while a write is in flight, and the total wait after which
+# the rescan proceeds anyway.
+_SHARE_REFRESH_BACKOFF = 5.0
+_SHARE_REFRESH_MAX_WAIT = 600.0
 
 
-def refresh_shares_soon(delay=6.0):
+def _share_scope(cfg, paths=None):
+    """The paths a rescan would read: the changed paths a caller named, else
+    every shared folder (falling back to the music folder)."""
+    if paths:
+        return [p for p in paths if p]
+    try:
+        dirs = [p for p in share_dirs(cfg) if p]
+    except Exception:
+        dirs = []
+    if dirs:
+        return dirs
+    mf = str((cfg or {}).get("music_folder") or "").strip()
+    return [mf] if mf else []
+
+
+def share_write_in_flight(cfg=None, paths=None):
+    """The share path a job is writing under right now, "" when none.
+
+    A scan started while a job holds the album is exactly the read that
+    collides with the app's own tag/rename writes, so an app-triggered rescan
+    asks this first (see `_refresh_shares_now`, and the rescan route)."""
+    from server import job_locks
+    for p in _share_scope(cfg or load_config(), paths):
+        if p and job_locks.busy(p):
+            return p
+    return ""
+
+
+def _arm_refresh(delay):
+    """(Re-)arm the one-shot refresh timer, keeping the debounce's scope."""
+    with _SHARE_REFRESH_LOCK:
+        timer = _SHARE_REFRESH_TIMER.get("timer")
+        if timer is not None:
+            timer.cancel()
+        timer = threading.Timer(delay, _refresh_shares_now)
+        timer.daemon = True
+        _SHARE_REFRESH_TIMER["timer"] = timer
+    timer.start()
+
+
+def refresh_shares_soon(delay=6.0, paths=None):
     """Coalesce a burst of library changes into ONE share rescan.
 
     Trailing-edge debounce: every call pushes the timer out, so a run that
     keeps writing files asks slskd once, a few seconds after the last change,
     instead of once per album. Cheap enough to call from anywhere.
-    """
+
+    `paths` are the files/folders that changed, and the rescan waits for a job
+    holding any of them (`share_write_in_flight`). Omitted — the debounced
+    callers pass no path — means the whole share is the scope, so a job writing
+    anywhere under it defers the refresh. Several calls landing together
+    coalesce to one: each resets the timer out and the "since" clock."""
     with _SHARE_REFRESH_LOCK:
-        timer = _SHARE_REFRESH_TIMER["timer"]
+        timer = _SHARE_REFRESH_TIMER.get("timer")
         if timer is not None:
             timer.cancel()
+        _SHARE_REFRESH_TIMER["paths"] = [p for p in (paths or []) if p] or None
+        _SHARE_REFRESH_TIMER["since"] = time.time()
+        _SHARE_REFRESH_TIMER["deferred_logged"] = False
         timer = threading.Timer(delay, _refresh_shares_now)
         timer.daemon = True
         _SHARE_REFRESH_TIMER["timer"] = timer
@@ -3140,10 +3398,26 @@ def refresh_shares_soon(delay=6.0):
 def _refresh_shares_now():
     with _SHARE_REFRESH_LOCK:
         _SHARE_REFRESH_TIMER["timer"] = None
+        paths = _SHARE_REFRESH_TIMER.get("paths")
+        since = _SHARE_REFRESH_TIMER.get("since") or time.time()
     cfg = load_config()
     try:
         if not (is_running() or web_up(cfg)):
             return  # nothing to tell; the next start indexes the current tree
+        held = share_write_in_flight(cfg, paths)
+        if held:
+            waited = time.time() - since
+            if waited < _SHARE_REFRESH_MAX_WAIT:
+                if not _SHARE_REFRESH_TIMER.get("deferred_logged"):
+                    print(f"[mlo] share rescan deferred — {held} is being "
+                          f"written; it will run when the job finishes")
+                    _SHARE_REFRESH_TIMER["deferred_logged"] = True
+                # Deferred, not skipped: re-arm and deliver when the claim
+                # clears (the debounce keeps coalescing meanwhile).
+                _arm_refresh(_SHARE_REFRESH_BACKOFF)
+                return
+            print(f"[mlo] share rescan proceeding after {waited:.0f}s — a "
+                  f"write is still in flight on {held}")
         try:
             rescan_shares(cfg)
         except Exception:

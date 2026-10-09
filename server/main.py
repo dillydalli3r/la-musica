@@ -95,9 +95,10 @@ from server import discovery
 from server import artcache
 from server import version as version_mod
 from mlo.naming import sanitize_segment
-from mlo.paths import (AUDIO_EXTS, SKIP_DIRS, clear_track_covers, downloads_dir,
-                       is_video_file, library_root, load_track_covers, mlo_root,
-                       move_path, save_track_covers, set_track_covers, trash_dir,
+from mlo.paths import (AUDIO_EXTS, SKIP_DIRS, clear_track_covers, copy_path,
+                       downloads_dir, is_app_staging, is_video_file,
+                       library_root, load_track_covers, mlo_root, move_path,
+                       save_track_covers, set_track_covers, trash_dir,
                        trash_path)
 from mlo.subproc import tool_path
 from server import imports as imports_svc
@@ -998,10 +999,23 @@ def soulseek_shares_rescan():
 
     slskd's own reason is republished instead of a bare 500: a rescan it
     refused (409, one is already running) or an API that failed must not look
-    like a scan that started."""
+    like a scan that started.
+
+    While a job is writing under the share the scan is DEFERRED, not started
+    into the write (`deferred: true`): slskd's scan reads the very files the
+    app is replacing, and a reader holding the destination is what makes an
+    atomic tag write fail on Windows. The debounced refresh delivers the
+    rescan as soon as the claim clears."""
     from server import soulseek
-    if not (soulseek.is_running() or soulseek.web_up(load_config())):
+    cfg = load_config()
+    if not (soulseek.is_running() or soulseek.web_up(cfg)):
         raise HTTPException(400, "slskd is not running")
+    held = soulseek.share_write_in_flight(cfg)
+    if held:
+        soulseek.refresh_shares_soon(delay=0.0)
+        return {"ok": True, "deferred": True,
+                "message": "a job is writing to the share — the rescan runs "
+                           "as soon as it finishes"}
     try:
         soulseek.rescan_shares()
     except soulseek.SlskdError as e:
@@ -1501,6 +1515,58 @@ def soulseek_uploads():
     if not (soulseek.is_running() or soulseek.web_up(load_config())):
         raise HTTPException(503, "slskd is not running — start it first")
     return {"uploads": soulseek.uploads_summary()}
+
+
+@app.get("/api/soulseek/share-totals")
+def soulseek_share_totals():
+    """What this install OFFERS: the SHARE's own file count and byte total (see
+    `share_totals`) — summed from the index slskd serves, i.e. exactly the share
+    (the configured folders and excludes), never the library on disk.
+
+    `truncated` is honest: a share whose index is bigger than the app's one-shot
+    read comes back with null totals rather than a count of the part that fit.
+    503 when slskd is down, 502 with slskd's own words when its index cannot be
+    read."""
+    from server import soulseek
+    if not (soulseek.is_running() or soulseek.web_up(load_config())):
+        raise HTTPException(503, "slskd is not running — start it first")
+    try:
+        return soulseek.share_totals()
+    except RuntimeError as e:
+        raise HTTPException(502, str(e))
+
+
+class SoulseekForgetRequest(BaseModel):
+    scope: str
+    username: Optional[str] = None
+    dir: Optional[str] = None
+    filename: Optional[str] = None
+
+
+@app.post("/api/soulseek/uploads/forget")
+def soulseek_uploads_forget(req: SoulseekForgetRequest):
+    """Clear upload HISTORY at one granularity — `file`, `folder`, `user` or
+    `all` (see `soulseek.forget_uploads`).
+
+    This forgets RECORDS, never files: no upload is cancelled, no shared folder
+    changes, and nothing on disk is read or written. The history view stops
+    showing the matching rows; slskd's own transfer tree is left exactly as it
+    was. A download that arrives after the clear is shown again, so this clears
+    what is there now rather than blocking a peer forever.
+
+    Needs no daemon: the forget list is this app's own config, so it works with
+    slskd down (like the queue clear), and the next `/api/soulseek/uploads`
+    read applies it."""
+    from server import soulseek
+    try:
+        entries = soulseek.forget_uploads(
+            req.scope, username=req.username or "",
+            directory=req.dir or "", filename=req.filename or "")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except RuntimeError as e:
+        raise HTTPException(500, str(e))
+    return {"ok": True, "forget": entries}
 
 
 def _review_file_info(p, ffprobe=None):
@@ -2015,10 +2081,14 @@ def soulseek_browse(username: str, refresh: int = Query(0)):
     cfg = load_config()
     if soulseek.is_own_username(username, cfg):
         try:
-            rows = soulseek.local_browse(cfg, use_cache=not refresh)
+            rows, truncated = soulseek.local_browse(cfg, use_cache=not refresh)
         except Exception as e:
             raise HTTPException(502, f"browse failed: {e}")
-        return {"username": username, "local": True,
+        # `truncated`: slskd's own index is bigger than the bytes this app reads
+        # in one go, so `directories` is empty because the read was CUT OFF, not
+        # because the share is empty. A caller that ignored the flag would tell
+        # the user "shares no folders" — a lie about a share peers are served.
+        return {"username": username, "local": True, "truncated": truncated,
                 "note": LOCAL_SHARE_NOTE, "directories": _browse_rows(rows)}
     try:
         dirs = soulseek.browse(username, use_cache=not refresh) or []
@@ -6783,8 +6853,9 @@ def import_scan(path: str = Query(...)):
     """Recursively list a folder's files with relative paths (drag-drop or a
     typed/known folder path — there is no in-app folder picker).
 
-    The folder may live anywhere — the follow-up ingest step moves it into
-    the library.
+    The folder may live anywhere — the follow-up ingest step puts it in the
+    library (copying it: it is the user's folder, and an ingest never moves
+    one the app did not stage — see `import_ingest`).
 
     A single FILE is answered as a one-entry listing: a desktop shell hands
     over OS drop PATHS, and "one track dragged out of a folder" is a normal
@@ -6824,6 +6895,24 @@ def import_scan(path: str = Query(...)):
     return {"root": p.replace("\\", "/"), "files": out}
 
 
+def _place_arrival(src, dst, folder, log=None) -> bool:
+    """Put *src* at *dst* — MOVED when the app staged it, COPIED when the USER
+    supplied it.
+
+    The ORIGIN decides, and `mlo.paths.is_app_staging` is the one place that
+    answers it: a download, an unpacked archive or a trash entry the app
+    itself created is drained (a staging file left behind is a duplicate the
+    app made, leaking forever), while a folder or file the user dragged onto
+    the app or picked in the wizard's dialog is theirs and is COPIED
+    (`mlo.paths.copy_path`) — the original stays exactly where they left it.
+    Neither half degrades a rename into a silent copy, and a failure leaves
+    the destination absent rather than half-written.
+    """
+    if is_app_staging(src, folder):
+        return move_path(src, dst)
+    return copy_path(src, dst, log=log)
+
+
 def _ingest_one_file(src, target, cfg, folder):
     """Place ONE file that already sits on this server's disk.
 
@@ -6832,9 +6921,13 @@ def _ingest_one_file(src, target, cfg, folder):
     single-track rule a folder holding one track does
     (`imports.import_album_target`): the track joins the album the library
     already holds, or the album its own tags name, and only a file that answers
-    neither becomes a folder named after the wizard's field. The file MOVES —
-    an ingest of a path is the user handing the app that file, exactly as
-    dropping a folder moves the folder.
+    neither becomes a folder named after the wizard's field.
+
+    The file is the USER's — the wizard handed the app a path they dragged or
+    picked — so it is COPIED into the library and the original is left exactly
+    where it was; only a path the app itself staged (`<music>/.mlo/...`) is
+    drained, because a staging file left behind is a duplicate the app made.
+    See `_place_arrival`.
     """
     raw = os.path.basename(target or os.path.basename(src))
     name = re_safe_filename(raw)
@@ -6847,27 +6940,43 @@ def _ingest_one_file(src, target, cfg, folder):
         raise HTTPException(400, "target outside music folder")
     os.makedirs(album_path, exist_ok=True)
     dest_file = os.path.join(album_path, os.path.basename(src))
+    staged = is_app_staging(src, folder)
+    copied = False
     if os.path.normcase(os.path.abspath(dest_file)) != os.path.normcase(os.path.abspath(src)):
-        if not move_path(src, dest_file):
+        notes: list = []
+        if not staged and os.path.lexists(dest_file):
+            # The album already holds this file: its own copy wins and the
+            # user's file is left exactly where it is (the fill-never-overwrite
+            # rule `imports.merge_into_album` follows).
+            pass
+        elif _place_arrival(src, dest_file, folder, log=notes.append):
+            copied = not staged
+        elif staged:
             raise HTTPException(
-                500, f"could not import {os.path.basename(src)} — a file inside "
-                     f"it is still in use (stop playback and retry)")
+                500, f"could not import {os.path.basename(src)} — a file "
+                     f"inside it is still in use (stop playback and retry)")
+        else:
+            raise HTTPException(
+                500, f"could not copy {os.path.basename(src)} into the library "
+                     f"— {notes[-1] if notes else 'the copy did not complete'}; "
+                     f"the file you chose is untouched")
     tagcache.invalidate_album(album_path, os.path.dirname(src))
     mbresolve.invalidate()
     imports_svc.record_sidecar_tracklist(album_path, cfg)
     return {"ok": True, "path": album_path.replace("\\", "/"),
-            "album_name": os.path.basename(album_path), "merged": False}
+            "album_name": os.path.basename(album_path), "merged": False,
+            "copied": copied}
 
 
 def _ingest_paths(source, target):
-    """The folders ``POST /api/import/ingest`` touches: the album being moved
+    """The folders ``POST /api/import/ingest`` touches: the album being placed
     and the library folder it lands in.
 
     `target` is an album NAME, not a path (the body resolves it to
     ``<library>/<target>``), so the claim has to resolve it the same way —
-    otherwise the destination of the very move this guard protects would be
-    unclaimed, and a same-named album could be organized while it is being
-    replaced.
+    otherwise the destination of the very placement this guard protects would
+    be unclaimed, and a same-named album could be organized while it is being
+    filled.
     """
     name = re_safe_filename(os.path.basename(target or os.path.basename(source)))
     folder = str(load_config().get("music_folder") or "")
@@ -6904,9 +7013,17 @@ def _only_audio(folder):
 @app.post("/api/import/ingest")
 @job_locks.holds(_ingest_paths, kind="import", label="Import album")
 def import_ingest(source: str = Query(...), target: str = Query(...)):
-    """Move an album folder into the library. Same volume it is one rename;
-    across devices it is a verified copy followed by the source's removal —
-    never a blind copytree + rmtree.
+    """Put a folder the wizard was handed into the library.
+
+    The ORIGIN decides what happens to the source, and this route is where the
+    wizard hands over the path a user dragged or picked: a folder the USER
+    supplied is COPIED (mlo.paths.copy_path) and stays exactly where it was —
+    bytes, names and mtimes — while a folder the APP staged (`<music>/.mlo/…`,
+    the downloads / incomplete / unpacked-* trees) is MOVED and drained, so
+    staging leaves nothing behind. `mlo.paths.is_app_staging` is the one place
+    that answers which is which. Either way the placement is verified, never a
+    blind copytree + rmtree, and a failure leaves the source whole and no
+    half-written album in the library.
 
     A folder holding ONE track is not an album: it is placed on the album the
     track belongs to (see `server.imports.import_album_target`), and a folder
@@ -6943,22 +7060,39 @@ def import_ingest(source: str = Query(...), target: str = Query(...)):
         got, album_path, how = imports_svc.import_album_target(only, raw, cfg)
         if album_path and os.path.isdir(album_path):
             # The library already holds this album: the track joins it, and
-            # the album becomes partial.
+            # the album becomes partial. A staged folder is drained (the app
+            # owns both sides); the user's folder is COPIED and stays.
             one = os.path.join(album_path, os.path.basename(only[0]))
-            if not move_path(only[0], one):
+            staged = is_app_staging(src, folder)
+            notes: list = []
+            if not staged and os.path.lexists(one):
+                placed = True   # the album's own copy wins, the user's stays
+            elif _place_arrival(only[0], one, folder, log=notes.append):
+                placed = True
+            else:
+                placed = False
+            if not placed:
+                if staged:
+                    raise HTTPException(
+                        500, f"could not place {os.path.basename(only[0])} into "
+                             f"{os.path.basename(album_path)} — a file inside it "
+                             f"is still in use (stop playback and retry)")
                 raise HTTPException(
-                    500, f"could not place {os.path.basename(only[0])} into "
-                         f"{os.path.basename(album_path)} — a file inside it "
-                         f"is still in use (stop playback and retry)")
-            try:
-                os.rmdir(src)  # the one file left: the folder goes with it
-            except OSError:
-                pass
+                    500, f"could not copy {os.path.basename(only[0])} into "
+                         f"{os.path.basename(album_path)} — "
+                         f"{notes[-1] if notes else 'the copy did not complete'}; "
+                         f"the folder you chose is untouched")
+            if staged:
+                try:
+                    os.rmdir(src)  # the staged folder's one file went with it
+                except OSError:
+                    pass
             tagcache.invalidate_album(album_path, src)
             mbresolve.invalidate()
             imports_svc.record_sidecar_tracklist(album_path, cfg)
             return {"ok": True, "path": album_path.replace("\\", "/"),
-                    "album_name": os.path.basename(album_path), "merged": True}
+                    "album_name": os.path.basename(album_path), "merged": True,
+                    "copied": not staged}
         if got and re_safe_filename(got) != name:
             # The track's own tags name the album: the folder it is imported
             # into is the album's, not the track's.
@@ -6970,18 +7104,27 @@ def import_ingest(source: str = Query(...), target: str = Query(...)):
     while os.path.exists(dest):
         dest = os.path.normpath(os.path.join(root, f"{name} ({n})"))
         n += 1
-    if not move_path(src, dest):
-        # move_path retried every lock/sharing violation and refuses to copy
-        # blindly: whatever failed, the source is still complete.
+    staged = is_app_staging(src, folder)
+    place_notes: list = []
+    if not _place_arrival(src, dest, folder, log=place_notes.append):
+        if staged:
+            # move_path retried every lock/sharing violation and refuses to
+            # copy blindly: whatever failed, the source is still complete.
+            raise HTTPException(
+                500,
+                f"could not import {name} — a file inside it is still in use "
+                f"(stop playback and retry)")
         raise HTTPException(
             500,
-            f"could not import {name} — a file inside it is still in use "
-            f"(stop playback and retry)")
+            f"could not copy {name} into the library — "
+            f"{place_notes[-1] if place_notes else 'the copy did not complete'}"
+            f"; the folder you chose is untouched")
     tagcache.invalidate_album(dest, src)
     mbresolve.invalidate()
     imports_svc.record_sidecar_tracklist(dest, cfg)
     return {"ok": True, "path": dest.replace("\\", "/"),
-            "album_name": os.path.basename(dest), "merged": False}
+            "album_name": os.path.basename(dest), "merged": False,
+            "copied": not staged}
 
 
 @app.post("/api/import/commit")

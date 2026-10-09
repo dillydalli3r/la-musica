@@ -8,7 +8,7 @@ import {
   MessageSquare, X, Wand2, CheckCheck, MessageCircleQuestion, Layers,
 } from "lucide-react";
 import { api } from "../api";
-import type { ImportRunStatus, ReadyAlbum, SlskAutoFile, SlskAutoJob, SlskStatus, SlskAutoProgress, SlskConversation, SlskDownloads, SlskMessage, SlskPortCheck, SlskQueueItem, SlskQueuePayload, SlskQueueScope, SlskSearchProgress, SlskTransfer, SlskUploadFile, SlskUploadPeer, StagingEntry, StagingRoot, StagingRootId } from "../api";
+import type { ImportRunStatus, ReadyAlbum, SlskAutoFile, SlskAutoJob, SlskStatus, SlskAutoProgress, SlskConversation, SlskDownloads, SlskForgetScope, SlskMessage, SlskPortCheck, SlskQueueItem, SlskQueuePayload, SlskQueueScope, SlskSearchProgress, SlskTransfer, SlskUploadFile, SlskUploadPeer, StagingEntry, StagingRoot, StagingRootId } from "../api";
 import { toast } from "../store";
 import { useLiveTransfers, type TransfersFrame } from "../lib/notifications";
 import { SOULSEEK_QUEUE_KEY as QUEUE_KEY, STAGE_LABEL } from "../lib/acquisition";
@@ -1139,6 +1139,207 @@ function AutoPanel({ initialMbid, running, onShowQueue }: {
 /** One folder in a browsed share. */
 type SlskBrowseDir = { directory: string; files: { filename: string; size: number }[] };
 
+type BrowseFile = { filename: string; size: number };
+
+/** One folder in the rebuilt browse tree. */
+interface BrowseNode {
+  /** Identity: the path segments joined by one separator. */
+  key: string;
+  /** Last path segment — what the row prints as the folder name. */
+  name: string;
+  /** Full relative folder path: shown for orientation, and sent as-is when
+   *  this folder is downloaded / auto-imported (the server's own directory). */
+  dir: string;
+  files: BrowseFile[];
+  children: BrowseNode[];
+}
+
+/** slskd's browse answer is FLAT: one entry per folder, each carrying its WHOLE
+ *  path, and every file's own `filename` a whole path too (see
+ *  `_normalize_browse`). Four other callers read those flat rows and must keep
+ *  doing so, so the hierarchy is rebuilt HERE, where it is only ever looked at.
+ *  A folder slskd did not list on its own (a share is served as a tree; the
+ *  index does not spell out every level) is synthesised, and a file is filed
+ *  under its OWN parent path — the path a download needs. */
+function buildBrowseTree(dirs: SlskBrowseDir[]): BrowseNode[] {
+  const nodes = new Map<string, BrowseNode>();
+  const roots: BrowseNode[] = [];
+  const ensure = (segments: string[]): BrowseNode | null => {
+    let parent: BrowseNode | null = null;
+    let node: BrowseNode | null = null;
+    const acc: string[] = [];
+    for (const seg of segments) {
+      acc.push(seg);
+      const key = acc.join("\\");
+      let n = nodes.get(key);
+      if (!n) {
+        n = { key, name: seg, dir: key, files: [], children: [] };
+        nodes.set(key, n);
+        if (parent) parent.children.push(n);
+        else roots.push(n);
+      }
+      parent = n;
+      node = n;
+    }
+    return node;
+  };
+  for (const d of dirs) {
+    const segs = String(d.directory || "").split(/[\\/]+/).filter(Boolean);
+    const dirNode = segs.length ? ensure(segs) : null;
+    // Keep the server's own string for a folder it listed, so a download's
+    // target_dir is byte-for-byte what the browse answer carried.
+    if (dirNode && d.directory) dirNode.dir = d.directory;
+    for (const f of d.files || []) {
+      const parentSegs = String(f.filename || "").split(/[\\/]+/).filter(Boolean).slice(0, -1);
+      const target = parentSegs.length ? ensure(parentSegs) : dirNode;
+      if (target) target.files.push({ filename: f.filename, size: f.size });
+    }
+  }
+  // Alphabetical, numeric-aware (so "Album 2" precedes "Album 10"): the same
+  // order at every level, roots and children alike.
+  roots.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+  for (const n of nodes.values()) {
+    n.children.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+  }
+  return roots;
+}
+
+/** Every node, pre-order — what the filter searches and "Queue selected" walks. */
+function flattenBrowseTree(roots: BrowseNode[]): BrowseNode[] {
+  const out: BrowseNode[] = [];
+  const walk = (n: BrowseNode) => {
+    out.push(n);
+    for (const c of n.children) walk(c);
+  };
+  for (const r of roots) walk(r);
+  return out;
+}
+
+/** One folder of the rebuilt tree, drawn at `depth`. Its children render only
+ *  while it is open — so a share with thousands of folders paints one level at
+ *  a time, and a level with thousands of entries pages them. */
+function BrowseTreeFolder({ node, depth, open, onToggle, picked, onTogglePick, busy, onQueue, onQueueFile, onAuto, hideChildren }: {
+  node: BrowseNode;
+  depth: number;
+  open: Set<string>;
+  onToggle: (key: string) => void;
+  picked: Set<string>;
+  onTogglePick: (key: string) => void;
+  busy: string | null;
+  onQueue: (n: BrowseNode) => void;
+  onQueueFile: (f: BrowseFile) => void;
+  onAuto: (n: BrowseNode) => void;
+  /** Filter results list matching folders on their own: no nested children. */
+  hideChildren?: boolean;
+}) {
+  const [fileLimit, setFileLimit] = useState(100);
+  const [childLimit, setChildLimit] = useState(100);
+  const isOpen = open.has(node.key);
+  const total = node.files.reduce((n, f) => n + (f.size || 0), 0);
+  const hasFiles = node.files.length > 0;
+  const hasKids = !hideChildren && node.children.length > 0;
+  return (
+    <div className="rounded-lg border border-border overflow-hidden">
+      <div className="flex items-center gap-2 px-3 py-2 bg-panel/60" style={{ paddingLeft: 12 + depth * 14 }}>
+        <input
+          type="checkbox"
+          className="accent-accent shrink-0"
+          checked={picked.has(node.key)}
+          disabled={!hasFiles}
+          onChange={() => onTogglePick(node.key)}
+          title="Tick to include this folder in “Queue selected”"
+          aria-label={`Select ${node.dir}`}
+        />
+        <button className="flex-1 min-w-0 flex items-center gap-2 text-left" onClick={() => onToggle(node.key)} title={node.dir}>
+          {isOpen
+            ? <ChevronDown className="h-3.5 w-3.5 shrink-0 text-zinc-500" />
+            : <ChevronRight className="h-3.5 w-3.5 shrink-0 text-zinc-500" />}
+          <span className="min-w-0">
+            <span className="block text-xs text-zinc-100 truncate">
+              {node.name || node.dir || "(root)"}
+            </span>
+            <span className="block text-[10px] text-zinc-500 truncate">{node.dir}</span>
+          </span>
+        </button>
+        <span className="text-[10px] text-zinc-500 shrink-0">
+          {hasFiles
+            ? `${node.files.length} file(s) · ${fmtSize(total)}`
+            : `${node.children.length} folder(s)`}
+        </span>
+        {hasFiles && (
+          <>
+            <button
+              className="btn-ghost !py-1 text-xs shrink-0 tap"
+              disabled={busy !== null}
+              onClick={() => onQueue(node)}
+              title="Queue every file in this folder"
+            >
+              <ArrowDownToLine className="h-3.5 w-3.5" /> <span className="hidden sm:inline">Download</span>
+            </button>
+            <button
+              className="btn-ghost !py-1 text-xs shrink-0 tap"
+              disabled={busy !== null}
+              onClick={() => onAuto(node)}
+              title="Search the release this folder holds and import it fully tagged"
+            >
+              <Zap className="h-3.5 w-3.5" /> <span className="hidden sm:inline">Auto-import</span>
+            </button>
+          </>
+        )}
+      </div>
+      {isOpen && (hasKids || hasFiles) && (
+        <div className="border-t border-border/60">
+          {hasKids && (
+            <div className="space-y-1 p-2">
+              {node.children.slice(0, childLimit).map((c) => (
+                <BrowseTreeFolder
+                  key={c.key} node={c} depth={depth + 1} open={open} onToggle={onToggle}
+                  picked={picked} onTogglePick={onTogglePick} busy={busy}
+                  onQueue={onQueue} onQueueFile={onQueueFile} onAuto={onAuto}
+                />
+              ))}
+              {node.children.length > childLimit && (
+                <button
+                  className="btn-secondary w-full py-1 text-xs tap"
+                  onClick={() => setChildLimit((n) => n + 200)}
+                >
+                  Show more ({node.children.length - childLimit} folders)
+                </button>
+              )}
+            </div>
+          )}
+          {hasFiles && (
+            <div className="max-h-64 overflow-auto">
+              {node.files.slice(0, fileLimit).map((f) => (
+                <div key={f.filename} className="flex items-center gap-3 px-3 py-1 border-t border-border/40 first:border-t-0 text-xs">
+                  <span className="flex-1 min-w-0 truncate text-zinc-300" title={f.filename}>{fileName(f.filename)}</span>
+                  <span className="text-zinc-500 w-16 text-right shrink-0">{fmtSize(f.size)}</span>
+                  <button
+                    className="btn-ghost !px-1.5 !py-0.5 shrink-0 tap"
+                    disabled={busy !== null}
+                    onClick={() => onQueueFile(f)}
+                    title="Queue this file on its own"
+                  >
+                    <ArrowDownToLine className="h-3 w-3" />
+                  </button>
+                </div>
+              ))}
+              {node.files.length > fileLimit && (
+                <button
+                  className="btn-secondary w-full py-1 text-xs tap"
+                  onClick={() => setFileLimit((n) => n + 200)}
+                >
+                  Show more ({node.files.length - fileLimit} files)
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /** A peer's shared tree (slskd browse) — pick a folder to queue as-is, or hand
  *  it to auto-import. Big shares take a moment to enumerate, so the answer is
  *  cached per user and the folder list is filterable and paged. */
@@ -1162,30 +1363,36 @@ function BrowseModal({ username, onAuto, onClose }: {
   const [picked, setPicked] = useState<Set<string>>(new Set());
 
   const dirs = data?.directories ?? [];
+  // The flat slskd rows rebuilt as a tree. Both derivations are pure and the
+  // payload is cached per user, so a big share is rebuilt once per answer.
+  const tree = useMemo(() => buildBrowseTree(dirs), [dirs]);
+  const allNodes = useMemo(() => flattenBrowseTree(tree), [tree]);
   const needle = text.trim().toLowerCase();
-  const shown = needle ? dirs.filter((d) => d.directory.toLowerCase().includes(needle)) : dirs;
-  const totalBytes = dirs.reduce((n, d) => n + d.files.reduce((m, f) => m + (f.size || 0), 0), 0);
+  // A filter lists the matching folders on their own, wherever they sit; with
+  // no filter the tree paints one level at a time.
+  const matches = needle ? allNodes.filter((n) => n.dir.toLowerCase().includes(needle)) : tree;
+  const totalBytes = allNodes.reduce((n, node) => n + node.files.reduce((m, f) => m + (f.size || 0), 0), 0);
 
-  const toggle = (dir: string) =>
+  const toggle = (key: string) =>
     setOpen((prev) => {
       const next = new Set(prev);
-      if (next.has(dir)) next.delete(dir);
-      else next.add(dir);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
       return next;
     });
 
-  const togglePick = (dir: string) =>
+  const togglePick = (key: string) =>
     setPicked((prev) => {
       const next = new Set(prev);
-      if (next.has(dir)) next.delete(dir);
-      else next.add(dir);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
       return next;
     });
 
-  const queue = async (d: SlskBrowseDir) => {
-    setBusy(d.directory);
+  const queue = async (node: BrowseNode) => {
+    setBusy(node.dir);
     try {
-      const r = await api.soulseekDownload(username, d.files.map((f) => ({ filename: f.filename, size: f.size })));
+      const r = await api.soulseekDownload(username, node.files.map((f) => ({ filename: f.filename, size: f.size })));
       toast.success(`Queued ${r.queued} file(s) from ${username}`);
       qc.invalidateQueries({ queryKey: ["soulseekDownloads"] });
     } catch (e) {
@@ -1196,7 +1403,7 @@ function BrowseModal({ username, onAuto, onClose }: {
   };
 
   /** One file row's Download: slskd takes a single-entry file list. */
-  const queueFile = async (f: { filename: string; size: number }) => {
+  const queueFile = async (f: BrowseFile) => {
     setBusy(f.filename);
     try {
       const r = await api.soulseekDownload(username, [{ filename: f.filename, size: f.size }]);
@@ -1211,9 +1418,9 @@ function BrowseModal({ username, onAuto, onClose }: {
 
   /** Every ticked folder in one request — the server walks each folder. */
   const queuePicked = async () => {
-    const files = dirs
-      .filter((d) => picked.has(d.directory))
-      .flatMap((d) => d.files.map((f) => ({ filename: f.filename, size: f.size })));
+    const files = allNodes
+      .filter((n) => picked.has(n.key))
+      .flatMap((n) => n.files.map((f) => ({ filename: f.filename, size: f.size })));
     if (files.length === 0) return;
     setBusy("*");
     try {
@@ -1246,11 +1453,11 @@ function BrowseModal({ username, onAuto, onClose }: {
     }
   };
 
-  const auto = async (d: SlskBrowseDir) => {
-    setBusy(d.directory);
+  const auto = async (node: BrowseNode) => {
+    setBusy(node.dir);
     try {
-      const r = await api.soulseekAutoStart({ username, target_dir: d.directory });
-      const folder = d.directory.split(/[\\/]/).filter(Boolean).pop() ?? "";
+      const r = await api.soulseekAutoStart({ username, target_dir: node.dir });
+      const folder = node.dir.split(/[\\/]/).filter(Boolean).pop() ?? "";
       toast(r.waiting
         ? `${username} · ${folder} is queued — waiting for a free slot (position ${r.position})`
         : `Auto-importing from ${username} · ${folder}`);
@@ -1268,7 +1475,9 @@ function BrowseModal({ username, onAuto, onClose }: {
       onClose={onClose}
       icon={FolderOpen}
       title={`Shared folders — ${username}`}
-      subtitle={isLoading ? "Reading their share list…" : `${dirs.length} folder(s) · ${fmtSize(totalBytes)}`}
+      subtitle={isLoading ? "Reading their share list…"
+        : data?.local && data.truncated ? "Index too large to read in full"
+        : `${allNodes.length} folder(s) · ${fmtSize(totalBytes)}`}
       width="max-w-3xl"
       bodyClass="p-3 space-y-2"
       headerExtra={
@@ -1317,85 +1526,51 @@ function BrowseModal({ username, onAuto, onClose }: {
         <PageLoading label={`Browsing ${username}'s shares…`} />
       ) : error ? (
         <EmptyState title="Could not read the share list" hint={String(error)} />
-      ) : shown.length === 0 ? (
+      ) : data?.local && data.truncated ? (
+        // The local answer was CUT OFF at the app's read cap (48 MB:
+        // server/soulseek.py `_LOCAL_BROWSE_MAX_BYTES`): slskd holds a real
+        // index — peers are served it — only too big to read into this view in
+        // one go. Saying "shares no folders" here would be a lie about a share
+        // that works.
         <EmptyState
-          title={dirs.length === 0 ? `${username} shares no folders` : `No folder matches “${text.trim()}”`}
-          hint={dirs.length === 0
-            ? "They may have sharing turned off, or slskd has not finished reading their file list yet."
-            : "Clear the filter to see their whole share."}
+          title="Share index too large to list here"
+          hint="slskd's share index is bigger than the 48 MB this app reads in one go, so this view has no folder list to show — the share itself is still served to peers. Use Verify browse to check it, or the Settings rescan to refresh the index."
+        />
+      ) : matches.length === 0 ? (
+        <EmptyState
+          title={needle ? `No folder matches “${text.trim()}”` : `${username} shares no folders`}
+          hint={needle
+            ? "Clear the filter to see their whole share."
+            : "They may have sharing turned off, or slskd has not finished reading their file list yet."}
         />
       ) : (
         <>
+          {needle && (
+            <p className="text-[10px] text-zinc-500">
+              {matches.length} folder(s) match “{text.trim()}”
+            </p>
+          )}
           <div className="space-y-2 stagger">
-            {shown.slice(0, limit).map((d) => {
-              const isOpen = open.has(d.directory);
-              const total = d.files.reduce((n, f) => n + (f.size || 0), 0);
-              return (
-                <div key={d.directory} className="rounded-lg border border-border overflow-hidden">
-                  <div className="flex items-center gap-2 px-3 py-2 bg-panel/60">
-                    <input
-                      type="checkbox"
-                      className="accent-accent shrink-0"
-                      checked={picked.has(d.directory)}
-                      onChange={() => togglePick(d.directory)}
-                      title="Tick to include this folder in “Queue selected”"
-                      aria-label={`Select ${d.directory}`}
-                    />
-                    <button className="flex-1 min-w-0 flex items-center gap-2 text-left" onClick={() => toggle(d.directory)} title={d.directory}>
-                      {isOpen
-                        ? <ChevronDown className="h-3.5 w-3.5 shrink-0 text-zinc-500" />
-                        : <ChevronRight className="h-3.5 w-3.5 shrink-0 text-zinc-500" />}
-                      <span className="min-w-0">
-                        <span className="block text-xs text-zinc-100 truncate">
-                          {d.directory.split(/[\\/]/).filter(Boolean).slice(-2).join(" / ") || d.directory}
-                        </span>
-                        <span className="block text-[10px] text-zinc-500">
-                          {d.files.length} file(s) · {fmtSize(total)}
-                        </span>
-                      </span>
-                    </button>
-                    <button
-                      className="btn-ghost !py-1 text-xs shrink-0 tap"
-                      disabled={busy !== null || d.files.length === 0}
-                      onClick={() => queue(d)}
-                      title="Queue every file in this folder"
-                    >
-                      <ArrowDownToLine className="h-3.5 w-3.5" /> <span className="hidden sm:inline">Download</span>
-                    </button>
-                    <button
-                      className="btn-ghost !py-1 text-xs shrink-0 tap"
-                      disabled={busy !== null}
-                      onClick={() => auto(d)}
-                      title="Search the release this folder holds and import it fully tagged"
-                    >
-                      <Zap className="h-3.5 w-3.5" /> <span className="hidden sm:inline">Auto-import</span>
-                    </button>
-                  </div>
-                  {isOpen && (
-                    <div className="border-t border-border/60 max-h-64 overflow-auto">
-                      {d.files.map((f) => (
-                        <div key={f.filename} className="flex items-center gap-3 px-3 py-1 border-t border-border/40 first:border-t-0 text-xs">
-                          <span className="flex-1 min-w-0 truncate text-zinc-300" title={f.filename}>{fileName(f.filename)}</span>
-                          <span className="text-zinc-500 w-16 text-right shrink-0">{fmtSize(f.size)}</span>
-                          <button
-                            className="btn-ghost !px-1.5 !py-0.5 shrink-0 tap"
-                            disabled={busy !== null}
-                            onClick={() => queueFile(f)}
-                            title="Queue this file on its own"
-                          >
-                            <ArrowDownToLine className="h-3 w-3" />
-                          </button>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              );
-            })}
+            {matches.slice(0, limit).map((node) => (
+              <BrowseTreeFolder
+                key={node.key}
+                node={node}
+                depth={0}
+                open={open}
+                onToggle={toggle}
+                picked={picked}
+                onTogglePick={togglePick}
+                busy={busy}
+                onQueue={queue}
+                onQueueFile={queueFile}
+                onAuto={auto}
+                hideChildren={Boolean(needle)}
+              />
+            ))}
           </div>
-          {shown.length > limit && (
+          {matches.length > limit && (
             <button className="btn-secondary w-full py-2 text-xs tap" onClick={() => setLimit((n) => n + 200)}>
-              Show more ({shown.length - limit} folders remaining)
+              Show more ({matches.length - limit} folders remaining)
             </button>
           )}
         </>
@@ -3370,7 +3545,7 @@ function SharingCard({ running, ownUsername, onBrowse }: {
   // the same cadence the rest of this page uses, so a scan started behind the
   // card's back (a save in another tab, slskd restarting, the share watcher)
   // does not leave it claiming the last answer forever.
-  const { data } = useQuery({
+  const { data, dataUpdatedAt } = useQuery({
     queryKey: ["soulseekShares"],
     queryFn: () => api.soulseekShares(),
     refetchInterval: (query) => {
@@ -3378,6 +3553,23 @@ function SharingCard({ running, ownUsername, onBrowse }: {
       return audit?.scan?.scanning || audit?.scan?.pending ? 1500 : 15000;
     },
   });
+  // "port unconfirmed" must not be a dead end: the same read-only check the
+  // Settings tab runs (`GET /api/soulseek/port-check` →
+  // server/soulseek_port.port_check — no mapping added or removed), asked from
+  // here. The shared query key means both tabs show the one answer.
+  const { data: portCheck, isFetching: portCheckBusy, refetch: probePort } = useQuery({
+    queryKey: ["soulseekPortCheck"],
+    queryFn: api.soulseekPortCheck,
+    enabled: false,
+  });
+  const testPort = async () => {
+    try {
+      const r = await probePort();
+      if (r.error) toast.error(String(r.error));
+    } catch (e) {
+      toast.error(String(e));
+    }
+  };
   const [dirs, setDirs] = useState<string[] | null>(null);
   const [newDir, setNewDir] = useState("");
   const [busy, setBusy] = useState(false);
@@ -3426,8 +3618,10 @@ function SharingCard({ running, ownUsername, onBrowse }: {
   const rescan = async () => {
     setBusy(true);
     try {
-      await api.soulseekSharesRescan();
-      toast("Share rescan started");
+      const r = await api.soulseekSharesRescan();
+      // A write job can hold the share: the server defers the scan rather than
+      // starting it into the write, and says so here.
+      toast(r.deferred && r.message ? r.message : "Share rescan started");
       refresh();
     } catch (e) {
       toast.error(String(e));
@@ -3490,10 +3684,27 @@ function SharingCard({ running, ownUsername, onBrowse }: {
       <div className="flex items-center gap-2 flex-wrap">
         <span className="text-[10px] uppercase tracking-widest text-zinc-500">Sharing</span>
         {audit && (
-          <span className={`chip text-[9px] border ${AUDIT_TONE[audit.status] ?? "bg-red-900/40 text-red-300 border-red-800"}`}>
+          <span
+            className={`chip text-[9px] border ${AUDIT_TONE[audit.status] ?? "bg-red-900/40 text-red-300 border-red-800"}`}
+            title={audit.status === "listen_unconfirmed"
+              ? "No forward for the listen port was confirmed — press Test port for the read-only check of the port itself"
+              : undefined}
+          >
             {audit.status === "ok" ? "shared"
               : audit.status === "listen_unconfirmed" ? "port unconfirmed"
               : audit.status.replace(/_/g, " ")}
+          </span>
+        )}
+        {/* When the state was determined: this card re-reads slskd's share
+            state (the chip above is one line of it) every 15 s, so "port
+            unconfirmed" is never older than that — and Test port measures the
+            port itself rather than this snapshot. */}
+        {audit?.status === "listen_unconfirmed" && dataUpdatedAt > 0 && (
+          <span
+            className="text-[10px] text-zinc-500"
+            title="When this card last read slskd's share state. The port check below measures the port directly — this line is the audit snapshot's age."
+          >
+            state read {new Date(dataUpdatedAt).toLocaleTimeString()}
           </span>
         )}
         {audit?.scan.ready && audit.scan.files > 0 && (
@@ -3529,6 +3740,15 @@ function SharingCard({ running, ownUsername, onBrowse }: {
               : "Waiting for the Soulseek account to load"}
           >
             <FolderOpen className="h-3.5 w-3.5" /> Browse my share
+          </button>
+          <button
+            className="btn-ghost !py-1 text-xs tap"
+            onClick={testPort}
+            disabled={portCheckBusy}
+            title="Check the listen port from this machine: a listener here, whether the host publishes it, what the router holds, the addresses, and a connection to the public address. Read-only — no mapping is added or removed — so it runs while transfers do. This is the concrete next step behind “port unconfirmed”."
+          >
+            {portCheckBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Zap className="h-3.5 w-3.5" />}
+            {portCheckBusy ? "Testing…" : "Test port"}
           </button>
           <button className="btn-ghost !py-1 text-xs tap" onClick={rescan} disabled={busy || !running}>
             <RefreshCw className="h-3.5 w-3.5" /> Rescan
@@ -3652,6 +3872,15 @@ function SharingCard({ running, ownUsername, onBrowse }: {
             <div key={n} className="text-[10px] text-zinc-600">{n}</div>
           ))}
         </div>
+      )}
+      {/* The check Test port just ran: the same rows/verdict/`checked_at` the
+          Settings tab shows, with the concrete next step the rows carry (the
+          container publish line, the manual forward, the egress trap). */}
+      {portCheck && (
+        <PortCheckPanel
+          result={portCheck}
+          onHide={() => qc.removeQueries({ queryKey: ["soulseekPortCheck"] })}
+        />
       )}
       {dirs !== null && (
         <div className="space-y-1">
@@ -5465,40 +5694,129 @@ function uploadFile(f: UploadItem) {
   };
 }
 
+/** One peer's files grouped by the folder they were served from — the unit a
+ *  per-folder clear names. Keeps the server's order (newest first). */
+function groupByDir(items: UploadItem[]): [string, UploadItem[]][] {
+  const by = new Map<string, UploadItem[]>();
+  for (const f of items) {
+    const k = String(f.dir ?? "");
+    const list = by.get(k);
+    if (list) list.push(f);
+    else by.set(k, [f]);
+  }
+  return [...by.entries()];
+}
+
+/** The folder a transfer sits in, in the panel's words: the last real path
+ *  segment (slskd's `p2p`/uuid bookkeeping stripped), or the share root. */
+function folderLabel(dir: string) {
+  const segs = String(dir ?? "").replace(/\\/g, "/").split("/")
+    .map((s) => s.trim()).filter((s) => s && !OPAQUE_SEG.test(s));
+  return segs.length ? segs[segs.length - 1] : "(share root)";
+}
+
 /** Shared history: who is / has been downloading from this share. ONE ROW PER
  *  PEER — the server groups slskd's per-file tree per user (`uploads_summary`),
  *  so the panel is a list of PEOPLE, not a wall of files: each row says how
  *  many files the peer took, the total size of them, and when they last took
- *  something. Expanding a row lists that peer's own files, each with its FULL
- *  size — and, while one is still running, the bytes moved so far beside it. */
+ *  something. Expanding a row lists that peer's own files, grouped by folder,
+ *  each with its FULL size — and, while one is still running, the bytes moved
+ *  so far beside it.
+ *
+ *  Alongside the uploads' own totals the header carries the SHARE's totals
+ *  (`share_totals`: what this install OFFERS, from slskd's share index), and a
+ *  clear control sits at every granularity the owner asked for — one file, one
+ *  folder, one peer, or the whole history. Clearing forgets RECORDS only (see
+ *  server `forget_uploads`): no file is deleted, no upload is cancelled and
+ *  nothing about the share changes. */
 function UploadsPanel({ running }: { running: boolean }) {
+  const qc = useQueryClient();
   const { data } = useQuery({
     queryKey: ["soulseekUploads"],
     queryFn: api.soulseekUploads,
     enabled: running,
     refetchInterval: 5000,
   });
+  // The SHARE's own totals — a DIFFERENT measurement from the uploads below:
+  // what this install OFFERS to the network, read from the index slskd serves
+  // (server `share_totals`), not from the library on disk. It moves only when
+  // the share changes and slskd rescans, so it is read once and refreshed on a
+  // long cadence rather than the uploads' 5 s one.
+  const { data: share } = useQuery({
+    queryKey: ["soulseekShareTotals"],
+    queryFn: api.soulseekShareTotals,
+    enabled: running,
+    refetchInterval: 120000,
+    staleTime: 60000,
+  });
   const [open, setOpen] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
   const peers: SlskUploadPeer[] = data?.uploads ?? [];
   const totalFiles = peers.reduce((n, p) => n + (p.files ?? 0), 0);
   const totalBytes = peers.reduce((n, p) => n + (p.bytes ?? 0), 0);
   const sharingNow = peers.reduce((n, p) => n + (p.active ?? 0), 0);
 
+  /** Clear upload HISTORY at one granularity. The confirmation says what this
+   *  is, because a clear here touches no file and cancels no upload — it hides
+   *  the matching records from this view and nothing else changes. */
+  const forget = async (
+    scope: SlskForgetScope,
+    target: { username?: string; dir?: string; filename?: string },
+    what: string
+  ) => {
+    if (!window.confirm(
+      `Clear ${what} from the upload history?\n\n` +
+      "This forgets the RECORD and hides it here. It does NOT delete any file, " +
+      "does not cancel an upload, and does not change what this app shares — " +
+      "slskd keeps its own transfer history.")) return;
+    setBusy(true);
+    try {
+      await api.soulseekUploadsForget(scope, target);
+      toast("History cleared");
+      qc.invalidateQueries({ queryKey: ["soulseekUploads"] });
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <div className="panel">
-      <div className="flex items-center justify-between gap-2 flex-wrap mb-2">
+      <div className="flex items-center gap-2 flex-wrap mb-2">
         <div className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Shared history (uploads)</div>
-        {peers.length > 0 && (
-          <div className="flex gap-1 text-[10px]">
-            <span className="chip text-[9px] bg-sky-900/40 text-sky-300 border border-sky-800">sharing now {sharingNow}</span>
-            <span className="chip text-[9px] bg-raise border border-border text-zinc-300">
-              {peers.length} {peers.length === 1 ? "peer" : "peers"}
+        <div className="ml-auto flex items-center gap-1 text-[10px]">
+          {share && (
+            <span
+              className="chip text-[9px] bg-emerald-900/30 text-emerald-300 border border-emerald-800/60"
+              title="What this install OFFERS to the network: the files in the share slskd serves (the configured share folders, excludes applied) — not the uploads listed below, which are what peers have actually taken."
+            >
+              {share.truncated
+                ? "share: too big to count"
+                : `share ${fmtCount(share.files ?? 0)} files · ${fmtSize(share.bytes ?? 0)} offered`}
             </span>
-            <span className="chip text-[9px] bg-panel border-border/60 text-zinc-500">
-              {fmtCount(totalFiles)} {totalFiles === 1 ? "file" : "files"} · {fmtSize(totalBytes)} given
-            </span>
-          </div>
-        )}
+          )}
+          {peers.length > 0 && (
+            <>
+              <span className="chip text-[9px] bg-sky-900/40 text-sky-300 border border-sky-800">sharing now {sharingNow}</span>
+              <span className="chip text-[9px] bg-raise border border-border text-zinc-300">
+                {peers.length} {peers.length === 1 ? "peer" : "peers"}
+              </span>
+              <span className="chip text-[9px] bg-panel border-border/60 text-zinc-500">
+                {fmtCount(totalFiles)} {totalFiles === 1 ? "file" : "files"} · {fmtSize(totalBytes)} given
+              </span>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => forget("all", {}, "the whole upload history")}
+                className="chip text-[9px] text-zinc-500 hover:text-red-300 disabled:opacity-50"
+                title="Clear the whole upload history (records only — no file is deleted and no upload is cancelled)"
+              >
+                <Trash2 className="h-3 w-3" /> clear all
+              </button>
+            </>
+          )}
+        </div>
       </div>
       {!running ? (
         <EmptyState title="slskd is not running" hint="Start it above to share your library." />
@@ -5510,62 +5828,107 @@ function UploadsPanel({ running }: { running: boolean }) {
             const expanded = open === p.username;
             return (
               <div key={p.username} className="rounded border border-transparent hover:border-border/60 hover:bg-white/[0.03]">
-                <button
-                  type="button"
-                  className="w-full flex items-center gap-2 px-2 py-1.5 text-xs text-left tap"
-                  onClick={() => setOpen(expanded ? null : p.username)}
-                  aria-expanded={expanded}
-                  title={expanded ? "Hide the files this peer took" : "Show the files this peer took"}
-                >
-                  {expanded ? <ChevronDown className="h-3.5 w-3.5 shrink-0 text-zinc-500" />
-                            : <ChevronRight className="h-3.5 w-3.5 shrink-0 text-zinc-500" />}
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 min-w-0">
-                      <span className="truncate text-zinc-200">{p.username || "unknown user"}</span>
-                      {p.active > 0 && (
-                        <span className="chip text-[9px] bg-sky-900/40 text-sky-300 border border-sky-800 shrink-0">
-                          sharing now
-                        </span>
-                      )}
+                <div className="flex items-center gap-1 px-2 py-1.5">
+                  <button
+                    type="button"
+                    className="flex items-center gap-2 flex-1 min-w-0 text-xs text-left tap"
+                    onClick={() => setOpen(expanded ? null : p.username)}
+                    aria-expanded={expanded}
+                    title={expanded ? "Hide the files this peer took" : "Show the files this peer took"}
+                  >
+                    {expanded ? <ChevronDown className="h-3.5 w-3.5 shrink-0 text-zinc-500" />
+                              : <ChevronRight className="h-3.5 w-3.5 shrink-0 text-zinc-500" />}
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className="truncate text-zinc-200">{p.username || "unknown user"}</span>
+                        {p.active > 0 && (
+                          <span className="chip text-[9px] bg-sky-900/40 text-sky-300 border border-sky-800 shrink-0">
+                            sharing now
+                          </span>
+                        )}
+                      </div>
+                      <div className="truncate text-[10px] text-zinc-600">
+                        {p.files} {p.files === 1 ? "file" : "files"} · {fmtSize(p.bytes)}
+                        {p.active > 0 && p.transferred > 0 && ` · ${fmtSize(p.transferred)} sent`}
+                        {p.truncated > 0 && ` · ${p.truncated} older not shown`}
+                      </div>
                     </div>
-                    <div className="truncate text-[10px] text-zinc-600">
-                      {p.files} {p.files === 1 ? "file" : "files"} · {fmtSize(p.bytes)}
-                      {p.active > 0 && p.transferred > 0 && ` · ${fmtSize(p.transferred)} sent`}
-                      {p.truncated > 0 && ` · ${p.truncated} older not shown`}
-                    </div>
-                  </div>
-                  <span className="text-zinc-500 w-20 text-right shrink-0 truncate">
-                    {p.last ? timeAgo(p.last) : "—"}
-                  </span>
-                </button>
+                    <span className="text-zinc-500 w-20 text-right shrink-0 truncate">
+                      {p.last ? timeAgo(p.last) : "—"}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => forget("user", { username: p.username },
+                                          `${p.username || "this peer"}'s history`)}
+                    className="chip text-[9px] shrink-0 text-zinc-500 hover:text-red-300 disabled:opacity-50"
+                    title="Clear this peer's upload history (records only)"
+                  >
+                    <Trash2 className="h-3 w-3" /> clear
+                  </button>
+                </div>
                 {expanded && (
                   <div className="border-t border-border/40">
-                    {p.items.map((f, i) => {
-                      const u = uploadFile(f);
-                      const full = u.full || u.file;
-                      return (
-                        <div key={`${f.dir}\u0000${f.filename}\u0000${i}`}
-                          className="flex items-center gap-3 px-2 py-1 border-t border-border/30 first:border-t-0 text-xs"
-                          title={[full, u.state].filter(Boolean).join("\n")}>
-                          <div className="flex-1 min-w-0 pl-5">
-                            <div className="truncate text-zinc-300" title={full}>{u.album || u.file}</div>
-                            {u.album && (
-                              <div className="truncate text-[10px] text-zinc-600" title={full}>{u.file}</div>
-                            )}
-                          </div>
-                          {u.finished ? (
-                            <span className="text-zinc-500 w-20 text-right shrink-0">{fmtSize(u.size)}</span>
-                          ) : (
-                            <span className="text-sky-400 w-28 text-right shrink-0 tabular-nums">
-                              {fmtSize(u.done)} / {fmtSize(u.size)}
-                            </span>
-                          )}
-                          <span className="text-zinc-600 w-16 text-right shrink-0 truncate">
-                            {u.finished ? (u.when || "—") : `${u.percent}%`}
+                    {groupByDir(p.items).map(([dir, files]) => (
+                      <div key={dir} className="border-t border-border/30 first:border-t-0">
+                        <div className="flex items-center gap-2 px-2 py-1 pl-5">
+                          <FolderOpen className="h-3 w-3 shrink-0 text-zinc-600" />
+                          <span className="flex-1 min-w-0 truncate text-[10px] uppercase tracking-wide text-zinc-500" title={dir}>
+                            {folderLabel(dir)}
                           </span>
+                          <span className="text-[10px] text-zinc-600 shrink-0">
+                            {files.length} {files.length === 1 ? "file" : "files"}
+                          </span>
+                          <button
+                            type="button"
+                            disabled={busy}
+                            onClick={() => forget("folder", { username: p.username, dir },
+                                                  `the folder “${folderLabel(dir)}”`)}
+                            className="chip text-[9px] shrink-0 text-zinc-500 hover:text-red-300 disabled:opacity-50"
+                            title="Clear this folder's history (records only)"
+                          >
+                            clear folder
+                          </button>
                         </div>
-                      );
-                    })}
+                        {files.map((f, i) => {
+                          const u = uploadFile(f);
+                          const full = u.full || u.file;
+                          return (
+                            <div key={`${f.dir}\u0000${f.filename}\u0000${i}`}
+                              className="flex items-center gap-3 px-2 py-1 border-t border-border/30 text-xs"
+                              title={[full, u.state].filter(Boolean).join("\n")}>
+                              <div className="flex-1 min-w-0 pl-5">
+                                <div className="truncate text-zinc-300" title={full}>{u.album || u.file}</div>
+                                {u.album && (
+                                  <div className="truncate text-[10px] text-zinc-600" title={full}>{u.file}</div>
+                                )}
+                              </div>
+                              {u.finished ? (
+                                <span className="text-zinc-500 w-20 text-right shrink-0">{fmtSize(u.size)}</span>
+                              ) : (
+                                <span className="text-sky-400 w-28 text-right shrink-0 tabular-nums">
+                                  {fmtSize(u.done)} / {fmtSize(u.size)}
+                                </span>
+                              )}
+                              <span className="text-zinc-600 w-16 text-right shrink-0 truncate">
+                                {u.finished ? (u.when || "—") : `${u.percent}%`}
+                              </span>
+                              <button
+                                type="button"
+                                disabled={busy}
+                                onClick={() => forget("file", { username: p.username, dir: f.dir, filename: f.filename },
+                                                      `“${u.file}”`)}
+                                className="chip text-[9px] shrink-0 text-zinc-500 hover:text-red-300 disabled:opacity-50"
+                                title="Clear this file's history row (records only)"
+                              >
+                                clear
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ))}
                   </div>
                 )}
               </div>

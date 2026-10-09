@@ -1122,10 +1122,17 @@ def recording_isrcs(recording_mbid):
 #   apple-album    iTunes artist → its albums → THE EXPLICIT EDITION →
 #                  lookup?entity=song                    (verified working)
 #   itunes-song    iTunes song search, exact title only  (last resort)
-#   discogs-parental  Discogs edition format/description (token only, WEAK,
-#                  album level — explicit-only, ranks last)
 #   youtube-age    yt-dlp `age_limit` >= 18 for the track's OWN video id
 #                  (explicit-only, last, never a blind per-track search)
+#
+# NOT a route any more: Discogs' edition `format`/`description`
+# "Parental Advisory". It is an ALBUM/EDITION-level flag, so it could not
+# state anything about ONE track — merged in as an explicit `1` it made every
+# track of a flagged edition read explicit (the owner's "tagging tracks as
+# explicit even when they aren't"). An explicit flag now needs a source that
+# states the TRACK is explicit (an ISRC route, or Apple's own
+# `trackExplicitness`). The Discogs reader it used
+# (`discovery.discogs_parental_advisory`) is gone with it.
 #
 # ISRC path: the two ISRC sources are asked for every ISRC the track has —
 # the file's own tag, or every ISRC MusicBrainz holds for its recording.
@@ -1161,8 +1168,7 @@ def recording_isrcs(recording_mbid):
 # Every value a route may report as `source`. A caller may only write a value
 # it can attribute to one of these.
 ADVISORY_SOURCES = frozenset({"deezer-isrc", "spotify-isrc", "apple-album",
-                              "itunes-song", "discogs-parental",
-                              "youtube-age"})
+                              "itunes-song", "youtube-age"})
 
 _ITUNES_LOOKUP = "https://itunes.apple.com"
 _DEEZER_TRACK_ISRC = "https://api.deezer.com/track/isrc:"
@@ -1245,14 +1251,22 @@ def _advisory_cached(key, producer):
 def _deezer_advisory(isrc, timeout=None):
     """(value, source) for one track from Deezer's ISRC lookup, or None.
 
-    Deezer states two things and both are read:
-      * `explicit_content_lyrics` 1 (explicit lyrics) or 2 (explicit content /
-        artwork), or `explicit_lyrics: true` → 1. BOTH are explicit statements:
-        this app's 2 means "safe" (mlo/autotag.py), so mapping an explicit flag
-        to 2 would relabel an explicit track as safe.
-      * `explicit_lyrics: false` (whatever the content flag says) or
-        `explicit_content_lyrics: 0` → 0 — Deezer is stating the track is not
-        explicit.
+    Deezer states two things and both are read, but the TRACK's own lyrics
+    flag is decisive:
+      * `explicit_lyrics: false` — Deezer stating the track's LYRICS are not
+        explicit — is 0, whatever `explicit_content_lyrics` says. The two
+        fields are separate, and a record with `explicit_lyrics: false` and a
+        content flag of 2 ("explicit content", an edition/artwork flag, the
+        value the owner's "Just (Edit)" pressing carries) is NOT a statement
+        that the track is explicit. Reading the content flag first made the
+        app mark a clean track explicit off its own edit's record — and it
+        contradicted this function's own rule.
+      * `explicit_content_lyrics` 1 and 2 are explicit statements — the same
+        "explicit content" an explicit flag carries — but only when
+        `explicit_lyrics` is ABSENT. Mapping an explicit flag to 2 would
+        relabel an explicit track as safe: this app's 2 means "clean edition",
+        not "explicit".
+      * `explicit_content_lyrics: 0` → 0, the same clean statement.
       * anything else (the unclassified value Deezer reports as 3) is NO
         ANSWER, and never 0.
     """
@@ -1265,9 +1279,17 @@ def _deezer_advisory(isrc, timeout=None):
         return None
     content = _advisory_int(data.get("explicit_content_lyrics"))
     lyrics = data.get("explicit_lyrics")
-    if content in (1, 2) or lyrics is True:
+    # The TRACK's own lyrics flag decides when Deezer states it: `true` is 1,
+    # `false` is 0 — whatever the content flag says. `explicit_content_lyrics`
+    # is only consulted when `explicit_lyrics` is absent, and its 1/2 are the
+    # explicit statements (`0` is the clean one, 3 unclassified → no answer).
+    if lyrics is True:
         return (1, "deezer-isrc")
-    if content == 0 or lyrics is False:
+    if lyrics is False:
+        return (0, "deezer-isrc")
+    if content in (1, 2):
+        return (1, "deezer-isrc")
+    if content == 0:
         return (0, "deezer-isrc")
     return None
 
@@ -1794,27 +1816,6 @@ def _spotify_configured(cfg):
                 and str(cfg.get("spotify_client_secret") or "").strip())
 
 
-def _discogs_parental_advisory(artist, album, cfg=None):
-    """(1, "discogs-parental") when Discogs lists a Parental Advisory format.
-
-    Album-level and WEAK — a sticker on the edition Discogs matched, not a
-    per-track statement — so it ranks LAST and can only ever add an explicit
-    signal: it never clears a track it did not rate. Requires `discogs_token`,
-    like every Discogs route; without one (or without a hit) it answers None.
-    """
-    from server import discovery
-
-    if not str((cfg or {}).get("discogs_token") or "").strip():
-        return None
-    if not (artist and album):
-        return None
-    try:
-        flagged = discovery.discogs_parental_advisory(artist, album, cfg)
-    except Exception:
-        return None
-    return (1, "discogs-parental") if flagged else None
-
-
 # The tags a track's own video origin is recorded in: the video pipeline
 # writes SOURCE, and YOUTUBEID/VIDEOID are the explicit spellings.
 _YOUTUBE_TAG_KEYS = ("YOUTUBEID", "YOUTUBE_ID", "VIDEOID", "SOURCE")
@@ -1984,13 +1985,17 @@ def resolve_advisory_route(isrc="", recording_mbid="", title="", artist="",
       3. Apple's artist route — artist → its album list → the explicit
          edition → track (disc/track, then a title match);
       4. Apple's song search — title match only;
-      5. Discogs' edition (`format`/`description` "Parental Advisory", token
-         only) and 6. YouTube's 18+ gate for a video the track records — two
-         LAST, explicit-only, album/edition-level signals that never clear a
-         track and stay silent when their input is absent.
+      5. YouTube's 18+ gate for a video the track records — LAST,
+         explicit-only, and silent when its input is absent.
+
+    Every one of these states something about the TRACK. An
+    album/edition-level flag (Discogs' Parental-Advisory sticker, which this
+    route used to merge in as an explicit `1`) is NOT a per-track statement
+    and is not asked: one flagged edition must never rate every track of the
+    release explicit.
 
     When every one of them states NOTHING under the track's stored names, the
-    NAME-based routes (3, 4 and 5) are asked again under MusicBrainz's alias
+    NAME-based routes (3 and 4) are asked again under MusicBrainz's alias
     substitutions — the reader's locale first, the whole name localised before
     a single entity (`_advisory_alias_queries`), original first and only while
     the merge is still None.
@@ -2037,11 +2042,17 @@ def resolve_advisory_route(isrc="", recording_mbid="", title="", artist="",
     def _ask_names(a_name, al_name, t_name):
         """Ask the NAME-based routes about ONE spelling of the track.
 
-        Apple's album route, Apple's song search and the Discogs edition are
-        the sources whose answer depends on what the track is CALLED; the ISRC
-        sources above are named already, which is why the alias pass below
-        re-runs only this half. `checked` records each route as it is asked,
-        in this order.
+        Apple's album route and Apple's song search are the sources whose
+        answer depends on what the track is CALLED; the ISRC sources above are
+        named already, which is why the alias pass below re-runs only this
+        half. `checked` records each route as it is asked, in this order.
+
+        A track's flag is only ever taken from a source that states something
+        about the TRACK. The Discogs edition's Parental-Advisory sticker used
+        to be asked here and merged in as an explicit `1`; it is an
+        ALBUM/EDITION-level flag, so one flagged edition rated every track of
+        the release explicit — the owner's "tagging tracks as explicit even
+        when they aren't". It is no longer a per-track advisory source.
         """
         if a_name and al_name:
             checked.append("apple-album")
@@ -2057,14 +2068,6 @@ def resolve_advisory_route(isrc="", recording_mbid="", title="", artist="",
             key = ("itunes-song", _norm_compare(a_name), _norm_compare(t_name))
             answer = _advisory_cached(
                 key, lambda: _itunes_song_advisory(t_name, a_name))
-            if answer is not None:
-                _record_advisory(answers, answer)
-        if a_name and al_name and str((cfg or {}).get("discogs_token") or "").strip():
-            checked.append("discogs-parental")
-            key = ("discogs-parental", _norm_compare(a_name),
-                   _norm_compare(al_name))
-            answer = _advisory_cached(
-                key, lambda: _discogs_parental_advisory(a_name, al_name, cfg))
             if answer is not None:
                 _record_advisory(answers, answer)
 
@@ -3991,9 +3994,9 @@ def discogs_album_rating(artist, album, cfg=None):
     Discogs' community rating lives on the release detail
     (``community.rating = {"average": 4.72, "count": 3809}``, VERIFIED live on
     release 1174296), which is the same document `server.discovery` already
-    fetches for the genre chain and the parental advisory — one cached pair of
-    requests, three readers. Without a `discogs_token` it answers None and this
-    source is skipped cleanly, exactly like the genre chain's.
+    fetches for the genre chain — one cached pair of requests, two readers.
+    Without a `discogs_token` it answers None and this source is skipped
+    cleanly, exactly like the genre chain's.
     """
     if not str((cfg or {}).get("discogs_token") or "").strip():
         return None

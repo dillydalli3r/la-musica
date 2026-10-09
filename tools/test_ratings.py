@@ -555,6 +555,86 @@ check(ratings.value(ent_track) == 7 and ratings.value(ALBUM_DIR, scope="album") 
       (ratings.value(ent_track), ratings.value(ALBUM_DIR, scope="album")))
 shutil.rmtree(legacy_dir, ignore_errors=True)
 
+# ── 11. a rate that lands while a job holds the album is DEFERRED, and it
+#        converges (the tag is written) the moment the claim clears ──────────
+import threading                                          # noqa: E402
+import time                                               # noqa: E402
+from server import job_locks                              # noqa: E402
+
+held = make_file("Held Album/01 - Held.flac")
+TAGS[key(held)] = {}
+album_dir = os.path.dirname(held)
+gate = threading.Event()
+
+
+def _hold():
+    with job_locks.holding([album_dir], kind="import", label="Test import"):
+        gate.wait(20)
+
+
+worker = threading.Thread(target=_hold, daemon=True)
+worker.start()
+for _ in range(60):
+    if job_locks.busy(album_dir):
+        break
+    time.sleep(0.05)
+check(job_locks.busy(album_dir), "the job holds the album for this test")
+
+CALLS.clear()
+out = ratings.rate(held, 7, cfg=CFG)
+check(out["rating"] == 7, "the rating is STORED even while its album is held", out)
+check(out["tag"]["deferred"] and not out["tag"]["written"],
+      "the tag write is DEFERRED, not attempted", out["tag"])
+check(out["tag"]["error"] is None and "will be written" in (out["tag"]["message"] or ""),
+      "the reply carries a message, not a raw error", out["tag"])
+check("RATING" not in TAGS.get(key(held), {}),
+      "no tag was written while the album was held", TAGS.get(key(held)))
+pending = ratings.pending_tag_writes()
+check(pending and pending[0]["rating"] == 70 and pending[0]["path"] == os.path.normpath(held),
+      "the owed write is recorded durably", pending)
+check(ratings.track_tags_for([held]).get(key(held)) == 7,
+      "the store answers for the path the grader reads (the divergence)",
+      ratings.track_tags_for([held]))
+
+gate.set()
+worker.join(20)
+_deadline = time.time() + 20
+while time.time() < _deadline and ratings.pending_tag_writes():
+    time.sleep(0.1)
+check(TAGS.get(key(held), {}).get("RATING") == "70",
+      "once the claim clears the tag converges", TAGS.get(key(held)))
+check(not ratings.pending_tag_writes(),
+      "and the owed write is cleared", ratings.pending_tag_writes())
+
+# A rating on a FREE album still writes at once and owes nothing.
+free = make_file("Held Album/02 - Free.flac")
+TAGS[key(free)] = {}
+out2 = ratings.rate(free, 3, cfg=CFG)
+check(out2["tag"]["written"] and not out2["tag"]["deferred"]
+      and TAGS[key(free)]["RATING"] == "30",
+      "a free album's rating is written immediately", out2)
+check(not ratings.pending_tag_writes(), "and leaves no deferred intent")
+
+# A NEWER rating supersedes an older owed one (the file must end on the latest).
+ratings.set_rating(held, 0)
+TAGS[key(held)].pop("RATING", None)
+gate.clear()
+worker = threading.Thread(target=_hold, daemon=True)
+worker.start()
+for _ in range(60):
+    if job_locks.busy(album_dir):
+        break
+    time.sleep(0.05)
+ratings.rate(held, 2, cfg=CFG)
+ratings.rate(held, 8, cfg=CFG)     # supersedes the 2
+gate.set()
+worker.join(20)
+_deadline = time.time() + 20
+while time.time() < _deadline and ratings.pending_tag_writes():
+    time.sleep(0.1)
+check(TAGS.get(key(held), {}).get("RATING") == "80",
+      "the LAST rating is the one that converges", TAGS.get(key(held)))
+
 # ── done ────────────────────────────────────────────────────────────────────
 shutil.rmtree(tmp, ignore_errors=True)
 

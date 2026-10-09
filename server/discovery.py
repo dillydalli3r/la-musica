@@ -1055,26 +1055,6 @@ def discogs_album_genres(artist, album, cfg=None, timeout=None):
     return [g for g in out if str(g).strip()]
 
 
-def discogs_parental_advisory(artist, album, cfg=None, timeout=None):
-    """True when Discogs lists a "Parental Advisory" release format.
-
-    Album-level and WEAK evidence — a sticker on the edition Discogs matched,
-    not a statement about any one track — so it is only ever used as an extra
-    explicit signal, and its absence states nothing. None without a token.
-    """
-    detail = _discogs_release(artist, album, cfg=cfg, timeout=timeout)
-    if not detail:
-        return None
-    for fmt in detail.get("formats") or []:
-        if not isinstance(fmt, dict):
-            continue
-        text = " ".join([str(fmt.get("name") or "")]
-                        + [str(d) for d in fmt.get("descriptions") or []])
-        if "parental advisory" in text.lower():
-            return True
-    return None
-
-
 def _lastfm_key(cfg):
     return str((cfg or {}).get("lastfm_api_key") or "").strip()
 

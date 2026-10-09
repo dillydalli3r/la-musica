@@ -192,6 +192,7 @@ function mergeRoles(rows: SourceHealth[]): PanelRow[] {
       ...r,
       kinds: all.map((x) => x.kind),
       needs: [...new Set(all.flatMap((x) => x.needs))],
+      optional_needs: [...new Set(all.flatMap((x) => x.optional_needs ?? []))],
       configured: all.every((x) => x.configured),
       status: all.reduce((worst, x) => (rank[x.status] > rank[worst] ? x.status : worst), "ok" as SourceHealth["status"]),
       detail: [...new Set(all.map((x) => x.detail).filter(Boolean))].join(" · "),

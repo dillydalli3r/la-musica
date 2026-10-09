@@ -410,6 +410,163 @@ else:
           all(atomic.is_temp_name(n) for n in temps), str(temps))
 
 # ---------------------------------------------------------------------------
+# 1d. a rename a reader denied is retried, then reported honestly
+# ---------------------------------------------------------------------------
+section("1d. a rename Windows refused is retried, and gives up with a real message")
+
+# The owner's failure, verbatim:
+#   set_tag: [WinError 5] Access is denied: '<tmp>' -> '<track>.flac'
+# on a file that was NOT read-only. On Windows a plain `open(path, "rb")` — this
+# app's own player/range reader, slskd's share scan, an antivirus pass, a sibling
+# job's ffprobe — shares read and write but NOT delete, so os.replace onto it
+# fails with ERROR_ACCESS_DENIED even while the writer itself holds no handle.
+# The denial clears on its own, so the atomic swap retries it a few times over
+# ~1.5 s; a holder that outlives that gets a message naming it, and the original
+# is left byte-identical with no temp beside it.
+from mlo.atomic import replace_locked, write_bytes             # noqa: E402
+
+retry_album = os.path.join(music, "Artists", "Retry Artist", "Retry Album")
+os.makedirs(retry_album, exist_ok=True)
+RETRY_TRACK = os.path.join(retry_album, "01 - Denied.flac")
+retry_built = (make_track(RETRY_TRACK, 2) if FFMPEG else False)
+if not retry_built:
+    check("a fixture for the retry case was built", False, "needs ffmpeg")
+else:
+    # -- the retry, deterministic and OS-independent: os.replace denied twice,
+    #    then allowed, so the swap must land on the third call.
+    real_replace = os.replace
+    calls = {"n": 0}
+
+    def flaky_replace(src, dst):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise PermissionError(
+                f"[WinError 5] Access is denied: {src!r} -> {dst!r}") from None
+        return real_replace(src, dst)
+
+    tmp = atomic.new_temp(RETRY_TRACK)
+    with open(tmp, "wb") as fh, open(RETRY_TRACK, "rb") as src:
+        fh.write(src.read())
+    os.replace = flaky_replace
+    try:
+        replace_locked(tmp, RETRY_TRACK)
+        retried_ok = True
+    except OSError:
+        retried_ok = False
+    finally:
+        os.replace = real_replace
+    check("a denial that clears is waited out and the swap lands",
+          retried_ok and calls["n"] == 3, f"os.replace calls={calls['n']}")
+
+    # -- a denial that does not clear: the original is intact, no temp remains,
+    #    and the error names the likely holder and says nothing was written.
+    original = read(RETRY_TRACK)
+
+    def always_denied(src, dst):
+        raise PermissionError(
+            f"[WinError 5] Access is denied: {src!r} -> {dst!r}")
+
+    os.replace = always_denied
+    try:
+        try:
+            write_bytes(RETRY_TRACK, b"a rewritten container that must not land")
+            gave_up, msg = False, ""
+        except PermissionError as e:
+            gave_up, msg = True, str(e)
+    finally:
+        os.replace = real_replace
+    check("a denial that outlasts the retries is a clear PermissionError",
+          gave_up and "has it open" in msg and "nothing was written" in msg,
+          msg[:160] or "(no error raised)")
+    check("the original bytes are untouched after giving up",
+          read(RETRY_TRACK) == original)
+    check("the failed write left no temp behind",
+          leftover_temps(retry_album) == [], str(leftover_temps(retry_album)))
+
+    # -- a REAL second-process reader, as the owner's machine had (slskd / AV /
+    #    another job). Windows only: on POSIX a rename over an open file is
+    #    allowed, so there is no denial to survive and the write just lands.
+    holder = os.path.join(music, "hold_open.py")
+    with open(holder, "w", encoding="utf-8") as fh:
+        fh.write("import sys, time\n"
+                 "fh = open(sys.argv[1], 'rb')\n"
+                 "print('HELD', flush=True)\n"
+                 "time.sleep(float(sys.argv[2]))\n"
+                 "fh.close()\n")
+
+    def hold_for(path, seconds):
+        proc = subprocess.Popen([sys.executable, holder, path, str(seconds)],
+                                stdout=subprocess.PIPE, text=True)
+        return proc, proc.stdout.readline().strip()
+
+    # -- the reproduction itself: while a second process holds the track open,
+    #    a bare os.replace onto it is refused — on Windows with WinError 5, the
+    #    owner's exact error, on a file that is NOT read-only.
+    bare_path = os.path.join(retry_album, "03 - Bare.flac")
+    if make_track(bare_path, 2):
+        proc, line = hold_for(bare_path, 0.5)
+        raw_tmp = atomic.new_temp(bare_path)
+        with open(raw_tmp, "wb") as fh:
+            fh.write(b"x")
+        winerr = None
+        try:
+            try:
+                os.replace(raw_tmp, bare_path)
+            except OSError as e:
+                winerr = getattr(e, "winerror", None)
+        finally:
+            proc.wait(timeout=30)
+            try:
+                os.remove(raw_tmp)
+            except OSError:
+                pass
+        if os.name == "nt":
+            check("a held track denies a bare rename with WinError 5 (the owner's error)",
+                  winerr == 5, f"winerror={winerr}")
+        else:
+            check("(POSIX: a held track does not deny a rename)",
+                  winerr is None, f"winerror={winerr}")
+        check("...and no temp is left by that probe",
+              leftover_temps(retry_album) == [], str(leftover_temps(retry_album)))
+
+    held_path = os.path.join(retry_album, "02 - Held.flac")
+    if make_track(held_path, 2):
+        proc, line = hold_for(held_path, 0.6)   # released inside the retry window
+        af = AudioFile(held_path)
+        try:
+            wrote = bool(af.set_tag("ALBUM", "While held"))
+        except Exception:
+            wrote = False
+        finally:
+            proc.wait(timeout=30)
+        if os.name == "nt":
+            check("a rename denied by a second process's reader still lands",
+                  wrote and AudioFile(held_path).get_tag("ALBUM") == "While held",
+                  str(getattr(af, "error", "")))
+        else:
+            check("(POSIX: a reader does not deny a rename; the write lands)",
+                  wrote, str(getattr(af, "error", "")))
+
+        original = read(held_path)
+        proc, line = hold_for(held_path, 6.0)   # outlives the retry window
+        af = AudioFile(held_path)
+        try:
+            af.set_tag("ALBUM", "Too long a hold")
+        except Exception:
+            pass
+        finally:
+            proc.kill()
+            proc.wait(timeout=30)
+        if os.name == "nt":
+            check("a holder that will not let go fails the write with the honest message",
+                  af.error is not None and "has it open" in af.error
+                  and "nothing was written" in af.error, str(af.error))
+            check("...and the track keeps its original bytes",
+                  read(held_path) == original)
+        check("...and no temp file is left behind",
+              leftover_temps(retry_album) == [], str(leftover_temps(retry_album)))
+
+# ---------------------------------------------------------------------------
 # 2. An interrupted run is recoverable, and says so
 # ---------------------------------------------------------------------------
 section("2. the startup sweep reconciles what a killed run left")

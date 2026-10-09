@@ -4,11 +4,14 @@ Downloads missing lyrics for every track from the configured provider chain
 (``lyrics_sources``, built-in order in ``lyrics_providers``) and writes
 them per the global ``lyrics_format`` (EMBEDDED / LRC / BOTH), canonicalized
 with the same formatting rules as script 1. Tracks tagged INSTRUMENTAL=1
-and tracks that already carry lyrics (embedded or an .lrc sidecar) are
-skipped — always, force included: a run FILLS what is missing and never
-replaces words the file already holds (only the manual per-track route may,
-see ``fetch_one``). Standard library only, so the runner
-works in every install (no httpx dependency).
+and tracks that already carry a lyric the install ACCEPTS (a timed one, or
+an untimed one while ``lyrics_allow_plain`` is on — embedded or an .lrc
+sidecar) are skipped: a run FILLS what is missing and never replaces words
+the file already holds, and an untimed lyric under ``lyrics_allow_plain``
+off is one the policy refuses, so it is re-fetched rather than left as a
+grading failure. ``force`` (the manual per-track route) is what may replace
+even an accepted lyric — see ``fetch_one``. Standard library only, so the
+runner works in every install (no httpx dependency).
 
 A search that comes back with nothing is not the end of the track here: the
 app's own rule settles it (`server.instrumental.lyrics_absent`, spec R162) —
@@ -36,7 +39,7 @@ import os
 from .audio import AudioFile
 from .lyrics import (
     _atomic_write_text, _format_for_storage, _lrc_for, has_lyrics_text,
-    _process_lyrics_for_audio,
+    _process_lyrics_for_audio, sync_level_of,
 )
 from .lyrics_providers import (  # noqa: F401  (lrclib_fetch is a re-export shim)
     SOURCE_LABELS, fetch_lyrics, lrclib_fetch, provider_order, youtube_id_from,
@@ -212,7 +215,9 @@ def fetch_one(path, config, replace=False, mark_absent=True):
     had the words and only the timestamps were missing. *alias_pass* is present
     (and names the entity and the name that found the track) when the chain's
     second pass is what answered. The skip
-    rules (INSTRUMENTAL, existing embedded/sidecar lyrics unless *force*),
+    rules (INSTRUMENTAL; an ACCEPTED stored lyric — a synced one, or a plain
+    one while `lyrics_allow_plain` is on — unless *force*; an untimed lyric
+    under `lyrics_allow_plain` off is refused and re-fetched),
     the `lyrics_format` write mode and the canonicalization pass are the same
     ones the batch runner uses, so a lyrics run from the UI and a lyrics run
     from the Optimization page produce identical files.
@@ -234,15 +239,34 @@ def fetch_one(path, config, replace=False, mark_absent=True):
         # A sidecar only blocks the fetch when it really holds lyrics: a
         # 0-byte file or a metadata/timestamp-only stub counts as ABSENT, so
         # the fetch proceeds and overwrites it.
+        sidecar_text = ""
         try:
             with open(_lrc_for(path), "r", encoding="utf-8", errors="replace") as _f:
-                has_sidecar = has_lyrics_text(_f.read())
+                sidecar_text = _f.read()
         except OSError:
-            has_sidecar = False
+            sidecar_text = ""
         if instrumental:
             result["reason"] = "instrumental"
             return result
-        if not replace and (existing or has_sidecar):
+        # WHAT counts as "already has lyrics": a lyric this install ACCEPTS. A
+        # PLAIN (untimed) lyric is a value the policy REFUSES while
+        # `lyrics_allow_plain` is off — the grader fails it, `settle_digital_lyrics`
+        # drops an arrived one — so it is treated as ABSENT and the fetch may
+        # replace it with a timed answer. That is what makes the chain's own
+        # script 13 reach the outcome the manual override reaches for a track
+        # whose only stored words are untimed, instead of leaving it as a
+        # LYRICS grading failure for a person to fix by hand. A SYNCED lyric
+        # (or a plain one while `lyrics_allow_plain` is ON) still blocks the
+        # fetch exactly as it always did — a stored text the install accepts is
+        # a fact of the file, not a cache of the search that found it — and
+        # `has_lyrics_text` keeps a metadata-only stub from counting either way.
+        allow_plain = bool((config or {}).get("lyrics_allow_plain", False))
+
+        def _accepted(text):
+            return (has_lyrics_text(text)
+                    and (sync_level_of(text) != "plain" or allow_plain))
+
+        if not replace and (_accepted(existing) or _accepted(sidecar_text)):
             result["reason"] = "lyrics already present"
             return result
 
@@ -359,7 +383,8 @@ def run_fetch_lyrics(config):
     log("sources: " + " → ".join(
         SOURCE_LABELS[p] for p in provider_order(config)))
     log(f"write mode: {fmt}"
-        "  (fills what is missing; stored lyrics are never replaced)")
+        "  (fills what is missing; an accepted lyric is never replaced, an "
+        "untimed one the policy refuses is re-fetched)")
 
     if config.get("targets") is not None:
         files = sorted(_collect_targets(config["targets"], AUDIO_EXTS))

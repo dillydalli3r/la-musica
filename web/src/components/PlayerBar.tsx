@@ -25,7 +25,7 @@ import VolumePct from "./VolumePct";
 import { applyEq, applyReplayGain, applyVolume, attachAnalyser, audibleLatencySec, resumeAnalyser } from "../lib/analyser";
 import { eqApplyRefusal } from "../lib/eqNodes";
 import FavHeart from "./FavHeart";
-import { ROW_COVER_W } from "./CoverImg";
+import { ROW_COVER_W, useCoverRetry } from "./CoverImg";
 import { useNowPlayingMeta } from "../lib/nowPlaying";
 import { useQueueWarm } from "../lib/queueWarm";
 import ScrollingText from "./ScrollingText";
@@ -956,11 +956,12 @@ export default function PlayerBar() {
   // the record's own business and may land after the words (see lib/nowPlaying
   // for the rule and why it changed).
   const block = useNowPlayingMeta(blockRecord, current !== null && currentTags !== undefined);
-  const [thumbFailed, setThumbFailed] = useState(false);
-  // Keyed on the RECORD's path, not the queue's: the block describes the track
-  // it committed, and a cover that failed earlier must not yet be holding the
-  // next track's art in the disc placeholder.
-  useEffect(() => setThumbFailed(false), [block?.path]);
+  // The bar's artwork: the same URL the record names, re-asked a bounded few
+  // times before the disc glyph is the answer (see `useCoverRetry`). The retry
+  // state is keyed on the URL, so it starts over for the next track's cover
+  // and a failure never holds the next track's art in the placeholder — the
+  // job the `block.path` reset below used to do by hand.
+  const cover = useCoverRetry(block?.coverUrl ?? null);
   // What plays after this track (meaningful only without shuffle) — shown
   // as a compact "UP NEXT" readout in the actions row.
   const upNextTrack = !shuffle ? queue[index + 1] : undefined;
@@ -2223,18 +2224,19 @@ export default function PlayerBar() {
           title={idle ? "Nothing playing" : "Album art — click for the fullscreen player"}
           disabled={idle}
         >
-          {block?.coverUrl && !thumbFailed ? (
+          {cover.src ? (
             <img
-              src={block.coverUrl}
+              src={cover.src}
               alt=""
-              onError={() => setThumbFailed(true)}
+              onError={cover.onError}
               className="h-full w-full object-cover"
             />
           ) : block || !current ? (
-            /* Either the track has no art at all (the disc is its FINAL state)
-               or nothing is playing. While a track's record is still resolving
-               the slot stays empty rather than wearing a disc the art is about
-               to replace — see lib/nowPlaying. */
+            /* Either the track has no art at all (the disc is its FINAL state),
+               nothing is playing, or the art's request failed and its retries
+               are spent — see `useCoverRetry`. While a track's record is still
+               resolving the slot stays empty rather than wearing a disc the art
+               is about to replace — see lib/nowPlaying. */
             <Disc3 className={`h-5 w-5 ${idle ? "text-zinc-700" : "text-zinc-600"}`} />
           ) : null}
         </button>
@@ -2815,12 +2817,12 @@ export default function PlayerBar() {
             title={idle ? "Nothing playing" : "Album art — tap for the fullscreen player"}
             disabled={idle}
           >
-            {block?.coverUrl && !thumbFailed ? (
-              <img src={block.coverUrl} alt="" onError={() => setThumbFailed(true)} className="h-full w-full object-cover" />
+            {cover.src ? (
+              <img src={cover.src} alt="" onError={cover.onError} className="h-full w-full object-cover" />
             ) : block || !current ? (
-              /* No art at all (the disc is the final state) or nothing
-                 playing; a record still resolving leaves the slot empty —
-                 see the desktop copy above and lib/nowPlaying. */
+              /* No art at all (the disc is the final state), nothing playing,
+                 or the art's retries are spent — see the desktop copy above
+                 and lib/nowPlaying. */
               <Disc3 className={`h-5 w-5 ${idle ? "text-zinc-700" : "text-zinc-600"}`} />
             ) : null}
           </button>

@@ -194,7 +194,6 @@ const ADVISORY_SOURCE_WORDS: Record<string, string> = {
   "spotify-isrc": "Spotify (ISRC)",
   "apple-album": "Apple (album editions)",
   "itunes-song": "iTunes (song search)",
-  "discogs-parental": "Discogs (parental advisory)",
   "youtube-age": "YouTube (age gate)",
   "ai-lyrics": "the AI's read of the lyrics",
   ai: "the AI (no lyrics in the file)",

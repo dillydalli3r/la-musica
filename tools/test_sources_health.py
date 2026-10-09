@@ -9,6 +9,10 @@ APIs every time Settings opens. This pins:
   * a keyed source without its key is `skipped` + `configured: false`, and the
     row names the key to ask for,
   * an unconfigured source is never probed (no request, even with probe=1),
+  * UNLESS it has a second route: with `rym_archive_fallback` on (the shipped
+    default) RateYourMusic's rows are `ok` and ARE probed without a
+    `rym_cookie` — the cookie is still asked for, but its absence makes the
+    LIVE site unavailable, not the source (`optional_needs` says so),
   * a probe that raises is a `fail` row with a detail, never an exception,
   * `probe=False` calls nothing at all,
   * every registered source appears exactly once, with the documented keys.
@@ -84,7 +88,8 @@ ok(sorted(ids) == sorted(expected),
 ok(len(ids) == len(set((r["kind"], r["id"]) for r in rows)),
    "no (kind, id) pair is repeated — a shared id carries its own kind")
 
-ok(all(set(r) - {"synced", "rank", "notes", "provides"} == ROW_KEYS
+ok(all(set(r) - {"synced", "rank", "notes", "provides", "optional_needs"}
+       == ROW_KEYS
        for r in rows),
    "every row carries exactly the documented keys")
 ok(all(r["kind"] in sh.KINDS for r in rows),
@@ -206,7 +211,6 @@ ok(len(sh.health_payload(cfg={})["sources"]) == len(rows),
 # --------------------------------------------------------------------------- #
 print("== configuration state ==")
 for sid, needs in (("spotify-isrc", ["spotify_client_id", "spotify_client_secret"]),
-                   ("discogs-parental", ["discogs_token"]),
                    ("lastfm", ["lastfm_api_key"]),
                    ("discogs", ["discogs_token"]),
                    ("rateyourmusic", ["rym_cookie"])):
@@ -229,9 +233,40 @@ configured_cfg = {"spotify_client_id": "id", "spotify_client_secret": "secret",
                   "rym_cookie": "cf=1"}
 keyed = sh.health_payload(cfg=configured_cfg)["sources"]
 ok(all(row({"sources": keyed}, sid)["configured"] is True
-       for sid in ("spotify-isrc", "discogs-parental", "lastfm", "discogs",
+       for sid in ("spotify-isrc", "lastfm", "discogs",
                    "rateyourmusic")),
    "setting the keys flips every keyed source to configured")
+
+ok(all(r["id"] == "rateyourmusic" for r in rows if "optional_needs" in r),
+   "only RateYourMusic rows carry `optional_needs`")
+
+# --------------------------------------------------------------------------- #
+# the one source with a SECOND route
+# --------------------------------------------------------------------------- #
+# cfg={} above omits `rym_archive_fallback`, which reads as the fallback OFF: a
+# caller that never went through the config layer has no second route, so the
+# cookie is required there and the row is `skipped`. The SHIPPED install holds
+# the key True, and then an empty `rym_cookie` makes the live site unavailable,
+# not the source: RYM's rows are runnable and ARE probed, while still asking
+# for the cookie (`needs`) — the panel's paste field and "cookie missing" chip
+# depend on that.
+archive_on = {"rym_archive_fallback": True}
+rym_on = row({"sources": sh.health_payload(cfg=archive_on, kind="genre")["sources"]},
+             "rateyourmusic")
+ok(rym_on["configured"] is False and rym_on["status"] == "ok"
+   and rym_on["optional_needs"] == ["rym_cookie"]
+   and "archive" in rym_on["detail"],
+   f"archive fallback on: RYM runs without a cookie "
+   f"({rym_on['status']}: {rym_on['detail']})")
+link_on = sh.health_payload(cfg=archive_on, kind="links")["sources"][0]
+ok(link_on["configured"] is False and link_on["status"] == "ok"
+   and link_on["optional_needs"] == ["rym_cookie"],
+   "…and its link row is runnable without the cookie too (MusicBrainz route)")
+rym_off = row({"sources": sh.health_payload(cfg={}, kind="genre")["sources"]},
+              "rateyourmusic")
+ok(rym_off["status"] == "skipped" and "optional_needs" not in rym_off
+   and rym_off["detail"] == "needs rym_cookie",
+   f"fallback off: the cookie is required again ({rym_off['detail']})")
 
 print("== probe=False is free ==")
 intg._advisory_json = stub("advisory_json", None)
@@ -251,7 +286,6 @@ discovery.itunes_search_album = stub("itunes_album", [])
 discovery.wikidata_genres = stub("wikidata_genres", None)
 discovery.lastfm_artist_genres = stub("lastfm_genres", [])
 discovery.discogs_album_genres = stub("discogs_genres", [])
-discovery.discogs_parental_advisory = stub("discogs_parental", None)
 discovery._discogs_release = stub("discogs_release", None)
 discovery.itunes_artist_artwork = stub("itunes_artwork", None)
 discovery.audiodb_artist = stub("audiodb_artist", None)
@@ -285,7 +319,6 @@ lyrics.probe_source = stub("lyrics_probe", {"id": "x", "status": "ok",
 CALLS.clear()
 sh.health_payload(cfg={}, probe=True)
 for sid, seam in (("spotify-isrc", "spotify_advisory"),
-                  ("discogs-parental", "discogs_release"),
                   ("lastfm", "lastfm_genres"),
                   ("discogs", "discogs_genres"),
                   ("rateyourmusic", "rym_genres")):
@@ -301,6 +334,15 @@ ok(calls("deezer_artist") >= 1,
 ok(calls("credential_check") == 1,
    f"only the login credential was probed with an empty config "
    f"({calls('credential_check')} credential probes)")
+# …AND the one source with a second route IS asked with an empty cookie when
+# the archive fallback is on — that is what makes an unattended default
+# install import genres at all, and what the old "unconfigured ⇒ skipped"
+# rule was hiding.
+CALLS.clear()
+sh.health_payload(cfg={"rym_archive_fallback": True}, kind="genre", probe=True)
+ok(calls("rym_genres") == 1,
+   f"archive fallback on: RYM IS probed without a cookie "
+   f"({calls('rym_genres')} rym_genres calls)")
 
 print("== the RYM link probe ==")
 saved_rym_links, saved_failures = intg.rym_links, intg._rym_failures

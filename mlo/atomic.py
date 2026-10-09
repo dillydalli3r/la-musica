@@ -18,10 +18,12 @@ Two consequences this module owns:
 * the directory entry is fsynced after the replace on POSIX (see
   :func:`mlo.paths.fsync_dir`), so the rename itself survives a power cut.
 """
+import errno
 import os
 import re
 import shutil
 import tempfile
+import time
 
 from .paths import fsync_dir
 
@@ -167,11 +169,113 @@ def _apply_mode(tmp, dest) -> None:
         pass
 
 
+# A rename onto a file Windows still has open fails with ERROR_ACCESS_DENIED
+# (5) — a plain ``open(path, "rb")`` does not share delete, so this app's own
+# player/range reader, slskd's share scan, a virus scan or a sibling job's
+# ffprobe all turn an ``os.replace`` into this error even though neither file
+# is read-only. A source that is itself still open (or a memory mapping over
+# it) surfaces as ERROR_SHARING_VIOLATION (32) / ERROR_LOCK_VIOLATION (33).
+# All three clear on their own in milliseconds, which is what the bounded
+# retry below waits out; a real permissions problem (a read-only destination,
+# no rights on the folder) still ends in the same error after the attempts.
+_TRANSIENT_WINERRORS = (5, 32, 33)
+# A few tries over ~1.5 s. Long enough to outlast an AV pass or a short
+# ffprobe/share-scan read of the same file; short enough that an interactive
+# tag write (a star click) never hangs the UI on a holder that will not let go.
+REPLACE_ATTEMPTS = 6
+REPLACE_DELAY = 0.25
+
+
+def _is_transient_replace(exc) -> bool:
+    """Whether *exc* from a rename is a sharing/lock denial worth a retry."""
+    if isinstance(exc, PermissionError):
+        return True
+    if getattr(exc, "winerror", None) in _TRANSIENT_WINERRORS:
+        return True
+    return getattr(exc, "errno", None) in (errno.EACCES, errno.EPERM,
+                                           errno.EBUSY, errno.ETXTBSY)
+
+
+def _held_open(dest, exc) -> PermissionError:
+    """The honest error for a rename Windows refused: what likely holds it, and
+    that nothing was written."""
+    out = PermissionError(
+        f"{os.path.basename(str(dest))} could not be replaced: Windows denied "
+        f"the rename — another program has it open (a player, a scanner, "
+        f"antivirus, or another job) or the file is read-only; nothing was "
+        f"written and the original is unchanged. ({exc})")
+    out.winerror = getattr(exc, "winerror", None)
+    out.errno = getattr(exc, "errno", None)
+    return out
+
+
+def replace_locked(tmp, dest, *, attempts=REPLACE_ATTEMPTS, delay=REPLACE_DELAY,
+                   what=None) -> None:
+    """``os.replace(tmp, dest)``, retried through a transient sharing denial.
+
+    Every atomic writer in this app funnels its final swap through here (and
+    through :func:`replace_temp`) so a rename that a reader, a scanner or a
+    sibling job has momentarily blocked is waited out instead of surfacing as
+    the owner's "Access is denied" on a library file that is not read-only.
+
+    On give-up it raises :class:`PermissionError` whose message names what
+    likely holds the file and says nothing was written. The caller still owns
+    *tmp*: the swap did not happen, the destination keeps its original bytes,
+    and the caller discards the temp (as :func:`write_bytes` /
+    :func:`rewrite_via` do).
+    """
+    last = None
+    for i in range(1, max(1, int(attempts)) + 1):
+        try:
+            os.replace(tmp, dest)
+            return
+        except OSError as exc:
+            if i >= attempts or not _is_transient_replace(exc):
+                if _is_transient_replace(exc):
+                    raise _held_open(dest, exc) from exc
+                raise
+            last = exc
+            if delay:
+                time.sleep(delay)
+    if last is not None:  # defensive: the loop returns or raises
+        raise _held_open(dest, last) from last
+
+
+def read_bytes_locked(path, *, attempts=REPLACE_ATTEMPTS, delay=REPLACE_DELAY) -> bytes:
+    """The bytes of *path*, retried through a transient sharing denial.
+
+    :func:`replace_locked`'s twin on the READ side. The denial it waits out is
+    the same one and comes from the same holders, but the read direction is
+    where it is silent: a writer holds ``cover.jpg`` open for the few
+    milliseconds between its temp landing and its ``os.replace``, a scanner has
+    the file mapped, or the anti-malware pass has it locked — and this app's
+    readers used to turn that instant into a FAILED READ (an empty answer the
+    caller had no way to tell from "there is nothing here"). A read has no
+    atomicity to protect: the retry is free and the answer is the file the
+    caller is entitled to.
+
+    On give-up it raises the last :class:`OSError` (never a made-up empty
+    result), so the caller decides what a real, persistent denial means for it.
+    """
+    last = None
+    for i in range(1, max(1, int(attempts)) + 1):
+        try:
+            with open(path, "rb") as fh:
+                return fh.read()
+        except OSError as exc:
+            if i >= attempts or not _is_transient_replace(exc):
+                raise
+            last = exc
+            if delay:
+                time.sleep(delay)
+    raise last  # defensive: the loop returns or raises
+
+
 def replace_temp(tmp, dest) -> str:
     """Durably move a finished temp onto *dest*; returns *dest*."""
     fsync_file(tmp)
     _apply_mode(tmp, dest)
-    os.replace(tmp, dest)
+    replace_locked(tmp, dest)
     fsync_dir(os.path.dirname(os.path.abspath(str(dest))) or ".")
     return dest
 

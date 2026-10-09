@@ -496,6 +496,64 @@ finally:
     tagindex._conn, tagindex._conn_path = None, None
 
 # --------------------------------------------------------------------------- #
+# 11) A FAILED tag read is not cached as an empty track
+# --------------------------------------------------------------------------- #
+# The owner's other complaint: a transient lock (a scanner, an AV pass, a
+# concurrent replace) made a read fail, and the empty result was CACHED under
+# the file's stat key, so the album served a stale "untagged" row until the
+# file happened to change. A failure must not be cached as a result; the next
+# read has to try again, and the reason has to survive on the (empty) answer.
+section("tag cache: a failed read is not cached as an empty track")
+tagcache.invalidate_all()
+STATE = {"fail": True, "reads": 0}
+
+
+class _Info:
+    length = 12.5
+
+
+class _Audio:
+    def __init__(self, path):
+        STATE["reads"] += 1
+        if STATE["fail"]:
+            self.audio = None
+            self.error = "[WinError 32] the file is being used by another process"
+        else:
+            self.audio = type("A", (), {"info": _Info()})()
+            self.error = None
+
+    def get_tag(self, name):
+        return "Real Title" if name == "TITLE" else None
+
+    def all_tags(self):
+        return {"TITLE": "Real Title"}
+
+
+_real_audio = tagcache.AudioFile
+tagcache.AudioFile = _Audio
+try:
+    t1, tech1 = tagcache.read_track(TRACK_1, ["TITLE"])
+    t2, tech2 = tagcache.read_track(TRACK_1, ["TITLE"])
+    check("an unreadable file is served empty, not as a cached row",
+          t1 == {} and t2 == {} and STATE["reads"] >= 2,
+          f"reads={STATE['reads']} second={t2}")
+    check("the reason is visible on the read, not silently dropped",
+          "error" in tech1 and "used by another process" in tech1["error"],
+          str(tech1))
+    STATE["fail"] = False
+    t3, _ = tagcache.read_track(TRACK_1, ["TITLE"])
+    check("once the holder is gone the TRUE tags appear",
+          t3.get("TITLE") == "Real Title", str(t3))
+    reads_after_true = STATE["reads"]
+    t4, _ = tagcache.read_track(TRACK_1, ["TITLE"])
+    check("...and a READABLE track is cached again (no re-read)",
+          t4 == t3 and STATE["reads"] == reads_after_true,
+          f"reads={STATE['reads']}")
+finally:
+    tagcache.AudioFile = _real_audio
+    tagcache.invalidate_all()
+
+# --------------------------------------------------------------------------- #
 print(f"\n{'FAILED: ' + ', '.join(FAILED) if FAILED else 'all checks passed'}")
 os.environ.pop("MLO_MUSIC_FOLDER", None)
 sys.exit(1 if FAILED else 0)

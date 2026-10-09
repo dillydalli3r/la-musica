@@ -22,7 +22,12 @@ import path holds it to:
     empty album;
   * the server-side `staged` list the upload route accepts may only name files
     inside a folder THIS app unpacked — every other path is refused, which is
-    what keeps the route from placing any file on the server into the library.
+    what keeps the route from placing any file on the server into the library;
+  * a folder or file the USER dragged onto the app (or picked in the wizard's
+    folder dialog) is COPIED into the library: the original's bytes, names and
+    mtimes are untouched, because the app's own staging is the only thing it
+    owns — while a path the APP staged (`<music>/.mlo/…`, or a finished
+    download) is still MOVED and drained, so staging leaves no duplicate.
 
 Nothing here touches the network and no external tool is required: the
 fixtures are crafted archives (zip and tar by hand, `.7z` only when this host
@@ -34,6 +39,7 @@ drives them.
 Run:  python tools/test_import_archives.py   (exit 0 pass, 1 fail)
 """
 import atexit
+import hashlib
 import io
 import json
 import os
@@ -103,7 +109,9 @@ def eq(got, want, label, extra=""):
 from fastapi.testclient import TestClient  # noqa: E402
 
 from mlo import archives  # noqa: E402
-from mlo.paths import library_root, mlo_root  # noqa: E402
+from mlo.config import normalize_config  # noqa: E402
+from mlo.grader import _grade_album  # noqa: E402
+from mlo.paths import downloads_dir, library_root, mlo_root  # noqa: E402
 from server import main as mlo_main  # noqa: E402
 
 CLIENT = TestClient(mlo_main.app)
@@ -435,6 +443,116 @@ res = CLIENT.post("/api/import/unpack/discard", data={"dirs": [os.path.dirname(A
 eq(res.json()["skipped"], [os.path.dirname(ALBUM_SRC).replace("\\", "/")],
    "a folder the app did NOT make is never removed")
 check(os.path.isdir(os.path.dirname(ALBUM_SRC)), "…it is still there")
+
+# --------------------------------------------------------------------------- #
+# 3e. WHO supplied the folder decides whether it MOVES or is COPIED. The
+#     wizard hands `/api/import/ingest` the path a user dragged onto the app
+#     (or picked in its native folder dialog), and that folder is the USER's:
+#     the album is COPIED into the library and the original stays exactly where
+#     it was — every byte, every mtime, every folder. Only the app's OWN
+#     staging (<music>/.mlo: downloads, incomplete, the unpacked-* trees it
+#     makes) is drained, because a staging file left behind is a duplicate the
+#     app made and nobody asked for.
+# --------------------------------------------------------------------------- #
+print("\n== a dragged folder is copied; the app's own staging is drained ==")
+
+
+def _tree_state(root):
+    """{rel path: (sha256, size, mtime)} for every file under *root*, plus the
+    directories' own mtimes: the whole tree's attendance, not one file's."""
+    files, dirs = {}, {}
+    for base, names, fnames in os.walk(root):
+        for n in names:
+            p = os.path.join(base, n)
+            dirs[os.path.relpath(p, root).replace("\\", "/")] = os.path.getmtime(p)
+        for n in sorted(fnames):
+            p = os.path.join(base, n)
+            rel = os.path.relpath(p, root).replace("\\", "/")
+            with open(p, "rb") as fh:
+                files[rel] = (hashlib.sha256(fh.read()).hexdigest(),
+                              os.path.getsize(p), os.path.getmtime(p))
+    return files, dirs
+
+
+DRAGGED = os.path.join(WORK, "dragged", "Dragged Album")
+os.makedirs(os.path.join(DRAGGED, "Scans"), exist_ok=True)
+for name in ("01 - One.wav", "02 - Two.wav"):
+    make_wav(os.path.join(DRAGGED, name), 0.05)
+for rel, blob in (("cover.jpg", b"\xff\xd8\xff" * 40),
+                  ("notes.txt", b"the user's own notes\n"),
+                  ("Scans/back.jpg", b"\xff\xd8\xff" * 20)):
+    with open(os.path.join(DRAGGED, *rel.split("/")), "wb") as fh:
+        fh.write(blob)
+dragged_before, dragged_dirs_before = _tree_state(DRAGGED)
+
+# exactly what a desktop OS drop does: the shell hands PATHS over, the wizard
+# scans the folder and then commits it through the ingest route
+# (ImportWizard.handleDropPaths → api.importIngest).
+res = CLIENT.post("/api/import/scan", params={"path": DRAGGED})
+eq(res.status_code, 200, "the dragged folder is scanned", res.text[:200])
+eq(res.json()["root"], os.path.realpath(DRAGGED).replace("\\", "/"),
+   "…from the path the user dropped")
+res = CLIENT.post("/api/import/ingest",
+                  params={"source": DRAGGED, "target": "Dragged Album"})
+eq(res.status_code, 200, "the dragged folder is ingested", res.text[:300])
+eq(res.json().get("copied"), True, "the reply says the source was COPIED, not moved")
+dragged_album = os.path.join(library_root(MF), "Dragged Album")
+eq(os.path.normcase(res.json()["path"]),
+   os.path.normcase(dragged_album.replace("\\", "/")), "the album is under <library>")
+check(os.path.isdir(DRAGGED), "the user's folder is STILL THERE")
+dragged_after, dragged_dirs_after = _tree_state(DRAGGED)
+eq(dragged_after, dragged_before,
+   "every source file is byte-identical — same sha256, size and mtime")
+eq(dragged_dirs_after, dragged_dirs_before, "…and every source folder kept its mtime")
+lib_files, _lib_dirs = _tree_state(dragged_album)
+eq(lib_files, dragged_before, "the library copy holds exactly those bytes")
+eq(sorted(lib_files), sorted(dragged_before),
+   "…the audio AND its sidecars (cover.jpg, notes.txt, Scans/back.jpg)")
+# The copy is a real album the app can read and grade, not a folder of bytes.
+_grade = _grade_album(dragged_album, "lrc", normalize_config({"music_folder": MF}))
+check(isinstance(_grade, dict) and "issues" in _grade,
+      "the copied album is gradable", str(_grade)[:200])
+check(any(t.get("file") == "01 - One.wav" for t in _grade.get("tracks") or []),
+      "…and the grader lists the copied track", str(_grade.get("tracks"))[:200])
+
+# A single FILE the shell handed over is copied the same way.
+SOLO_DIR = os.path.join(WORK, "dragged-solo")
+SOLO = os.path.join(SOLO_DIR, "07 - Solo.wav")
+os.makedirs(SOLO_DIR, exist_ok=True)
+make_wav(SOLO, 0.05)
+solo_before, _ = _tree_state(SOLO_DIR)
+res = CLIENT.post("/api/import/ingest", params={"source": SOLO, "target": "Dragged Solo"})
+eq(res.status_code, 200, "a dragged single file is ingested", res.text[:300])
+eq(res.json().get("copied"), True, "…and the reply says it was copied")
+check(os.path.isfile(SOLO), "the user's file is still there")
+eq(_tree_state(SOLO_DIR)[0], solo_before, "…byte-identical, mtime included")
+
+# The app's OWN staging keeps its drain: a tree this app made under
+# <music>/.mlo is MOVED into the library and leaves nothing behind.
+STAGED_SRC = os.path.join(mlo_root(MF), "unpacked-drain-me", "Staged Album")
+os.makedirs(STAGED_SRC, exist_ok=True)
+make_wav(os.path.join(STAGED_SRC, "01 - Staged.wav"), 0.05)
+res = CLIENT.post("/api/import/ingest",
+                  params={"source": STAGED_SRC, "target": "Staged Album"})
+eq(res.status_code, 200, "a staged folder is ingested", res.text[:300])
+eq(res.json().get("copied"), False, "the reply says the app-staged tree was MOVED")
+check(not os.path.exists(STAGED_SRC), "…and the staged tree is gone: no leftover")
+check(os.path.isfile(os.path.join(library_root(MF), "Staged Album", "01 - Staged.wav")),
+      "…its file is in the library")
+
+# …and so does a finished DOWNLOAD, through the downloads route.
+staged_dl = os.path.join(downloads_dir(MF), "Staged Download")
+os.makedirs(staged_dl, exist_ok=True)
+make_wav(os.path.join(staged_dl, "01 - Downloaded.wav"), 0.05)
+res = CLIENT.post("/api/downloads/import", json={"names": ["Staged Download"]})
+eq(res.status_code, 200, "a finished download imports", res.text[:200])
+eq([m["name"] for m in res.json()["moved"]], ["Staged Download"], res.text[:200])
+check(not os.path.exists(staged_dl), "the staged download is gone (drained)")
+eq(os.listdir(downloads_dir(MF)), [],
+   "…and the downloads staging area holds nothing at all")
+check(os.path.isfile(os.path.join(library_root(MF), "Staged Download",
+                                 "01 - Downloaded.wav")),
+      "…its file is in the library")
 
 # --------------------------------------------------------------------------- #
 # 4. an archive with no audio says so

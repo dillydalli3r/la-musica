@@ -38,6 +38,7 @@ import subprocess
 import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from .atomic import replace_locked
 from .audio import AudioFile
 from .discs import album_discs, _disc_pattern_for, _disc_expected_name, CUE_FILE_RE
 from .naming import cue_ref_names, name_key
@@ -153,7 +154,7 @@ def _save_identities(config, evidence):
                 os.fsync(f.fileno())
             except OSError:
                 pass
-        os.replace(tmp, path)
+        replace_locked(tmp, path)
     except OSError:
         if tmp:
             try:
@@ -1131,7 +1132,7 @@ def run_generate_accurip(config):
                         os.fsync(f.fileno())
                     except Exception:
                         pass
-                os.replace(tmp, accurip_path)
+                replace_locked(tmp, accurip_path)
                 fsync_dir(album_dir)
                 if disc_ids and all(disc_ids.values()):
                     # What this file was verified against, for the next run's

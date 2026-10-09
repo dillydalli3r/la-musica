@@ -1363,8 +1363,12 @@ if mlo_main is not None:
         probe("the album ingest", [staging],
               lambda: client.post("/api/import/ingest"
                                   f"?source={staging}&target=Ingested"))
-        check("the ingest really moved the album",
+        check("the ingest really placed the album in the library",
               os.path.isdir(os.path.join(music, "Artists", "Ingested")))
+        # …and it COPIED it: the folder was planted by this test, not staged by
+        # the app (<music>/.mlo), so the user's own folder must survive.
+        check("…and the folder the app did not stage was copied, not moved",
+              os.path.isfile(os.path.join(staging, "01 - Track.flac")))
 
         # Two COVER WRITES at once, through the real app on one event loop.
         # The first suspends inside its own body (its image fetch runs in a

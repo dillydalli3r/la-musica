@@ -1095,6 +1095,9 @@ def peer_flac(folder, lyric=None, advisory="0"):
     mutagen tags it and `mlo.audio` reads it exactly like any other FLAC, and
     nothing in this suite decodes audio (the same reason `make_wav` above
     writes a WAV nobody listens to).
+
+    *advisory* None writes NO ITUNESADVISORY tag at all (a track that has
+    never been rated).
     """
     os.makedirs(folder, exist_ok=True)
     path = os.path.join(folder, "01 - Track.flac")
@@ -1114,7 +1117,8 @@ def peer_flac(folder, lyric=None, advisory="0"):
     f["ALBUM"] = "Peer Album"
     f["TRACKNUMBER"] = "1"
     f["GENRE"] = "Peer Genre"
-    f["ITUNESADVISORY"] = advisory
+    if advisory is not None:
+        f["ITUNESADVISORY"] = advisory
     if lyric is not None:
         f["LYRICS"] = lyric
     pic = Picture()
@@ -2347,3 +2351,100 @@ assert _bare_row["status"] == "imported", _bare_row
 assert _bare_row["album_path"] == os.path.join(LIB, "untagged raw drop").replace("\\", "/"), \
     _bare_row
 print("import names the album before its chain: all assertions passed")
+
+# --------------------------------------------------------------------------- #
+# The AUTOMATIC steps reach what the manual override reaches (and the two
+# guesses the owner refuses to trust make no tag at all)
+# --------------------------------------------------------------------------- #
+# Two corners the owner hit by hand:
+#   * a track whose only stored lyric is UNTIMED — the policy (lyrics_allow_plain
+#     off) refuses it, so the chain's own script 13 used to skip it as "has
+#     lyrics" and leave a LYRICS grading failure; the manual forced fetch
+#     replaced it. Now the automatic fetch re-fetches it too, while a SYNCED
+#     lyric (an accepted value) is still a fact of the file and is left alone;
+#   * a track nobody rated: the AI's reading of the lyrics is NOT a statement,
+#     so an AI-only `1` is NOT written — the track stays at the fallback — while
+#     a real source that states `0` ends the question whatever the model would
+#     have said. (The album/collection-level flag that could rate a whole
+#     release explicit is gone from the route — see `tools/test_genres.py`.)
+import mlo.advisory as _advisory_mod  # noqa: E402
+
+AUTO_ROOT = tempfile.mkdtemp(prefix="mlo_import_auto_")
+AUTO_CFG = {"music_folder": AUTO_ROOT, "lyrics_format": "EMBEDDED",
+            "lyrics_allow_plain": False, "advisory_auto_fetch": True,
+            "auto_zero_advisory_for_instrumental": True,
+            "advisory_ai_classify": True, "advisory_fallback": "0"}
+_real_auto_fetch = _lyrics_fetch.fetch_lyrics
+_real_auto_route = _intg.resolve_advisory_route
+_real_auto_ai = _advisory_mod.ai_advisory
+try:
+    _lyrics_fetch.fetch_lyrics = lambda *a, **k: {
+        "provider": "lrclib", "provider_label": "LRCLIB",
+        "synced": "[00:09.00]the timed lyric", "plain": "the timed lyric"}
+
+    # ---- a POLICY-REFUSED (untimed) lyric is re-fetched by the runner ------
+    plain_dir = os.path.join(AUTO_ROOT, "Plain Album")
+    plain_track = peer_flac(plain_dir, lyric="peer plain words, no stamps")
+    _stats = _lyrics_fetch.run_fetch_lyrics(dict(AUTO_CFG, targets=[plain_dir]))
+    assert "the timed lyric" in (arrived(plain_track).get_lyrics() or ""), \
+        arrived(plain_track).get_lyrics()
+    assert _stats["modified_count"] == 1, _stats
+
+    # ---- an ACCEPTED (synced) lyric is untouched ---------------------------
+    synced_dir = os.path.join(AUTO_ROOT, "Synced Album")
+    synced_track = peer_flac(synced_dir, lyric="[00:03.00]peer synced words")
+    _stats = _lyrics_fetch.run_fetch_lyrics(dict(AUTO_CFG, targets=[synced_dir]))
+    assert (arrived(synced_track).get_lyrics() or "") == "[00:03.00]peer synced words", \
+        arrived(synced_track).get_lyrics()
+    assert _stats["modified_count"] == 0 and _stats["skipped_count"] == 1, _stats
+
+    # ---- lyrics_allow_plain ON accepts the untimed lyric: skipped ----------
+    allowed_dir = os.path.join(AUTO_ROOT, "Allowed Album")
+    allowed_track = peer_flac(allowed_dir, lyric="peer plain words, no stamps")
+    _stats = _lyrics_fetch.run_fetch_lyrics(
+        dict(AUTO_CFG, lyrics_allow_plain=True, targets=[allowed_dir]))
+    assert (arrived(allowed_track).get_lyrics() or "") == "peer plain words, no stamps", \
+        arrived(allowed_track).get_lyrics()
+    assert _stats["modified_count"] == 0 and _stats["skipped_count"] == 1, _stats
+
+    # ---- advisory: an AI-only explicit is NOT written ----------------------
+    _intg.resolve_advisory_route = lambda **k: {"value": None, "source": "",
+                                                "checked": [], "answers": {}}
+    _advisory_mod.ai_advisory = lambda *a, **k: (1, "ai-lyrics")
+    ai_dir = os.path.join(AUTO_ROOT, "AI Album")
+    ai_track = peer_flac(ai_dir, advisory=None)
+    _res = imports.fetch_advisories([ai_dir], AUTO_CFG, force=False)
+    assert arrived(ai_track).get_tag("ITUNESADVISORY") == "0", \
+        (arrived(ai_track).get_tag("ITUNESADVISORY"), _res)
+    assert _res["sources"][ai_track] == "fallback", _res
+
+    # ---- ... but a real source's `1` IS written ----------------------------
+    _intg.resolve_advisory_route = lambda **k: {
+        "value": 1, "source": "deezer-isrc",
+        "checked": ["deezer-isrc"], "answers": {"deezer-isrc": 1}}
+    ctrl_dir = os.path.join(AUTO_ROOT, "Control Album")
+    ctrl_track = peer_flac(ctrl_dir, advisory=None)
+    imports.fetch_advisories([ctrl_dir], AUTO_CFG, force=False)
+    assert arrived(ctrl_track).get_tag("ITUNESADVISORY") == "1", \
+        arrived(ctrl_track).get_tag("ITUNESADVISORY")
+
+    # ---- a real source's `0` ends it: the AI is never even asked -----------
+    _asked = []
+    _advisory_mod.ai_advisory = lambda *a, **k: (_asked.append(1)
+                                                 or (1, "ai-lyrics"))
+    _intg.resolve_advisory_route = lambda **k: {
+        "value": 0, "source": "apple-album",
+        "checked": ["apple-album"], "answers": {"apple-album": 0}}
+    clean_dir = os.path.join(AUTO_ROOT, "Clean Album")
+    clean_track = peer_flac(clean_dir, advisory=None)
+    imports.fetch_advisories([clean_dir], AUTO_CFG, force=False)
+    assert arrived(clean_track).get_tag("ITUNESADVISORY") == "0", \
+        arrived(clean_track).get_tag("ITUNESADVISORY")
+    assert _asked == [], "a source that stated a value must not be second-guessed"
+finally:
+    _lyrics_fetch.fetch_lyrics = _real_auto_fetch
+    _intg.resolve_advisory_route = _real_auto_route
+    _advisory_mod.ai_advisory = _real_auto_ai
+    shutil.rmtree(AUTO_ROOT, ignore_errors=True)
+
+print("autonomous lyric/advisory reach the manual outcome: all assertions passed")

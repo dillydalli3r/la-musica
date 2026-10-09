@@ -1805,12 +1805,15 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
         cfg = {}
     try:
         all_files = os.listdir(album_dir)
-    except PermissionError as e:
-        log(f"Permission denied reading album: {album_dir} ({e})", Color.YELLOW)
-        return {"error": True, "path": album_dir, "error_detail": f"Permission denied: {e}"}
     except OSError as e:
+        # A folder this process cannot LIST is this album's own problem, and it
+        # is reported as one: a graded row carrying an UNREADABLE_FOLDER issue
+        # and the reason, so the album (and every readable sibling the run
+        # already grades) still reaches the page. It used to be a blanket
+        # {"error": True} that told a reader only that *something* failed, and
+        # erased the album's own grade instead of naming what was wrong.
         log(f"Cannot list album directory: {album_dir} ({e})", Color.YELLOW)
-        return {"error": True, "path": album_dir, "error_detail": str(e)}
+        return _unreadable_folder_result(album_dir, e)
     files = sorted(f for f in all_files if is_audio_file(f))
     audio_paths = [os.path.join(album_dir, f) for f in files]
 
@@ -1937,6 +1940,26 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
     else:
         md5_flac_exe = md5_ffmpeg_exe = None
 
+    # The app's own rating store, read ONCE for this album: a track the app
+    # holds a rating for must carry that value in its RATING tag (the 0-100
+    # Picard scale `server.ratings` writes). Only the store -> tag direction is
+    # a requirement: a tag with NO store row is NOT a divergence (it may be a
+    # Picard value the app never adopted), so a bare RATING tag never fails
+    # here. A missing/unreadable file is reported by the unreadable branch
+    # below, never as a phantom mismatch.
+    store_ratings, rating_step = {}, 10
+    try:
+        from server import ratings as _ratings
+        # A library-wide run injects the WHOLE map once (`_rating_store`), so
+        # this does not scan the ratings table once per album; a direct call
+        # reads just this album's rows.
+        injected = cfg.get("_rating_store")
+        store_ratings = (injected if isinstance(injected, dict)
+                         else _ratings.track_tags_for(audio_paths))
+        rating_step = int(_ratings.TAG_STEP)
+    except Exception:
+        store_ratings = {}
+
     for index, ap in enumerate(audio_paths):
         # The first file was already opened for the podcast probe — reuse that
         # handle instead of parsing the same container twice.
@@ -1998,6 +2021,24 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
         # Required per-track tags (skip if per-filetype disabled).
         is_video_track = os.path.splitext(ap)[1].lower() in LIB_VIDEO_EXTS
         format_by_path[ap] = _audio_format_info(af)
+        # The app's rating store vs the file: a track the app holds a rating
+        # for must carry it in RATING (0-100). Only a STORE ROW is a
+        # requirement — a bare tag the app never adopted is not checked (see
+        # `store_ratings` above), and an unreadable file never reaches here.
+        # Gated by the SAME switch the writer honours (`write_rating_tags`): a
+        # user who deliberately keeps ratings app-only would otherwise be failed
+        # forever for a divergence they asked for.
+        _stored_half = store_ratings.get(os.path.normcase(os.path.normpath(ap)))
+        if _stored_half and should_write_audio_tag(cfg, "RATING", filepath=ap):
+            _want_rating = str(int(_stored_half) * rating_step)
+            _have_rating = str(af.get_tag("RATING") or "").strip()
+            if _have_rating != _want_rating:
+                total_checks += 1
+                failed_checks += 1
+                add_issue(
+                    f"RATING {'missing' if not _have_rating else _have_rating} "
+                    f"does not match the app's stored rating ({_want_rating}) — "
+                    f"re-rate the track to rewrite the tag", basename)
         # ReplayGain is opt-in per file: with none of the four tags present
         # there is nothing to grade (and nothing is counted), so an
         # untouched library is not penalized for the family at all.
@@ -5014,6 +5055,13 @@ def _relpath_guard(path, base):
 # folder's path relative to the music folder.
 EMPTY_FOLDER = "EMPTY_FOLDER"
 
+# Issue code for an album folder whose own LISTING the process could not read
+# (a denial, or a share that went away). The row is a normal graded album that
+# carries this issue and the reason, so one unreadable folder reports ITSELF
+# rather than replacing the whole album with a blanket {"error": True}. The
+# label the UI shows is "Unreadable folder".
+UNREADABLE_FOLDER = "UNREADABLE_FOLDER"
+
 # Issue code for an album folder with no .mlo_expected.json: the release's own
 # tracklist is missing, so nothing can say whether the album is complete.
 # Album-wide like the other album checks (see grade_check_expected_tracks).
@@ -5134,6 +5182,44 @@ def _empty_folder_result(folder, folder_root):
     }
 
 
+def _unreadable_folder_result(folder, reason):
+    """Grade-style row for a folder whose own LISTING was denied.
+
+    The same shape `_empty_folder_result` returns — one failed check, zero
+    tracks — so the run's summary loop totals it like any other album, and the
+    read failure travels as THIS album's issue (UNREADABLE_FOLDER) with its
+    reason in `notes`. A reader therefore learns which folder could not be
+    read and why, instead of an opaque whole-album error.
+    """
+    rel = _relpath_guard(folder, os.path.dirname(folder)) or folder
+    return {
+        "path": folder,
+        "where": rel,
+        "album_artist": "",
+        "audit_summary": "",
+        "media": "",
+        "source_summary": "",
+        "track_count": 0,
+        "pass_count": 0,
+        "total_checks": 1,
+        "cover_file": "",
+        "cover_detail": "",
+        "cover_ok": False,
+        "has_log": False,
+        "has_cue": False,
+        "checksum_status": "NONE",
+        "accuraterip_status": "NONE",
+        "lyrics_present": 0,
+        "lyrics_expected": 0,
+        "instrumental_count": 0,
+        "tracks": [],
+        "sidecars": [],
+        "album_values": {t: "" for t in ALBUM_TAGS},
+        "issues": {UNREADABLE_FOLDER: [rel]},
+        "notes": [f"the folder listing could not be read: {reason}"],
+    }
+
+
 def printed_pct(pass_count, total_checks):
     """The percentage a surface may PRINT for one score. None with no checks.
 
@@ -5233,6 +5319,15 @@ def run_grade_library(config):
     sink = config.get("_grade_sink")
     if not isinstance(sink, dict):
         sink = None
+
+    # One read of the app's rating store for the WHOLE run — the same private-
+    # key pattern as `_grade_sink`, so the per-album RATING check reads this map
+    # instead of scanning the ratings table once per album.
+    try:
+        from server import ratings as _ratings
+        config["_rating_store"] = _ratings.all_track_tags()
+    except Exception:
+        config["_rating_store"] = {}
 
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futures = {ex.submit(_grade_album, a, lyrics_format, config): a

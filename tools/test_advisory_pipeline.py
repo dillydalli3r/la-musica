@@ -393,18 +393,19 @@ try:
         assert len(ai_calls) == 1, ai_calls
         # Chic 'N' Stu: Deezer's stated 0 stands, explicit lyric and all
         # Boom!: Deezer's own 1 is written as it stands
-        # Roulette: nobody stated anything — the AI's answer is the ladder's
+        # Roulette: nobody stated anything and the AI answered "1" — which is
+        #   NOT written (a guess must never be the only reason a track reads
+        #   explicit), so the track takes the fallback 0
         # Streamline: Deezer's stated 0 stands, no matter what the model said
         assert out["sources"] == {FILES[0]: "deezer-isrc",
                                   FILES[1]: "deezer-isrc",
-                                  FILES[2]: "ai",
+                                  FILES[2]: "fallback",
                                   FILES[3]: "deezer-isrc"}, out
-        assert out["values"] == {FILES[0]: 0, FILES[1]: 1, FILES[2]: 1,
+        assert out["values"] == {FILES[0]: 0, FILES[1]: 1, FILES[2]: 0,
                                  FILES[3]: 0}, out
         assert out["answers"] == {
             FILES[0]: {"deezer-isrc": 0},
             FILES[1]: {"deezer-isrc": 1},
-            FILES[2]: {"ai": 1},
             FILES[3]: {"deezer-isrc": 0}}, out
 
         # A file whose value this run ECHOES is asked about by NOBODY — the AI

@@ -19,8 +19,12 @@ What is pinned:
     stereo, in mono and at 96 kHz, which only comes out right if the decode
     resamples to the 44.1 kHz the meter measures at;
   * an album run through run_calc_dr_replaygain() that writes DYNAMIC RANGE per
-    track and ALBUM DYNAMIC RANGE per album, skips the tracks that have no DR,
-    and skips the whole album on a second run (skip-existing);
+    track and ALBUM DYNAMIC RANGE to EVERY track of the album (a track the
+    meter has no value for still carries the album's), and skips the whole
+    album on a second run (skip-existing);
+  * a tag write whose atomic replace is refused (a share scan / player /
+    scanner holding the file) — the run must REPORT the file by name, not
+    count the album as done with one track missing its DR tags;
   * the same WAV encoded twice, as FLAC and as ALAC .m4a, carrying identical
     tags — R43 claims both containers, and they must not drift apart;
   * the reference meter (simple-dr-meter in .dependencies, when it is there)
@@ -360,15 +364,20 @@ def check_album_loop(tmp, exe):
     ok(dr_a[1][0] and dr_a[1][0] != dr_a[0][0],
        f"the quieter track is its own measurement, DR{dr_a[1][0]} "
        f"(not DR{dr_a[0][0]} of the track above it)")
-    ok(dr_a[2][0] == "" and dr_a[2][1] == "",
-       "the silent track gets NO tags at all — nothing is invented for it")
-    for album_dr in {dr_a[0][1], dr_a[1][1], dr_b[0][1], dr_b[1][1]}:
-        want = int(round((int(dr_a[0][0]) + int(dr_a[1][0])) / 2))
-        ok(album_dr == str(want),
+    ok(dr_a[2][0] == "",
+       f"the silent track gets NO per-track DYNAMIC RANGE — nothing is "
+       f"invented for it (got {dr_a[2][0]!r})")
+    want_album = str(int(round((int(dr_a[0][0]) + int(dr_a[1][0])) / 2)))
+    ok(dr_a[2][1] == want_album,
+       f"but it still carries the ALBUM value {dr_a[2][1]!r}: ALBUM DYNAMIC "
+       f"RANGE belongs to the album, and leaving it off a track the meter "
+       f"came back empty on is the grader's 'missing on some tracks'")
+    for album_dr in {dr_a[0][1], dr_a[1][1], dr_a[2][1], dr_b[0][1], dr_b[1][1]}:
+        ok(album_dr == want_album,
            f"ALBUM DYNAMIC RANGE {album_dr} is the mean of the measured tracks "
-           f"({dr_a[0][0]} + {dr_a[1][0]})/2 -> {want}")
-    ok(stats["modified_count"] == 4 and stats["error_count"] == 0,
-       f"the run reports 4 modified files and no errors "
+           f"({dr_a[0][0]} + {dr_a[1][0]})/2 -> {want_album}")
+    ok(stats["modified_count"] == 5 and stats["error_count"] == 0,
+       f"the run reports 5 modified files and no errors "
        f"(modified={stats['modified_count']}, errors={stats['error_count']}, "
        f"albums={stats['total_scanned']})")
 
@@ -404,6 +413,55 @@ def check_undecodable_track(tmp, exe):
        f"(one bad file neither sinks the album nor hides itself)")
 
 
+def check_write_failure_reported(tmp, exe):
+    """A tag write that does not land must be REPORTED, never swallowed.
+
+    Every DR/ReplayGain write ends in an atomic replace (mlo.atomic), and that
+    replace can meet a file a share scan, a player or a virus scan still holds
+    — the owner's auto-import lost ONE track's DYNAMIC RANGE and ALBUM DYNAMIC
+    RANGE exactly so (WinError 5/32 on ``.mlo_tmp_*`` -> target) while the run
+    counted the album as done. This forces the replace to fail for one file
+    (the same PermissionError replace_locked raises on give-up) and requires:
+    the run names that file and errors, the album is not reported as a clean
+    skip, and the file that was not blocked still gets both its tags.
+    """
+    from mlo import atomic
+    lib = os.path.join(tmp, "writefail")
+    album, paths = _album_fixture(tmp, exe, lib, "Album",
+                                  [("One", {}), ("Two", {"loud": 0.2812})])
+    blocked = paths[1]
+    real_replace = atomic.replace_locked
+
+    def refusing(tmp_path, dest, **kwargs):
+        if os.path.normcase(str(dest)) == os.path.normcase(blocked):
+            raise PermissionError(f"{os.path.basename(str(dest))} could not "
+                                  f"be replaced: another program has it open")
+        return real_replace(tmp_path, dest, **kwargs)
+
+    atomic.replace_locked = refusing
+    try:
+        stats = run_calc_dr_replaygain(_cfg(lib, worker_limit=1,
+                                            targets=[album]))
+    finally:
+        atomic.replace_locked = real_replace
+
+    blocked_tags = _dr_tags([blocked])[0]
+    good = _dr_tags([paths[0]])[0]
+    names = [name for name, _r in stats["errors"]]
+    ok(blocked_tags == ("", ""),
+       f"the file whose replace was refused keeps no DR tag — nothing landed "
+       f"({blocked_tags})")
+    ok(stats["error_count"] == 1 and os.path.basename(blocked) in names,
+       f"the run REPORTS that file by name instead of counting the album "
+       f"clean (errors={names})")
+    ok(stats["skipped_count"] == 0,
+       f"and the album is not reported as the benign skip a swallowed write "
+       f"used to look like (skipped={stats['skipped_count']})")
+    ok(good[0] and good[1],
+       f"the file that was not blocked still gets DYNAMIC RANGE and ALBUM "
+       f"DYNAMIC RANGE ({good})")
+
+
 def check_without_numpy(tmp, exe):
     """The block-math engine: the Rust helper first, numpy its fallback, and a
     build with NEITHER must SAY so instead of silently skipping."""
@@ -432,19 +490,43 @@ def check_without_numpy(tmp, exe):
     # because the helper owns the block math and numpy is only its fallback.
     if not dr.have_helper():
         skip("mlo-audio helper not built: the numpy-less measurement is untested")
+    else:
+        lib_b = os.path.join(tmp, "norust")
+        _album_b, paths_b = _album_fixture(tmp, exe, lib_b, "Album",
+                                           [("Loud", {})])
+        try:
+            dr.np = None
+            stats_b = run_calc_dr_replaygain(_cfg(lib_b, worker_limit=1))
+            tagged_b = str(AudioFile(paths_b[0]).get_tag("DYNAMIC RANGE") or "")
+            why_b = dict(stats_b["errors"]).get("dynamic range", "")
+        finally:
+            dr.np = real_np
+        ok(tagged_b != "" and not why_b,
+           f"the mlo-audio helper measures with numpy absent (tag {tagged_b!r}, "
+           f"reason {why_b!r})")
+
+    # (c) the helper EXISTS but will not start (a stale or half-copied build, a
+    # missing DLL). That is a broken INSTALL, not a verdict about the track, so
+    # the numpy block math must measure it — a helper that cannot launch used to
+    # come back as a failure for every track in the library.
+    if not dr.have_numpy():
+        skip("numpy absent: the cannot-start fallback cannot be measured here")
         return
-    lib_b = os.path.join(tmp, "norust")
-    _album_b, paths_b = _album_fixture(tmp, exe, lib_b, "Album", [("Loud", {})])
+    lib_c = os.path.join(tmp, "badhelper")
+    _album_c, paths_c = _album_fixture(tmp, exe, lib_c, "Album",
+                                       [("Loud", {})])
+    bogus = os.path.join(tmp, "bogus-helper.exe")
+    with open(bogus, "wb") as fh:
+        fh.write(b"this is not an executable\n")
+    saved_helper = dr.rust_helper
+    dr.rust_helper = lambda: bogus
     try:
-        dr.np = None
-        stats_b = run_calc_dr_replaygain(_cfg(lib_b, worker_limit=1))
-        tagged_b = str(AudioFile(paths_b[0]).get_tag("DYNAMIC RANGE") or "")
-        why_b = dict(stats_b["errors"]).get("dynamic range", "")
+        got_c = dr.measure_track_detailed(paths_c[0], exe, channels=2)
     finally:
-        dr.np = real_np
-    ok(tagged_b != "" and not why_b,
-       f"the mlo-audio helper measures with numpy absent (tag {tagged_b!r}, "
-       f"reason {why_b!r})")
+        dr.rust_helper = saved_helper
+    ok(got_c.dr is not None and not got_c.failed,
+       f"a helper that exists but will not start falls back to numpy "
+       f"(measured DR {got_c.dr!r}, reason {got_c.reason!r})")
 
 
 def check_rust_parity(tmp, exe):
@@ -536,6 +618,7 @@ def main():
         checks.append(("FLAC vs MP4", lambda: check_container_parity(tmp, exe)))
         checks.append(("without numpy", lambda: check_without_numpy(tmp, exe)))
         checks.append(("unreadable track", lambda: check_undecodable_track(tmp, exe)))
+        checks.append(("write failure", lambda: check_write_failure_reported(tmp, exe)))
         checks.append(("album loop", lambda: check_album_loop(tmp, exe)))
         checks.append(("album RG skip", lambda: check_album_rg_skip_existing(tmp, exe)))
     else:

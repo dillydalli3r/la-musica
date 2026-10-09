@@ -1555,14 +1555,15 @@ class AudioFile:
                 pass
             return False
 
+        from .atomic import replace_locked
         if in_place:
             # *dest* is the temp: one rename puts the tagged stream in place.
-            os.replace(dest, src)
+            replace_locked(dest, src)
         else:
             # The verified new container is placed FIRST and the source
             # removed after, so a kill in between leaves both files (a
             # duplicate the user can see) rather than neither.
-            os.replace(dest, final)
+            replace_locked(dest, final)
             try:
                 os.remove(src)
             except OSError:

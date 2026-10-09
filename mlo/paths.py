@@ -360,7 +360,7 @@ def trash_path(path, music_folder=None, user="") -> str:
         tmp = _trash_manifest_path(bin_dir) + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump({"version": 1, "entries": entries}, f)
-        os.replace(tmp, _trash_manifest_path(bin_dir))
+        _replace_atomic(tmp, _trash_manifest_path(bin_dir))
     except OSError:
         # The file IS in the bin either way; without a record the Trash page
         # asks for a destination instead of guessing one.
@@ -750,7 +750,7 @@ def save_track_covers(album_dir, mapping):
             json.dump({"version": 1, "tracks": mapping}, fh, indent=1, sort_keys=True)
             fh.flush()
             os.fsync(fh.fileno())
-        os.replace(tmp, dest)
+        _replace_atomic(tmp, dest)
         fsync_dir(album_dir)
         return True
     except Exception:
@@ -930,7 +930,7 @@ def save_expected_tracks(album_dir, release_id, tracks):
                        "tracks": rows}, fh, indent=1)
             fh.flush()
             os.fsync(fh.fileno())
-        os.replace(tmp, dest)
+        _replace_atomic(tmp, dest)
         fsync_dir(album_dir)
         return True
     except Exception:
@@ -978,7 +978,7 @@ def save_pending(album_dir, info):
             json.dump(dict(info, version=1), fh, indent=1)
             fh.flush()
             os.fsync(fh.fileno())
-        os.replace(tmp, _pending_path(album_dir))
+        _replace_atomic(tmp, _pending_path(album_dir))
         fsync_dir(album_dir)
         return True
     except Exception:
@@ -1042,7 +1042,7 @@ def save_importing(album_dir, info):
             json.dump(dict(info, version=1), fh, indent=1)
             fh.flush()
             os.fsync(fh.fileno())
-        os.replace(tmp, _importing_path(album_dir))
+        _replace_atomic(tmp, _importing_path(album_dir))
         fsync_dir(album_dir)
         return True
     except Exception:
@@ -1080,6 +1080,18 @@ _CROSS_DEVICE_ERRNOS = (errno.EXDEV,)
 # Every rename goes through this name so a single-volume test can stand in
 # for a cross-volume move.
 _replace = os.replace
+
+
+def _replace_atomic(tmp, dest):
+    """``os.replace`` with the shared transient-denial retry (mlo.atomic).
+
+    Resolved lazily because mlo.atomic imports THIS module for fsync_dir, so a
+    module-level import would be circular. The sidecar/marker writers below use
+    it so a reader or scanner Windows has holding the destination open does not
+    turn a library write into a bare "Access is denied".
+    """
+    from .atomic import replace_locked
+    replace_locked(tmp, dest)
 
 
 class _SizeMismatch(OSError):
@@ -1161,10 +1173,13 @@ def fsync_dir(path):
                 pass
 
 
-def _copy_across_volumes(src, dst, step):
-    """Copy *src* to a temp name beside *dst*, verify it, place it, then remove
-    the source. The source is untouched until the destination holds every byte,
-    so a failed copy can never lose data."""
+def _copy_verified(src, dst, step):
+    """Copy *src* to a temp name beside *dst*, verify every byte, and place it.
+
+    The SOURCE is never touched here — removing it is the caller's decision
+    (`_copy_across_volumes` does, `copy_path` does not). A copy that fails or
+    lands short discards its temp and raises: *dst* is never a half-made tree,
+    and every byte is verified before it is placed."""
     is_dir = os.path.isdir(src)
     tmp = f"{dst}.mlo-tmp-{os.getpid()}-{os.urandom(4).hex()}"
 
@@ -1182,6 +1197,14 @@ def _copy_across_volumes(src, dst, step):
     except OSError:
         _discard(tmp, is_dir)
         raise
+
+
+def _copy_across_volumes(src, dst, step):
+    """Copy *src* to a temp name beside *dst*, verify it, place it, then remove
+    the source. The source is untouched until the destination holds every byte,
+    so a failed copy can never lose data."""
+    is_dir = os.path.isdir(src)
+    _copy_verified(src, dst, step)
     step(lambda: shutil.rmtree(src) if is_dir else os.remove(src), f"remove {src}")
 
 
@@ -1254,6 +1277,143 @@ def move_path(src, dst, *, attempts=40, delay=0.5, log=None) -> bool:
         say("fail", f"move {src} -> {dst} gave up after {attempts} attempt(s): {exc}")
         return False
     return os.path.exists(dst) and (same_path or not os.path.exists(src))
+
+
+def _path_bytes(src) -> int:
+    """Every byte under *src* (the source tree's own size), 0 when unreadable."""
+    if not os.path.isdir(src):
+        try:
+            return os.path.getsize(src)
+        except OSError:
+            return 0
+    total = 0
+    for root, _dirs, files in os.walk(src):
+        for name in files:
+            try:
+                total += os.path.getsize(os.path.join(root, name))
+            except OSError:
+                pass
+    return total
+
+
+def is_app_staging(path, music_folder=None) -> bool:
+    """Whether *path* is inside the app's OWN staging for arriving files.
+
+    That is ``<music folder>/.mlo``: the state root (``data/``), the default
+    download and incomplete roots, the ``unpacked-*`` trees an archive is
+    extracted into, and the trash bin. Files there were put there BY THE APP,
+    so the movers may drain them — a staged download is moved into the library
+    and leaves nothing behind, because leaving it would leak a duplicate
+    forever.
+
+    A path the USER supplied is NOT staging, however much it looks like a
+    library folder: a folder dragged onto the app or picked in the wizard's
+    folder dialog belongs to the user, and the import COPIES it (see
+    `copy_path`) so the original stays exactly where they left it. A staging
+    root the user moved elsewhere (a custom ``soulseek_download_dir``) is a
+    folder they chose, so it reads as theirs here too — the flows that drain
+    it (``/api/downloads/import``, the Soulseek page's own import) name it
+    explicitly instead.
+
+    Resolved through realpath, so a link into the state root does not count as
+    being one, and a path on another drive is simply not in it.
+    """
+    root = mlo_root(music_folder)
+    if not path or not root:
+        return False
+    try:
+        real = os.path.realpath(str(path))
+        real_root = os.path.realpath(root)
+    except (OSError, ValueError, TypeError):
+        return False
+    if os.path.normcase(real) == os.path.normcase(real_root):
+        return True
+    try:
+        return (os.path.normcase(os.path.commonpath([real, real_root]))
+                == os.path.normcase(real_root))
+    except (OSError, ValueError):
+        return False
+
+
+def copy_path(src, dst, *, attempts=40, delay=0.5, log=None) -> bool:
+    """Copy *src* to *dst*, verified — and NEVER touch the source.
+
+    The other half of `move_path`, for a path the USER supplied: a folder or
+    file dragged onto the app, or picked in the wizard's folder dialog, is
+    theirs — the import takes a real copy into the library and leaves the
+    original exactly where it was (names, bytes and mtimes included).
+
+    A real byte copy, never a hard link and never a rename in place: a "copy"
+    that shared the original's blocks would silently change under the user the
+    moment the library renamed its own file, which is the opposite of what
+    they asked for. The disk-space consequence is therefore stated rather than
+    hidden — when the destination volume cannot hold the whole source the copy
+    is REFUSED, with the numbers in the log, instead of filling the disk and
+    leaving a half-copied album claimed as done. A copy that fails or lands
+    short discards its temp and returns False; *dst* is never a partial tree
+    and the source is whole either way.
+
+    Retries the same transient sharing/lock violations `move_path` does (a
+    file still open by a player or a download client), *attempts* tries,
+    *delay* seconds apart. An existing *dst* is refused rather than merged
+    into: filling a live album is `server.imports.merge_into_album`'s job, and
+    a merge hidden inside a copy is how a file the album already held gets
+    silently replaced. Returns True only when *dst* exists and holds every
+    byte of the source.
+    """
+    src, dst = os.fspath(src), os.fspath(dst)
+    attempts = max(1, int(attempts))
+    said = set()
+
+    def say(key, msg):
+        if log is None or key in said:
+            return
+        said.add(key)
+        try:
+            log(msg)
+        except Exception:
+            pass
+
+    if not os.path.lexists(src):
+        say("fail", f"copy {src} -> {dst}: the source is not there")
+        return False
+    if os.path.lexists(dst):
+        say("fail", f"copy {src} -> {dst}: the destination already exists")
+        return False
+    parent = os.path.dirname(os.path.abspath(dst))
+    if parent and not os.path.isdir(parent):
+        try:
+            os.makedirs(parent, exist_ok=True)
+        except OSError as exc:
+            say("fail", f"could not create {parent}: {exc}")
+            return False
+    needed = _path_bytes(src)
+    try:
+        free = shutil.disk_usage(parent or ".").free
+    except OSError:
+        free = None
+    if free is not None and needed > free:
+        say("space", f"not enough free space for the copy: {needed} bytes "
+                     f"needed, {free} free on {parent}")
+        return False
+
+    def step(run, what):
+        for i in range(1, attempts + 1):
+            try:
+                return run()
+            except OSError as exc:
+                if i >= attempts or not _is_locked(exc):
+                    raise
+                say("retry", f"{what}: {exc} (attempt {i}/{attempts})")
+                if delay:
+                    time.sleep(delay)
+
+    try:
+        _copy_verified(src, dst, step)
+    except OSError as exc:
+        say("fail", f"copy {src} -> {dst} gave up after {attempts} attempt(s): {exc}")
+        return False
+    return os.path.exists(dst)
 
 
 def get_track_cover(album_dir, track_filename):

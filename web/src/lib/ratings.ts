@@ -262,6 +262,10 @@ export function useSetRating(scope: RatingsScope = "track") {
         // `skipped` (write_rating_tags off) stays silent — it is a setting,
         // not a failure — and a folder scope has no tag at all (`tag` null).
         if (r.tag?.error) toast(`Rated, but the RATING tag was not written: ${r.tag.error}`, "error");
+        // Deferred is NOT a failure: a job owns this album right now, the
+        // rating is stored, and the server's own worker writes the tag when
+        // the job clears. Show the server's sentence as news, never an error.
+        else if (r.tag?.deferred && r.tag?.message) toast(r.tag.message, "info");
       } catch (e) {
         qc.setQueryData<RatingsPayload>(key, (old) => applyRating(old, path, had));
         toast(e instanceof Error ? e.message : String(e), "error");
@@ -318,6 +322,12 @@ export function useBulkRating() {
       if (r.tags_failed?.length) {
         const first = r.tags_failed[0];
         toast(`${r.tags_failed.length} file(s) could not be tagged — ${first.error || first.path}`, "error");
+      }
+      // Deferred rows are stored and owed: the server's worker writes them
+      // when the job on each album clears. News, not a failure.
+      if (r.tags_deferred?.length) {
+        toast(r.tags_deferred[0].message
+          || `${r.tags_deferred.length} rating(s) saved; their tags will be written when the running job finishes`, "info");
       }
       qc.invalidateQueries({ queryKey: RATINGS_KEY });
     },

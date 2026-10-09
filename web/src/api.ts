@@ -1948,6 +1948,21 @@ export interface SlskUploads {
   uploads: SlskUploadPeer[];
 }
 
+/** The SHARE's own totals (what this install OFFERS), summed server-side from
+ *  the index slskd serves — the configured share folders and excludes, not the
+ *  library on disk. `truncated: true` means the index exceeded the server's
+ *  one-shot read, so `files`/`bytes` are null: the share is bigger than the app
+ *  will count in one read, said plainly instead of reported as a wrong total. */
+export interface SlskShareTotals {
+  files: number | null;
+  bytes: number | null;
+  truncated: boolean;
+}
+
+/** The granularity a history clear targets: one file, one folder, one peer, or
+ *  the whole history. */
+export type SlskForgetScope = "file" | "folder" | "user" | "all";
+
 /** Which staging root an action targets. They are two directories —
  *  `<music>/.mlo/downloads` and its `<incomplete>` sibling — and a name is
  *  only unique INSIDE one of them, so every call names its root. */
@@ -1986,6 +2001,10 @@ export interface SlskBrowse {
    *  own words, and is shown as-is. */
   local?: boolean;
   note?: string;
+  /** Only ever set for the local answer: slskd's share index was bigger than
+   *  the bytes the server reads at once, so `directories` is empty because the
+   *  read was cut off — not because the share is empty. */
+  truncated?: boolean;
 }
 
 /** One private-message conversation (slskd): the peer and its unread count.
@@ -2820,8 +2839,12 @@ export const api = {
       `${API}/import/scan?path=${encodeURIComponent(path)}`,
       { method: "POST" }
     ),
+  /** Ingest a path the wizard was handed (an OS drop, a native folder pick).
+   *  `copied` says what happened to the source: a path the USER supplied is
+   *  copied into the library and stays where it was, while one the APP staged
+   *  (`<music>/.mlo/…`) is moved and drained. */
   importIngest: (source: string, target: string) =>
-    json<{ ok: boolean; path: string; album_name?: string; merged?: boolean }>(
+    json<{ ok: boolean; path: string; album_name?: string; merged?: boolean; copied?: boolean }>(
       `${API}/import/ingest?source=${encodeURIComponent(source)}&target=${encodeURIComponent(target)}`,
       { method: "POST" }
     ),
@@ -3068,7 +3091,16 @@ export const api = {
       scope: RatingsScope;
       path: string;
       rating: number;
-      tag: { rating100: number; written: boolean; skipped: boolean; error: string | null } | null;
+      tag: {
+        rating100: number;
+        written: boolean;
+        skipped: boolean;
+        /** The write was deferred because a job is rewriting this album: the
+         *  rating is stored and `message` says the tag will follow. */
+        deferred?: boolean;
+        error: string | null;
+        message?: string | null;
+      } | null;
     }>(
       `${API}/ratings`,
       {
@@ -3089,6 +3121,7 @@ export const api = {
       failed: { path: string; error: string }[];
       tags_written: number;
       tags_failed: { path: string; error: string }[];
+      tags_deferred: { path: string; message: string }[];
     }>(
       `${API}/ratings/bulk`,
       {
@@ -3869,10 +3902,27 @@ export const api = {
       body: JSON.stringify({ dirs, autostart, apply }),
     }, 60000),
   soulseekSharesRescan: () =>
-    json<{ ok: boolean }>(`${API}/soulseek/shares/rescan`, { method: "POST" }, 60000),
+    json<{ ok: boolean; deferred?: boolean; message?: string }>(`${API}/soulseek/shares/rescan`, { method: "POST" }, 60000),
   soulseekSharesRefresh: () =>
     json<{ ok: boolean; message: string }>(`${API}/soulseek/shares/refresh`, { method: "POST" }, 120000),
   soulseekUploads: () => json<SlskUploads>(`${API}/soulseek/uploads`),
+  /** What this install OFFERS: the SHARE's own file count and byte total, from
+   *  the index slskd serves (not the library on disk). `truncated` is honest —
+   *  an index too big for the server's one read comes back with null totals. */
+  soulseekShareTotals: () =>
+    json<SlskShareTotals>(`${API}/soulseek/share-totals`, undefined, 120000),
+  /** Clear upload HISTORY at one granularity (file / folder / user / all).
+   *  Records only: nothing on disk is touched, no upload is cancelled, and
+   *  slskd's own transfer tree is left as it is. */
+  soulseekUploadsForget: (
+    scope: SlskForgetScope,
+    target: { username?: string; dir?: string; filename?: string } = {}
+  ) =>
+    json<{ ok: boolean }>(`${API}/soulseek/uploads/forget`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ scope, ...target }),
+    }),
   /** The listen port's own check (server/api_soulseek.py): the listener here,
    *  what the router holds for the port, the addresses both depend on, a
    *  connection from this machine to the public address, and slskd's login —

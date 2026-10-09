@@ -916,9 +916,11 @@ assert route["checked"][-1] == "youtube-age", route
 assert route["answers"]["youtube-age"] == 1 and route["value"] == 1, route
 assert route["source"] == "youtube-age", route
 
-# Discogs' Parental Advisory format is album-level, token-only and WEAK: it
-# can only add an explicit signal (never clear a track), and without a token
-# it is not even asked.
+# Discogs' Parental Advisory format is ALBUM/EDITION-level evidence, so it
+# must never rate a track: one flagged edition would otherwise make every
+# track of the release read explicit (the owner's "tagging tracks as explicit
+# even when they aren't"). The advisory route does not ask Discogs at all any
+# more — even with a token, a flagged release adds NOTHING to a track.
 def discogs_router(formats):
     def router(url, params):
         if "api.discogs.com/releases" in url:
@@ -935,23 +937,11 @@ intg._ADVISORY_CACHE.clear()
 stub_json(discogs_router(sticker))
 route = intg.resolve_advisory_route(title="Track One", artist="Test Artist",
                                     album="Test Album", cfg={"discogs_token": "t"})
-assert "discogs-parental" in route["checked"], route
-assert route["answers"] == {"discogs-parental": 1}, route
-assert route["value"] == 1 and route["source"] == "discogs-parental", route
-
-intg._ADVISORY_CACHE.clear()
-route = intg.resolve_advisory_route(title="Track One", artist="Test Artist",
-                                    album="Test Album", cfg={})
 assert "discogs-parental" not in route["checked"], route
-assert route["answers"] == {}, route
-
-# A release without the sticker states nothing at all — it never says "clean".
-intg._ADVISORY_CACHE.clear()
-stub_json(discogs_router([{"name": "CD", "descriptions": ["Album"]}]))
-route = intg.resolve_advisory_route(title="Track One", artist="Test Artist",
-                                    album="Test Album", cfg={"discogs_token": "t"})
-assert "discogs-parental" in route["checked"], route
 assert route["answers"] == {} and route["value"] is None, route
+assert route["source"] is None, route
+# ... the album-level flag is not a source any caller may attribute a value to
+assert "discogs-parental" not in intg.ADVISORY_SOURCES, intg.ADVISORY_SOURCES
 
 # --------------------------------------------------------------------------- #
 # 8) The 30-day cache answers the second run instead of the network

@@ -1905,6 +1905,11 @@ export interface SourceHealth {
    *  tray reads it as the source's one-line description). */
   provides?: string;
   needs: string[];
+  /** The subset of `needs` whose absence does NOT stop this source: it has a
+   *  second route (RateYourMusic's archived snapshot, MusicBrainz's own links).
+   *  A row with these still prompts for the key — they upgrade the read — but
+   *  is `ok` rather than `skipped` while they are unset. */
+  optional_needs?: string[];
   configured: boolean;
   status: "ok" | "skipped" | "fail";
   detail: string;

@@ -1080,7 +1080,12 @@ rating.
 - **R51** — an answer without timestamps is discarded as if the provider had
   none; `lyrics_allow_plain` (off) is the only opt-in that lets plain text
   through. Automatic fetches only *write* a hit at a high confidence floor while
-  the manual search keeps the loose one.
+  the manual search keeps the loose one. A STORED lyric is a reason to skip the
+  fetch only when the install ACCEPTS it (a timed one, or an untimed one while
+  `lyrics_allow_plain` is on): an untimed lyric under `lyrics_allow_plain` off
+  is a value the policy refuses, so the automatic fetch re-fetches it (the same
+  outcome the manual override reaches) instead of leaving it as a LYRICS
+  grading failure.
 - **R52** — credits are not lyrics: the contributor block some providers return
   as the first line is dropped (becoming a blank line), and an instrumental is
   never given lyrics.
@@ -1684,8 +1689,16 @@ and records which stage answered (`source`).
 
 - **R61 — the providers are a source, and the merge rule is `1 > 0 > 2`.**
   `server/integrations.py::resolve_advisory_route` asks Deezer/Spotify (ISRC),
-  Apple, Discogs and YouTube, and `merge_advisory` settles what they said: a
-  stated 1 beats everything, then a stated 0, then a clean edition's 2.
+  Apple and YouTube — every route states something about the TRACK — and
+  `merge_advisory` settles what they said: a stated 1 beats everything, then a
+  stated 0, then a clean edition's 2. An ALBUM/EDITION-level flag is never a
+  route: Discogs' `format`/`description` "Parental Advisory" used to be merged
+  in as an explicit `1`, which made every track of a flagged edition read
+  explicit, and it is not asked any more. Deezer's own `explicit_lyrics` is
+  decisive when the record states it (`true` → 1, `false` → 0); the
+  `explicit_content_lyrics` flag is read only when `explicit_lyrics` is absent,
+  so a pressing whose record says its LYRICS are not explicit cannot mark a
+  track explicit off the content flag (the "Just (Edit)" false positive).
 - **R61a — every ISRC is asked, by every ISRC source — the instrumental lookup
   included.** `server/integrations.py::_isrc_codes` is the ONE reader of "the
   ISRCs this track has" (a file's `"; "`-joined `ISRC` tag or a caller's own
@@ -1714,7 +1727,11 @@ and records which stage answered (`source`).
   nothing); `3` (or an unparseable reply) falls through the ladder. Provenance
   ids: `ai-lyrics` (the words were read) and `ai` (they were not). It is never
   asked what a source already answered: its answer is not a second opinion, so
-  a provider's value is left alone however the model would have voted.
+  a provider's value is left alone however the model would have voted. Its `1`
+  is NOT written, though: an explicit flag needs a REAL source to state the
+  track is explicit, and a model that answers explicit while every source is
+  silent (or says not explicit) leaves the track at the fallback — a guess may
+  never be the only reason a track reads explicit.
 - **R62a — the reasoning effort is the user's, and `Max` degrades instead of
   failing.** `ai_effort` (default **high**) is what every AI call sends as
   `reasoning_effort` — R62's advisory judge, script 17's transforms, the

@@ -5,6 +5,7 @@ import subprocess
 import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from .atomic import replace_locked
 from .paths import fsync_dir
 from .stats import (
     new_stats, _make_pbar, _pbar_skip, _pbar_update, _walk_files, _diff_bytes,
@@ -187,7 +188,7 @@ def _process_cue_file(args):
             except Exception:
                 pass
 
-        os.replace(tmp_path, filename)
+        replace_locked(tmp_path, filename)
         fsync_dir(os.path.dirname(filename))
         tmp_path = None
 

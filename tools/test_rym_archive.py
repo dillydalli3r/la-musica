@@ -36,7 +36,17 @@ network at all) and the module's disk caches off unless a test asks for one:
   * MusicBrainz's own tiers are labelled by where their names came from —
     recording → release → release group → artist — with an artist-only row
     marked `artist` and never `album`, because a mislabelled tier both
-    misreports the provenance and outranks the next source's album tier.
+    misreports the provenance and outranks the next source's album tier;
+  * RateYourMusic is the FIRST source asked and its names LEAD the merged,
+    capped list — the shipped `genre_sources` (and `web_ratings_sources`) put
+    it in slot 1 — and a track RYM alone completes stops the chain before the
+    next source is paid a request;
+  * the refusal is SURFACED, not only logged: `server.sources_health`'s RYM
+    row reports the live state the Settings/Dependencies panel and the wizard
+    read — `ok` (and probed over the archive) for a default install with no
+    cookie, `skipped` plus RYM's own sentence and the `rym_last` response
+    (403, challenge marker, URL) for a stale one, and a real `needs rym_cookie`
+    skip when the archive fallback is off and there is no second route.
 
 Run:  python tools/test_rym_archive.py
 """
@@ -517,5 +527,146 @@ assert got["per_track"][(1, 2)] == ["Art Rock"], got["per_track"]
 assert got["per_track_levels"][(1, 2)] == "artist", got["per_track_levels"]
 assert got["levels"] == {FILE_ONE: "track", FILE_TWO: "artist"}, got["levels"]
 assert got["level_counts"] == {"track": 1, "album": 0, "artist": 1}, got["level_counts"]
+
+# --------------------------------------------------------------------------- #
+# 9) RateYourMusic is the FIRST source asked, and its names LEAD the merge
+# --------------------------------------------------------------------------- #
+# The shipped default is a PRIORITY list, and RateYourMusic holds slot 1 of it:
+# the chain asks it first and the merged, capped list keeps its names ahead of
+# every later source's. This is what "preferred" means here — not "its answer
+# is the only one", which the family-first merge rules would contradict.
+from mlo.config import DEFAULT_CONFIG           # noqa: E402
+from mlo import web_ratings                     # noqa: E402
+
+# The three lists a preference could live in, all pinned to the same order:
+# the genre registry the chain reads (`server.integrations.GENRE_SOURCES`), the
+# shipped config the Settings form writes, and the web-rating registry (album
+# AND the track-level subset).
+assert intg.GENRE_SOURCES[0] == "rateyourmusic", intg.GENRE_SOURCES
+assert list(DEFAULT_CONFIG["genre_sources"]) == intg.GENRE_SOURCES, \
+    DEFAULT_CONFIG["genre_sources"]
+assert web_ratings.SOURCES[0] == "rateyourmusic", web_ratings.SOURCES
+assert list(DEFAULT_CONFIG["web_ratings_sources"]) == web_ratings.SOURCES, \
+    DEFAULT_CONFIG["web_ratings_sources"]
+assert web_ratings.TRACK_SOURCES[0] == "rateyourmusic", web_ratings.TRACK_SOURCES
+
+# Two sources, both able to answer. The cap is set ABOVE what RYM alone states
+# (4 slots vs its three names) so the chain cannot stop before MusicBrainz:
+# RYM is first in `asked`, and its genres sit ahead of MusicBrainz's in the
+# merged per-track list (the merge walks the ask order).
+MB_PAYLOADS = {"release-group/rg-1": {"genres": [{"name": "Progressive Rock"}]},
+               "artist/art-1": {"genres": []}}
+clear()
+stub_mb(MB_PAYLOADS)
+fake = stub_http(archive_only)
+got = chain(CFG, sources=["rateyourmusic", "musicbrainz"], limit=4)
+assert got["asked"] == ["rateyourmusic", "musicbrainz"], got["asked"]
+names = got["per_track"][(1, 1)]
+assert names[:2] == ["Heavy Metal", "Groove Metal"], names
+assert "Progressive Rock" in names, names
+assert names.index("Heavy Metal") < names.index("Progressive Rock"), names
+# The report keeps the per-source provenance the payload carries: RYM's answer
+# is attributed to rateyourmusic, MusicBrainz's to musicbrainz.
+assert got["per_track_sources"][(1, 1)][:2] == ["rateyourmusic", "musicbrainz"], \
+    got["per_track_sources"]
+
+# And RYM FIRST means the later sources are not paid for an answer RYM already
+# completed: at the shipped two-genre cap, one source's family+genre fills the
+# track and MusicBrainz is never asked at all.
+clear()
+stub_mb(MB_PAYLOADS)
+stub_http(archive_only)
+filled = chain(CFG, sources=["rateyourmusic", "musicbrainz"], limit=2)
+assert filled["asked"] == ["rateyourmusic"], filled["asked"]
+assert filled["per_track"][(1, 1)] == ["Heavy Metal", "Groove Metal"], \
+    filled["per_track"]
+
+# --------------------------------------------------------------------------- #
+# 10) The failure is SURFACED, not only logged: the Sources row carries it
+# --------------------------------------------------------------------------- #
+# The reported bug the owner feels: RYM refuses (a stale cookie, a challenged
+# network) and the only account of it is a log line. `sources_health` is the
+# surface the Settings/Dependencies panel and the wizard read, and its RYM row
+# must carry the refusal itself. The HTTP layer is stubbed (no network).
+import server.sources_health as sh              # noqa: E402
+
+_ALL_SPECS = sh._specs
+# Probe ONLY the RYM rows: the other eleven genre sources would each reach the
+# real network, which this hermetic file must never do.
+sh._specs = lambda kind=None: [s for s in _ALL_SPECS(kind)
+                               if s["id"] == "rateyourmusic"]
+
+# A default install: no cookie, `rym_archive_fallback` ON (it ships True). The
+# row must read as RUNNABLE and must be probed — the archive is the second
+# route, so "needs rym_cookie" is an upgrade note, never "cannot run".
+PROBE_PAGE = (
+    '<html><body><h1 class="album_title">Pablo Honey</h1>'
+    '<a href="/artist/radiohead">Radiohead</a>'
+    '<div class="album_genres">'
+    '<a href="/genre/alternative-rock">Alternative Rock</a>'
+    '<a href="/genre/grunge">Grunge</a>'
+    '</div></body></html>')
+
+
+def probe_archive(url, params):
+    assert url.startswith("https://web.archive.org/"), url
+    target = url.split("id_/")[-1]
+    return Response(200, PROBE_PAGE,
+                    "https://web.archive.org/web/%sid_/%s" % (STAMP, target))
+
+
+clear()
+stub_mb({})
+fake = stub_http(probe_archive)
+payload = sh.health_payload(CFG, kind="genre", probe=True)
+row = payload["sources"][0]
+assert row["id"] == "rateyourmusic" and row["rank"] == 1, row
+# The cookie is still ASKED for (`needs` drives the panel's paste field), but
+# its absence does not sink the row.
+assert row["needs"] == ["rym_cookie"], row["needs"]
+assert row["configured"] is False, row
+assert row["optional_needs"] == ["rym_cookie"], row
+assert row["status"] == "ok", row
+assert row["detail"] == "2 genres", row["detail"]
+# …and it was really probed, over the ARCHIVE — no live rateyourmusic.com call.
+assert fake.calls and all("web.archive.org" in u for u in fake.calls), fake.calls
+
+# The owner's case: a saved cookie RYM then refuses. The row reports `skipped`
+# with RYM's own sentence AND the response behind it (`rym_last`) — status,
+# the challenge marker and the URL — which is what separates a stale cookie
+# from a blocked network on the panel.
+clear()
+stub_mb({})
+
+
+def stale_cookie(url, params):
+    if url.startswith(intg.RYM_ARCHIVE_INDEX):
+        return Response(200, cdx(), url)      # no capture: the archive adds nothing
+    assert "rateyourmusic.com" in url, url
+    return Response(403, CHALLENGE, url)
+
+
+stub_http(stale_cookie)
+payload = sh.health_payload(CFG_COOKIE, kind="genre", probe=True)
+row = payload["sources"][0]
+assert row["status"] == "skipped", row
+assert "Cloudflare challenge instead of a page (HTTP 403)" in row["detail"], row
+assert "rym_cookie" in row["detail"], row["detail"]
+assert row["rym_last"]["status"] == 403, row["rym_last"]
+assert row["rym_last"]["challenge"] is True, row["rym_last"]
+assert "rateyourmusic.com" in row["rym_last"]["url"], row["rym_last"]
+assert "rym_cookie" in row["rym_last"]["reason"], row["rym_last"]
+
+# Fallback OFF and no cookie: the cookie IS required now (no second route), so
+# the row is `skipped` and — because nothing can answer — it is not probed at
+# all (the `never` router would fail on any request).
+clear()
+stub_mb({})
+stub_http(never)
+payload = sh.health_payload(CFG_OFF, kind="genre", probe=True)
+row = payload["sources"][0]
+assert row["status"] == "skipped", row
+assert row["detail"] == "needs rym_cookie", row["detail"]
+assert "optional_needs" not in row, row
 
 print("rym archive: all assertions passed")

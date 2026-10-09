@@ -152,6 +152,13 @@ def _init():
                 );
                 CREATE INDEX IF NOT EXISTS ratings_by_mbid
                     ON ratings (user, mbid);
+                CREATE TABLE IF NOT EXISTS tag_writes (
+                    path TEXT NOT NULL PRIMARY KEY,
+                    rating INTEGER NOT NULL,
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    next_try REAL NOT NULL DEFAULT 0,
+                    created REAL NOT NULL
+                );
                 """)
             if legacy:
                 c.execute(
@@ -160,6 +167,9 @@ def _init():
                     " SELECT user, 'track', path, rating, mbid, updated"
                     " FROM ratings_legacy")
                 c.execute("DROP TABLE ratings_legacy")
+    # Any owed tag write from a previous process is drained as soon as ratings
+    # are touched again — this is what makes a deferred write survive a restart.
+    _ensure_pump()
 
 
 # --------------------------------------------------------------------------- #
@@ -310,6 +320,74 @@ def value(path, user="", scope="track"):
             if _pathkey(r["path"]) == want:
                 return int(r["rating"] or 0)
     return 0
+
+
+def _read_conn():
+    """A connection for a READ that must not CREATE the database.
+
+    The grader reads the store for every album it grades; opening a missing
+    ratings.db would plant an empty one (and its `_init` side effects) in a
+    state dir just because a library was graded. A missing file means "no rows
+    the app holds", answered without touching the disk.
+    """
+    try:
+        if not os.path.isfile(db_path()):
+            return None
+    except Exception:
+        return None
+    return _conn()
+
+
+def track_tags_for(paths, user="", scope="track"):
+    """{pathkey: half-stars} for the STORED rows among *paths*.
+
+    The grader's read: for the tracks it is grading, which ones does the app
+    actually hold a rating for (and what is it). Keyed with :func:`_pathkey`
+    (the identity rows are stored under), and only rows that EXIST are
+    returned — a track the app has no row for is absent, which is how "a tag
+    the app never wrote is not a divergence" is expressed (see the grader's
+    RATING check). No file is opened and nothing is healed: this answers only
+    "what does the app think", for paths the caller has already resolved.
+    """
+    scope = parse_scope(scope)
+    want = {_pathkey(p): p for p in (paths or []) if str(p or "").strip()}
+    out = {}
+    if not want:
+        return out
+    c = _read_conn()
+    if c is None:
+        return out
+    with c:
+        for r in c.execute("SELECT path, rating FROM ratings"
+                           " WHERE user=? AND scope=?", (user, scope)):
+            half = int(r["rating"] or 0)
+            if not half:
+                continue
+            key = _pathkey(r["path"])
+            if key in want:
+                out[key] = half
+    return out
+
+
+def all_track_tags(user="", scope="track"):
+    """{pathkey: half-stars} for EVERY stored row of one scope, in one read.
+
+    The library-wide grade must not pay a full table scan per album: the run
+    reads the whole map ONCE here and hands it to every `_grade_album` call
+    (see the `_rating_store` private config key in `mlo.grader`).
+    """
+    scope = parse_scope(scope)
+    out = {}
+    c = _read_conn()
+    if c is None:
+        return out
+    with c:
+        for r in c.execute("SELECT path, rating FROM ratings"
+                           " WHERE user=? AND scope=?", (user, scope)):
+            half = int(r["rating"] or 0)
+            if half:
+                out[_pathkey(r["path"])] = half
+    return out
 
 
 def map_for(paths=None, user="", adopt=True, scope="track"):
@@ -543,22 +621,197 @@ def _config():
         return {}
 
 
+# A job rewriting an album (an import, a script chain, the organizer) holds it
+# for MINUTES, so no bounded retry window can write a tag through it. A rating
+# that lands on such an album is deferred instead: the value is already in the
+# store, the intent is recorded durably (tag_writes), and the pump below writes
+# the tag the moment the claim clears. This is the sentence the UI shows.
+DEFERRED_MESSAGE = ("Rating saved — the RATING tag will be written "
+                    "automatically when the job running on this album finishes.")
+# The pump's own budget for a FILE whose write keeps failing (the album is free
+# but the container refuses): back off, and stop after this many tries. The
+# RATING row is untouched either way, and a new rating re-arms the intent.
+_PUMP_MAX_ATTEMPTS = 20
+_PUMP_MAX_DELAY = 60.0
+
+_pump_lock = threading.Lock()
+_pump_thread = None
+_pump_wake = threading.Event()
+
+
+def _album_busy(path):
+    """Whether ANY job holds *path*'s album right now.
+
+    ``job_locks.busy`` is the outsider query (asker None, never inherited from
+    the calling context), which is what a rating needs: a rating made inside a
+    job's own context still has to see that job and defer rather than fight it.
+    ``holder(path, asker=None)`` would NOT do this — its ``asker or current()``
+    falls back to the caller's context and would treat the holding job as the
+    caller's own.
+    """
+    try:
+        from server import job_locks
+        return bool(job_locks.busy(os.path.dirname(os.path.abspath(str(path)))))
+    except Exception:
+        return False
+
+
+def _defer_tag_write(path, tag_value):
+    """Record durably that *path* is owed a RATING tag of *tag_value*.
+
+    Upsert: a NEWER rating supersedes an older intent, because the file must
+    end up carrying the user's LATEST value. Survives a crash/restart (the row
+    is on disk) and re-arms the pump."""
+    key = os.path.normpath(str(path))
+    with _lock:
+        with _conn() as c:
+            c.execute(
+                "INSERT INTO tag_writes (path, rating, attempts, next_try, created)"
+                " VALUES (?,?,0,0,?)"
+                " ON CONFLICT(path) DO UPDATE SET"
+                " rating=excluded.rating, attempts=0, next_try=0,"
+                " created=excluded.created",
+                (key, int(tag_value), time.time()))
+    _ensure_pump()
+
+
+def _clear_tag_write(path):
+    key = os.path.normpath(str(path))
+    with _lock:
+        with _conn() as c:
+            c.execute("DELETE FROM tag_writes WHERE path=?", (key,))
+
+
+def pending_tag_writes():
+    """The owed tag writes, newest first — for the UI and for tests."""
+    with _conn() as c:
+        return [{"path": r["path"], "rating": int(r["rating"]),
+                 "attempts": int(r["attempts"])}
+                for r in c.execute("SELECT path, rating, attempts FROM tag_writes"
+                                   " ORDER BY created DESC")]
+
+
+def _due_tag_writes(now, limit=32):
+    with _conn() as c:
+        return [dict(r) for r in c.execute(
+            "SELECT path, rating, attempts, next_try FROM tag_writes"
+            " WHERE next_try<=? ORDER BY next_try, created LIMIT ?",
+            (now, limit))]
+
+
+def _bump_tag_write(path, attempts, next_try):
+    key = os.path.normpath(str(path))
+    with _lock:
+        with _conn() as c:
+            c.execute("UPDATE tag_writes SET attempts=?, next_try=? WHERE path=?",
+                      (int(attempts), float(next_try), key))
+
+
+def _write_tag_file(path, half, tag_value):
+    """The container write itself (the claim check is the caller's).
+
+    Returns ``(ok, wrote, error)``: *ok* is whether the file now carries the
+    value (True also when it already did, with *wrote* False), *error* the
+    container's own message on failure."""
+    try:
+        from mlo.audio import AudioFile
+        af = AudioFile(path)
+        if af.audio is None:
+            return False, False, af.error or "cannot open the file"
+        # Already says this: rating a track must not rewrite a container for a
+        # value it carries.
+        if from_tag(af.get_tag("RATING")) == half:
+            return True, False, None
+        ok = (af.delete_tag("RATING") if half == 0
+              else af.set_tag("RATING", str(tag_value)))
+        if not ok or af.defer_save(False) is False:
+            return False, False, af.error or "tag write failed"
+        _invalidate(path)
+        return True, True, None
+    except Exception as e:
+        return False, False, f"{type(e).__name__}: {e}"
+
+
+def _ensure_pump():
+    """Start the deferred-write pump if it is not already running.
+
+    Called when an intent is recorded AND when the store is first opened, so a
+    process that inherits owed writes from a crash/restart drains them."""
+    global _pump_thread
+    with _pump_lock:
+        if _pump_thread is not None and _pump_thread.is_alive():
+            return
+        _pump_thread = threading.Thread(target=_pump_loop, daemon=True,
+                                        name="mlo-tag-writes")
+        _pump_thread.start()
+
+
+def _pump_loop():
+    """Write owed tags as their albums free up, then exit when none are owed.
+
+    A held album is re-checked ~1 s later WITHOUT spending an attempt (the
+    holder is expected, and may run for minutes); a write that keeps failing
+    with the album FREE is retried with backoff and dropped after
+    ``_PUMP_MAX_ATTEMPTS`` — the RATING row itself is never touched here, and a
+    fresh rating re-arms the intent."""
+    while True:
+        try:
+            due = _due_tag_writes(time.time())
+        except Exception:
+            return
+        if not due:
+            try:
+                with _conn() as c:
+                    owed = c.execute("SELECT 1 FROM tag_writes LIMIT 1").fetchone()
+            except Exception:
+                owed = None
+            if owed is None:
+                return          # nothing owed: stop; a new rating restarts this
+            _pump_wake.wait(1.0)
+            _pump_wake.clear()
+            continue
+        for row in due:
+            path = row["path"]
+            try:
+                if _album_busy(path):
+                    _bump_tag_write(path, row["attempts"], time.time() + 1.0)
+                    continue
+                tag_value = int(row["rating"])
+                ok, _wrote, _err = _write_tag_file(path, from_tag(tag_value), tag_value)
+                if ok:
+                    _clear_tag_write(path)
+                    continue
+                attempts = int(row["attempts"]) + 1
+                if attempts >= _PUMP_MAX_ATTEMPTS:
+                    _clear_tag_write(path)
+                    continue
+                delay = min(_PUMP_MAX_DELAY, 2.0 * attempts)
+                _bump_tag_write(path, attempts, time.time() + delay)
+            except Exception:
+                continue
+
+
 def write_tag(path, rating, cfg=None):
     """Write (or clear) the file's ``RATING``. NEVER raises, never throws away
     the caller's DB rating.
 
     Returns ``{"rating100": int, "written": bool, "skipped": bool,
-    "error": str|None}`` — `rating100` is the value that belongs in the tag
-    (0 on a clear), `written` says the file on disk changed, `skipped` says
-    the write gate (`write_rating_tags`, and the per-filetype
-    `audio_tag_writes` matrix) left the file alone, and `error` is the
-    container's own message. A caller stores its rating either way and reports
-    `error`, so a read-only file can never silently drop what the user chose.
+    "deferred": bool, "error": str|None, "message": str|None}`` — `rating100`
+    is the value that belongs in the tag (0 on a clear), `written` says the
+    file on disk changed, `skipped` says the write gate (`write_rating_tags`,
+    and the per-filetype `audio_tag_writes` matrix) left the file alone, and
+    `error` is the container's own message (a read-only file can never silently
+    drop what the user chose).
+
+    `deferred` is the case the app caused ITSELF: a job holding this album
+    right now. The write is not attempted (or, if one raced in, not retried
+    against it) — the intent is recorded and `message` is shown instead of an
+    "Access is denied" the job would clear on its own.
     """
     half = parse_half_stars(rating)
     tag_value = to_tag(half)
     out = {"rating100": tag_value, "written": False, "skipped": False,
-           "error": None}
+           "deferred": False, "error": None, "message": None}
     cfg = _config() if cfg is None else cfg
     try:
         from mlo.config import should_write_audio_tag
@@ -567,27 +820,26 @@ def write_tag(path, rating, cfg=None):
             return out
     except Exception:
         pass  # a config that cannot answer must not block the user's rating
-    try:
-        from mlo.audio import AudioFile
-        af = AudioFile(path)
-        if af.audio is None:
-            out["error"] = af.error or "cannot open the file"
-            return out
-        # Skip a file that already says this: rating a track must not rewrite
-        # a container for a value it carries.
-        if from_tag(af.get_tag("RATING")) == half:
-            return out
-        ok = af.delete_tag("RATING") if half == 0 else af.set_tag(
-            "RATING", str(tag_value))
-        if not ok or af.defer_save(False) is False:
-            out["error"] = af.error or "tag write failed"
-            return out
-        out["written"] = True
-        _invalidate(path)
+    if _album_busy(path):
+        _defer_tag_write(path, tag_value)
+        out["deferred"] = True
+        out["message"] = DEFERRED_MESSAGE
         return out
-    except Exception as e:
-        out["error"] = f"{type(e).__name__}: {e}"
+    ok, wrote, err = _write_tag_file(path, half, tag_value)
+    if ok:
+        _clear_tag_write(path)
+        out["written"] = wrote
         return out
+    # The write failed. If a job holds the album NOW (it may have claimed it
+    # between our check and the write), that collision is the app's own: defer
+    # rather than show the user a denial the job will clear by itself.
+    if _album_busy(path):
+        _defer_tag_write(path, tag_value)
+        out["deferred"] = True
+        out["message"] = DEFERRED_MESSAGE
+        return out
+    out["error"] = err
+    return out
 
 
 def _invalidate(path):
@@ -609,7 +861,10 @@ def rate(path, rating, mbid=None, user="", cfg=None, scope="track"):
     The row is written FIRST: the database is the source of truth, so a file
     that cannot be tagged (read-only, a full disk, a container this app cannot
     write) still keeps the rating the user just gave it, with the tag failure
-    reported beside it.
+    reported beside it. A rating that lands while a JOB holds the album is
+    DEFERRED instead — `tag.deferred` and a message, never an error the app's
+    own job caused — and converges (the pump writes the tag) when the claim
+    clears.
 
     An album or artist rating writes NO tag — a folder has no file to carry one
     — so its reply says ``"tag": None`` rather than inventing a write that
@@ -632,7 +887,9 @@ def bulk_rate(paths, rating, user="", cfg=None):
     stored); a path whose rating was stored but whose file tag could not be
     written counts as updated AND appears in `tags_failed` with the reason —
     the rating is the user's intent and it is never dropped for a container's
-    sake, and the two lists never overlap.
+    sake, and the two lists never overlap. A path whose album is held by a job
+    is stored and listed in `tags_deferred` (with the message), not in
+    `tags_failed`: that write is owed, not refused.
 
     Tracks only, deliberately: a bulk call is a multi-select of FILES (a
     selection of rows, a whole playlist), and no surface multi-selects album or
@@ -641,7 +898,8 @@ def bulk_rate(paths, rating, user="", cfg=None):
     folder.
     """
     half = parse_half_stars(rating)
-    updated, failed, tagged, tags_failed = 0, [], 0, []
+    updated, failed, tagged = 0, [], 0
+    tags_failed, tags_deferred = [], []
     for raw in paths or []:
         p = str(raw or "").strip()
         try:
@@ -656,7 +914,9 @@ def bulk_rate(paths, rating, user="", cfg=None):
         res = write_tag(p, half, cfg)
         if res["error"]:
             tags_failed.append({"path": api_path(p), "error": res["error"]})
+        elif res.get("deferred"):
+            tags_deferred.append({"path": api_path(p), "message": res.get("message")})
         elif res["written"]:
             tagged += 1
     return {"updated": updated, "failed": failed, "tags_written": tagged,
-            "tags_failed": tags_failed}
+            "tags_failed": tags_failed, "tags_deferred": tags_deferred}

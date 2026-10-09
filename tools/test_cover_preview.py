@@ -418,5 +418,149 @@ else:
     assert small_asked.content == on_disk(small_album_cover), (
         "a cover below the asked width was re-encoded")
 
+# --------------------------------------------------------------------------- #
+# 7) The cover the player cannot recover from on its own.
+#
+#    One URL is built from an album path and a cover FILE NAME, and both can
+#    predate what is on disk: the writers rename the file inside a stable album
+#    (`_write_cover_bytes` drops the old extension after a PNG→JPEG re-encode;
+#    script 5 renames the folder's own cover candidate to `cover.*` — see
+#    `mlo.images._rename_to_cover`), while a queue row, a page payload or the
+#    offline cache can still hold the name the file used to have. `file` is
+#    therefore a HINT: the album's own cover answers a name that no longer
+#    exists, and the 404 is what is left when the album really has no art in
+#    either place — never a blank slot a track cannot get past.
+# --------------------------------------------------------------------------- #
+from mlo import atomic  # noqa: E402
+from server import tagcache  # noqa: E402
+
+album_art = on_disk(os.path.join(ALBUM, album_cover))
+
+# 7a) A stale name — what every URL built before a script-5 rename carries —
+#     resolves to the cover the album really has, sized and unsized alike.
+for stale_name in ("front.png", "folder.jpg", "01 - Song.jpg"):
+    stale = fetch(ALBUM, stale_name)
+    assert stale.status_code == 200, (stale_name, stale.status_code, stale.text)
+    assert stale.content == album_art, (
+        f"a stale cover name ({stale_name}) did not resolve to the album's own art")
+    assert stale.headers["etag"] == fetch(ALBUM).headers["etag"], (
+        "the fallback answered with a different image than the album's own cover")
+# …and the bar's own sized request lands on the same fallback.
+assert fetch(ALBUM, "01 - Song.jpg", params={"w": "160"}).status_code == 200
+
+# The rename script 5 really performs — the folder's cover candidate takes the
+# canonical name and the old one is gone (`mlo.images._rename_to_cover`) — is
+# the case that used to strand the player for a whole track: the URL a page, a
+# queue row or the offline cache holds still names the file that no longer
+# exists. The name must still resolve, to the file the album now has.
+if album_cover != "cover.jpg":
+    os.replace(os.path.join(ALBUM, album_cover), os.path.join(ALBUM, "cover.jpg"))
+    tagcache.invalidate_album(ALBUM)
+    assert not os.path.exists(os.path.join(ALBUM, album_cover))
+    pre_rename = fetch(ALBUM, album_cover)
+    assert pre_rename.status_code == 200, (pre_rename.status_code, pre_rename.text)
+    assert pre_rename.content == album_art, (
+        "the pre-rename name stopped resolving after the rename")
+    assert fetch(ALBUM).status_code == 200
+    assert fetch(ALBUM, album_cover, params={"w": "160"}).status_code == 200
+    album_cover = "cover.jpg"
+
+# 7b) A read the OS denies for a moment is WAITED OUT, not turned into a
+#     missing cover — the state the owner saw as "the cover sometimes does not
+#     load": a writer's replace window, a scanner or an anti-malware pass holds
+#     the file for milliseconds, and the read side had no retry at all.
+REAL_OPEN = open
+cover_target = os.path.normcase(os.path.join(ALBUM, album_cover))
+denied = {"n": 0}
+
+
+def _denying_open(path, *a, **k):
+    mode = (a[0] if a else k.get("mode")) or "r"
+    if (mode == "rb" and os.path.normcase(str(path)) == cover_target
+            and denied["n"] < 2):
+        denied["n"] += 1
+        raise PermissionError(32, "The process cannot access the file: "
+                                  "it is being used by another process")
+    return REAL_OPEN(path, *a, **k)
+
+
+atomic.open = _denying_open          # the module `read_bytes_locked` calls open in
+try:
+    tagcache.invalidate_album(ALBUM)  # the in-process cache must not answer first
+    waited = fetch(ALBUM)
+finally:
+    atomic.open = REAL_OPEN
+assert denied["n"] == 2, denied
+assert waited.status_code == 200, (waited.status_code, waited.text)
+assert waited.content == album_art, "a transient denial was served as a missing cover"
+
+# …and a denial that does NOT clear answers 404 — never a made-up empty image —
+# without poisoning the cache: the next healthy read is the cover again.
+always_denied = {"n": 0}
+
+
+def _always_denying(path, *a, **k):
+    mode = (a[0] if a else k.get("mode")) or "r"
+    if mode == "rb" and os.path.normcase(str(path)) == cover_target:
+        always_denied["n"] += 1
+        raise PermissionError(32, "held open")
+    return REAL_OPEN(path, *a, **k)
+
+
+atomic.open = _always_denying
+try:
+    tagcache.invalidate_album(ALBUM)
+    blocked = fetch(ALBUM)
+finally:
+    atomic.open = REAL_OPEN
+assert always_denied["n"] > 1, always_denied      # it did retry before giving up
+assert blocked.status_code == 404, (blocked.status_code, blocked.text)
+assert blocked.content != b"", "a failed read was answered with empty bytes"
+healed = fetch(ALBUM)
+assert healed.status_code == 200, (healed.status_code, healed.text)
+assert healed.content == album_art, "the failed read was cached as the album's cover"
+
+# 7c) No cover FILE at all, but the art is INSIDE the track — an album the
+#     library's `embed_covers` policy allows, or a folder the import's cover
+#     step has not reached yet. The embedded picture is what is served, and an
+#     album with neither is still the honest 404.
+try:
+    from mutagen.id3 import APIC, ID3
+except Exception:
+    print("cover preview: embedded-cover checks SKIPPED (no mutagen id3)")
+else:
+    EMB = os.path.join(MUSIC, "Artists", "Preview Artist", "2002 - Embedded Album")
+    os.makedirs(EMB, exist_ok=True)
+    emb_png = png(3, 3, (200, 120, 30))
+    emb_mp3 = os.path.join(EMB, "01 - Song.mp3")
+    with open(emb_mp3, "wb") as f:
+        f.write(_MP3_FRAME * 40)
+    _id3 = ID3()
+    _id3.add(APIC(encoding=3, mime="image/png", type=3, desc="Cover", data=emb_png))
+    _id3.save(emb_mp3)
+    assert not os.path.exists(os.path.join(EMB, "cover.jpg")), "the fixture has no sidecar"
+
+    embedded = fetch(EMB)
+    assert embedded.status_code == 200, (embedded.status_code, embedded.text)
+    assert embedded.content == emb_png, "the track's own embedded art was not served"
+    assert embedded.headers["content-type"] == "image/png", embedded.headers
+    # The named track's picture, when the caller names a sidecar for it, and
+    # the bar's sized request: the bytes behind a sized ask are the same file,
+    # because there is no file to shrink.
+    assert fetch(EMB, "01 - Song.jpg").content == emb_png
+    assert fetch(EMB, params={"w": "160"}).status_code == 200
+    # A name that is not there at all still reaches the embedded picture: on an
+    # album with no cover FILE the track's own art IS the album's art.
+    assert fetch(EMB, "cover.png").content == emb_png
+
+    # Neither a file NOR an embedded picture: the 404 the UI's placeholder is
+    # built on, with or without a name.
+    BARE = os.path.join(MUSIC, "Artists", "Preview Artist", "2003 - No Art Album")
+    os.makedirs(BARE, exist_ok=True)
+    with open(os.path.join(BARE, "01 - Song.mp3"), "wb") as f:
+        f.write(_MP3_FRAME * 40)
+    assert fetch(BARE).status_code == 404
+    assert fetch(BARE, "cover.png").status_code == 404
+
 print("cover preview: all checks passed")
 shutil.rmtree(TMP, ignore_errors=True)

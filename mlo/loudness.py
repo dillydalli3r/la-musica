@@ -230,10 +230,14 @@ def _dr_album(album, ffmpeg_exe, force, write_tags=True, config=None, rg=None,
     decode is handed ONE lane's thread share, so *lanes* × width decoders
     still add up to the run's budget.
 
-    Returns (files_modified, [(name, reason)] for the files that could not be
-    measured at all). A track the meter has no value for — silent, shorter than
-    two blocks — is logged by name and simply carries no per-track tag, which
-    is a skip and not a failure of the run.
+    Returns (files_modified, [(name, reason)]). A track the meter has no value
+    for — silent, shorter than two blocks — is logged by name and simply
+    carries no per-track tag, which is a skip and not a failure of the run;
+    the ALBUM value still lands on it. A track that could not be MEASURED at
+    all (no audio stream, a decode that failed, a container that would not
+    open) and a tag write that did not land (a replace a concurrent reader
+    blocked) are both in the failure list: the run names them instead of
+    counting the album as finished with a tag missing.
     """
     rg = rg or {}
     opened = _open_album_files(album)
@@ -292,9 +296,17 @@ def _dr_album(album, ffmpeg_exe, force, write_tags=True, config=None, rg=None,
         else:
             log(f"      {os.path.basename(album)}: DR {album_value} over "
                 f"{len(values)} of {len(opened)} track(s)")
-    modified = _write_album_tags(values, album_value, rg, write_tags=write_tags,
-                                 config=config, opened=opened)
-    return modified, failures
+    modified, write_failures = _write_album_tags(
+        values, album_value, rg, write_tags=write_tags, config=config,
+        opened=opened)
+    # One entry per FILE: a track whose measurement already failed is often
+    # also the track the write could not land on (a container that will not
+    # open, a decoder that rejected it), and reporting it twice would double
+    # the run's error count for one bad file.
+    seen = {}
+    for name, reason in failures + write_failures:
+        seen.setdefault(name, reason)
+    return modified, list(seen.items())
 
 
 def _write_album_tags(per_path, album_value, rg, write_tags=True, config=None,
@@ -310,18 +322,40 @@ def _write_album_tags(per_path, album_value, rg, write_tags=True, config=None,
     caller's already-open handles, which keep this pass from opening every
     container a second time.
 
+    The ALBUM value belongs to the ALBUM, not to the tracks that happened to
+    measure: when there is one, it is written to EVERY file *opened* says the
+    album holds, so a track the meter came back empty on (silent, too short,
+    the one file a concurrent reader stopped the decode of) still carries it.
+    Writing it only for the measured tracks is what let the grader say "ALBUM
+    DYNAMIC RANGE missing on some tracks" about an album this pass reported as
+    finished.
+
     ONE write per file, whatever is pending: the handle defers its saves and
     flushes them together, where two DR tags used to mean two saves and a file
     gaining both families would have meant six. Each save is a copy beside the
     file and one atomic replace (mlo.atomic), so a killed run leaves the old
     file or the new one.
+
+    Returns ``(modified, failures)``. *failures* names every file a wanted tag
+    did not land on, with the container's own reason: a failed flush (the
+    atomic replace kept meeting a share scan, a player or a virus scan holding
+    the file) and an exception used to be swallowed here, so the run counted
+    the album as done while one track kept no DR tag at all — the file the
+    grader then failed. The failure is REPORTED now; the retry that makes the
+    replace itself durable is mlo.atomic's (see replace_locked).
     """
     modified = 0
-    for path in sorted(set(per_path) | set(rg or ())):
+    failures = []
+    targets = set(per_path) | set(rg or ())
+    if album_value is not None and opened:
+        targets |= set(opened)
+    for path in sorted(targets):
         try:
             if opened is not None:
                 af = opened.get(path)
                 if af is None:
+                    # The container would not open; _dr_album has already
+                    # reported that, and there is no handle to write through.
                     continue
             else:
                 af = AudioFile(path)
@@ -335,8 +369,11 @@ def _write_album_tags(per_path, album_value, rg, write_tags=True, config=None,
                                               filepath=path)):
                 if str(af.get_tag("DYNAMIC RANGE") or "").strip() != str(dr_value):
                     pending["DYNAMIC RANGE"] = str(dr_value)
-                if (album_value is not None
-                        and str(af.get_tag("ALBUM DYNAMIC RANGE") or "").strip()
+            if album_value is not None and (
+                    config is None
+                    or should_write_audio_tag(config, "ALBUM DYNAMIC RANGE",
+                                              filepath=path)):
+                if (str(af.get_tag("ALBUM DYNAMIC RANGE") or "").strip()
                         != str(album_value)):
                     pending["ALBUM DYNAMIC RANGE"] = str(album_value)
             for tag_name, tag_value in (rg or {}).get(path, {}).items():
@@ -344,28 +381,45 @@ def _write_album_tags(per_path, album_value, rg, write_tags=True, config=None,
                     pending[tag_name] = str(tag_value)
             if not pending:
                 continue
+            name = os.path.basename(path)
             if getattr(af, "is_video", False):
                 # A video container is rewritten whole on every write, so
                 # every tag goes in one ffmpeg pass instead of one remux each.
                 if af.set_video_tags(pending):
                     modified += 1
-            else:
-                defer = hasattr(af, "defer_save")
-                if defer:
-                    af.defer_save(True)
-                changed = False
-                for tag_name, tag_value in pending.items():
-                    if af.set_tag(tag_name, tag_value):
-                        changed = True
-                if defer:
-                    # A failed flush means nothing landed; never report a write.
-                    changed = bool(af.flush()) and changed
-                    af.defer_save(False)
-                if changed:
-                    modified += 1
-        except Exception:
-            continue
-    return modified
+                else:
+                    failures.append((name, "the video container refused "
+                                           "the tag write"))
+                continue
+            defer = hasattr(af, "defer_save")
+            if defer:
+                af.defer_save(True)
+            changed = False
+            for tag_name, tag_value in pending.items():
+                if af.set_tag(tag_name, tag_value):
+                    changed = True
+            if defer:
+                # A failed flush means nothing landed; never report a write.
+                changed = bool(af.flush()) and changed
+                af.defer_save(False)
+            if not changed:
+                failures.append((name, getattr(af, "error", "")
+                                 or "the tag write did not land"))
+                continue
+            # The write claim is only as good as what the file now holds: a
+            # flush that returned True after a half-write leaves a tag the
+            # grader cannot see, so re-read every tag that was asked for.
+            missing = [t for t, v in pending.items()
+                       if str(af.get_tag(t) or "").strip() != v]
+            if missing:
+                failures.append((name, getattr(af, "error", "")
+                                 or f"{', '.join(missing)} did not land"))
+                continue
+            modified += 1
+        except Exception as e:
+            failures.append((os.path.basename(path),
+                             f"the tag write failed: {e}"))
+    return modified, failures
 
 
 # ----------------------------------------------------------------------
@@ -496,8 +550,10 @@ def run_calc_dr_replaygain(config):
         elif rg:
             # Dynamic range is off or unavailable; the ReplayGain values the
             # scan produced still land, through the same atomic writer.
-            amod += _write_album_tags({}, None, rg, write_tags=True,
-                                      config=config)
+            rg_modified, rg_failures = _write_album_tags(
+                {}, None, rg, write_tags=True, config=config)
+            amod += rg_modified
+            failures = rg_failures
         return album_path, amod, afail, failures
 
     def _finish(album_path, amod, afail, failures):
@@ -513,6 +569,13 @@ def run_calc_dr_replaygain(config):
             stats["total_scanned"] += 1
             stats["modified_count"] += amod
             _pbar_update(pbar, counts, kind="ok")
+        elif failures:
+            # Nothing landed and a file SAID why (a tag write the container
+            # refused, a track that would not decode): the album is a failure,
+            # not the "already tagged, nothing to do" a skip reads as. The
+            # run must not claim this album came off clean.
+            stats["total_scanned"] += 1
+            _pbar_update(pbar, counts, kind="fail")
         else:
             stats["skipped_count"] += 1
             _pbar_skip(pbar, counts)

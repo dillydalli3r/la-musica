@@ -19,6 +19,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from mlo import autotag as _autotag
+from mlo.atomic import replace_locked
 from mlo.stats import worker_count
 from server import integrations as intg
 from server import job_locks
@@ -573,7 +574,7 @@ def lyrics_write(req: LyricsWriteRequest):
                 os.fsync(f.fileno())
             except Exception:
                 pass
-        os.replace(tmp, lrc_path)
+        replace_locked(tmp, lrc_path)
     except Exception as e:
         try:
             os.remove(tmp)

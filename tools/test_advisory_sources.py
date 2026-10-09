@@ -111,9 +111,15 @@ def gets(calls, url_part):
 DEEZER_CASES = [
     ({"explicit_lyrics": True, "explicit_content_lyrics": 1}, 1),
     ({"explicit_lyrics": True, "explicit_content_lyrics": 0}, 1),
-    # explicit content (artwork) is still an explicit statement — this app's 2
-    # means "safe", so it may never be the value for an explicit flag
-    ({"explicit_lyrics": False, "explicit_content_lyrics": 2}, 1),
+    # `explicit_content_lyrics` is only read when `explicit_lyrics` is ABSENT:
+    # a content flag of 2 (an edition/artwork "explicit content" statement) is
+    # explicit on its own…
+    ({"explicit_content_lyrics": 2}, 1),
+    # …but Deezer's own statement that the track's LYRICS are not explicit is
+    # decisive. A record with `explicit_lyrics: false` and a content flag of 2
+    # is exactly the owner's "Just (Edit)" pressing (GBAYE9500669): reading the
+    # content flag first marked the clean album track explicit off its edit.
+    ({"explicit_lyrics": False, "explicit_content_lyrics": 2}, 0),
     ({"explicit_lyrics": False, "explicit_content_lyrics": 0}, 0),
     # Deezer leaves it unclassified (3) but states the lyrics are not explicit
     ({"explicit_lyrics": False, "explicit_content_lyrics": 3}, 0),
@@ -960,5 +966,32 @@ try:
     assert release_answers == {"1:1": {"deezer-isrc": 1}}, release_answers
 finally:
     intg.release_lookup = _real_release_lookup
+
+# --------------------------------------------------------------------------- #
+# 11) Album/collection-level evidence never rates a track
+# --------------------------------------------------------------------------- #
+# A Discogs edition's Parental-Advisory sticker used to be merged in as an
+# explicit `1` for a whole release. It states nothing about one TRACK, so it is
+# not a route any more: no source id, and the route never asks it whatever the
+# config carries.
+assert "discogs-parental" not in intg.ADVISORY_SOURCES, intg.ADVISORY_SOURCES
+clear()
+stub_http({"itunes.apple.com/search": {"results": []},
+           "api.deezer.com": {"error": {"type": "DataException"}}})
+route = intg.resolve_advisory_route(isrc=ISRC, artist="Radiohead",
+                                    album="The Bends", title="Just",
+                                    disc=1, track=2,
+                                    cfg={"discogs_token": "tok"})
+assert "discogs-parental" not in route["checked"], route
+assert route["value"] is None and route["answers"] == {}, route
+
+# A file may state several ISRCs — `get_tag` reads a repeated field back
+# "; "-joined, and a malformed, doubled, space-separated tag (seen in the
+# owner's library) still yields each code once, trimmed: every one is asked,
+# none is asked twice.
+assert intg._isrc_codes("GBAYE9400060;GBAYE9500669; GBAYE9400060;GBAYE9500669") \
+    == ["GBAYE9400060", "GBAYE9500669"], \
+    intg._isrc_codes("GBAYE9400060;GBAYE9500669; GBAYE9400060;GBAYE9500669")
+assert intg._isrc_codes(" usrc17607839 ") == ["usrc17607839"]
 
 print("advisory sources: all assertions passed")

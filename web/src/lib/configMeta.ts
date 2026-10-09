@@ -902,6 +902,12 @@ export const HIDDEN_KEYS: string[] = [
   // edited in the cookie panel itself — next to the cookie they describe —
   // never in a raw JSON box, so no Settings row offers this key.
   "cookie_notes",
+  // The upload-history entries the Sharing card's Clear controls write
+  // (server/soulseek.py::forget_uploads): one selector per cleared peer, folder,
+  // file or whole history, each with the stamp it applies from, so a transfer
+  // arriving later shows again. It is a record those buttons keep and show — no
+  // Settings row offers the raw list.
+  "soulseek_upload_forget",
   // One-shot re-run switches. They say "process this track even though it
   // already carries a result", which cannot be answered before the library has
   // been through the pipeline once; each one lives on the Settings tab of the

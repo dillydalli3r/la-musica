@@ -70,6 +70,41 @@ const state = payload.listen_port_state || {};
 const port = Number(payload.listen_port) || Number(state.listen_port) || 0;
 const obfuscated = Number(state.obfuscated_port) || 0;
 
+// The SHARING card's fixtures: slskd's share audit with the listen port
+// unconfirmed (the state the card's chip names) and the read-only port check's
+// own payload. The card must stop being a dead end at that chip: say when the
+// state was read, offer the check, and render the check's verdict + `checked_at`
+// and the next step its rows carry once it has run.
+const SHARING_AUDIT = {
+  ok: false, status: "listen_unconfirmed",
+  summary: "slskd is sharing 3 files in 3 folders — other users can find and " +
+    "search them, but nothing accepts a connection on the listen port, so a " +
+    "browse or a download FROM this client can fail until it is reachable.",
+  problems: [{
+    code: "listen_unreachable",
+    message: "nothing accepts a connection on the listen port 50000",
+    hint: "Forward TCP 50000 on the router to this machine's LAN address.",
+  }],
+  notes: [],
+  shares: { configured: [], live: [], mismatch: false, dropped: [] },
+  filters: { applied: [], invalid: [], mismatch: false },
+  scan: { state: "ready", scanning: false, pending: false, ready: true,
+          faulted: false, cancelled: false, progress: 100, files: 3,
+          directories: 3, log: [] },
+  disk: { roots: [], audio_files: 3, truncated: false, probe_file: "" },
+  browse: { checked: false, ok: null, directories: 0, detail: "" },
+  port: { listen_port: 50000, container: false }, running: false,
+};
+const PORT_CHECK = {
+  ok: false, port: 50000, container: false, verdict: "fail",
+  note: "a definite answer about the internet needs a probe from outside",
+  checked_at: "2026-01-02T03:04:05+00:00",
+  checks: [{ id: "listen", label: "Listening on 127.0.0.1:50000", state: "fail",
+             detail: "nothing accepts a connection on 127.0.0.1:50000 — forward port 50000 on the router",
+             proves: "something accepts on the port here",
+             cannot: "whether the internet reaches it" }],
+};
+
 const server = await createServer({
   configFile: path.join(webDir, "vite.config.ts"),
   root: webDir,
@@ -124,6 +159,34 @@ try {
     check("no obfuscated port is shown when the listen port is unknown/0",
           !flat.includes("obfuscated "), flat.slice(0, 800));
   }
+
+  // The SHARING card's half of the same surface: "port unconfirmed" must offer
+  // the read-only check ON the card, say when the audit snapshot was read, and
+  // render the check's verdict + `checked_at` + the next step its rows carry.
+  // (A second render, seeded with the card's own payloads; SSR runs no effects,
+  // so the disabled port-check query answers from the seeded cache.)
+  const qc2 = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  qc2.setQueryData(["soulseekStatus"], payload);
+  qc2.setQueryData(["soulseekShares"], { dirs: [], autostart: false, audit: SHARING_AUDIT });
+  qc2.setQueryData(["soulseekPortCheck"], PORT_CHECK);
+  const html2 = renderToString(
+    React.createElement(QueryClientProvider, { client: qc2 },
+      React.createElement(MemoryRouter, { initialEntries: ["/soulseek?tab=sharing"] },
+        React.createElement(page.default)))
+  );
+  const flat2 = html2.replace(/<!-- -->/g, "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ");
+  const sharing = flat2.slice(0, 1600);
+  check("the Sharing card shows the port-unconfirmed chip",
+        flat2.includes("port unconfirmed"), sharing);
+  check("...and says when the share state was read",
+        /state read \d/.test(flat2), sharing);
+  check("...and offers the read-only port check on the card itself",
+        flat2.includes("Test port"), sharing);
+  check("the card renders the port check's verdict and when it ran",
+        flat2.includes("Port check") && flat2.includes("port 50000")
+        && /\d{4}-\d{2}-\d{2} \d{2}:\d{2}/.test(flat2), sharing);
+  check("...and the row's concrete next step",
+        flat2.includes("forward port 50000"), sharing);
 
   if (problems.length) {
     console.error("[ports] MISSING: " + JSON.stringify(problems));

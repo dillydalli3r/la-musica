@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from .atomic import replace_locked
 from .config import DEFAULT_CONFIG
 from .containers import (
     CODECS, CODEC_KEEP, codec_extra_args, codec_is_lossless, encoder_args,
@@ -847,7 +848,7 @@ def _convert_lossless_source(args):
                 return (filename, False,
                         "cannot move the original to the trash", 0, 0)
             b_rem = src_size
-        os.replace(tmp, dest)
+        replace_locked(tmp, dest)
         tmp = None
         if not in_place and not keep_source:
             moved = _trash_converted(filepath, config)
@@ -1194,7 +1195,7 @@ def _optimize_flac(args):
             log(c(f"[tag warn] {filename}: {e}", Color.YELLOW))
 
         final_size = os.path.getsize(temp_path)
-        os.replace(temp_path, filepath)
+        replace_locked(temp_path, filepath)
         temp_path = None
 
         b_rem, b_add = _diff_bytes(original_size, final_size)

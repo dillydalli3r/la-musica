@@ -19,6 +19,12 @@ Honey), in parallel, and reports what came back:
   * `skipped` — it cannot run here at all (no key, no yt-dlp, RYM refusing us),
   * `fail`    — it ran and had nothing, or raised.
 
+A source with a SECOND route is not "skipped" when its key is absent: with
+`rym_archive_fallback` on (the shipped default) RateYourMusic reads its pages
+from the Wayback Machine, so its rows stay `ok` and are still probed without a
+`rym_cookie` — the key is still in `needs` (the panel prompts for it) and
+`optional_needs` says which of `needs` the source can run without.
+
 Nothing here ever raises or writes anything: a broken source is a row, not a
 500. `mlo.lyrics_providers.probe_source` is reused for the lyrics providers so
 there is exactly one sample and one set of probe rules.
@@ -56,13 +62,12 @@ KINDS = ("lyrics", "advisory", "genre", "metadata", "links", "discover",
 
 # The ask order of the advisory routes — `resolve_advisory_route`'s own order.
 _ADVISORY_ORDER = ["deezer-isrc", "spotify-isrc", "apple-album", "itunes-song",
-                   "discogs-parental", "youtube-age"]
+                   "youtube-age"]
 _ADVISORY_LABELS = {
     "deezer-isrc": "Deezer (ISRC)",
     "spotify-isrc": "Spotify (ISRC)",
     "apple-album": "Apple (album editions)",
     "itunes-song": "iTunes (song search)",
-    "discogs-parental": "Discogs (parental advisory)",
     "youtube-age": "YouTube (age gate)",
 }
 
@@ -79,8 +84,6 @@ _ADVISORY_PROVIDES = {
                    "collectionExplicitness it states.",
     "itunes-song": "Apple's song search for the track, and its "
                    "trackExplicitness.",
-    "discogs-parental": "the parental-advisory flag on the release's Discogs "
-                        "entry; needs a token.",
     "youtube-age": "a track's YouTube video age gate; needs the video's id and "
                    "yt-dlp.",
 }
@@ -234,24 +237,6 @@ def _probe_advisory(pid, cfg):
         if raw.get("resultCount"):
             return "ok", "search answered, no rated match for the sample"
         return "fail", "Apple's song search answered nothing"
-
-    if pid == "discogs-parental":
-        # The release lookup is the token's real test: a bad or missing token
-        # answers nothing here, while a hit with no flag is a working source.
-        started = time.time()
-        row = discovery._discogs_release(SAMPLE_ARTIST, SAMPLE_ALBUM, cfg=cfg)
-        if not row:
-            got = discovery.last_http_error("api.discogs.com")
-            reason = ""
-            if got and float(got.get("at") or 0) >= started and got.get("status"):
-                reason = f"Discogs answered HTTP {got['status']} {got['body']}".strip()
-            return "fail", _why("no Discogs release matched — check "
-                                "discogs_token", reason)
-        flagged = discovery.discogs_parental_advisory(SAMPLE_ARTIST,
-                                                      SAMPLE_ALBUM, cfg)
-        if flagged:
-            return "ok", "parental advisory flagged on the sample's edition"
-        return "ok", "release found, no advisory flag"
 
     if pid == "youtube-age":
         # Like the captions provider: there is nothing to probe without a
@@ -637,7 +622,6 @@ def _specs(kind=None):
 
     for pid in _ADVISORY_ORDER:
         needs = {"spotify-isrc": ["spotify_client_id", "spotify_client_secret"],
-                 "discogs-parental": ["discogs_token"],
                  "youtube-age": ["yt-dlp"]}.get(pid, [])
         specs.append({"id": pid, "kind": "advisory",
                       "label": _ADVISORY_LABELS[pid], "needs": list(needs),
@@ -653,10 +637,23 @@ def _specs(kind=None):
                  "rateyourmusic": ["rym_cookie"],
                  "spotify": ["spotify_client_id", "spotify_client_secret"],
                  }.get(pid, [])
-        specs.append({"id": pid, "kind": "genre", "rank": rank,
-                      "provides": _GENRE_PROVIDES.get(pid, ""),
-                      "label": _GENRE_LABELS.get(pid, pid), "needs": list(needs),
-                      "probe": lambda cfg, p=pid: _probe_genre(p, cfg)})
+        spec = {"id": pid, "kind": "genre", "rank": rank,
+                "provides": _GENRE_PROVIDES.get(pid, ""),
+                "label": _GENRE_LABELS.get(pid, pid), "needs": list(needs),
+                "probe": lambda cfg, p=pid: _probe_genre(p, cfg)}
+        if pid == "rateyourmusic":
+            # RYM is the one genre source with a SECOND route: with
+            # `rym_archive_fallback` on (the shipped default) the archived
+            # snapshot answers whether or not a cookie is set, so an empty
+            # `rym_cookie` makes the LIVE site unavailable, not the source.
+            # `_optional_keys` drops this when the fallback is off.
+            spec["optional"] = ["rym_cookie"]
+            spec["optional_gate"] = "rym_archive_fallback"
+            spec["optional_detail"] = (
+                "runs without rym_cookie — RYM pages are read from the "
+                "archived snapshot (rym_archive_fallback); set the cookie to "
+                "read the live site")
+        specs.append(spec)
 
     for pid in discovery.IMAGE_SOURCES:
         specs.append({"id": pid, "kind": "metadata",
@@ -669,8 +666,18 @@ def _specs(kind=None):
     # the same cookie the genre row prompts for — that is the point: the
     # wizard shows one place to paste it and one button that proves it works.
     for pid in ("rateyourmusic",):
+        # The links row shares the genre row's cookie, and the note below
+        # spells out why a missing one does not read as "this source cannot
+        # run": MusicBrainz states the RYM page for many releases, so the
+        # resolver answers without the cookie and the cookie is what resolves
+        # the releases MusicBrainz does not cover.
         specs.append({"id": pid, "kind": "links",
                       "label": _RYM_LABELS[pid], "needs": ["rym_cookie"],
+                      "optional": ["rym_cookie"],
+                      "optional_detail": (
+                          "runs without rym_cookie — MusicBrainz states the "
+                          "RYM page where it has one; the cookie resolves the "
+                          "rest"),
                       "provides": "the album and artist RateYourMusic links an "
                                   "import writes onto the tracks — the same "
                                   "cookie the genre row asks for.",
@@ -721,6 +728,29 @@ def _missing(spec, cfg):
                   if t in _TOOLS and not _tool_available(t)]
 
 
+def _optional_keys(spec, cfg):
+    """The `needs` entries whose absence does NOT stop this source — [] for
+    most of them.
+
+    A source is normally unrunnable without its key, which is why `needs` is
+    also what the panel prompts for. RateYourMusic is the exception: with
+    `rym_archive_fallback` on (the key ships True), the archived snapshot of
+    its pages answers whether or not a `rym_cookie` is set, so the live site
+    being unavailable is not the SOURCE being unavailable. The cookie is still
+    prompted for (it is what upgrades the read to the live page), which is why
+    it stays in `needs` and only the STATUS/`probe` decision consults this. A
+    cfg that switched the fallback off — or that never carried the key — has
+    no second route, so the cookie is required again (`optional_gate` names
+    the key that decides it; a spec without one is unconditional, like the
+    links row, whose second route is MusicBrainz rather than the archive).
+    """
+    out = list(spec.get("optional") or ())
+    gate = str(spec.get("optional_gate") or "")
+    if gate and not bool((cfg or {}).get(gate)):
+        out = []
+    return out
+
+
 def _tool_available(tool):
     if tool != "yt-dlp":
         return False
@@ -758,12 +788,27 @@ def health_payload(cfg=None, kind=None, probe=False):
     rows, pending = [], []
     for spec in specs:
         missing = _missing(spec, cfg)
+        optional = _optional_keys(spec, cfg)
+        # What actually STOPS the source: a missing key that has no second
+        # route. RYM without a cookie is runnable (the archive answers), so it
+        # is `ok` and IS probed, while `configured` stays False so the panel
+        # still says "cookie missing" and prompts for it.
+        blocking = [k for k in missing if k not in optional]
+        if not missing:
+            detail = "configured"
+        elif blocking:
+            detail = "needs " + ", ".join(blocking)
+        else:
+            detail = spec.get("optional_detail") or ("runs without "
+                                                     + ", ".join(missing))
         row = {"id": spec["id"], "kind": spec["kind"], "label": spec["label"],
                "free": bool(spec.get("free", True)), "needs": list(spec["needs"]),
-               "configured": not missing, "status": "ok" if not missing else "skipped",
-               "detail": "configured" if not missing
-                         else "needs " + ", ".join(missing),
+               "configured": not missing,
+               "status": "skipped" if blocking else "ok",
+               "detail": detail,
                "ms": 0}
+        if optional:
+            row["optional_needs"] = list(optional)
         if spec.get("synced"):
             row["synced"] = True
         if spec.get("rank") is not None:
@@ -773,7 +818,7 @@ def health_payload(cfg=None, kind=None, probe=False):
         if spec.get("notes"):
             row["notes"] = spec["notes"]
         rows.append(row)
-        if probe and not missing:
+        if probe and not blocking:
             pending.append((row, spec))
 
     if pending:
