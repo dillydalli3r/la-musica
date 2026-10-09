@@ -382,6 +382,22 @@ def pending_album_payload(folder, cfg, light=False):
     return row
 
 
+def _album_importing(album_dir):
+    """Whether an import is writing *album_dir* right now — never fatal.
+
+    The ONE predicate (`server.imports.importing_album`), imported lazily: this
+    module is read from inside routes that must not join the import service's
+    import graph at load time. A failure to ask reads as "not importing", so a
+    broken import module can never make the whole library page disagree with
+    itself.
+    """
+    try:
+        from server import imports
+        return bool(imports.importing_album(album_dir))
+    except Exception:
+        return False
+
+
 def build_album(album_dir, cfg, light=False, cfg_key=None):
     """Grade + enrich a single album — from the persistent index when it matches.
 
@@ -453,6 +469,28 @@ def _build_album(album_dir, cfg, light=False):
     # framework row rendering as a playable album with a play button over
     # nothing, which is exactly what the owner saw on screen.
     res["pending"] = not res.get("tracks")
+    # MID-IMPORT: an album an import is writing RIGHT NOW — a live claim, or a
+    # surviving disk marker (see `server.imports.importing_album`, the ONE
+    # predicate every grading surface reads). Its grade would be a snapshot of a
+    # half-written folder — the very tags the chain is about to add read as
+    # missing — so it is NOT graded: no checks, no issues, no audit verdict. By
+    # the same rule that already governs a no-checks album (failed == 0), the
+    # row then reads PASS rather than FAIL, and the `importing` flag rides out
+    # so a surface can say so instead of drawing a verdict at all.
+    if _album_importing(album_dir):
+        res["importing"] = True
+        res["total_checks"] = 0
+        res["pass_count"] = 0
+        res["issues"] = {}
+        res["notes"] = []
+        res["audit_summary"] = None
+        res["checksum_status"] = None
+        for tr in res.get("tracks", []):
+            tr["issues"] = []
+            tr["notes"] = []
+            tr["audit"] = None
+            tr["log_grade"] = None
+            tr["grade_pass"] = True
     res["artwork"] = _album_artwork(album_dir, light=light)
     tc = res.get("total_checks", 0)
     # Printed, so it obeys the one rule (mlo.grader.printed_pct): a Fail badge

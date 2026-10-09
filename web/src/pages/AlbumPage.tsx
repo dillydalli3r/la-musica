@@ -238,6 +238,10 @@ export default function AlbumPage() {
   const maxDisc = data.tracks.reduce((m, t) => Math.max(m, t.discnumber ?? 1), 1);
   // One condensed verdict: grading problems OR a FAKE/Mix audit → FAIL.
   const verdictPass = !!data.pass && !auditFails(data.audit_summary);
+  // An import is writing this album right now: it was deliberately NOT graded
+  // (`server.imports.importing_album`), so the header draws the neutral amber
+  // pulse instead of a FAIL that describes the process, not the album.
+  const importing = !!data.importing;
   const issueEntries = Object.entries(data.issues ?? {});
   const verdictTrack = (tr: Track) => !!tr.grade_pass && !auditFails(tr.audit);
 
@@ -787,8 +791,8 @@ export default function AlbumPage() {
                     mark is NOT here any more: it sits with the title. */}
                 <div className="flex items-center gap-2 flex-wrap">
                   <button
-                    className={`tap-hit h-2 w-2 rounded-full shrink-0 transition-opacity ${verdictPass ? "bg-emerald-500/70" : "bg-red-500/80"}`}
-                    title={verdictPass ? `Pass — ${data.grade_pct ?? "?"}% of checks` : `Fail — ${data.grade_pct ?? "?"}% · ${issueEntries.length} problem type(s)`}
+                    className={`tap-hit h-2 w-2 rounded-full shrink-0 transition-opacity ${importing ? "bg-amber-400/90 animate-pulse" : verdictPass ? "bg-emerald-500/70" : "bg-red-500/80"}`}
+                    title={importing ? "Importing — not graded yet" : verdictPass ? `Pass — ${data.grade_pct ?? "?"}% of checks` : `Fail — ${data.grade_pct ?? "?"}% · ${issueEntries.length} problem type(s)`}
                     onClick={() => setIssuesOpen(!issuesOpen)}
                     aria-label="Grading verdict"
                   />
@@ -1583,7 +1587,7 @@ export default function AlbumPage() {
                           {tr.issues.length}✗
                         </button>
                       )}
-                      <GradeBadge pass={verdictTrack(tr)} size="sm" />
+                      <GradeBadge pass={verdictTrack(tr)} size="sm" importing={importing} />
                       <CachedMark path={tr.path} />
                       {(tr.is_video || isVideoFile(tr.file)) && (
                         <button

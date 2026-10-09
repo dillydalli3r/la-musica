@@ -2653,10 +2653,12 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   `GET /api/import/sessions` on load and the notification tray shows one
   **Continue import** row per unfinished album, linking back to
   `/import?album=…&step=…` so the wizard re-opens on that album at the step it
-  was left on. A bookmark whose folder is gone is pruned on read. This is NOT
-  R121's gap prompt: a prompt is raised AFTER a finished run reports what its
-  sources could not supply, while a session is a run that has not reached
-  Finish at all. Pinned by `tools/test_import_sessions.py`.
+  was left on. A bookmark whose folder was RENAMED is relocated through the
+  album's mid-import marker (R381); only a folder with no marker anywhere is
+  pruned on read. This is NOT R121's gap prompt: a prompt is raised AFTER a
+  finished run reports what its sources could not supply, while a session is a
+  run that has not reached Finish at all. Pinned by
+  `tools/test_import_sessions.py`.
 
 - **R346 — a native analysis helper is allowed, the engine that ran is named,
   and no dependency stays without a call site.** `rust/` is a zero-dependency
@@ -6867,6 +6869,38 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   caches and stores the report — asking in parallel raced it and cached the
   pre-press answer). Pinned by `tools/test_layout_case.py`.
 
+- **R381 — an album an import is on is NOT graded, and that verdict survives a
+  restart and a rename.** A manual import the user abandoned mid-way used to be
+  a bookmark only (`server.import_sessions`, keyed by path), while the grader
+  and every warning surface knew about an in-flight import only through the
+  in-memory `server.job_locks` registry — so an album mid-import was reported as
+  an ordinary failing album the moment the process restarted (registries empty),
+  and a bookmark whose album the chain's own organize/beets step renamed was
+  pruned to nothing. Now there is ONE disk marker per folder: the wizard's
+  bookmark AND `server.imports.finish_album` stamp `<album>/.mlo_importing.json`
+  (`mlo.paths.save_importing`) when an import starts and clear it when the
+  album reaches Finish, a discard or a cancel. The marker lives INSIDE the
+  folder, so it travels with a rename; `server.import_sessions.sessions`
+  relocates a bookmark whose folder moved through the marker that names the path
+  the row was written under, so the tray's **Continue import** row still works
+  after a restart, and pressing Finish re-runs organize (idempotent) before the
+  chain — never across a half-done rename, never re-doing a completed stage
+  destructively. ONE predicate, `server.imports.importing_album`, answers "is
+  an import on this album" from BOTH the live registry and the marker, and
+  every grading/warning surface routes through it: `server.recommendations
+  .grade_warning` (held out of the findings and counted in `albums_importing`)
+  and `_needs_attention`; the Home payload; `server.library.build_album`, which
+  reports no checks, no issues and the `importing` flag instead of a grade;
+  `mlo.grader.run_grade_library`'s library-wide sweep (a targeted run — the
+  import's OWN Grade step — is deliberately exempt); and the web surfaces that
+  draw a verdict (the Library row and Failing filter, the album page, the
+  shared card). `mlo.paths.save_importing`'s temp name joins the sweep prefixes,
+  and `server.interrupt_recovery` reconciles what a SIGKILL left: a
+  session-backed marker is kept (the import can still be continued) and a
+  marker with no session — an abandoned autonomous import nothing will resume —
+  is cleared, so the album is not hidden from grading forever. Pinned by
+  `tools/test_import_sessions.py`.
+
 ## 8. Recommended runbook
 
 Nothing here is a substitute for the app's own Dependencies page: run it first
@@ -7022,6 +7056,36 @@ QUEUES and creates — the matched files exist in the library by construction, s
 they cannot change what those files score — and `cookie_notes` (R242) is a
 hidden key, written by the cookie routes and never by the settings form (no
 Settings row offers it).
+
+---
+
+### 7.77 The artist folder's bracket: the id is resolved, never omitted
+
+- **R382 — an album the app could not match is still filed under
+  `Artist [<mbid>]`.** The naming script's artist segment is
+  `%albumartist% [%musicbrainz_albumartistid%]` (`mlo/naming.py`, the ONE
+  script the organizer, beets' `%mlo_dir` plugin and the placeholder creator all
+  evaluate) and `sanitize_path` drops an empty bracket group — so an import that
+  reached the namer with no artist id (an unmatched download, a provider row, a
+  release lookup that did not answer) was filed under a bare
+  `Artists/Radiohead`. The grader could then only report the mismatch per file
+  as `PATH: expected '…' (run organize)` — a script that cannot help while the
+  tag itself names no id. The import's identity writer
+  (`server/imports.py::_stamp_mb_tags`) now resolves the id from the artist's
+  NAME — `discovery.resolve_release_artist_mbid`, the resolver the artist
+  image/description/genre chains already use — so `MUSICBRAINZ_ARTISTID` and
+  `MUSICBRAINZ_ALBUMARTISTID` land and every namer reads them. Only a
+  SINGLE-credit release is resolved: a split or an "A feat. B" release has no
+  one album artist, a name lookup there would bracket the album with a
+  stranger's id, and an artist MusicBrainz does not know stays bare with no id
+  invented. Measured on a scratch library holding two real FLACs stripped of
+  every MusicBrainz tag: with the lookup suppressed the album landed at
+  `Artists/Radiohead/[Album] 1997-05-21 …` with an empty
+  `MUSICBRAINZ_ALBUMARTISTID`; with it, the tag read
+  `a74b1b7f-71a5-4011-9441-d0b5e4122711` and the album landed at
+  `Artists/Radiohead [a74b1b7f-…]/[Album] 1997-05-21 …`, the emptied bare folder
+  pruned. `tools/test_import_pipeline.py` pins both, plus the multi-credit and
+  unknown-artist guards.
 
 ---
 

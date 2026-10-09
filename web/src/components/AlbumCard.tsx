@@ -81,6 +81,10 @@ export default function AlbumCard({ al, artistName, selectable, selected, onSele
   size?: GridSize;
 }) {
   const st = statusFor(!!al.pass, al.audit_summary);
+  /** An import is writing this album right now: no verdict was earned, so the
+   *  dot is the neutral amber pulse (the same one the pending mark wears),
+   *  never the red of a half-written folder's "failures". */
+  const importing = !!al.importing;
   const ref = href === undefined ? albumRef(al) : href;
   // A row outside the library has no verdict, no audio and nothing to
   // favourite: the three controls that would claim otherwise are left off.
@@ -288,7 +292,7 @@ export default function AlbumCard({ al, artistName, selectable, selected, onSele
             the two ends read as their own columns) */}
         <div className="text-[11px] text-zinc-500 truncate flex items-center gap-1.5 mt-0.5">
           {inLibrary && (
-            <span className={`h-1.5 w-1.5 rounded-full ${st.edge} inline-block shrink-0`} title={st.label} />
+            <span className={`h-1.5 w-1.5 rounded-full ${importing ? "bg-amber-400/90 animate-pulse" : st.edge} inline-block shrink-0`} title={importing ? "Importing — not graded yet" : st.label} />
           )}
           {/* The artist OPENS its page: the caption named an artist a reader
               could not follow, while the title beside it was already a link.

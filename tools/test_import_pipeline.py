@@ -241,12 +241,13 @@ finally:
         setattr(imports, _n, _fn)
     script_runners.run_chain = _real_run_chain
 
-# the staging steps, both tag-writing fetches AND the chain: once each. The
-# genres family is NOT among them here, and that is the contract: its one
-# action is release-driven, and this fixture's files carry no MusicBrainz
-# identity to resolve a release from (tools/test_autonomous_import.py's album
-# has one and asserts the step runs there).
-assert default_seen == {"rym": 1, "metadata": 1, "cover": 1,
+# the staging steps, both tag-writing fetches, the genre step AND the chain:
+# once each. The genre step is now always OFFERED — it decides for itself
+# whether there is an identity to ask by (the release in hand, or the album's
+# own tags) — and this fixture's files carry neither a release nor an
+# artist/album tag, so it asks nothing. The fetch it does make when there IS
+# an identity is pinned in the "no release identity" case above.
+assert default_seen == {"rym": 1, "metadata": 1, "cover": 1, "genres": 1,
                         "advisory": 1, "instrumental": 1, "chain": 1}, default_seen
 assert default_args["rym"][0][0] == (DF_PATH, DF_CFG), default_args["rym"]
 assert default_args["metadata"][0][0] == (DF_PATH, DF_CFG), default_args["metadata"]
@@ -999,6 +1000,53 @@ for _label, _stub, _want_two, _seed in (
 # the real writer goes back on before the next block tags real files
 _audio.AudioFile = _real_audiofile
 print("genre fallback: all assertions passed")
+
+# --------------------------------------------------------------------------- #
+# NO release identity: the automatic step asks the sources by the album's OWN
+# name
+# --------------------------------------------------------------------------- #
+# The owner's "genre importing is broken autonomously": the genre step was
+# gated on the release id alone, so an album whose import had no MusicBrainz
+# identity (an untagged hand-download, or a release lookup that did not answer)
+# fetched NOTHING here — while the manual Import genres button on the very same
+# album answered by name. The gate is the album's own tags now, one code path
+# with the manual action, and this pins both halves: the chain IS asked (with
+# the album's identity, release None) and its names land on the tracks.
+print()
+print("== no release identity: the automatic step asks by the album's own name ==")
+_ask = {}
+_audio.AudioFile = _FakeAudio
+try:
+    _no_id_album = staging_album("Name Only Album")
+    _written.clear()
+    for _base in ("01 - track.wav", "02 - track.wav"):
+        _written.setdefault(_base, {})["ALBUMARTIST"] = "Test Artist"
+        _written.setdefault(_base, {})["ALBUM"] = "Name Only"
+
+    def _name_only_chain(**kw):
+        _ask.update(kw)
+        return {"per_track": {(1, 1): ["Shoegaze"], (1, 2): ["Shoegaze"]},
+                "genres": ["Shoegaze"], "sources": {}, "levels": {}}
+
+    _intg.genre_chain = _name_only_chain
+    _w, _f = imports._stamp_release(_no_id_album, None, CFG)
+    # The chain ran AT ALL (the release-gated code path used to skip it) …
+    assert _ask, "the genre chain was never asked for an album with no release"
+    # … asked by the album's own identity, and with no release payload to key
+    # a per-track answer on.
+    assert _ask.get("artist") == "Test Artist", _ask
+    assert _ask.get("album") == "Name Only", _ask
+    assert _ask.get("release") is None, _ask
+    # … and its names landed on the tracks through the same canonicalisation
+    # and cap as any other genre write.
+    assert _written["01 - track.wav"]["GENRE"] == \
+        _normalize(["Shoegaze"], _GENRE_CAP), _written["01 - track.wav"]
+    assert _written["02 - track.wav"]["GENRE"] == \
+        _normalize(["Shoegaze"], _GENRE_CAP), _written["02 - track.wav"]
+finally:
+    _intg.genre_chain = _real_chain
+    _audio.AudioFile = _real_audiofile
+print("autonomous genre fetch: all assertions passed")
 
 # --------------------------------------------------------------------------- #
 # What an import does NOT keep: the peer's lyric, genre, advisory and art
@@ -1853,6 +1901,84 @@ assert landed_tags["MEDIA"] == "12\" Vinyl", landed_tags
 assert landed_tags["RELEASECOUNTRY"] == "GB", landed_tags
 assert landed_tags["CATALOGNUMBER"] == "LANDED-CAT", landed_tags
 assert landed_tags["MUSICBRAINZ_ALBUMID"] == LANDED["id"], landed_tags
+
+# ---- (4) an album with no MusicBrainz match is still bracketed ---------------
+# A download the app could not match — no MUSICBRAINZ_ALBUMID tag, no pinned
+# release — reached the naming script with an EMPTY artist id, and the script
+# drops an empty bracket group: the album was filed under a bare
+# `Artists/Talking Heads` where it belongs under
+# `Artists/Talking Heads [<mbid>]`. The grader could only report the mismatch
+# per file as `PATH: expected '…' (run organize)` — a script that cannot help
+# while the tag itself names no id, so the fix belongs where the identity is
+# written: `_stamp_mb_tags` now resolves the artist's id from the NAME
+# (`discovery.resolve_release_artist_mbid`, the resolver the artist image and
+# genre chains already use) when the payload carries none.
+import server.discovery as discovery
+
+ARTIST_ID = "a94a7155-c79d-4409-9fcf-220cb0e4dc3a"
+_real_resolve = discovery.resolve_artist_mbid
+discovery.resolve_artist_mbid = lambda name, cfg=None, timeout=None, exact_only=False: (
+    ARTIST_ID if name == "Talking Heads" else None)
+try:
+    bare_dir, bare_files = ident_album("Remain in Light (no match)")
+    GUESS = {"title": "Remain in Light", "artists": [{"name": "Talking Heads"}]}
+    assert imports._stamp_mb_tags(bare_dir, GUESS) == 2
+
+    from mlo.audio import AudioFile
+    from mlo.naming import DEFAULT_NAMING_SCRIPT, eval_script, track_variables
+    got_tags = dict(AudioFile(bare_files[0]).all_tags() or {})
+    assert got_tags.get("MUSICBRAINZ_ALBUMARTISTID") == ARTIST_ID, got_tags
+    assert got_tags.get("MUSICBRAINZ_ARTISTID") == ARTIST_ID, got_tags
+    # …and the FOLDER the naming script builds from those tags carries the
+    # bracket — this is the path the organizer and beets' plugin both evaluate.
+    rel = eval_script(DEFAULT_NAMING_SCRIPT, track_variables(got_tags))
+    assert rel.startswith(f"Talking Heads [{ARTIST_ID}]/"), rel
+
+    # A release with MORE THAN ONE artist credit has no one album artist to look
+    # up: nothing is asked, nothing is written, and the folder stays bare — a
+    # name lookup there would bracket the album with a stranger's id.
+    split_dir, split_files = ident_album("Remain in Light (split)")
+    assert imports._stamp_mb_tags(split_dir, {
+        "title": "Remain in Light",
+        "artists": [{"name": "Talking Heads", "joinphrase": " & "},
+                    {"name": "Brian Eno"}]}) == 2
+    assert not AudioFile(split_files[0]).get_tag("MUSICBRAINZ_ALBUMARTISTID")
+    # An artist MusicBrainz does not know stays bare as well — the resolver
+    # answers nothing, and no id is invented.
+    unknown_dir, unknown_files = ident_album("Remain in Light (unknown)")
+    assert imports._stamp_mb_tags(unknown_dir, {
+        "title": "Remain in Light",
+        "artists": [{"name": "Nobody At All"}]}) == 2
+    assert not AudioFile(unknown_files[0]).get_tag("MUSICBRAINZ_ALBUMARTISTID")
+finally:
+    discovery.resolve_artist_mbid = _real_resolve
+
+# …and an id is only accepted when MusicBrainz carries this artist by NAME. The
+# walk's fuzzy fallback — the first row for a spelling MusicBrainz does not have
+# — is fine for an image or a description, but it would bracket the FOLDER after
+# a neighbouring artist, so identity refuses it. `search_mb` is stubbed: no
+# suite reaches the network.
+from server import integrations
+
+_real_search = integrations.search_mb
+try:
+    integrations.search_mb = lambda kind, query, **kw: {
+        "rows": [{"title": "Test Artist Tribute Band", "id": "someone-else"}]}
+    fuzzy_dir, fuzzy_files = ident_album("Remain in Light (fuzzy)")
+    assert imports._stamp_mb_tags(fuzzy_dir, {
+        "title": "Remain in Light", "artists": [{"name": "Test Artist"}]}) == 2
+    assert not AudioFile(fuzzy_files[0]).get_tag("MUSICBRAINZ_ALBUMARTISTID"), \
+        "a fuzzy neighbour must never bracket the folder"
+
+    integrations.search_mb = lambda kind, query, **kw: {
+        "rows": [{"title": "Test Artist", "id": "exact-artist-id"}]}
+    exact_dir, exact_files = ident_album("Remain in Light (exact)")
+    assert imports._stamp_mb_tags(exact_dir, {
+        "title": "Remain in Light", "artists": [{"name": "test artist"}]}) == 2
+    assert AudioFile(exact_files[0]).get_tag("MUSICBRAINZ_ALBUMARTISTID") \
+        == "exact-artist-id", "an exact name IS the artist MusicBrainz carries"
+finally:
+    integrations.search_mb = _real_search
 assert ASKED["id"] not in json.dumps(landed_tags), \
     f"the asked-for pressing must not appear anywhere: {landed_tags}"
 # the marker is the framework album's, and the import clears it as it does on

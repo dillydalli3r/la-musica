@@ -187,7 +187,17 @@ def _stamp_mb_tags(album_dir, release, force_ids=False):
 
     tracks_meta = release.get("media") or []
     artists = release.get("artists") or []
-    artist_mbid = (artists[0].get("mbid") if artists else "") or ""
+    # The album artist's id, resolved from the NAME when the payload carries
+    # none (discovery.resolve_release_artist_mbid): an album that arrived with
+    # no MusicBrainz match — an untagged download, a provider row — would
+    # otherwise be stamped with an EMPTY MUSICBRAINZ_ALBUMARTISTID, which the
+    # naming script's artist segment drops along with its brackets, filing the
+    # album under a bare `Artists/Radiohead`. The grader then reports it per
+    # file as `PATH: expected '…' (run organize)` — a script that cannot help
+    # while the tag itself names no id. Only a single-credit release is
+    # resolved, and an artist MusicBrainz does not know stays bare as before.
+    from server.discovery import resolve_release_artist_mbid
+    artist_mbid = resolve_release_artist_mbid(release)
     artist_name = (artists[0].get("name") if artists else "") or ""
     album_title = str(release.get("title") or "")
 
@@ -611,6 +621,97 @@ def _importing_now(album_dir):
     return claim
 
 
+def importing_album(album_dir):
+    """Whether *album_dir* is MID-IMPORT — the ONE predicate every grading and
+    warning surface reads, so none of them can disagree about it.
+
+    Two sources, because "being imported" spans a restart:
+
+    * the LIVE registry — an import claim that holds this album right now: an
+      `import`-kind claim (the album, or a folder above it, per the registry's
+      containment rule) or a run scoped to THIS album (`scripts`, holding the
+      album path itself — a library-wide Run All holds the library ROOT, which
+      must not read every album under it as importing). The in-process truth
+      for a download's one-click import, a bulk-queue row, or the wizard's
+      running chain;
+    * the DISK marker (`mlo.paths.is_importing`) — written when an import
+      starts (the wizard's bookmark, and :func:`finish_album` itself) and
+      cleared when it finishes, discards or cancels. It survives a restart, and
+      because it lives INSIDE the folder it also survives the chain's own
+      organize/beets rename, so an album the app was killed half-way through is
+      still known to be mid-import when the process comes back.
+
+    A FRAMEWORK album's pending marker is a SEPARATE case — those surfaces read
+    `pending` (and a no-checks row) for it; this predicate answers only "is an
+    import ON it right now".
+    """
+    if not album_dir:
+        return False
+    try:
+        from server import job_locks
+        claim = _importing_now(album_dir)
+        if claim is not None:
+            kind = str(claim.get("kind") or "")
+            keys = claim.get("keys") or ()
+            # An IMPORT claim holds the album it is finishing (or a folder above
+            # it — the registry's containment rule, which the strip's own tests
+            # pin), so it counts as-is. A script RUN that happens to hold a
+            # folder ABOVE the album — a library-wide Run All / Grade holds the
+            # library ROOT — is NOT an import of everything under it: only a run
+            # whose scope is this very album counts (its claim holds the album
+            # path itself). Without that line, every album would read as
+            # importing while any library-wide script ran.
+            if kind == "import":
+                return True
+            if kind == "scripts" and job_locks.normalize(album_dir) in keys:
+                return True
+    except Exception:
+        pass
+    try:
+        from mlo.paths import is_importing
+        return bool(is_importing(album_dir))
+    except Exception:
+        return False
+
+
+def _mark_importing(path):
+    """Record on DISK that this album is mid-import — never fatal.
+
+    Merged into whatever the folder's marker already holds (the wizard's
+    bookmark may have written a step and a name there first), so the marker
+    that ties the session world to the grading world is one file, not two. The
+    album's cache is marked stale so the next library read reflects the marker
+    (the album stops being a finding while the import runs).
+    """
+    try:
+        from mlo.paths import load_importing, save_importing
+        info = load_importing(path) or {}
+        info.setdefault("album", os.path.normpath(str(path)).replace("\\", "/"))
+        info.setdefault("at", time.time())
+        info["importing"] = True
+        save_importing(path, info)
+    except Exception:
+        traceback.print_exc()
+    _invalidate_caches(path)
+
+
+def _clear_importing(path):
+    """Drop the disk mid-import marker — never fatal.
+
+    The album's cache is marked stale for the same reason the write is: without
+    it a payload built while the marker was present could keep reporting the
+    album as mid-import after it finished.
+    """
+    if not path:
+        return
+    try:
+        from mlo.paths import clear_importing
+        clear_importing(path)
+    except Exception:
+        traceback.print_exc()
+    _invalidate_caches(path)
+
+
 def finish_album(album_dir, cfg=None, progress=None, force=None, release=None,
                  wait=True):
     """Run the configured chain over ONE album folder.
@@ -783,8 +884,21 @@ def finish_album(album_dir, cfg=None, progress=None, force=None, release=None,
         # is refused (or a queued import still waiting) has not started, and a
         # notification about it would be a lie either way.
         _announce_import("import_started", album_dir, cfg=cfg)
-        return _finish_album(path, cfg, progress=progress, force=force,
-                             release=release, wait=wait)
+        # The DISK half of `importing_album`: from here until the import ends,
+        # the folder carries a marker that survives a kill AND the chain's own
+        # rename. It is what lets a restarted process still know this album is
+        # mid-import instead of grading a half-written one as failing. Written
+        # once the album is really this import's (a refused press wrote nothing).
+        _mark_importing(path)
+        out = _finish_album(path, cfg, progress=progress, force=force,
+                            release=release, wait=wait)
+        # The import reached its end — Finish, a review stop, no chain, or a
+        # missing folder — so it is no longer mid-import. Cleared wherever the
+        # album STARTED and wherever the chain LEFT it: script 14 renames the
+        # folder, and the marker travelled with it.
+        _clear_importing(path)
+        _clear_importing((out or {}).get("path") if isinstance(out, dict) else None)
+        return out
 
 
 def _finish_album(path, cfg, progress=None, force=None, release=None,
@@ -987,29 +1101,35 @@ def _finish_album(path, cfg, progress=None, force=None, release=None,
     # config that fetches no genre (`genre_autofill` off — the switch the step
     # itself reads — or a kept Genres family) has nothing to announce: that is
     # the "genre-less config" whose bar must not say "Fetching genres…".
-    if run_cfg.get("genre_autofill", True) and (rel or album_mbid):
-        _phase("Fetching genres…")
+    # The step is OFFERED whenever the family is on: `_stamp_release` decides
+    # whether there is anything to ask BY — the release in hand, or the ALBUM's
+    # own tags — and it publishes "Fetching genres…" itself the moment it really
+    # starts the fetch, so the bar and the work can never disagree. A folder
+    # with neither a release nor an artist/album announces nothing and fetches
+    # nothing; it used to skip the step for a missing release id, which left an
+    # untagged hand-download genre-less while the manual button on the same
+    # album answered by name.
     if run_cfg.get("genre_autofill", True):
         if not rel and album_mbid:
-            # The identity the import just stamped is enough to ask for the
-            # release the genres belong to — a release-GROUP id resolves to its
-            # best edition through the same choice policy the import path uses,
-            # and the lookup is cached. No identity at all skips the step.
+            # A release-GROUP id resolves to its best edition through the same
+            # choice policy the import path uses, and the lookup is cached.
+            # With no id at all the step still runs: `_stamp_release` falls
+            # back to the album's own tags, exactly as the manual Import
+            # genres action does, instead of silently skipping the fetch.
             try:
                 from server import integrations as intg
                 rel, _rid = intg.resolve_release(album_mbid)
             except Exception:
                 rel = None
-        if rel:
-            try:
-                written, failed = _stamp_release(path, rel, run_cfg,
-                                                 force_ids=explicit_release)
-                out["genres"] = {"written": written, "failed": failed}
-                if failed:
-                    out["errors"].append(
-                        f"{failed} track(s) took no genre (see the genre sources)")
-            except Exception:
-                traceback.print_exc()
+        try:
+            written, failed = _stamp_release(path, rel, run_cfg,
+                                             force_ids=explicit_release)
+            out["genres"] = {"written": written, "failed": failed}
+            if failed:
+                out["errors"].append(
+                    f"{failed} track(s) took no genre (see the genre sources)")
+        except Exception:
+            traceback.print_exc()
 
     # ---- the digital release's own two answers -----------------------------
     # SOURCE (the grader requires it on a Digital Media release and nothing in
@@ -4308,6 +4428,13 @@ def _stamp_release(album_dir, release, cfg, force_ids=False):
     payload the stamp was built from — a gap the user could only close by hand.
     Still an EMPTY slot only, so a genre the track states still wins, and the
     names go through the same canonicalisation and cap as any other track's.
+
+    The chain is asked whenever there is anything to ask WITH: the release in
+    hand, or — when the import has no release identity — the album's own tags
+    (`ALBUMARTIST`/`ARTIST` + `ALBUM`), the same way `server.main` runs the
+    manual Import genres action. Without that second source an untagged
+    hand-download fetched no genre automatically while the button on the same
+    album did, which is what "genre importing is broken" looked like.
     """
     from mlo.audio import AudioFile
     from mlo.autotag import genre_count, trim_genres
@@ -4315,11 +4442,38 @@ def _stamp_release(album_dir, release, cfg, force_ids=False):
     from server import integrations as intg
 
     rel = _release_for_stamping(release)
+    files = _audio_files(album_dir)
+    # WHAT the sources are asked BY: the release in hand when the import has
+    # one, else the album's OWN tags — the identity the manual Import genres
+    # action reads (`server.main._run_genre_chain`). The gate used to be the
+    # release id alone, so an album whose import had no MusicBrainz identity
+    # (an untagged hand-download, or a release lookup that did not answer)
+    # fetched NOTHING here while the very same album answered by name through
+    # the button — the reason genre importing was broken autonomously.
+    artist = next((a.get("name") for a in rel.get("artists") or []
+                   if a.get("name")), "")
+    album = rel.get("title") or ""
+    has_release = bool(rel.get("release_group_id") or rel.get("id"))
+    if not (artist or album):
+        try:
+            probe = AudioFile(files[0]) if files else None
+            if probe is not None and probe.audio is not None:
+                artist = str(probe.get_tag("ALBUMARTIST")
+                             or probe.get_tag("ARTIST") or "").strip()
+                album = str(probe.get_tag("ALBUM") or "").strip()
+        except Exception:
+            traceback.print_exc()
+    if not files or not (has_release or artist or album):
+        # Nothing to ask the sources BY. The step has NOTHING to fetch and must
+        # not walk the files at all: an unreadable file in such an album is not
+        # a genre failure — this is the behaviour for an album with no identity,
+        # unchanged (a framework/tagless folder reached here before and did
+        # nothing; it still does).
+        return (0, 0)
     try:
         _stamp_mb_tags(album_dir, rel, force_ids=force_ids)
     except Exception:
         traceback.print_exc()
-    files = _audio_files(album_dir)
     # The same per-track cap the other writers keep — the one helper reads
     # `mb_genre_count` (and clamps it to its ceiling), with the shipped default
     # behind it so an import can never leave a file the app's own grader would
@@ -4327,19 +4481,24 @@ def _stamp_release(album_dir, release, cfg, force_ids=False):
     cap = genre_count(cfg)
     genres = {}
     album_genres = []
-    if rel.get("release_group_id") or rel.get("id"):
+    if files and (has_release or artist or album):
+        # The step's own readout, published HERE where the decision is made:
+        # a folder with nothing to ask by says nothing, and one that does ask
+        # shows the wait (see `_finish_album`'s note).
+        _phase("Fetching genres…")
         try:
             # The FULL per-track chain (RateYourMusic → ListenBrainz →
             # MusicBrainz → iTunes → Wikidata → Last.fm → Discogs → Deezer),
             # merged per track and capped: an import therefore writes the same
             # genres an Auto-tagging run would, from the release it has just
             # identified, and a per-track source (recording tags, Apple's
-            # primaryGenreName) lands on the track it belongs to.
+            # primaryGenreName) lands on the track it belongs to. With no
+            # release identity in hand the chain still runs BY NAME (release
+            # None) — one code path with the manual action, not a second rule.
             chain = intg.genre_chain(
-                artist=next((a.get("name") for a in rel.get("artists") or []
-                             if a.get("name")), ""),
-                album=rel.get("title") or "",
-                release=rel, limit=cap, cfg=cfg, files=files)
+                artist=artist, album=album,
+                release=rel if has_release else None,
+                limit=cap, cfg=cfg, files=files)
             genres = chain.get("per_track") or {}
             # THE ALBUM'S OWN GENRE, for a track the chain had nothing to say
             # about. `genres` above is keyed by (disc, position) and holds what

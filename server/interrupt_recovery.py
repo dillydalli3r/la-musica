@@ -36,8 +36,9 @@ import time
 import traceback
 
 from mlo import atomic
-from mlo.paths import (app_data_dir, downloads_dir, incomplete_dir,
-                       library_root, load_pending, trash_root)
+from mlo.paths import (IMPORTING_FILE, app_data_dir, clear_importing,
+                       downloads_dir, incomplete_dir, library_root,
+                       load_pending, trash_root)
 
 # The app's own grace period at shutdown: how long it waits for running jobs
 # before it gives up and records them as abandoned. It MUST stay below the
@@ -266,6 +267,54 @@ def _read_journal(cfg=None, log=None) -> list:
     return rows
 
 
+def _importing_report(cfg=None, log=None) -> list:
+    """Mid-import markers a kill left behind, reconciled.
+
+    A marker with a live SESSION behind it (`server.import_sessions`, which
+    relocates a bookmark to wherever a rename moved the album) is an import the
+    user can still continue: it is logged and LEFT IN PLACE, so the album stays
+    out of grading until it is finished or discarded — and the tray's "Continue
+    import" row, rebuilt from the same session, is what finishes it.
+
+    A marker with NO session is an autonomous import that was abandoned mid-way
+    and that nothing will resume: it is CLEARED, so the album reads as the
+    ordinary (possibly failing) album it now is instead of being hidden from
+    grading forever. This is the one place a mid-import marker is ever removed
+    without the import ending.
+    """
+    from server import import_sessions
+
+    out = []
+    root = library_root(_music_folder(cfg))
+    if not root or not os.path.isdir(root):
+        return out
+    try:
+        kept = {os.path.normcase(os.path.normpath(str(row.get("album") or "")))
+                for row in import_sessions.sessions(cfg)}
+    except Exception:
+        traceback.print_exc()
+        kept = set()
+    for dirpath, dirs, files in os.walk(root):
+        dirs[:] = [d for d in dirs if not d.startswith(".")]
+        if IMPORTING_FILE not in files:
+            continue
+        name = os.path.basename(dirpath)
+        if os.path.normcase(os.path.normpath(dirpath)) in kept:
+            out.append({"kind": "importing", "folder": dirpath})
+            _say(log, f"import of {name!r} was interrupted mid-way: it is left"
+                      " out of grading and can be continued from the import"
+                      " wizard (or dismissed)")
+            continue
+        try:
+            clear_importing(dirpath)
+        except Exception:
+            traceback.print_exc()
+        out.append({"kind": "importing_cleared", "folder": dirpath})
+        _say(log, f"import of {name!r} was interrupted and is not resumable:"
+                  " its mid-import marker was cleared")
+    return out
+
+
 def startup_recovery(cfg=None, log=None) -> dict:
     """Reconcile everything a killed run left; one log line per action.
 
@@ -274,7 +323,8 @@ def startup_recovery(cfg=None, log=None) -> dict:
     nothing else.
     """
     _say(log, "checking for files and jobs an interrupted run left behind")
-    summary = {"temp_files": [], "staging": [], "pending": [], "jobs": []}
+    summary = {"temp_files": [], "staging": [], "pending": [], "jobs": [],
+               "importing": []}
     for root, wide in _sweep_roots(cfg):
         if not os.path.isdir(root):
             continue
@@ -290,17 +340,23 @@ def startup_recovery(cfg=None, log=None) -> dict:
         summary["pending"] = _pending_report(cfg, log)
     except Exception:
         traceback.print_exc()
+    try:
+        summary["importing"] = _importing_report(cfg, log)
+    except Exception:
+        traceback.print_exc()
     left = (len(summary["temp_files"]) + len(summary["staging"])
-            + len(summary["pending"]) + len(summary["jobs"]))
+            + len(summary["pending"]) + len(summary["jobs"])
+            + len(summary["importing"]))
     if left:
         _say(log, f"recovery done: {len(summary['temp_files'])} temp file(s)"
                   f" deleted, {len(summary['staging'])} download-area item(s)"
                   f" reported, {len(summary['pending'])} framework album(s)"
+                  f" reconciled, {len(summary['importing'])} mid-import album(s)"
                   f" reconciled, {len(summary['jobs'])} interrupted job(s)"
                   " reported")
     else:
         _say(log, "nothing to recover: no leftover temp files, downloads,"
-                  " pending markers or interrupted jobs")
+                  " pending or mid-import markers, or interrupted jobs")
     return summary
 
 

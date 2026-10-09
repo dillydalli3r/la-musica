@@ -24,7 +24,7 @@ import {
   TRACK_COLS, TRACK_COL_W, TRACK_PHONE_CLS, TRACK_RATING_COL, PHONE_HIDE, phoneHide,
   type Col, type CustomCol,
 } from "../lib/columns";
-import { gradeSliver, statusFor, auditFails } from "../lib/status";
+import { gradeSliver, statusFor, IMPORTING_STATUS, auditFails } from "../lib/status";
 import { invalidateLibrary } from "../lib/invalidate";
 import { albumRef, trackRef, artistRef, entityLinkClick } from "../lib/refs";
 import { fmtTech, fmtDuration, fmtDateCell, originalYear, GRID_SIZE_MIN } from "../lib/fmt";
@@ -181,6 +181,9 @@ interface FlatTrack extends Track {
   albumCover?: string | null;
   albumPath: string;
   hay: string; // lowercase search blob, built once per payload
+  /** The owning album is being imported right now (see Album.importing): the
+   *  track inherits it, so a mid-import track is never a Failing-filter hit. */
+  importing?: boolean;
 }
 
 /** The name an album row answers to in the toolbar's alphabet filter — ONE
@@ -577,7 +580,7 @@ export default function LibraryPage() {
           const hay = [artistName, al.meta?.ALBUM ?? "", t.file, tagHay(t.tags)]
             .filter(Boolean).join(" ").toLowerCase();
           trackHays.push(hay);
-          tracks.push({ ...t, artist: artistName, album: al.meta?.ALBUM ?? al.path.split("/").pop() ?? "", albumCover: al.cover_file ?? null, albumPath: al.path, hay });
+          tracks.push({ ...t, artist: artistName, album: al.meta?.ALBUM ?? al.path.split("/").pop() ?? "", albumCover: al.cover_file ?? null, albumPath: al.path, importing: !!al.importing, hay });
         }
         albums.push({
           ...al,
@@ -593,10 +596,10 @@ export default function LibraryPage() {
 
   // Per-preset predicate, shared by the filter memo and the filter menu
   // counts (search text is applied separately from the preset).
-  const trackPresetOK = (t: Track, preset: Preset) => {
+  const trackPresetOK = (t: Track & { importing?: boolean }, preset: Preset) => {
     switch (preset) {
       case "all": return true;
-      case "failing": return !t.grade_pass;
+      case "failing": return !t.grade_pass && !t.importing;
       case "cd": return (t.tags.MEDIA ?? "").toUpperCase().includes("CD");
       case "digital": return (t.tags.MEDIA ?? "").toUpperCase().includes("DIGITAL");
       case "instrumental": return t.tags.INSTRUMENTAL === "1";
@@ -612,7 +615,7 @@ export default function LibraryPage() {
   const albumPresetOK = (al: Album, preset: Preset) => {
     switch (preset) {
       case "all": return true;
-      case "failing": return !al.pass;
+      case "failing": return !al.pass && !al.importing;
       case "cd": return (al.media ?? "").toUpperCase().includes("CD");
       case "digital": return (al.media ?? "").toUpperCase().includes("DIGITAL");
       case "podcasts": return !!al.podcast?.series;
@@ -1850,7 +1853,7 @@ export default function LibraryPage() {
             <p className="text-xs text-zinc-500 py-1">{t("library.az.empty")}</p>
           )}
           {albumWindow.map((al) => {
-            const st = statusFor(!!al.pass, al.audit_summary);
+            const st = al.importing ? IMPORTING_STATUS : statusFor(!!al.pass, al.audit_summary);
             const sel = selAlbumSet.has(al.path);
             const isExp = expanded.has(al.path);
             const tracks = tracksByAlbum[al.path] ?? [];
@@ -2011,7 +2014,7 @@ export default function LibraryPage() {
                                 {t.issues.length}✗
                               </button>
                             )}
-                            <GradeBadge pass={!!t.grade_pass && !auditFails(t.audit)} size="sm" />
+                            <GradeBadge pass={!!t.grade_pass && !auditFails(t.audit)} size="sm" importing={!!al.importing} />
                             <CachedMark path={t.path} />
                             {t.tags.INSTRUMENTAL === "1" && (
                               <span className="chip bg-zinc-800 text-zinc-400 border border-border text-[9px] shrink-0">INST</span>
@@ -2369,7 +2372,7 @@ export default function LibraryPage() {
                                 {tr.issues.length}✗
                               </button>
                             )}
-                            <GradeBadge pass={!!tr.grade_pass && !auditFails(tr.audit)} size="sm" />
+                            <GradeBadge pass={!!tr.grade_pass && !auditFails(tr.audit)} size="sm" importing={!!tr.importing} />
                             <CachedMark path={tr.path} />
                             {tr.is_video && <span title="Music video" className="shrink-0 inline-flex"><FileVideo className="h-3.5 w-3.5 text-zinc-500" /></span>}
                             {tr.tags.INSTRUMENTAL === "1" && (
@@ -2623,7 +2626,7 @@ function AlbumRowGroup({
     cells.push({
       id: "grade",
       cls: `td${phoneHide(ALBUM_PHONE_CLS, "grade")}`,
-      node: <GradeBadge pass={!!album.pass && !auditFails(album.audit_summary)} score={album.grade_pct} />,
+      node: <GradeBadge pass={!!album.pass && !auditFails(album.audit_summary)} score={album.grade_pct} importing={!!album.importing} />,
     });
   if (visibleCols.includes("media"))
     cells.push({
@@ -2820,7 +2823,7 @@ function AlbumRowGroup({
                                     {t.issues.length}✗
                                   </button>
                                 )}
-                                <GradeBadge pass={!!t.grade_pass && !auditFails(t.audit)} size="sm" />
+                                <GradeBadge pass={!!t.grade_pass && !auditFails(t.audit)} size="sm" importing={!!album.importing} />
                                 <CachedMark path={t.path} />
                                 {t.is_video && <span title="Music video" className="shrink-0 inline-flex"><FileVideo className="h-3.5 w-3.5 text-zinc-500" /></span>}
                                 {t.tags.INSTRUMENTAL === "1" && (

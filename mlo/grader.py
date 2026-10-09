@@ -52,8 +52,8 @@ from .naming import (DEFAULT_NAMING_SCRIPT, UNKNOWN_RELEASE_TYPE,
                      mb_style_release_type, name_key)
 from .paths import (ALBUM_SIDECAR_NAMES, AUDIO_EXTS, IMAGE_EXTS,
                     LIB_AUDIO_EXTS, LIB_VIDEO_EXTS, get_track_cover,
-                    library_root, load_expected_tracks, load_pending,
-                    load_track_covers)
+                    library_root, load_expected_tracks, load_importing,
+                    load_pending, load_track_covers)
 from .stats import (
     new_stats, _make_pbar, _pbar_skip, _pbar_update, is_audio_file,
     _find_albums, _clean_set, _summarize_values, _collect_targets,
@@ -5069,6 +5069,11 @@ def _find_empty_folders(root, dirs_out):
             # lists it as pending, so it is not a broken album — failing it here
             # would fail the very album the import is about to fill.
             continue
+        if load_importing(d):
+            # A mid-import folder with no audio in it yet (an import killed
+            # between moving the audio out and writing it back, say): it is the
+            # process's own half-written state, not a broken album.
+            continue
         if v == WALK_FILES:
             # Files, but none of them audio: only a folder still holding part
             # of the album (the cover slot or a rip/lyrics sidecar) is a broken
@@ -5194,6 +5199,21 @@ def run_grade_library(config):
         albums = _find_albums(folder, dir_scan)
         empty_folders = (_find_empty_folders(folder, dir_scan)
                          if config.get("grade_check_empty_folders", True) else [])
+        # An album an import is writing RIGHT NOW is left out of the sweep:
+        # grading a half-written folder reports the process, not the library —
+        # the very tag the chain is about to add reads as missing until it
+        # does. The ONE predicate (`server.imports.importing_album`) is asked,
+        # so a live claim and a surviving mid-import marker after a restart
+        # answer the same. A TARGETED run (targets is not None, above) is the
+        # import's OWN Grade step and is deliberately NOT filtered: it was
+        # asked to grade exactly these albums. Lazy import keeps mlo/ usable
+        # without server/; a server that cannot be imported never hides an
+        # album from grading.
+        try:
+            from server.imports import importing_album as _importing_album
+            albums = [a for a in albums if not _importing_album(a)]
+        except Exception:
+            pass
 
     if not albums and not empty_folders:
         log("No albums found.")

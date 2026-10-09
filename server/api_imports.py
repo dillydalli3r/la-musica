@@ -64,6 +64,7 @@ Path containment mirrors ``server.main._in_music_folder`` — imported inside
 the handler on purpose, since main imports this module to mount the router.
 """
 from typing import Dict, List, Optional
+import traceback
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -383,11 +384,19 @@ def import_sessions_list():
 
 @router.post("/api/import/sessions")
 def import_session_save(req: SessionRequest):
-    """Bookmark (or refresh) an unfinished manual import of one album."""
+    """Bookmark (or refresh) an unfinished manual import of one album.
+
+    The write stamps the album's mid-import marker (R381), which changes what
+    the library payload says about the album (no grade while an import is on
+    it). Drop the assembled tree so the next read reflects that instead of
+    serving a tree built before the bookmark.
+    """
     from mlo.config import load_config
     _guard([req.album], req.staged)
-    return {"session": import_sessions.upsert(
-        req.album, req.step, req.album_name, req.staged, load_config())}
+    row = import_sessions.upsert(
+        req.album, req.step, req.album_name, req.staged, load_config())
+    _invalidate_library_payloads()
+    return {"session": row}
 
 
 @router.post("/api/import/sessions/dismiss")
@@ -396,11 +405,22 @@ def import_session_dismiss(req: SessionDismissRequest):
 
     No folder guard: this only deletes a bookmark, and a staged album lives
     outside the library by design — requiring the guard would make a staged
-    session impossible to clear.
+    session impossible to clear. The marker comes off with the bookmark, so the
+    assembled tree is dropped for the same reason `import_session_save` drops it.
     """
     from mlo.config import load_config
     import_sessions.dismiss(req.album, load_config())
+    _invalidate_library_payloads()
     return {"ok": True}
+
+
+def _invalidate_library_payloads():
+    """Drop the assembled library tree after a marker write — never fatal."""
+    try:
+        from server import tagcache
+        tagcache.invalidate_library_payloads()
+    except Exception:
+        traceback.print_exc()
 
 
 # --------------------------------------------------------------------------- #

@@ -1758,8 +1758,16 @@ def resolve_release_group(artist, album, cfg=None, timeout=None):
     return None
 
 
-def resolve_artist_mbid(name, cfg=None, timeout=None):
-    """MusicBrainz artist MBID for a name (used for description/image chains)."""
+def resolve_artist_mbid(name, cfg=None, timeout=None, exact_only=False):
+    """MusicBrainz artist MBID for a name (used for description/image chains).
+
+    ``exact_only`` refuses the fuzzy fallback this walk otherwise takes: the
+    search is a NAME query, and for an artist MusicBrainz does not carry under
+    that spelling the first row is a *neighbour*, not this artist (asking for
+    "Test Artist" answers a real id). A surface that only *offers* something —
+    an image, a description, a genre — may take that; one that writes the id
+    into the FOLDER NAME must not (`resolve_release_artist_mbid` passes True),
+    because a folder bracketed with a stranger's id is worse than a bare one."""
     if not name:
         return None
     try:
@@ -1770,7 +1778,48 @@ def resolve_artist_mbid(name, cfg=None, timeout=None):
     if not rows:
         return None
     exact = [r for r in rows if _norm(r.get("title")) == _norm(name)]
-    return (exact or rows)[0].get("id")
+    if exact:
+        return exact[0].get("id")
+    return None if exact_only else rows[0].get("id")
+
+
+def resolve_release_artist_mbid(release, cfg=None):
+    """The release payload's album-artist MBID, resolved from the NAME when the
+    payload carries none.
+
+    A MusicBrainz payload always names its artist's id, but an album that
+    arrives with no MB match at all — an unmatched download, a provider row, a
+    framework album added by hand — reaches the naming script with an EMPTY
+    `musicbrainz_albumartistid`, and `mlo.naming.sanitize_path` drops the empty
+    bracket group: the album is filed under a bare `Artists/Radiohead` where it
+    belongs under `Artists/Radiohead [<mbid>]`. The grader then reports it per
+    file as `PATH: expected '…' (run organize)` — a script that cannot help
+    while the tag itself is missing the id.
+
+    This is the app's own name->id resolver (`resolve_artist_mbid`, the one the
+    artist image/description/genre chains already use) filling that gap at the
+    identity writer, so every namer sees an id: the organizer, beets' plugin
+    and the placeholder creator all read the same
+    `MUSICBRAINZ_ALBUMARTISTID` tag.
+
+    Only a SINGLE credit is resolved, and only an EXACT name match is accepted
+    (`resolve_artist_mbid(..., exact_only=True)`). A multi-credit release (a
+    split, "A feat. B") has no one album artist to look up, and a name lookup
+    would bracket the album with a stranger's id; `joinphrase` on the one credit
+    says the same thing. The fuzzy fallback the image/description chains use is
+    refused here for the same reason: asking MusicBrainz for a spelling it does
+    not carry answers a neighbouring artist, and a folder named after the wrong
+    artist is worse than a bare one. Returns "" when nothing resolved — an
+    artist MusicBrainz does not know stays bare, exactly as before, and the
+    caller writes no id."""
+    artists = (release or {}).get("artists") or []
+    mbid = str((artists[0].get("mbid") if artists else "") or "").strip()
+    if mbid:
+        return mbid
+    if len(artists) != 1 or str(artists[0].get("joinphrase") or "").strip():
+        return ""
+    name = str(artists[0].get("name") or "").strip()
+    return str(resolve_artist_mbid(name, cfg, exact_only=True) or "") if name else ""
 
 
 # --------------------------------------------------------------------------- #

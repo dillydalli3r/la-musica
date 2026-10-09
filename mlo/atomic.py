@@ -38,6 +38,7 @@ TEMP_PREFIXES = (
     ".mlo_covers_",       # mlo.paths.save_track_covers
     ".mlo_expected_",     # mlo.paths.save_expected_tracks
     ".mlo_pending_",      # mlo.paths.save_pending
+    ".mlo_importing_",    # mlo.paths.save_importing
     ".mlo_config_",       # mlo.config.save_config
     ".accurip_tmp_",      # mlo.accurip
     ".accurip_fmt_",      # mlo.format_all

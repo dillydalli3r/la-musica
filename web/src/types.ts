@@ -268,6 +268,13 @@ issues?: Record<string, string[]>;
   pending?: boolean;
   /** What the album is waiting for (the server's own sentence). */
   pending_reason?: string;
+  /** True while an import is writing this album RIGHT NOW (a live claim, or a
+   *  surviving mid-import marker after the app was killed mid-import). Its
+   *  grade is a snapshot of a half-written folder, so the server reports no
+   *  checks and the surfaces must say "importing" instead of drawing a
+   *  verdict — it is never a finding, and never a FAIL. See
+   *  `server.imports.importing_album`. */
+  importing?: boolean;
   /** What "Add to library" already fetched for this folder before its audio
    *  existed: the artist image / descriptions and the album description it
    *  wrote (their paths), the links it resolved and the cover candidates it

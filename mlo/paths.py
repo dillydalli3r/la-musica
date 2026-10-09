@@ -1000,6 +1000,75 @@ def clear_pending(album_dir):
     return True
 
 
+# A MID-IMPORT marker: the folder an import is working on RIGHT NOW, so a
+# process that is killed between two steps leaves behind a fact that survives
+# the restart. It is deliberately NOT `.mlo_pending.json` (that marker means a
+# framework album with no audio at all, and startup recovery CLEARS it the
+# moment audio is present — which would erase exactly the state an interrupted
+# import needs to keep) and NOT server.import_sessions.json alone (that file is
+# keyed by the album's PATH, so an organize/beets rename leaves it pointing at
+# a folder that is gone and the bookmark is pruned). This marker lives INSIDE
+# the folder, so it TRAVELS with a rename — a resumed import can be found again
+# at whatever path the naming script left it at. Same dotfile treatment as the
+# other markers: grading ignores hidden names, so it is never library content.
+IMPORTING_FILE = ".mlo_importing.json"
+
+
+def _importing_path(album_dir):
+    return os.path.join(album_dir, IMPORTING_FILE)
+
+
+def load_importing(album_dir):
+    """The mid-import marker as a dict, or None when the folder carries none."""
+    try:
+        with open(_importing_path(album_dir), "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def save_importing(album_dir, info):
+    """Atomically write the mid-import marker; a falsy *info* clears it."""
+    if not info:
+        return clear_importing(album_dir)
+    try:
+        fd, tmp = tempfile.mkstemp(prefix=".mlo_importing_", suffix=".tmp",
+                                   dir=album_dir)
+    except OSError:
+        return False
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(dict(info, version=1), fh, indent=1)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, _importing_path(album_dir))
+        fsync_dir(album_dir)
+        return True
+    except Exception:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        return False
+
+
+def clear_importing(album_dir):
+    """Remove the mid-import marker; True when the folder holds none after."""
+    try:
+        os.remove(_importing_path(album_dir))
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def is_importing(album_dir):
+    """Whether *album_dir* carries a mid-import marker (durable across restarts)."""
+    return load_importing(album_dir) is not None
+
+
 # Windows codes a move retries instead of giving up on: 32 (sharing
 # violation — something still holds the file) and 33 (lock violation).
 _LOCK_WINERRORS = (32, 33)

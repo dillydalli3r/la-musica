@@ -239,9 +239,24 @@ def _rated(albums, user, limit):
 
 
 def _needs_attention(albums, limit):
-    """Owned albums that fail at least one check — lowest grade first."""
+    """Owned albums that fail at least one check — lowest grade first.
+
+    An album an import is on is left out through the ONE predicate
+    (`server.imports.importing_album`, live claim or surviving disk marker): a
+    shelf built from a payload that predates the import would otherwise list a
+    half-written album as needing attention. Imported lazily for the same
+    reason `grade_warning` does — this module must not join the import
+    service's import graph at load time.
+    """
+    try:
+        from server import imports
+        importing = imports.importing_album
+    except Exception:
+        def importing(_path):
+            return False
     bad = [a for a in albums
-           if (a.get("total_checks") or 0) > 0 and not a.get("pass")]
+           if (a.get("total_checks") or 0) > 0 and not a.get("pass")
+           and not importing(a.get("path"))]
     bad.sort(key=lambda a: (a.get("grade_pct") if a.get("grade_pct") is not None else 0.0,
                             -(a.get("total_checks") or 0)))
     return [_owned_row(a, reason="Needs attention") for a in bad[:limit]]
@@ -283,12 +298,13 @@ def grade_warning(lib):
       that step runs — and a strip that reported it would be describing the
       process, not the library. The album's own row already says "Script run"
       for the same reason; when the claim goes the album is a finding again.
-      The albums an IMPORT holds right now — `server.imports._importing_now`,
-      the three claim kinds the queue's own In progress section reads, so both
-      surfaces agree about what "being imported" is — are counted in
-      `albums_importing`, which the strip prints in one clause: a reader whose
-      failing album left the list the moment its chain started is told where it
-      went instead of wondering which album the strip lost. It counts the
+      The albums an import is on right now —
+      `server.imports.importing_album`, the ONE predicate (a live import claim,
+      or a surviving disk marker after a restart), so both surfaces agree about
+      what "being imported" is — are counted in `albums_importing`, which the
+      strip prints in one clause: a reader whose failing album left the list
+      the moment its chain started is told where it went instead of wondering
+      which album the strip lost. It counts the
       FINDINGS left out on that account (graded, failing, mid-import), not
       every claim in the registry — an album that was never a finding has none
       to lose.
@@ -333,15 +349,14 @@ def grade_warning(lib):
         # See the docstring: neither of these was graded, so neither is wrong.
         if alb.get("pending") or not (alb.get("total_checks") or 0) or alb.get("pass"):
             continue
-        # An album an import holds is mid-write by definition — its chain is
+        # An album an import is on is mid-write by definition — its chain is
         # filling the very tags the grader has just read as missing — so it is
         # not a finding, and it is COUNTED, because a strip that only dropped it
-        # would look like it lost an album. A claim held by the CALLER's own job
-        # is not a conflict to `_importing_now` (see job_locks.busy), so that
-        # one falls through to the absolute rule below instead: held back all
-        # the same, just not counted — and a second reading of the registry is
-        # exactly what this pair is here to avoid.
-        if imports._importing_now(alb.get("path")) is not None:
+        # would look like it lost an album. The question is asked through the
+        # ONE predicate (`server.imports.importing_album`), so a live claim and
+        # a surviving disk marker (an import killed mid-way, the app restarted)
+        # answer the same way, and the strip and the queue cannot disagree.
+        if imports.importing_album(alb.get("path")):
             albums_importing += 1
             continue
         # …and any other live job's album is mid-write rather than wrong. Asked

@@ -17,16 +17,33 @@ export function GradeBadge({
   pass,
   score,
   size = "md",
+  importing = false,
 }: {
   pass: boolean;
   score?: number | null;
   size?: "sm" | "md";
+  /** The album is being imported right now (`server.imports.importing_album`):
+   *  it has NOT been graded, so the badge draws a neutral spinner instead of a
+   *  PASS it did not earn or a FAIL that describes the process, not the album. */
+  importing?: boolean;
 }) {
   // One word for the verdict. The tooltip used to append `audit REAL` /
   // `audit FAKE` — the app's internal name for the CD verdict, which a reader
   // hovering a row should not have to learn (the audit chip in the track
   // details says it where there is room to say it in full). The failing
   // percentage stays: it is the number behind the cross.
+  if (importing) {
+    return (
+      <span
+        className="inline-flex items-center shrink-0 text-amber-400/80"
+        title="Importing — not graded yet"
+        role="img"
+        aria-label="Importing — not graded yet"
+      >
+        <Loader2 className={size === "sm" ? "h-3 w-3 animate-spin" : "h-3.5 w-3.5 animate-spin"} />
+      </span>
+    );
+  }
   const title = pass
     ? "Pass"
     : score != null

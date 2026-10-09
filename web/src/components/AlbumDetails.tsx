@@ -164,9 +164,11 @@ export function AlbumDetails({ album, onClose }: { album: Album; onClose: () => 
   const gradeRows: DetailItem[] = [
     {
       label: "Grade",
-      value: album.grade_pct == null
-        ? (album.pass ? "PASS (no checks enabled)" : "—")
-        : `${album.grade_pct}% · ${album.pass_count}/${album.total_checks} checks · ${album.pass ? "PASS" : "FAIL"}`,
+      value: album.importing
+        ? "Importing — not graded yet"
+        : album.grade_pct == null
+          ? (album.pass ? "PASS (no checks enabled)" : "—")
+          : `${album.grade_pct}% · ${album.pass_count}/${album.total_checks} checks · ${album.pass ? "PASS" : "FAIL"}`,
     },
     { label: "Audit", value: album.audit_summary || "—", title: "AccurateRip / AudioAuditor verdict for the whole album" },
     { label: "Checksum", value: album.checksum_status || "—" },

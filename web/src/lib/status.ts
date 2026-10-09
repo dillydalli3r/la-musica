@@ -40,3 +40,15 @@ export function statusFor(pass: boolean, audit: string | null | undefined): Trac
 export function gradeSliver(pass: boolean, audit: string | null | undefined): string {
   return statusFor(pass, audit).key.toUpperCase();
 }
+
+/** The neutral verdict for an album an import is writing right now: it has not
+ *  been graded, so it is neither PASS nor FAIL. `key` is "pass" so no FAIL
+ *  sliver is drawn and no red edge/tint is painted; the amber edge and the
+ *  label say why the row carries no verdict. See GradeBadge's `importing`. */
+export const IMPORTING_STATUS: TrackStatus = {
+  key: "pass",
+  label: "Importing — not graded yet",
+  edge: "bg-amber-400/80",
+  tint: "",
+  text: "text-amber-300/80",
+};

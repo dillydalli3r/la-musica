@@ -228,7 +228,11 @@ def stub_resolve(mbid):
     _resolve_calls.append(mbid)
     return ({"id": mbid, "title": "Test Album",
              "release_group_id": "22222222-2222-2222-2222-222222222222",
-             "artists": [{"name": "Test Artist"}]}, mbid)
+             # A real MusicBrainz payload always names its artist's id, and the
+             # import's identity writer resolves one from the NAME only when the
+             # payload lacks it — so the fixture carries it, and this suite
+             # stays offline (the name lookup would be a live MusicBrainz call).
+             "artists": [{"name": "Test Artist", "mbid": "test-artist-1"}]}, mbid)
 
 
 def stub_genres(album_dir, release, cfg, **kwargs):

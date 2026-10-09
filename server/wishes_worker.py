@@ -458,9 +458,8 @@ def _try_candidate(wish, cfg, cand, window, pos, total):
         # through the same settle policy instead of its own private retry, so a
         # permanently unfillable wish still ends up announced rather than being
         # re-resolved forever.
-        return _settled(_settle_attempt(
-            wish, cfg,
-            f"MusicBrainz release could not be resolved ({cand['mbid']})"))
+        err = f"MusicBrainz release could not be resolved ({cand['mbid']})"
+        return (_settle_attempt(wish, cfg, err), err)
     # Which PRESSING this attempt is about, recorded on the wish itself: the
     # release is in hand here, so the queue row never spends a MusicBrainz
     # request of its own to say it (server.wishes.RELEASE_KEYS). It follows the
