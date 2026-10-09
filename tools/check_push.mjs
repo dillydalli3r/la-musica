@@ -215,6 +215,11 @@ try {
 
   const notify = await server.ssrLoadModule("/src/lib/notify.ts");
   const bell = await server.ssrLoadModule("/src/components/NotificationBell.tsx");
+  // The kinds a device may ask the server to push are the module's OWN list
+  // (lib/notifications.ts, whose OS_KINDS documents which outcomes deserve an
+  // OS popup); asserting against it rather than against a copy typed here is
+  // what stopped this check from silently pinning a kind the app had dropped.
+  const { OS_KINDS } = await server.ssrLoadModule("/src/lib/notifications.ts");
 
   console.log("== what each client can be offered ==");
   const DESKTOP_UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36";
@@ -257,10 +262,13 @@ try {
   check("the endpoint and both keys reach the server",
     body.endpoint === "https://push.example.invalid/send/harness"
     && body.keys?.p256dh === P256DH && body.keys?.auth === AUTH, JSON.stringify(body));
+  const askedKinds = Array.isArray(body.kinds) ? body.kinds : [];
   check("...with the kinds this device asked for",
-    Array.isArray(body.kinds) && body.kinds.includes("import_done")
-    && body.kinds.includes("wish_found") && !body.kinds.includes("script_done"),
-    JSON.stringify(body.kinds));
+    askedKinds.length > 0
+    && Object.keys(OS_KINDS).every((k) => askedKinds.includes(k))
+    && askedKinds.every((k) => OS_KINDS[k] === true)
+    && !askedKinds.includes("script_done"),
+    `${JSON.stringify(askedKinds)} vs ${JSON.stringify(Object.keys(OS_KINDS))}`);
   check("...over the session's own credentials", post?.init.credentials === "same-origin");
   check("...and the device remembers it is subscribed", notify.pushEnabled() === true);
 
