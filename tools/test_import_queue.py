@@ -193,10 +193,18 @@ try:
     thread = import_queue._thread
     if thread is not None:
         thread.join(20)
+    # The run's frame is a STEP of the run now (server.events.import_step): it
+    # is counted with the album's own success and published when the run goes
+    # quiet, so the window is closed here the way the timer would. What this
+    # case pins — ONE frame at the end, naming the album's identity — holds.
+    events_mod.flush_coalesced()
 finally:
     events_mod.emit = _real_emit
     import_queue.set_importer(None)
-done = [e for e in said if e[0] == "download_done"]
+# ONE frame, and it is the kind the user's own switch governs (`import_done`) —
+# the run's `download_done` tally and the album's success are the same notice's
+# raw material now (see server.events.import_step).
+done = [e for e in said if e[0] == "import_done"]
 check("the run ends with ONE completion frame", len(done) == 1, str([e[0] for e in said]))
 if done:
     check("...naming the album's identity, not the folder",
@@ -223,9 +231,10 @@ try:
     thread = import_queue._thread
     if thread is not None:
         thread.join(20)
+    events_mod.flush_coalesced()          # the run's own tally, held as a step
 finally:
     events_mod.emit = _real_emit
-done = [e for e in said if e[0] == "download_done"]
+done = [e for e in said if e[0] == "import_done"]
 check("a multi-album run ends with one tally frame", len(done) == 1, str([e[0] for e in said]))
 if done:
     check("...counting the albums it imported",
