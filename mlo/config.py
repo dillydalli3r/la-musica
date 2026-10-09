@@ -1461,7 +1461,14 @@ DEFAULT_CONFIG = {
     # pipeline emits it per candidate. The outcome kinds above are what a user
     # acts on.
     "notify_soulseek_download_start": False,
-    "notify_soulseek_upload_start": True,
+    # OFF by default too, and for the owner's own reason: who is taking files
+    # from this share is an IN-APP fact, not an interruption. It shows where a
+    # user looks for it — the Soulseek entry's own dot in the sidebar (blue
+    # while files are being served) and the Sharing panel on the Soulseek page,
+    # both of which read the live uploads state rather than an event. Turning
+    # this on ADDS a notification on top of those; leaving it off (the shipped
+    # value) is the app being quiet about somebody else's download.
+    "notify_soulseek_upload_start": False,
 
     # Size cap on the app's remove-from-library bin (<music>/.mlo/trash),
     # which nothing else bounds: a bin nothing ever empties keeps every album

@@ -4232,7 +4232,15 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   pins all four halves: three albums then ONE frame counting them, a single
   album speaking in its own words, the run's own tally winning, progress-only
   publishing nothing at all, and a failed run adding no summary to the failure
-  that spoke.
+  that spoke. **Sharing is not a notification at all**: who is taking files
+  from this share is an in-app fact, so `notify_soulseek_upload_start` ships OFF
+  and the two places a user looks carry it instead — the Soulseek entry's dot in
+  the sidebar turns blue (the page's own "sharing now" colour) while files are
+  being served, its tooltip naming the connection AND the count, and the
+  Soulseek page's Sharing panel lists each peer. Both read the live uploads
+  state (`/api/soulseek/uploads`, one query key shared with the page), never an
+  event, so switching the notification on ADDS a notice rather than being what
+  makes the state visible.
 
 - **R206 — a stored audit verdict is trusted for the AUDIO it was written for,
   not for the file's mtime.** Script 6 re-decides nothing it can already prove: a

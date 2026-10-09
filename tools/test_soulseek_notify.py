@@ -111,9 +111,16 @@ check("the import-start kind ships OFF",
       and events_mod._notify_configured("import_started", DEFAULT_CONFIG) is False)
 check("the album-ready-to-import kind ships OFF",
       DEFAULT_CONFIG.get("notify_import_ready") is False)
-check("the upload kind still ships on",
-      DEFAULT_CONFIG.get("notify_soulseek_upload_start") is True
-      and events_mod._notify_configured("upload_started", DEFAULT_CONFIG) is True)
+# …and the UPLOAD kind ships OFF too, for the owner's own reason: a peer taking
+# files from this share is an in-app fact. It shows in the Soulseek entry's dot
+# (blue while files are served) and in the page's Sharing panel, which read the
+# live uploads state rather than an event; the switch only ADDS a notification.
+check("the upload kind ships off (it shows in the app instead)",
+      DEFAULT_CONFIG.get("notify_soulseek_upload_start") is False
+      and events_mod._notify_configured("upload_started", DEFAULT_CONFIG) is False)
+check("...and turning it on still publishes it",
+      events_mod._notify_configured(
+          "upload_started", {"notify_soulseek_upload_start": True}) is True)
 check("turning the download kind on publishes it",
       events_mod._notify_configured(
           "download_started", {"notify_soulseek_download_start": True}) is True)
@@ -134,6 +141,12 @@ events_mod.emit("download_started", "kept back", config={"notify_soulseek_downlo
 check("...for the download kind too", frames() == [], str(frames()))
 
 print("== the uploads watcher loop ==")
+# The watcher falls back to the LOADED config when it is handed a falsy one, and
+# the kind ships OFF (the dot and the Sharing panel are where sharing is shown),
+# so the machinery below is driven with the switch named explicitly — the same
+# thing this file does for the download kinds further down. What is asserted is
+# the dedupe per session, which is the rule either way.
+UPLOAD_ON = {"notify_soulseek_upload_start": True}
 main_mod._ULSK_STATE = {}
 drain()
 real = (slsk.is_running, slsk.web_up, slsk.uploads_state)
@@ -147,20 +160,20 @@ try:
         return uploads(("peer", [state]))
 
     slsk.uploads_state = lambda cfg=None: one_state("InProgress")
-    main_mod._soulseek_uploads_check(cfg={})
+    main_mod._soulseek_uploads_check(cfg=UPLOAD_ON)
     check("a pass that sees a new peer emits one frame",
           len(frames("upload_started")) == 1, str(len(frames("upload_started"))))
-    main_mod._soulseek_uploads_check(cfg={})
-    main_mod._soulseek_uploads_check(cfg={})
+    main_mod._soulseek_uploads_check(cfg=UPLOAD_ON)
+    main_mod._soulseek_uploads_check(cfg=UPLOAD_ON)
     check("later passes while the same transfer runs stay silent",
           len(frames("upload_started")) == 1, str(len(frames("upload_started"))))
     check("...even though the daemon really was polled each time",
           len(polled) == 3, str(len(polled)))
 
     slsk.uploads_state = lambda cfg=None: one_state("Completed, Succeeded")
-    main_mod._soulseek_uploads_check(cfg={})
+    main_mod._soulseek_uploads_check(cfg=UPLOAD_ON)
     slsk.uploads_state = lambda cfg=None: one_state("InProgress")
-    main_mod._soulseek_uploads_check(cfg={})
+    main_mod._soulseek_uploads_check(cfg=UPLOAD_ON)
     check("a new session after the peer went quiet is announced again",
           len(frames("upload_started")) == 2, str(len(frames("upload_started"))))
     last = frames("upload_started")[-1]
@@ -173,7 +186,7 @@ try:
 
     polled.clear()
     slsk.is_running = lambda: False
-    main_mod._soulseek_uploads_check(cfg={})
+    main_mod._soulseek_uploads_check(cfg=UPLOAD_ON)
     check("a daemon that is not running is never polled", polled == [], str(polled))
 finally:
     slsk.is_running, slsk.web_up, slsk.uploads_state = real

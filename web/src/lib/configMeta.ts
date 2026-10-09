@@ -797,7 +797,7 @@ export const CONFIG_GROUPS: CfgGroup[] = [
         { k: "notify_import_start", label: "Notify when an import starts", type: "bool", help: "An album being picked up is progress, and progress lives on the queue page: with this on it joins the run's summary, and on its own it never raises a notification." },
         { k: "notify_import_done", label: "Notify when an import run finishes", type: "bool", help: "ONE notification when the work goes quiet — \"Imported 5 albums\" (or the album's own name and chain summary when it was a single one), with how many need a decision. This is the notice you get instead of one per album." },
         { k: "notify_soulseek_download_start", label: "Soulseek download started", type: "bool", help: "A candidate's first bytes moving. Progress, so it joins the run's summary and never raises a notification by itself." },
-        { k: "notify_soulseek_upload_start", label: "A peer started downloading from you", type: "bool" },
+        { k: "notify_soulseek_upload_start", label: "Notify when a peer starts downloading from you", type: "bool", help: "Off by default: who is taking files from this share is shown IN the app — the Soulseek entry's dot in the sidebar turns blue while files are being served, and the Soulseek page's Sharing panel lists each peer, how many files they took and the size of them. Turning this on adds a notification on top of those." },
       ],
     },    {
       title: "Artist watch",

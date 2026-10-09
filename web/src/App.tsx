@@ -278,9 +278,42 @@ function useSlskDot(enabled: boolean) {
     staleTime: 15000,
     retry: false,
   });
+  // What is being TAKEN from this share right now, for the dot. It is the SAME
+  // payload (and query key) the Soulseek page's Sharing panel renders, so the
+  // two share one request and one cache, and the state is what the page already
+  // says in words ("sharing now N").
+  //
+  // A peer starting to download no longer raises a notification
+  // (`notify_soulseek_upload_start` ships off): somebody taking files from this
+  // share is an in-app fact, so it shows HERE — the dot turns blue while files
+  // are being served — and in the Sharing panel, not as an interruption.
+  const sharing = useQuery({
+    queryKey: ["soulseekUploads"],
+    queryFn: api.soulseekUploads,
+    enabled: enabled && !!st?.running && !st?.conflict,
+    refetchInterval: 20000,
+    refetchIntervalInBackground: false,
+    staleTime: 15000,
+    retry: false,
+  });
+  const serving = (sharing.data?.uploads ?? []).reduce(
+    (n, p) => n + (p.active ?? 0), 0);
+  const servingTip = serving > 0
+    ? ` · sharing now (${serving} file${serving === 1 ? "" : "s"})`
+    : "";
   if (st?.logged_in) {
     // The LIVE account, not the saved username — those drift apart.
     const name = String(st.account || st.username || "").trim() || null;
+    if (serving > 0) {
+      // The connection is still what the dot MEANS, so its word comes first and
+      // the activity rides along; the colour is the page's own "sharing now"
+      // colour, which is what makes it visible at a glance at all.
+      return {
+        cls: "bg-sky-400",
+        tip: `${name ? `Soulseek — logged in as ${name}` : "Soulseek — connected"}${servingTip}`,
+        name,
+      };
+    }
     return {
       cls: "bg-emerald-500",
       tip: name ? `Soulseek — logged in as ${name}` : "Soulseek — connected",
@@ -293,7 +326,8 @@ function useSlskDot(enabled: boolean) {
     // "not logged in" — the dot is the only place some users will look.
     return {
       cls: "bg-amber-400",
-      tip: st.error ? `Soulseek — not logged in: ${st.error}` : "Soulseek — running, not logged in",
+      tip: (st.error ? `Soulseek — not logged in: ${st.error}` : "Soulseek — running, not logged in")
+        + servingTip,
       name: null,
     };
   }
