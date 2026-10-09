@@ -224,3 +224,15 @@ When they do ask for one:
   (`web/src/lib/externalLinks.ts` → `open_external`): a webview drops
   `window.open` and `target="_blank"` alike. And no window the app did not open
   may appear.
+- **A scratch run isolates its app data — `MLO_MUSIC_FOLDER` alone is not
+  isolation.** The app data dir stays the install's
+  (`%LOCALAPPDATA%\la musica`) unless `MLO_APP_DATA_DIR` names another, and
+  `mlo.config.save_config` stamps that dir's own `config.json` with whatever
+  music folder the save carried. So one `POST /api/config
+  {"music_folder": "<scratch>"}` from a scratch run repoints the REAL install:
+  the owner's next launch opens the scratch folder and lists no albums, while
+  their library sits untouched. Set **both** variables for every scratch server
+  (`MLO_MUSIC_FOLDER=<scratch> MLO_APP_DATA_DIR=<scratch>/appdata`), never start
+  the packaged `mlo-server.exe` or the desktop app for scratch work, and never
+  post a wizard flip to a port you have not just checked is both free and yours
+  (`netstat -ano | findstr LISTENING`).
