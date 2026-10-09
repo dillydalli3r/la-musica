@@ -22,6 +22,8 @@ import PageHeader from "../components/PageHeader";
 import { ForceControl, useForceRun } from "../components/ForceRun";
 import { useI18n } from "../lib/i18n";
 import MetadataReviewModal from "../components/MetadataReviewModal";
+import ImportIdentifyDialog from "../components/ImportIdentifyDialog";
+import type { IdentifyAlbum } from "../components/ImportIdentifyDialog";
 import type {
   AcoustidAlbumMatch, AcoustidMatch, AcoustidSubmitResult, AcoustidWrite, CoverResult,
   ImportBulkJob, ImportPrompt, ImportScriptsPreview, ImportSettleResult, LyricsAutoResult, MBRelease, MatchSuggestion,
@@ -589,6 +591,23 @@ export default function ImportWizard() {
       : { label: act?.label ?? progress?.desc ?? fetchStatus ?? "Working…",
           frame: progress, steps: act ? null : progress?.steps };
   const qc = useQueryClient();
+
+  // ---- Auto-import (the drop hands the whole batch to the pipeline) ------
+  // The "Auto-import" button stages the selection exactly like Import does,
+  // then runs each album through the AUTONOMOUS pipeline (the same
+  // `POST /api/import/bulk` the Library's "Run importing" uses): the chain
+  // decides everything a configured source can answer and only comes back for
+  // what nothing could supply. Albums whose files name no MusicBrainz release
+  // are still asked about first — the identify dialog, with its release
+  // URL/MBID field, AcoustID fingerprint and catalogue search. Several batches
+  // can be in flight: the server keeps one job per call (`jobs` in the bulk
+  // status) and the In-progress page shows them all.
+  const [autoBusy, setAutoBusy] = useState(false);
+  const [identify, setIdentify] = useState<{
+    staged: { name: string; path: string }[];
+    albums: IdentifyAlbum[];
+    identified: number;
+  } | null>(null);
 
   // ---- Bulk queue (several albums at once) ------------------------------
   // More than one album selected/dropped switches the wizard into queue mode:
@@ -1561,7 +1580,7 @@ export default function ImportWizard() {
     });
   };
 
-  const doImport = async () => {
+  const doImport = async (auto = false) => {
     // Excluded files are dropped here, before anything is uploaded or moved:
     // that is what makes a PARTIAL album import (one track of twelve) work.
     // The native/folder import MOVES the source directory, so there is no
@@ -1622,8 +1641,19 @@ export default function ImportWizard() {
       setUploaded(results);
       setAlbumIndex(0);
       setAlbumPath(results[0].path);
-      setStep(1);
       qc.invalidateQueries({ queryKey: ["library"] });
+      // Auto-import: the staged batch goes to the autonomous pipeline instead
+      // of the 8-step wizard. The albums that name no release are asked about
+      // first (the identify dialog), and the whole batch is queued through
+      // api.importBulk — several batches may be in flight at once.
+      if (auto) {
+        if (failed.length) {
+          toast(`Staged ${results.length} album(s) — ${failed.length} could not be staged: ${failed.map((f) => f.name).join(", ")}`);
+        }
+        await beginAutoImport(results);
+        return;
+      }
+      setStep(1);
       // Committed. With metadata_review on (Settings → Metadata) the review is
       // offered right here, while the album is fresh, instead of on a later
       // visit to its page.
@@ -1656,6 +1686,83 @@ export default function ImportWizard() {
         setUnpacked((u) => u.map((s) => (s.dir ? { ...s, dir: "" } : s)));
         api.importUnpackDiscard(unpackDirs).catch(() => {});
       }
+    }
+  };
+
+  /** Auto-import: ask about the albums that name no release, then queue them.
+   *
+   *  Reading each staged album's release id costs one `/api/album` per album
+   *  (the same payload the library tree already caches), and the ones that
+   *  name a release are NOT asked about — exactly the Library's "Run
+   *  importing" rule. The dialog's own release-URL/MBID field, AcoustID
+   *  fingerprint and catalogue search are the ways a person pins a release. */
+  const beginAutoImport = async (staged: { name: string; path: string }[]) => {
+    const unknown: IdentifyAlbum[] = [];
+    await Promise.all(staged.map(async (r) => {
+      try {
+        const al = await api.album(r.path);
+        const pin = al?.meta?.MUSICBRAINZ_ALBUMID
+          ?? al?.album_values?.MUSICBRAINZ_ALBUMID ?? "";
+        if (!pin) {
+          unknown.push({
+            path: r.path,
+            artist: al?.album_artist ?? "",
+            album: al?.meta?.ALBUM || r.name,
+          });
+        }
+      } catch {
+        // Unreadable payload: ask rather than silently import a guess.
+        unknown.push({ path: r.path, artist: "", album: r.name });
+      }
+    }));
+    if (!unknown.length) {
+      await startAutoImport(staged, {});
+      return;
+    }
+    setIdentify({
+      staged,
+      albums: unknown.sort((a, b) => a.path.localeCompare(b.path)),
+      identified: staged.length - unknown.length,
+    });
+  };
+
+  /** Queue the staged batch through the autonomous pipeline. Several batches
+   *  can run: the server keeps one job per call, and the In-progress page
+   *  lists them all. The wizard clears its own selection so the drop zone is
+   *  free for the next batch. */
+  const startAutoImport = async (
+    staged: { name: string; path: string }[],
+    pins: Record<string, string>,
+  ) => {
+    setAutoBusy(true);
+    try {
+      const items = staged.map((r) => ({ path: r.path, mbid: pins[r.path] || undefined }));
+      const res = await api.importBulk(items);
+      if (!res.ok) {
+        toast.error(res.error ?? "could not start the auto-import");
+        return;
+      }
+      const job = res.job;
+      const others = (job?.jobs ?? []).filter((j) => j.id !== job?.id);
+      const pinned = Object.values(pins).filter(Boolean).length;
+      const n = staged.length;
+      toast([
+        `Auto-importing ${n === 1 ? staged[0].name : `${n} albums`}`,
+        pinned ? `${pinned} pinned to a release` : null,
+        others.length ? `${others.length} other batch${others.length === 1 ? "" : "es"} running` : null,
+      ].filter(Boolean).join(" — "));
+      // Free the drop zone for the NEXT batch; the running job lives on the
+      // server and shows in the queue panel and In-progress.
+      setUnpacked([]);
+      setAlbums([]);
+      setExcluded(new Set());
+      setUploaded([]);
+      setIdentify(null);
+      qc.invalidateQueries({ queryKey: ["queue"] });
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setAutoBusy(false);
     }
   };
 
@@ -3818,11 +3925,25 @@ const finish = async () => {
               ))}
               <button
                 className="btn-primary tap"
-                onClick={doImport}
-                disabled={uploading || !albums.some((g) => g.name.trim() && g.files.length)}
+                onClick={() => void doImport()}
+                disabled={uploading || autoBusy || !albums.some((g) => g.name.trim() && g.files.length)}
               >
                 {uploading ? "Importing…" : `Import ${albums.filter((g) => g.files.length).length} album(s) into library`}
               </button>
+              <button
+                className="btn-ghost tap"
+                onClick={() => void doImport(true)}
+                disabled={uploading || autoBusy || !albums.some((g) => g.name.trim() && g.files.length)}
+                title="Stage the selection, then run the whole import for every album automatically — the app decides everything a source can answer and only asks about albums whose files name no release"
+              >
+                {autoBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Wand2 className="h-4 w-4" />}
+                Auto-import {albums.filter((g) => g.files.length).length} album(s) — decide everything and queue
+              </button>
+              <p className="text-[11px] text-zinc-500">
+                Auto-import runs the full pipeline for each album without the 8 steps: releases, links, metadata,
+                covers, genres and lyrics are fetched and written, and whatever nothing can supply comes back as a
+                prompt to answer later. Drop another folder while it runs to queue more batches.
+              </p>
             </div>
           )}
         </div>
@@ -5347,6 +5468,22 @@ const finish = async () => {
           artist={baseName(reviewPath.split("/").slice(0, -1).join("/"))}
           albumPath={reviewPath}
           onClose={() => setReviewPath(null)}
+        />
+      )}
+    {/* The release-identification dialog for an auto-import of albums whose
+          files name no MusicBrainz release. Same dialog the Library's "Run
+          importing" opens: a release URL/MBID, an AcoustID fingerprint or a
+          catalogue search pins the release before the batch is queued. */}
+      {identify && (
+        <ImportIdentifyDialog
+          albums={identify.albums}
+          identified={identify.identified}
+          onClose={() => setIdentify(null)}
+          onStart={async (pins) => {
+            const staged = identify.staged;
+            setIdentify(null);
+            await startAutoImport(staged, pins);
+          }}
         />
       )}
     </div>

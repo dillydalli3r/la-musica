@@ -456,6 +456,15 @@ def detect_instrumental(paths, cfg=None):
 
     def _network(track):
         _path, af, title, artist, album, codes, duration = track
+        # A track whose file already carries lyrics is NOT instrumental
+        # whatever any provider would say — the album holds the proof locally
+        # (`_lyrics_answer` states the 0 below), so the two NETWORK sources are
+        # not asked about it at all. They are the whole cost of this stage
+        # (LRCLIB alone is two requests per track), and spending them on a
+        # question the file already answered was most of what made Auto
+        # tagging slow on a library that had already been lyric-fetched.
+        if _lyrics_present(af, _path):
+            return []
         return _network_entries(af.get_tag, cfg, artist, title, album,
                                 duration, codes)
 

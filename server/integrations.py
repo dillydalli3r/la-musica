@@ -2491,6 +2491,13 @@ RYM_ARCHIVE_HEADERS = {
     "User-Agent": USER_AGENT + " (genre fallback)",
     "Accept": "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
 }
+# The archive is a DIFFERENT host from RYM and answers from a CDN, so its
+# requests do not wear RYM's 1 req/s etiquette — sharing that lock made the
+# fallback (the path a cookie-less install takes for EVERY album) the slowest
+# part of an import. Its own, lighter spacing and its own lock: four calls a
+# second to a public archive is still gentle, and archive fetches for several
+# albums can now overlap instead of queueing behind RYM's live-site pace.
+RYM_ARCHIVE_MIN_INTERVAL = 0.25
 # How many release-page spellings the ARCHIVE walk tries. The live ladder can
 # afford four (`_rym_release_paths`) because a 404 is one cheap request; an
 # archive answer costs a snapshot fetch and — when the newest capture is not a
@@ -2499,6 +2506,11 @@ RYM_ARCHIVE_HEADERS = {
 RYM_ARCHIVE_PATHS = 2
 _rym_lock = threading.Lock()
 _rym_last = 0.0
+# The archive's own pacing, kept OFF RYM's lock on purpose (see
+# RYM_ARCHIVE_MIN_INTERVAL): archive fetches never wait behind a live RYM
+# request, and several can be in flight at once.
+_rym_archive_lock = threading.Lock()
+_rym_archive_last = 0.0
 _rym_warned = False           # RYM refused since `_rym_blocked_at`, under
 _rym_blocked_cookie = ""      # this cookie — the latch `_rym_get` reads via
 _rym_blocked_at = 0.0         # `_rym_blocked` (the test harnesses reset these)
@@ -3088,6 +3100,27 @@ def _rym_archive_unpack(text):
              "url": fields[1].strip() if len(fields) > 1 else ""})
 
 
+def _rym_archive_http(url, params=None):
+    """One GET to archive.org under the archive's OWN pacing and lock.
+
+    Separate from `_rym_fetch` on purpose (see RYM_ARCHIVE_MIN_INTERVAL): the
+    fallback must not queue behind RYM's live-site 1 req/s, whose etiquette is
+    RYM's and not archive.org's. The lock reserves each caller's issue SLOT and
+    is released before the request goes out, so several archive fetches overlap
+    (a bulk import asks about several albums at once) while the ISSUE rate stays
+    at `RYM_ARCHIVE_MIN_INTERVAL`."""
+    global _rym_archive_last
+    with _rym_archive_lock:
+        now = time.time()
+        slot = max(now, _rym_archive_last + RYM_ARCHIVE_MIN_INTERVAL)
+        _rym_archive_last = slot
+    delay = slot - now
+    if delay > 0:
+        time.sleep(delay)
+    return httpx.get(url, params=params or {}, headers=RYM_ARCHIVE_HEADERS,
+                     timeout=20.0, follow_redirects=True)
+
+
 def _rym_archive_fetch(url, params=None):
     """One GET to archive.org: (page, final_url, answered).
 
@@ -3104,7 +3137,7 @@ def _rym_archive_fetch(url, params=None):
     is worth remembering for the full cache TTL, the second is not.
     """
     try:
-        r = _rym_fetch(url, params, RYM_ARCHIVE_HEADERS, None)
+        r = _rym_archive_http(url, params)
     except httpx.HTTPError:
         return None, "", False
     final = str(getattr(r, "url", "") or url)
@@ -3124,7 +3157,20 @@ def _rym_archive_captures(path):
     page — and it is what makes the negative cache honest: nothing to try,
     nothing to find, do not ask again for a month. None means nothing is known,
     so nothing is written down.
+
+    The index answer itself is cached (`_rym_cache_read`) so a second album
+    whose ladder reaches the same path does not pay the index request again:
+    the list of 200 captures of a page does not change between two imports.
     """
+    key = "wayback-cdx-" + hashlib.sha1(path.encode("utf-8")).hexdigest()
+    cached = _rym_cache_read(key, RYM_CACHE_TTL)
+    if cached is not None:
+        try:
+            stamps = json.loads(cached)
+        except ValueError:
+            stamps = None
+        if isinstance(stamps, list):
+            return [str(s) for s in stamps]
     text, _final, answered = _rym_archive_fetch(
         RYM_ARCHIVE_INDEX,
         {"url": f"{RYM_BASE}{path}", "output": "json",
@@ -3137,6 +3183,7 @@ def _rym_archive_captures(path):
     except ValueError:
         return None
     if not rows:
+        _rym_cache_write(key, "[]")
         return []
     # Row 0 NAMES the columns ("urlkey","timestamp","original","mimetype",
     # "statuscode","digest","length" for a plain CDX query — VERIFIED live), so
@@ -3148,6 +3195,7 @@ def _rym_archive_captures(path):
     stamps = [str(row[col]) for row in rows[1:]
               if len(row) > col and str(row[col]).isdigit()]
     stamps.reverse()
+    _rym_cache_write(key, json.dumps(stamps))
     return stamps
 
 
@@ -3167,12 +3215,15 @@ def _rym_archive_get(path, cfg=None, started=None):
     own data about the release, and the alternative to reading it is reading
     nothing at all.
 
-    Every request here goes through `_rym_fetch`, so it shares the live route's
-    1 req/s and the module's single request lock: the fallback costs a couple of
-    seconds and never a burst. `started` is the caller's wall-clock budget
-    (`_rym_expired`), checked between captures. Nothing here touches the refusal
-    latch or records a refusal (`_rym_unreachable`) — archive.org is a different
-    host, and a capture that is junk is not RYM refusing anything.
+    Every request here goes through `_rym_archive_http`, which paces calls to
+    archive.org on the archive's OWN light interval (`RYM_ARCHIVE_MIN_INTERVAL`)
+    and does NOT take RYM's live-site lock — the fallback (the path a
+    cookie-less install takes for every album) must not queue behind RYM's
+    1 req/s, and archive fetches for several albums can overlap. `started` is
+    the caller's wall-clock budget (`_rym_expired`), checked between captures.
+    Nothing here touches the refusal latch or records a refusal
+    (`_rym_unreachable`) — archive.org is a different host, and a capture that
+    is junk is not RYM refusing anything.
     """
     if not path or not _rym_archive_on(cfg):
         return None, {}
@@ -7679,22 +7730,105 @@ def _lrclib_ua():
 _LRCLIB_HEADERS = {"User-Agent": _lrclib_ua()}
 _lrclib_last = 0.0
 _lrclib_lock = threading.Lock()
+# LRCLIB answers are cached on disk (30 days, the app's other provider caches'
+# TTL): a library pass asks the same tracks again on every import, and a track
+# LRCLIB does not know costs TWO requests (a 404 `/get`, then `/search`) that
+# answer the same thing every time. Without this the memory memo
+# (`_advisory_cached`) was all there was — it dies with the process.
+_LRCLIB_CACHE_TTL = 30 * 86400.0
+
+
+class _LRCLIBCachedResponse:
+    """A cached LRCLIB answer in the shape the callers read: `.status_code`
+    and `.json()`, exactly the httpx response's two used attributes."""
+    __slots__ = ("status_code", "_body")
+
+    def __init__(self, status_code, body):
+        self.status_code = status_code
+        self._body = body
+
+    def json(self):
+        return self._body
+
+
+def _lrclib_cache_key(endpoint, params):
+    import hashlib
+    from urllib.parse import urlencode
+    raw = f"{endpoint}?{urlencode(sorted((params or {}).items()))}"
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+
+def _lrclib_cache_read(key):
+    d = _data_cache_dir("lrclib_cache")
+    if not d:
+        return None
+    fp = os.path.join(d, key + ".json")
+    try:
+        if os.path.isfile(fp) and time.time() - os.path.getmtime(fp) < _LRCLIB_CACHE_TTL:
+            with open(fp, "r", encoding="utf-8") as fh:
+                row = json.loads(fh.read())
+            return _LRCLIBCachedResponse(int(row["status"]), row.get("body"))
+    except Exception:
+        return None
+    return None
+
+
+def _lrclib_cache_write(key, status, body):
+    d = _data_cache_dir("lrclib_cache")
+    if not d:
+        return
+    try:
+        os.makedirs(d, exist_ok=True)
+        tmp = os.path.join(d, key + ".tmp")
+        with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
+            json.dump({"status": int(status), "body": body}, fh)
+        os.replace(tmp, os.path.join(d, key + ".json"))
+    except Exception:
+        pass
 
 
 def _lrclib_get(endpoint, params, timeout=15, retries=3):
-    """Rate-throttled LRCLIB GET with retry on 429/5xx (they throttle IPs)."""
+    """Rate-throttled LRCLIB GET with retry on 429/5xx (they throttle IPs).
+
+    The answer is served from a 30-day DISK cache first (`lrclib_cache`
+    beside the app's other provider caches), so a re-import of an album, or the
+    same track asked by a library-wide run, pays no request and no wait.
+
+    The lock RESERVES each caller's issue slot and is released BEFORE the
+    request goes out, so a request's whole latency no longer sits inside the
+    critical section — parallel callers (a track's /get and the album's next)
+    overlap their network time while the ISSUE rate stays one per 0.4 s. The
+    old shape held the lock across `httpx.get`, which made the effective rate
+    one per (0.4 s + latency) and the requests strictly serial — the largest
+    single cost of Auto tagging."""
     global _lrclib_last
+    key = _lrclib_cache_key(endpoint, params)
+    cached = _lrclib_cache_read(key)
+    if cached is not None:
+        return cached
     for attempt in range(retries):
         with _lrclib_lock:
-            elapsed = time.time() - _lrclib_last
-            if elapsed < 0.4:
-                time.sleep(0.4 - elapsed)
-            r = httpx.get(f"{LRCLIB_BASE}/{endpoint}", params=params,
-                          headers=_LRCLIB_HEADERS, timeout=timeout)
-            _lrclib_last = time.time()
+            now = time.time()
+            slot = max(now, _lrclib_last + 0.4)
+            _lrclib_last = slot
+        delay = slot - now
+        if delay > 0:
+            time.sleep(delay)
+        r = httpx.get(f"{LRCLIB_BASE}/{endpoint}", params=params,
+                      headers=_LRCLIB_HEADERS, timeout=timeout)
         if r.status_code in (429, 500, 502, 503, 504) and attempt < retries - 1:
             time.sleep(2.0 * (attempt + 1))
             continue
+        # 200 (a hit), 400/404 (no such track — the honest negative the ladder
+        # already pays for once per run) are definitive and worth keeping; a
+        # transient failure is NOT, so it is asked again next time.
+        if r.status_code in (200, 400, 404):
+            try:
+                body = r.json()
+            except Exception:
+                body = None
+            _lrclib_cache_write(key, r.status_code, body)
+            return _LRCLIBCachedResponse(r.status_code, body)
         return r
     return r
 

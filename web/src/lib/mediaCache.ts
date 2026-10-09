@@ -448,10 +448,17 @@ async function storeStream(c: Cache, path: string, resp: Response): Promise<void
  *  pages need offline, and the identity row that keeps it attached to the
  *  track once the organizer moves the file. */
 async function finishTrack(c: Cache, path: string): Promise<void> {
-  // Covers, the artist image and the album/artist payloads ride along, so
-  // offline playback is not left with a placeholder where the artwork should
-  // be, and the album page still has its description.
-  await Promise.allSettled([...artworkUrls(path), ...entityUrls(path)].map((u) => warm(c, u)));
+  // Covers, the artist image, the album/artist payloads and the track's OWN
+  // payload ride along, so offline playback is not left with a placeholder
+  // where the artwork should be, the album page still has its description,
+  // and the track page still has its lyrics. `/api/tags` is the track page's
+  // whole body (every tag, the tech readout and the stored LYRICS); without
+  // it a downloaded track's lyrics vanished with the server down.
+  await Promise.allSettled([
+    ...artworkUrls(path),
+    ...entityUrls(path),
+    apiAbsolute(`/api/tags?path=${encodeURIComponent(path)}`),
+  ].map((u) => warm(c, u)));
   // File the bytes under the track's identity too — the album payload is in
   // the cache by now (warm() above), and its row is what keeps this download
   // attached to the track when the organizer moves the file. A download made
@@ -528,11 +535,14 @@ export async function uncacheTrack(target: CacheTarget): Promise<void> {
  *  still holding cached tracks must keep the payload it renders from, and a
  *  bulk removal is one sweep rather than N racing ones. */
 export async function pruneEntityPayloads(): Promise<void> {
+  const paths = await cachedPaths();
   const keep = new Set<string>();
-  for (const p of await cachedPaths()) {
+  const keepTracks = new Set<string>();
+  for (const p of paths) {
     const album = parentDir(p);
     keep.add(album);
     keep.add(parentDir(album));
+    keepTracks.add(foldDir(p));
   }
   const c = await cache();
   for (const u of await cachedUrls()) {
@@ -540,6 +550,13 @@ export async function pruneEntityPayloads(): Promise<void> {
     try {
       url = new URL(u);
     } catch {
+      continue;
+    }
+    // A track's OWN payload (`/api/tags`) is kept only while the track itself
+    // is cached; an album/artist payload only while some cached track still
+    // lives under it.
+    if (url.pathname === "/api/tags") {
+      if (!keepTracks.has(foldDir(url.searchParams.get("path") || ""))) await c.delete(u);
       continue;
     }
     const key = url.pathname === "/api/credits" ? "album" : "path";

@@ -274,6 +274,21 @@ try:
     assert detect(track("06 - Sidecar.flac", title="Sidecar",
                         lrc=True))["answers"] == {"lyrics": 0}
 
+    # A file that carries lyrics is never asked of the NETWORK: `_lyrics_answer`
+    # states the 0 locally, so LRCLIB and Spotify would spend their requests
+    # (and LRCLIB's 0.4 s spacing) on a question the album already answered —
+    # the single biggest cost of Auto tagging on a library that had already
+    # been lyric-fetched.
+    clear()
+    no_lrclib = stub_lrclib({"get": {"instrumental": True, "trackName": "Sung"}})
+    no_spotify = stub_spotify({"v1/search": {"tracks": {"items": [
+        {"id": "sp-x", "external_ids": {"isrc": "USRC17607839"}}]}}})
+    sung = track("05b - Sung.flac", title="Sung", duration=200,
+                 lyrics="la la la\n", extra={"ISRC": "USRC17607839"})
+    hit = detect(sung, {"spotify_client_id": "cid", "spotify_client_secret": "sec"})
+    assert hit["value"] == 0 and hit["answers"] == {"lyrics": 0}, hit
+    assert no_lrclib == [] and no_spotify == [], (no_lrclib, no_spotify)
+
     # ----------------------------------------------------------------- #
     # 4) Spotify audio-features — banding, and the deprecated endpoint
     # ----------------------------------------------------------------- #

@@ -62,7 +62,9 @@ type Chain = {
    *  `HTMLMediaElement.volume` (the property is read-only there, so assigning
    *  it is silently dropped), and the level the user sets is only heard when
    *  it is applied inside the graph the element is routed through. On every
-   *  other platform both stages work and `applyVolume` keeps them in step. */
+   *  other platform both stages work and `applyVolume` keeps them in step.
+   *  It is the LAST stage, after the analyser, so the meters read the music
+   *  and not the slider. */
   volume: GainNode;
   eq?: EqChain | null;
 };
@@ -178,8 +180,8 @@ if (typeof document !== "undefined" && typeof document.addEventListener === "fun
   });
 }
 
-/** Attach the source → ReplayGain gain → analyser → speakers chain to an
- * <audio> or <video> element and make it the active visualizer source.
+/** Attach the source → ReplayGain gain → analyser → volume → speakers chain
+ * to an <audio> or <video> element and make it the active visualizer source.
  * Idempotent: a second call for the same element reuses the graph (and an
  * attach in progress can't happen twice). Resumes the context it just
  * created, so the caller does not have to order resume-after-attach. */
@@ -211,9 +213,12 @@ export function attachAnalyser(el: HTMLMediaElement): AnalyserNode | null {
   if (!c) return null;
   try {
     const source = c.createMediaElementSource(el);
-    // The volume stage sits FIRST, before the ReplayGain gain: it is the
-    // listener's own level, and it must multiply whatever loudness matching
-    // installed rather than be replaced by it.
+    // The volume stage sits LAST, AFTER the analyser: it is the listener's own
+    // level, and the meters/ambience must read the MUSIC, not the slider — a
+    // visualizer that collapsed to a flat line at low volume (and boomed at
+    // high) was reading the listener's setting instead of the track. The
+    // ReplayGain gain and the equalizer stay before the analyser: those are
+    // properties of what is playing, and the curve is part of the sound.
     const volume = c.createGain();
     const gain = c.createGain();
     const analyser = c.createAnalyser();
@@ -225,10 +230,10 @@ export function attachAnalyser(el: HTMLMediaElement): AnalyserNode | null {
     analyser.smoothingTimeConstant = 0.68;
     analyser.minDecibels = MIN_DB;
     analyser.maxDecibels = MAX_DB;
-    source.connect(volume);
-    volume.connect(gain);
+    source.connect(gain);
     gain.connect(analyser);
-    analyser.connect(c.destination);
+    analyser.connect(volume);
+    volume.connect(c.destination);
     const chain: Chain = { analyser, gain, volume, eq: null };
     tagged.__mloAnalyser = { ctx: c, chain };
     // An element attached AFTER a profile was installed (the gapless pair's
