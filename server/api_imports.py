@@ -86,6 +86,12 @@ class AcoustidRequest(BaseModel):
     # lookups — a transient failure on the second pass used to turn a displayed
     # match into zero tags.
     match: Optional[dict] = None
+    # What the album IS, when the wizard knows it ("CD", "Digital Media", "" for
+    # unsure): a CD is matched only to a release group that HAS a CD edition
+    # (`imports._cd_edition_filter`). The album's own MEDIA tag answers the same
+    # way when this is empty, so an album that states a CD is held to the rule
+    # without the client having to repeat it.
+    medium: str = ""
 
 
 class AcoustidSubmitRequest(BaseModel):
@@ -197,7 +203,7 @@ def import_acoustid(req: AcoustidRequest):
     # every other path this route touches.
     _guard(list(req.paths) + _matched_paths(supplied), req.staged)
     return imports.acoustid_match(req.paths, apply=bool(req.apply),
-                                  match=supplied)
+                                  match=supplied, medium=req.medium)
 
 
 @router.post("/api/import/acoustid/submit")

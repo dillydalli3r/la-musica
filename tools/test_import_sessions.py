@@ -167,6 +167,49 @@ def main():
     svc.dismiss(renamed, CFG)
     ok(not is_importing(renamed), "dismissing the relocated session clears the marker")
 
+    print("== the wizard dismisses with the path it STARTED from ==")
+    # The wizard's Finish calls dismiss with the album path it began with, and
+    # by then the chain's organize step has renamed the folder. Clearing only
+    # the paths the row remembers left the marker — which rode along INSIDE the
+    # folder — sitting in the album's new folder: the row disappeared from the
+    # tray (so nothing left could dismiss it) and the library read "importing"
+    # until the next restart's sweep. The marker's own `album` field is the
+    # only link between the old path and where the album is now.
+    started = os.path.join(root, "Rel Artist", "Started Album")
+    os.makedirs(started)
+    svc.upsert(started, 6, "Started Album", False, CFG)
+    moved = os.path.join(root, "Rel Artist", "Started Album Renamed")
+    os.rename(started, moved)
+    svc.dismiss(started, CFG)
+    ok(not is_importing(moved),
+       "dismissing with the pre-rename path clears the marker where it moved to")
+    ok(not imports_mod.importing_album(moved),
+       "...so a FINISHED import stops reading as mid-import")
+
+    print("== an import that FAILED is not mid-import for ever ==")
+    # `_clear_importing` used to sit on the success path alone: an exception
+    # escaping `_finish_album` (a cancelled task, `_report_gaps`'s unguarded
+    # tail) left the disk marker behind, and with no session behind it nothing
+    # cleared it until the next start's sweep — the album read "importing" for
+    # as long as the app stayed up.
+    boom = os.path.join(root, "Failed Import")
+    os.makedirs(boom)
+    real = imports_mod._finish_album
+
+    def _explode(*_a, **_k):
+        raise RuntimeError("a stage blew up")
+
+    imports_mod._finish_album = _explode
+    try:
+        try:
+            imports_mod.finish_album(boom, CFG)
+        except RuntimeError:
+            pass
+    finally:
+        imports_mod._finish_album = real
+    ok(not is_importing(boom) and not imports_mod.importing_album(boom),
+       "a failed import leaves no marker behind (nothing to resume, nothing hidden)")
+
     print("== grading leaves a mid-import album out ==")
     # The whole point: a marked album is not a finding anywhere. Built from a
     # synthetic library row (a marked folder, a failing grade) so the routing

@@ -546,8 +546,8 @@ def parse_payload(payload, min_score=0.0):
     """AcoustID JSON -> candidate rows, best score first (pure parser).
 
     Rows: {"score", "recording_id", "title", "artists", "release_group_id",
-    "release_group_title", "release_group_type"}. An unusable payload is an
-    empty list; the named reason lives in `_request`, not here.
+    "release_group_title", "release_group_type", "duration"}. An unusable
+    payload is an empty list; the named reason lives in `_request`, not here.
     """
     if not isinstance(payload, dict) or payload.get("status") != "ok":
         return []
@@ -571,8 +571,16 @@ def parse_payload(payload, min_score=0.0):
             groups = [g for g in (rec.get("releasegroups") or [])
                       if isinstance(g, dict)]
             group = groups[0] if groups else {}
+            try:
+                # The recording's own length. Kept so a caller that knows the
+                # FILE's length can tell a pressing from a different VERSION of
+                # the same title — see `_duration_mismatch`.
+                rec_duration = float(rec.get("duration") or 0)
+            except (TypeError, ValueError):
+                rec_duration = 0.0
             rows.append({
                 "score": score,
+                "duration": rec_duration,
                 "recording_id": str(rec.get("id") or ""),
                 "title": str(rec.get("title") or ""),
                 "artists": [str(a.get("name")) for a in (rec.get("artists") or [])
@@ -590,6 +598,28 @@ def min_score(cfg):
         return float((cfg or {}).get("acoustid_min_score") or 0.0)
     except (TypeError, ValueError):
         return 0.0
+
+
+# How far a candidate's stated length may be from the file's before it is a
+# different VERSION rather than a different pressing: two masters of one track
+# differ by a second or two, a radio edit / live cut / extended mix by minutes.
+# The band is the larger of a flat floor and a share of the track, so a long
+# track's jitter is not read as a wrong version, and a candidate that states no
+# length at all is never refused (no evidence is not evidence against).
+_DURATION_SLACK = 10.0
+_DURATION_SLACK_RATIO = 0.05
+
+
+def _duration_mismatch(named, actual):
+    """Whether *named* (the candidate recording's length) is a DIFFERENT cut.
+
+    The one thing a fingerprint cannot see is length: the same song's radio
+    edit, live take and album version all match, and AcoustID answers with the
+    score of the audio, not with which cut it is.
+    """
+    if named <= 0 or actual <= 0:
+        return False
+    return abs(named - actual) > max(_DURATION_SLACK, _DURATION_SLACK_RATIO * actual)
 
 
 def lookup(cfg, path):
@@ -618,6 +648,19 @@ def lookup(cfg, path):
         return _result(False, NO_MATCH,
                        f"AcoustID knows no recording above score "
                        f"{min_score(cfg):.2f} for this track", rows=[], **carry)
+    # The candidates whose OWN length says they are another cut of this track
+    # are dropped before anything votes on them: an album's worth of them
+    # otherwise decides the release from audio alone, and the fingerprint
+    # cannot tell a radio edit from the album version it was taken from.
+    actual = float(fp.get("duration") or 0)
+    kept = [r for r in rows if not _duration_mismatch(r["duration"], actual)]
+    if not kept:
+        named = ", ".join(f"{r['duration']:.0f} s" for r in rows[:3])
+        return _result(False, NO_MATCH,
+                       f"AcoustID's only candidate(s) for this track are a "
+                       f"different length ({named} against this file's "
+                       f"{actual:.0f} s)", rows=[], **carry)
+    rows = kept
     for row in rows:
         row["fingerprint"] = fp["fingerprint"]
     return _result(True, OK, "", rows=rows, **carry)
@@ -1463,7 +1506,8 @@ def _quorum(total):
     return 1 if total <= 1 else max(2, math.ceil(total * 0.4))
 
 
-def match_release(cfg, paths, progress=None, expect=None):
+def match_release(cfg, paths, progress=None, expect=None, allow_group=None,
+                  allow_note=""):
     """Modal release group across an album's tracks, and why it has none.
 
     Rule: a release group must own at least `max(2, ceil(total * 0.4))` of the
@@ -1484,6 +1528,16 @@ def match_release(cfg, paths, progress=None, expect=None):
     `conflicts` (+ `conflict`) carry the disagreements; the match itself is
     returned untouched, so a caller can never mistake a conflict for an
     overwrite.
+
+    *allow_group* is the CALLER's own eligibility filter (``gid -> bool``), asked
+    of every group that has already passed the quorum and the score floor, in
+    rank order — the engine lives without a MusicBrainz client, so the one rule
+    that needs one (an album that IS a CD must be matched to a release group
+    that HAS a CD edition) is the caller's. *allow_note* names what the filter
+    wants ("a CD edition"), and it is what the report says when a group the
+    vote would have taken is refused: the refusal is stated, never silent, and
+    a group the filter could not answer for is allowed through rather than
+    discarded on an error.
 
     -> see `report()`.
     """
@@ -1534,7 +1588,12 @@ def match_release(cfg, paths, progress=None, expect=None):
                 pass
 
     quorum = _quorum(total)
-    best = None
+    # Ranked best-first: most matched tracks, then the strongest mean, then the
+    # id. The comparison used to be on the matched COUNT alone, so two groups it
+    # left equal were decided by whichever track the folder listed first — the
+    # same album could match differently after a re-sort of its files. The id
+    # last is what makes the order total.
+    ranked = []
     for gid, entry in groups.items():
         matched = len(entry["recordings"])
         if matched < quorum:
@@ -1542,8 +1601,29 @@ def match_release(cfg, paths, progress=None, expect=None):
         mean = sum(r["score"] for r in entry["rows"]) / matched
         if mean < floor:
             continue
-        if best is None or matched > best[1]:
-            best = (gid, matched, mean, entry)
+        ranked.append((matched, mean, gid, entry))
+    ranked.sort(key=lambda t: (-t[0], -t[1], t[2]))
+    # The caller's eligibility filter, applied in rank order — see
+    # *allow_group*. A filter that cannot answer allows the group through:
+    # a lookup that failed must not turn a match into a no-match.
+    refused = 0
+    if allow_group is not None:
+        kept = []
+        for item in ranked:
+            try:
+                allowed = bool(allow_group(item[2]))
+            except Exception as e:
+                # A filter that cannot answer is not a refusal: a MusicBrainz
+                # outage must never turn a match into a no-match.
+                log(c(f"the release-group filter could not answer ({e}) — "
+                      f"the group is allowed through", Color.YELLOW))
+                allowed = True
+            if allowed:
+                kept.append(item)
+            else:
+                refused += 1
+        ranked = kept
+    best = ranked[0] if ranked else None
 
     if best is None:
         if failures:
@@ -1551,6 +1631,16 @@ def match_release(cfg, paths, progress=None, expect=None):
             return report("error", failures[0]["code"], _failure_reason(failures),
                           skips=skips, failures=failures, total=total,
                           fingerprinted=fingerprinted, no_match=no_match)
+        if refused:
+            # The audio matched the album; the groups it matched are none the
+            # caller accepts. Said in its own words — a bare "no match" would
+            # read as AcoustID not knowing the album at all.
+            return report("no_match", NO_MATCH,
+                          f"{refused} release group(s) matched the audio but "
+                          f"none has {allow_note or 'the medium this album is'}"
+                          " — nothing was accepted",
+                          skips=skips, total=total, fingerprinted=fingerprinted,
+                          no_match=no_match)
         if fingerprinted:
             return report("no_match", NO_MATCH,
                           f"no release group owned enough of the {fingerprinted} "
@@ -1566,7 +1656,7 @@ def match_release(cfg, paths, progress=None, expect=None):
                           skips=skips, total=total)
         return report("skipped", NO_TRACKS, _NOTES[NO_TRACKS], total=total)
 
-    gid, matched, mean, entry = best
+    matched, mean, gid, entry = best
     first = entry["rows"][0]
     artists = []
     for row in entry["rows"]:
@@ -1584,13 +1674,20 @@ def match_release(cfg, paths, progress=None, expect=None):
         "recordings": entry["recordings"],
     }
     conflicts = cross_check(match, expect)
-    reason = ""
+    notes = []
     if failures:
-        reason = (f"{len(failures)} of {total} track(s) could not be "
-                  f"fingerprinted")
-    return report("matched", CONFLICT if conflicts else OK, reason, match=match,
-                  skips=skips, failures=failures, conflicts=conflicts,
-                  total=total, fingerprinted=fingerprinted, no_match=no_match)
+        notes.append(f"{len(failures)} of {total} track(s) could not be "
+                     f"fingerprinted")
+    if refused:
+        # Not silent: the album matched groups the caller would not take, and
+        # WHICH groups those were is the difference between "AcoustID knows this
+        # album" and "AcoustID knows nothing".
+        notes.append(f"{refused} other release group(s) matched the audio "
+                     f"without {allow_note or 'the medium this album is'}")
+    return report("matched", CONFLICT if conflicts else OK, "; ".join(notes),
+                  match=match, skips=skips, failures=failures,
+                  conflicts=conflicts, total=total,
+                  fingerprinted=fingerprinted, no_match=no_match)
 
 
 def _failure_reason(failures):

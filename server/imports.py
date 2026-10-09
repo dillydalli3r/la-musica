@@ -890,14 +890,25 @@ def finish_album(album_dir, cfg=None, progress=None, force=None, release=None,
         # mid-import instead of grading a half-written one as failing. Written
         # once the album is really this import's (a refused press wrote nothing).
         _mark_importing(path)
-        out = _finish_album(path, cfg, progress=progress, force=force,
-                            release=release, wait=wait)
-        # The import reached its end — Finish, a review stop, no chain, or a
-        # missing folder — so it is no longer mid-import. Cleared wherever the
-        # album STARTED and wherever the chain LEFT it: script 14 renames the
-        # folder, and the marker travelled with it.
-        _clear_importing(path)
-        _clear_importing((out or {}).get("path") if isinstance(out, dict) else None)
+        out = None
+        try:
+            out = _finish_album(path, cfg, progress=progress, force=force,
+                                release=release, wait=wait)
+        finally:
+            # The import is OVER either way — Finish, a review stop, no chain,
+            # a missing folder, or a failure that escaped the body — so the
+            # album is no longer mid-import. A `finally` rather than the success
+            # path alone: an exception (a cancelled task, `_report_gaps`'s
+            # unguarded tail) used to skip these two lines, and the marker it
+            # left had no session behind it, so nothing cleared it until the
+            # next start's sweep — the album read "importing" for as long as the
+            # app stayed up. Cleared where the album STARTED and — when the
+            # chain got far enough to report one — where it LEFT it: script 14
+            # renames the folder, and the marker travelled with it. A rename
+            # cut short by a failure leaves the marker in the new folder for
+            # the next start's sweep, which clears a marker no session backs.
+            _clear_importing(path)
+            _clear_importing((out or {}).get("path") if isinstance(out, dict) else None)
         return out
 
 
@@ -3252,8 +3263,48 @@ def prefetch_album(album_dir, cfg=None):
     return out
 
 
+def _cd_edition_filter(medium, candidate):
+    """(allow_group, note) for an album whose own medium is a CD.
+
+    The rule: an album that IS a CD must be matched to a release group that HAS
+    a CD edition. The fingerprint names the AUDIO and never the pressing, so a
+    group whose only editions are vinyl, cassette or digital is not the thing
+    the user is looking at — and the wizard's own "what is this?" answer, or the
+    MEDIA tag a ripped album carries, is the one fact that settles it.
+
+    The medium is the caller's selection when it sent one (the user's current
+    intent) and otherwise the album's own MEDIA tag. A value that names no
+    medium (an untouched select, an untagged download) filters nothing: the rule
+    is about a STATED CD, never a guess about one.
+
+    ONE MusicBrainz request per candidate release group (`release_group_browse`
+    is the cached, rate-limited browse the release page already uses), asked
+    only of a group that has passed the vote's own quorum and score floor.
+    """
+    from mlo.release_choice import is_cd_format, media_formats
+    from mlo.tagtext import is_cd_media
+
+    stated = [str(medium or "").strip()]
+    if not stated[0] and isinstance(candidate, dict):
+        stated = [str(f).strip() for f in media_formats(candidate)]
+        tag_media = str(candidate.get("media") or "").strip()   # the MEDIA tag
+        if tag_media:
+            stated.append(tag_media)
+    if not any(s and is_cd_media(s) for s in stated):
+        return None, ""
+
+    def _allow(gid):
+        from server import integrations
+        page = integrations.release_group_browse(gid) or {}
+        return any(is_cd_format(fmt)
+                   for rel in page.get("releases") or []
+                   for fmt in media_formats(rel))
+
+    return _allow, "a CD edition"
+
+
 def acoustid_match(paths, cfg=None, progress=None, apply=False, expect=None,
-                   match=None):
+                   match=None, medium=""):
     """Which release group the audio in these albums really is (AcoustID).
 
     Album folders or track paths; the tracks of each folder are fingerprinted
@@ -3297,6 +3348,13 @@ def acoustid_match(paths, cfg=None, progress=None, apply=False, expect=None,
     displayed match into zero tags. The recordings of a supplied match are
     written straight from the payload, and a path outside these albums is
     ignored.
+
+    *medium* is what the album IS, when the caller knows (the wizard's own "what
+    is this?" answer). An album that is a CD is matched only to a release group
+    that HAS a CD edition (`_cd_edition_filter`) — the fingerprint names the
+    audio, never the pressing — and the album's own MEDIA tag answers the same
+    way when the caller says nothing. An album that states no medium anywhere is
+    matched on the audio alone, exactly as before.
     """
     cfg = cfg or load_config()
     try:
@@ -3323,6 +3381,7 @@ def acoustid_match(paths, cfg=None, progress=None, apply=False, expect=None,
         row = {"path": album, "tagged": 0, "writes": [], **_ACOUSTID_ROW}
         candidate = (expect if isinstance(expect, dict)
                      else _tag_candidate(album))
+        allow, allow_note = _cd_edition_filter(medium, candidate)
         if supplied is not None:
             # Applying a match the caller was ALREADY shown: no fpcalc, no
             # lookup, no network (see the docstring).
@@ -3335,7 +3394,9 @@ def acoustid_match(paths, cfg=None, progress=None, apply=False, expect=None,
                 tracks = []
             try:
                 report = acoustid.match_release(cfg, tracks, progress=progress,
-                                                expect=candidate)
+                                                expect=candidate,
+                                                allow_group=allow,
+                                                allow_note=allow_note)
             except Exception as e:
                 traceback.print_exc()
                 report = acoustid.error_report(f"AcoustID check failed: {e}",
@@ -3506,7 +3567,8 @@ def _tag_candidate(album_dir):
     """
     from mlo.audio import AudioFile
 
-    cand = {"release_group_id": "", "release_id": "", "title": "", "artists": []}
+    cand = {"release_group_id": "", "release_id": "", "title": "", "artists": [],
+            "media": ""}
     for p in _audio_files(album_dir)[:5]:
         try:
             af = AudioFile(p)
@@ -3517,6 +3579,10 @@ def _tag_candidate(album_dir):
             cand["release_id"] = cand["release_id"] or str(
                 af.get_tag("MUSICBRAINZ_ALBUMID") or "").strip()
             cand["title"] = cand["title"] or str(af.get_tag("ALBUM") or "").strip()
+            # What the album IS, as its own files state it: the one fact that
+            # makes the AcoustID match a CD one (`_cd_edition_filter`) without
+            # the caller having to say so.
+            cand["media"] = cand["media"] or str(af.get_tag("MEDIA") or "").strip()
             artist = str(af.get_tag("ALBUMARTIST")
                          or af.get_tag("ARTIST") or "").strip()
             if artist and artist not in cand["artists"]:
@@ -5020,7 +5086,19 @@ def _bulk_one(item, cfg):
     if not release and item.get("mbid"):
         try:
             from server.integrations import resolve_release
-            release = resolve_release(str(item["mbid"]).strip())
+            # `resolve_release` answers the PAIR (release, release_mbid) — it
+            # resolves a release-GROUP id to its best edition and hands back the
+            # id it settled on as well. Taking the tuple itself made every
+            # pinned-mbid bulk import worse than useless: both `_stamp_release`
+            # calls below take a release DICT (`dict(release)` inside
+            # `mlo.autotag.fill_release_identity` converts one), so the identity
+            # stamp raised and the chain's genre step found nothing to write —
+            # each failure swallowed into a stamping note, which is how "the
+            # automatic import finds no genres" while the album's own Import
+            # genres button (which resolves its release itself) answers in
+            # seconds. Every other caller unpacks; this one is the genre step's
+            # own author (see `_finish_album`) and now unpacks too.
+            release, _release_mbid = resolve_release(str(item["mbid"]).strip())
         except Exception as e:
             row["error"] = f"MusicBrainz: {e}"
             return row

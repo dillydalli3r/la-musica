@@ -2647,6 +2647,41 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   `import_acoustid_autofill` opt-in is gone — so nothing the user did not ask
   for can ever replace the MusicBrainz link they entered.
 
+- **R383 — the fingerprint decides the release GROUP by the audio; the CUT and
+  the MEDIUM are decided by what the album states.** AcoustID answers a score
+  and a list of candidates per track, and three things it cannot say are
+  `mlo.acoustid`'s and its caller's own:
+  * **a candidate of another length never votes.** fpcalc's duration for the
+    file and the recording's own `duration` are both in hand, so a candidate
+    whose stated length is off by more than `max(10 s, 5 %)` is dropped before
+    the vote (`_duration_mismatch`). The fingerprint cannot see length: the
+    radio edit, the live take and the extended mix of the right song score as
+    highly as the album version they were taken from, and telling them apart is
+    the whole of "AcoustID matched the wrong thing". A candidate that states no
+    length is never refused — no evidence is not evidence against.
+  * **the vote is deterministic and its tie-break is the mean.** Candidates are
+    ranked by matched tracks, then by mean score, then by id. It used to compare
+    the matched COUNT alone, so two groups it left equal were decided by
+    whichever track the folder happened to list first — the same album could
+    match differently after a re-sort of its files.
+  * **an album that IS a CD is matched to a group that HAS a CD edition.** The
+    wizard's own "what is this?" answer rides `/api/import/acoustid` as
+    `medium` (`ImportWizard`'s media select) and the album's own `MEDIA` tag
+    answers the same way when the client says nothing
+    (`imports._cd_edition_filter`), so an album the user called a CD cannot be
+    matched to a group whose editions are all vinyl or digital. Each candidate
+    group is browsed once, through the cached, rate-limited
+    `server.integrations.release_group_browse`, and refused unless one of its
+    editions is a CD-DA format (`mlo.release_choice.is_cd_format`) — the ruling
+    is on release GROUPS, never on a release, which is what keeps R340 intact
+    (the fingerprint still never picks a pressing). A refusal is stated in the
+    row's own sentence ("`N release group(s) matched the audio but none has a CD
+    edition`"), never dressed up as AcoustID knowing nothing, and a filter that
+    cannot ANSWER (a MusicBrainz outage) allows the group through rather than
+    turning a match into a no-match. An album that states no medium anywhere is
+    matched on the audio alone, exactly as before. Pinned by
+    `tools/test_acoustid.py` and `tools/test_acoustid_integrity.py`.
+
 - **R344 — a MusicBrainz link a file already carries is the USER's, and an
   import never replaces it with the edition it happened to resolve.**
   `server.imports._stamp_mb_tags` force-writes the release identity, but the
@@ -3404,6 +3439,18 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
     asked-for one appears nowhere; the readout then shows the pressing and the
     measured format) and `tools/test_add_to_library.py` (the pending tile's
     readout).
+  * **the chain's genre step stamps from THAT release, not from a second
+    lookup.** The release the item's link resolved to is handed on to
+    `finish_album`, whose genre step is the family's only FETCHER (script 8
+    trims what is already there), so a pinned import arrives carrying the genres
+    the release states. `integrations.resolve_release` answers the PAIR
+    `(release, release_mbid)`, and the bulk path took the tuple itself: both the
+    identity stamp and the genre step then raised inside `dict(release)` and were
+    swallowed into a stamping note, so a pinned-mbid bulk import wrote no genres
+    at all while the album's own Import genres button — which resolves its
+    release itself, correctly — answered in two seconds. The stub in
+    `tools/test_import_pipeline.py` returned a bare dict and hid it; it returns
+    the real pair now.
 
 ### 7.15 Notifications and the player's own immediacy
 
@@ -6915,8 +6962,18 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   and `server.interrupt_recovery` reconciles what a SIGKILL left: a
   session-backed marker is kept (the import can still be continued) and a
   marker with no session — an abandoned autonomous import nothing will resume —
-  is cleared, so the album is not hidden from grading forever. Pinned by
-  `tools/test_import_sessions.py`.
+  is cleared, so the album is not hidden from grading forever. Two leaks were
+  closed on the way: `finish_album` clears the marker in a `finally`, so an
+  exception that escapes `_finish_album` (a cancelled task, `_report_gaps`'s
+  unguarded tail) no longer leaves the album reading "importing" for as long as
+  the app stays up — nothing could clear it, because a marker with no session is
+  only swept at startup; and `import_sessions.dismiss` clears the marker where
+  the album is NOW, not only at the paths the row remembers. The wizard
+  dismisses with the path it STARTED from, and by then the chain's own organize
+  step has renamed the folder — marker and all — so a FINISHED import kept
+  reading "importing" while the tray row that could have dismissed it was
+  already gone. Pinned by `tools/test_import_sessions.py`, which now covers both
+  (a pre-rename dismiss, and an import body that raises).
 
 ## 8. Recommended runbook
 

@@ -23,6 +23,7 @@ no UI).
 """
 import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -108,6 +109,32 @@ def stage_7zip(bundle: Path) -> str:
     return f"copied {', '.join(copied)} (from {src})"
 
 
+def unavailable_runners(exe: Path) -> tuple[int, str]:
+    """What the frozen backend CANNOT run — asked of the runtime itself.
+
+    The script tables name a runner's module as a string and resolve it with
+    `__import__` (server/script_runners.RUNNERS, mlo/cli.build_script_runners),
+    and PyInstaller's analysis finds an import only where one is written. A
+    module reached only that way is therefore absent from the build with nothing
+    in the tree's file listing to show it: the backend starts, the menu offers
+    the script, and /api/run answers "runner N not available". `mlo.taghygiene`
+    (script 23) shipped exactly that. The exe is the only thing that knows what
+    it carries, so it is asked — `--mlo-python -c` is its own interpreter entry
+    point, and the answer is an exit code plus stderr, because a frozen build
+    has no console to print to.
+    """
+    code = (
+        "import server.script_runners as s, sys\n"
+        "bad = {i: n for i, (n, r) in s.RUNNERS.items() if r is None}\n"
+        "sys.stderr.write('missing runners: ' + repr(bad))\n"
+        "sys.exit(1 if bad else 0)\n"
+    )
+    proc = subprocess.run([str(exe), "--mlo-python", "-c", code],
+                          capture_output=True, text=True, timeout=600)
+    detail = (proc.stderr or proc.stdout or "").strip()
+    return proc.returncode, detail or f"exit {proc.returncode}"
+
+
 def main() -> int:
     server = Path(os.environ.get("MLO_SERVER_DIST") or (ROOT / "dist" / "mlo-server"))
 
@@ -132,6 +159,16 @@ def main() -> int:
                             server / "web" / "dist" / "index.html") if p.is_file()), None)
     if spa is None:
         return missing(f"{server.name} carries no web/dist — rebuild it after `cd web && npm run build`")
+
+    # A backend that boots and serves the SPA can still be missing a runner's
+    # module (see unavailable_runners): the shell offers the button and the
+    # press comes back 400. Nothing about the tree says so, so the exe is asked
+    # before anything is staged — a bad tree must fail the BUILD, not the
+    # install, and must not wipe the bundle that is already there.
+    code, detail = unavailable_runners(exe)
+    if code != 0:
+        return missing(f"{server.name} cannot run a script it offers: {detail} "
+                       "(rerun `python -m PyInstaller pyinstaller/mlo-server.spec`)")
 
     # The bundle folder is OURS: wipe it and lay down the one tree. A leftover
     # from an earlier layout (the separate web-dist/mlo-audio this script used

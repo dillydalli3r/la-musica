@@ -696,6 +696,15 @@ npm run dev        # vite dev UI + tauri window
 npm run build      # stages desktop/bundle/mlo-server, then NSIS/msi on Windows
 ```
 
+`npm run build` stages the frozen backend the shell will spawn and REFUSES one
+it cannot use: `tools/stage_desktop_bundle.py` asks the exe itself
+(`--mlo-python -c`) which script runners it cannot resolve and fails the build
+when one is missing. A runner's module is reached by NAME from the script
+tables, so PyInstaller's analysis only sees it when the spec lists it
+(`pyinstaller/mlo-server.spec` reads those tables for exactly that reason) — the
+probe is what keeps that gap a build failure instead of an install whose
+`/api/run` answers "runner N not available".
+
 The shell runs that backend itself (`Local backend`, the default): it picks a
 free loopback port from 8011 up, spawns `mlo-server`, and points the window at
 it. `npm run build` refuses to bundle without a staged backend, so the freeze

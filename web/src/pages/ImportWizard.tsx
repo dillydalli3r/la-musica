@@ -2003,7 +2003,7 @@ export default function ImportWizard() {
     setAcoustidBusy(true);
     setAct({ label: `Fingerprinting ${paths.length} album(s) with AcoustID…` });
     try {
-      const res = await api.importAcoustid(paths, false, staged);
+      const res = await api.importAcoustid(paths, false, staged, undefined, mediaType);
       setAcoustid(res);
       if (!res.available) toast(`Fingerprinting unavailable — ${res.note}`);
     } catch (e) {
@@ -3011,7 +3011,11 @@ export default function ImportWizard() {
     setAcoustidBusy(true);
     setAct({ label: `Fingerprinting ${paths.length} album(s) with AcoustID…` });
     try {
-      const res = await api.importAcoustid(paths, false, staged);
+      // `mediaType` rides along: an album ticked as a CD may only be matched to
+      // a release group that HAS a CD edition (the fingerprint names the audio,
+      // never the pressing). Empty/"" asks the server to decide from the
+      // album's own MEDIA tag instead.
+      const res = await api.importAcoustid(paths, false, staged, undefined, mediaType);
       setAcoustid(res);
       if (!res.available) {
         toast(`Fingerprinting unavailable — ${res.note}`);

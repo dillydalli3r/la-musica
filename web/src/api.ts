@@ -3409,14 +3409,15 @@ export const api = {
     paths: string[],
     apply = false,
     staged = false,
-    match?: AcoustidAlbumMatch
+    match?: AcoustidAlbumMatch,
+    medium = ""
   ) =>
     json<AcoustidMatch>(
       `${API}/import/acoustid`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ paths, apply, staged, match }),
+        body: JSON.stringify({ paths, apply, staged, match, medium }),
       },
       600000
     ),

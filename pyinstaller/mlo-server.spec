@@ -10,6 +10,7 @@
 # and the same origin as the API (the session cookie's home). Nothing is
 # patched at runtime.
 import os
+import re
 from pathlib import Path
 ROOT = Path(SPECPATH).resolve().parent
 
@@ -39,6 +40,24 @@ hiddenimports = [
 # console scripts with — which a hidden-import list alone would drop.
 pip_datas, pip_binaries, pip_hiddenimports = collect_all("pip")
 hiddenimports += pip_hiddenimports
+
+# Script runners reached ONLY by NAME. The two script tables — the server's
+# (server/script_runners.RUNNERS) and the terminal's (mlo/cli.build_script_runners)
+# — name a runner's module as a STRING and resolve it with `__import__`, which
+# PyInstaller's analysis cannot follow: it finds an import only where one is
+# written. Every other module in those tables happens to be imported normally
+# somewhere else, so the gap stayed invisible until `mlo.taghygiene` (script 23,
+# Optimize tags) — the first with no other importer — shipped a desktop backend
+# whose /api/run answered "runner 23 not available" for a menu entry it still
+# offered. Read the tables HERE, so a runner added to them is bundled without a
+# second edit: the assert is what keeps a parse that silently stopped matching
+# from looking like a complete list.
+_TABLE_FILES = (ROOT / "server" / "script_runners.py", ROOT / "mlo" / "cli.py")
+_NAMED_RUNNERS = sorted({name for path in _TABLE_FILES
+                         for name in re.findall(r'"((?:mlo|server)\.[a-z_0-9]+)"',
+                                                path.read_text(encoding="utf-8"))})
+assert len(_NAMED_RUNNERS) >= 10, f"script tables parsed to {_NAMED_RUNNERS}"
+hiddenimports += _NAMED_RUNNERS
 
 extra_datasets = list(pip_datas)
 

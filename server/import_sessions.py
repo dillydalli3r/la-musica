@@ -265,7 +265,25 @@ def dismiss(album=None, cfg=None):
     # remembers: a relocation (R381) can leave the row naming a folder the
     # chain has since renamed back, and a marker left behind is an album hidden
     # from grading with nothing to resume it.
-    _clear_marker(album)
+    from mlo.paths import is_importing
+    named = [album]
     if isinstance(entry, dict) and entry.get("album"):
-        _clear_marker(str(entry["album"]))
+        named.append(str(entry["album"]))
+    stray = not any(is_importing(p) for p in named)
+    for p in named:
+        _clear_marker(p)
+    if stray:
+        # Neither path held the marker, so it has MOVED: the chain's own
+        # organize step renamed the folder, and the marker — written inside it —
+        # travelled with the rename while still naming the path it was written
+        # under. The wizard dismisses with the path it started from, so a
+        # FINISHED import used to leave its marker in the album's new folder:
+        # the row disappeared from the tray (nothing left to dismiss it), and
+        # the library read "importing" until the next restart's sweep. The
+        # marker's own `album` field is the only link between the old path and
+        # the folder the album is in now, which is what `_find_markers` reads.
+        keys = {_key(p) for p in named}
+        for key, (folder, _marker) in _find_markers(cfg).items():
+            if key in keys:
+                _clear_marker(folder)
     _save(path, data)

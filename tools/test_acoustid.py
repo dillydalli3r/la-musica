@@ -456,8 +456,10 @@ check("row ids/title/artists", (row["recording_id"],
       ("38035858-f990-4fbb-b3b2-f2f8b958eeba", RG, "Silent Shout", "Album",
        ["The Knife"]))
 check("row keys", set(row) == {
-    "score", "recording_id", "title", "artists",
+    "score", "recording_id", "title", "artists", "duration",
     "release_group_id", "release_group_title", "release_group_type"})
+check("row carries the recording's own length",
+      row["duration"] == 289.0)
 check("parser sorted desc",
       [r["score"] for r in acoustid.parse_payload(SAMPLE, min_score=0.0)]
       == [0.9378, 0.6102])
@@ -566,6 +568,95 @@ acoustid.lookup = stub_lookup({os.path.basename(p): [cand_row(RG_A, "r", "T", 0.
 res = acoustid.match_release(cfg(), big)
 check("tracks capped at 12", res["match"]["total"] == acoustid.MAX_TRACKS == 12
       and res["match"]["matched"] == 12)
+
+# --------------------------------------------------------------------------- #
+# duration: another CUT of the same song is not this album's track
+# --------------------------------------------------------------------------- #
+# The fingerprint cannot see length, and a radio edit / live take / extended
+# mix of the right song scores as highly as the album version it was taken
+# from. fpcalc's own duration and the candidate's are both in hand, so the
+# candidate that is a different cut never reaches the vote.
+CUTS = {"status": "ok", "results": [{"score": 0.93, "recordings": [
+    {"id": "cut-1", "title": "Silent Shout (radio edit)", "duration": 240,
+     "artists": [{"name": "The Knife"}],
+     "releasegroups": [{"id": RG, "title": "Silent Shout", "type": "Album"}]}]}]}
+acoustid.lookup = real_lookup      # back to the real one, transport and all
+acoustid.fpcalc_path = lambda cfg=None: mine
+acoustid.run_tool = lambda *a, **k: _R(0, '{"duration": 225.0, "fingerprint": "AQAB"}')
+set_transport(urlopen(json.dumps(CUTS).encode()))
+res = acoustid.lookup(cfg(), PATHS[0])
+check("a candidate of another length is not taken for this track",
+      res["ok"] is False and res["code"] == acoustid.NO_MATCH
+      and res["rows"] == [])
+check("...and the reason names both lengths",
+      "240" in res["reason"] and "225" in res["reason"])
+res = acoustid.match_release(cfg(), PATHS[:2])
+check("an album whose every candidate is another cut is no_match, not a match",
+      res["status"] == "no_match" and res["match"] is None)
+
+CUTS["results"][0]["recordings"][0]["duration"] = 231   # 6 s: a pressing
+set_transport(urlopen(json.dumps(CUTS).encode()))
+res = acoustid.lookup(cfg(), PATHS[0])
+check("a pressing's few seconds are kept",
+      res["ok"] is True and len(res["rows"]) == 1)
+
+CUTS["results"][0]["recordings"][0]["duration"] = 0     # unstated
+set_transport(urlopen(json.dumps(CUTS).encode()))
+res = acoustid.lookup(cfg(), PATHS[0])
+check("a candidate that states no length is never refused",
+      res["ok"] is True and len(res["rows"]) == 1)
+
+# --------------------------------------------------------------------------- #
+# the caller's own filter: an album that IS a CD needs a group that HAS one
+# --------------------------------------------------------------------------- #
+# The engine has no MusicBrainz client, so the rule travels as a callback:
+# `allow_group(gid)`, asked in rank order and only of the groups the vote
+# itself would take (see server/imports._cd_edition_filter for the caller).
+acoustid.lookup = stub_lookup({
+    "01.flac": [cand_row(RG_A, "r1", "T1", 0.80)],
+    "02.flac": [cand_row(RG_A, "r2", "T2", 0.80)],
+    "03.flac": [cand_row(RG_B, "r3", "T3", 0.95)],
+    "04.flac": [cand_row(RG_B, "r4", "T4", 0.95)],
+    "05.flac": [],
+})
+res = acoustid.match_release(cfg(), PATHS)
+check("equal counts: the stronger mean wins, not the order the folder listed them",
+      res["status"] == "matched" and res["match"]["release_group_id"] == RG_B,)
+check("...and nothing is said about a filter nobody asked for", res["reason"] == "")
+
+asked = []
+
+
+def _allow(gid):
+    asked.append(gid)
+    return gid != RG_B
+
+
+res = acoustid.match_release(cfg(), PATHS, allow_group=_allow,
+                             allow_note="a CD edition")
+check("the caller's filter refuses the group the vote would have taken",
+      res["status"] == "matched" and res["match"]["release_group_id"] == RG_A,)
+check("...asked in rank order, and only of the candidates that passed the vote",
+      asked == [RG_B, RG_A])
+check("...and the refusal is stated, not silent",
+      "1 other release group(s) matched the audio without a CD edition"
+      in res["reason"])
+
+res = acoustid.match_release(cfg(), PATHS, allow_group=lambda gid: False,
+                             allow_note="a CD edition")
+check("nothing the caller accepts -> no_match, in the caller's own words",
+      res["status"] == "no_match" and res["code"] == acoustid.NO_MATCH
+      and "none has a CD edition" in res["reason"])
+
+# a filter that cannot answer must not turn a match into a no-match
+def _broken(gid):
+    raise RuntimeError("MusicBrainz is busy")
+
+
+res = acoustid.match_release(cfg(), PATHS, allow_group=_broken,
+                             allow_note="a CD edition")
+check("a filter that raises allows the group through",
+      res["status"] == "matched" and res["match"]["release_group_id"] == RG_B,)
 
 # --------------------------------------------------------------------------- #
 # write_tags: ONE verdict per file, and the ID/FINGERPRINT pair is never split

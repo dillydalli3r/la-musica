@@ -621,11 +621,17 @@ stamped = []
 
 
 def _fake_resolve(mbid):
+    # The REAL contract: `integrations.resolve_release` answers the PAIR
+    # (release, release_mbid). A stub returning the bare dict let the bulk path
+    # assign the tuple to `release` and still pass — the identity stamp and the
+    # chain's genre step both got a tuple, raised inside `dict(release)`, and
+    # were swallowed into a stamping note, so "auto-importing finds no genres"
+    # was invisible to this suite.
     stamped.append(("resolved", mbid))
     return {"id": PIN_ID, "title": "Pinned Album", "release_group_id": PIN_GROUP,
             "media": [{"disc": 1, "position": 1, "title": "Song",
                        "recording_mbid": None}],
-            "artists": []}
+            "artists": []}, PIN_ID
 
 
 def _record_stamp(album, release, cfg, **kw):
@@ -642,10 +648,13 @@ finally:
     _intg.resolve_release = _real_resolve
     imports._stamp_release = _real_stamp
 assert pinned_out["ok"] == 1 and pinned_out["items"][0]["status"] == "imported", pinned_out
-# resolved ONCE from the item's link, and every stamp used that release
-# (an import stamps it twice by design: the identity pass and the genres)
+# resolved ONCE from the item's link, and every stamp used that release — the
+# identity pass AND the chain's genre step, which is why the count is pinned: a
+# bulk path that took `resolve_release`'s pair for the release itself stamped
+# neither (each raised inside `dict(release)` into a swallowed note) and the
+# album arrived genre-less while the album's own Import genres button worked.
 assert stamped[0] == ("resolved", PIN_LINK), stamped
-assert {v for k, v in stamped if k == "stamped"} == {PIN_ID}, stamped
+assert [v for k, v in stamped if k == "stamped"] == [PIN_ID, PIN_ID], stamped
 assert os.path.isdir(os.path.join(LIB, "Pinned Album")), os.listdir(LIB)
 
 # …and a link that cannot be resolved fails THAT row, naming MusicBrainz: an

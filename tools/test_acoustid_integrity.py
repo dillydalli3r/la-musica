@@ -853,6 +853,80 @@ finally:
     acoustid.run_tool = _real_tool
 
 # --------------------------------------------------------------------------- #
+# (a4) AN ALBUM THAT IS A CD IS MATCHED TO A RELEASE GROUP THAT HAS ONE
+# --------------------------------------------------------------------------- #
+# The fingerprint names the AUDIO, never the pressing: a group whose editions
+# are all vinyl or digital is not the thing the user is importing. What the
+# album IS — the wizard's own "what is this?" answer (`medium`) or the MEDIA tag
+# its files carry — makes it a rule, asked through the cached browse the release
+# page already uses, and only of the groups the vote itself would take.
+from server import integrations  # noqa: E402
+
+CD_ALBUM = os.path.join(WORK, "cd-album")
+RG_CDLESS = "cccccccc-0000-0000-0000-00000000000c"
+for _name in ("01 - One.flac", "02 - Two.flac", "03 - Three.flac", "04 - Four.flac"):
+    make_flac(os.path.join(CD_ALBUM, _name), seconds=6)
+
+stub_tools()
+# The audio alone decides for RG_CDLESS (its 2 tracks score best); RG is the
+# runner-up on the same track count, so only the CD rule can move it.
+acoustid.lookup = stub_lookup({
+    "01 - One.flac": row("rec-1", rg=RG_CDLESS, score=0.95),
+    "02 - Two.flac": row("rec-2", rg=RG_CDLESS, score=0.94),
+    "03 - Three.flac": row("rec-3", rg=RG, score=0.80),
+    "04 - Four.flac": row("rec-4", rg=RG, score=0.79),
+})
+CD_CFG = dict(CFG, targets=None, acoustid_api_key="stub-key")
+BROWSED = []
+_real_browse = integrations.release_group_browse
+
+
+def _browse(gid, *a, **k):
+    BROWSED.append(gid)
+    formats = ["CD"] if gid == RG else ["Vinyl"]
+    return {"releases": [{"formats": formats, "medium": formats[0],
+                          "disc_count": 1, "track_count": 3}]}
+
+
+integrations.release_group_browse = _browse
+try:
+    cd_row = imports.acoustid_match([CD_ALBUM], CD_CFG, medium="CD")["albums"][0]
+    check("a CD album takes the group that HAS a CD edition",
+          cd_row["release_group_id"] == RG and cd_row["status"] == "matched",
+          str(cd_row))
+    check("...asked of the candidates in rank order, and only those",
+          BROWSED == [RG_CDLESS, RG], str(BROWSED))
+    check("...and the refusal is in the row's own sentence",
+          "1 other release group(s) matched the audio without a CD edition"
+          in str(cd_row.get("reason")), str(cd_row.get("reason")))
+
+    BROWSED.clear()
+    plain = imports.acoustid_match([CD_ALBUM], CD_CFG)["albums"][0]
+    check("no medium stated -> the audio decides, exactly as before",
+          plain["release_group_id"] == RG_CDLESS and BROWSED == [],
+          f"{plain} {BROWSED}")
+
+    # The album's OWN tag answers the same way when the caller says nothing.
+    for _name in ("01 - One.flac", "02 - Two.flac", "03 - Three.flac", "04 - Four.flac"):
+        tag(os.path.join(CD_ALBUM, _name), MEDIA="CD")
+    tagged = imports.acoustid_match([CD_ALBUM], CD_CFG)["albums"][0]
+    check("the album's own MEDIA tag makes the same rule",
+          tagged["release_group_id"] == RG, str(tagged))
+
+    # A group that matched the audio but has no CD edition anywhere: said in
+    # its own words, never dressed up as "AcoustID knows nothing".
+    integrations.release_group_browse = lambda gid, *a, **k: {
+        "releases": [{"formats": ["Vinyl"], "medium": "Vinyl"}]}
+    none_row = imports.acoustid_match([CD_ALBUM], CD_CFG,
+                                      medium="CD")["albums"][0]
+    check("no CD edition among the matches -> no_match naming the requirement",
+          none_row["status"] == "no_match"
+          and "none has a CD edition" in str(none_row.get("reason")),
+          str(none_row))
+finally:
+    integrations.release_group_browse = _real_browse
+
+# --------------------------------------------------------------------------- #
 # restore + verdict
 # --------------------------------------------------------------------------- #
 acoustid._post = _real_post
