@@ -988,6 +988,33 @@ def planned(c):
     return sorted(os.path.basename(f["file"]) for f in c["files"])
 
 
+# (a0) EVERY CD variant is a CD here: HDCD, SHM-CD, Enhanced CD, HQCD,
+#      Blu-spec CD, XRCD, CD-R and the rest of MusicBrainz's CD family
+#      (mlo.tagtext.CD_MEDIA_VALUES) take the SAME path a plain "CD" release
+#      does — a folder without the disc's rip evidence is not a usable folder
+#      at all, and the disc's own checks run against the log it must carry.
+#      Before the family rule, "CD" was matched by EQUALITY on
+#      `medium_formats`, so an HDCD release took the digital path: a log-less
+#      folder counted as a complete album, it was stamped MEDIA=Digital Media,
+#      and its evidence was never checked.
+_bare_rows = [lrow("peer", "Music/Album/01 - Alpha.flac"),
+              lrow("peer", "Music/Album/02 - Beta.flac", 210.0)]
+_logged_rows = _bare_rows + [lrow("peer", "Music/Album/x.log"),
+                             lrow("peer", "Music/Album/x.cue")]
+for _variant in ("CD", "HDCD", "SHM-CD", "Enhanced CD", "HQCD", "Blu-spec CD",
+                 "Blu-spec CD2", "UHQCD", "XRCD", "CD-R", "Copy Control CD",
+                 "Mixed Mode CD", "Data CD", "DTS CD", "Minimax CD", "8cm CD"):
+    _rel = dict(LAYOUT_RELEASE, medium_formats=[_variant])
+    assert soulseek_auto.find_candidates(_bare_rows, _rel, CFG) == [], _variant
+    _c = layout_candidate(_logged_rows, _rel)
+    assert _c["complete"], (_variant, _c["complete"])
+# ...and SACD is NOT in that family: a DSD disc has its own evidence rules,
+# and a video disc merely ends in the letters "CD".
+for _not_cd in ("SACD", "Video CD", "VCD", "SVCD", "Digital Media", "Vinyl"):
+    _rel = dict(LAYOUT_RELEASE, medium_formats=[_not_cd])
+    _c = layout_candidate(_bare_rows, _rel)
+    assert _c["complete"], (_not_cd, _c["complete"])
+
 # (a) every disc-folder spelling folds into one album root on its own
 for _disc_dir in ("CD 1", "CD1", "Disc1", "Disc 1", "Disk1", "Volume 1"):
     _c = layout_candidate([

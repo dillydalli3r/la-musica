@@ -69,9 +69,11 @@ __all__ = [
 # never drift apart.
 MEDIA_VALUES: Tuple[str, ...] = (
     '12" Vinyl', '10" Vinyl', '7" Vinyl', "8-Track", "Blu-ray", "Blu-spec CD",
-    "Cassette", "CD", "CD-R", "Digital Media", "DVD", "DVD-Audio",
-    "DVD-Video", "HDCD", "LaserDisc", "Minidisc", "SACD", "SHM-CD", "VHS",
-    "Vinyl",
+    "Blu-spec CD2", "Cassette", "CD", "CD-R", "CD+G", "Copy Control CD",
+    "Data CD", "Digital Media", "DTS CD", "DVD", "DVD-Audio", "DVD-Video",
+    "Enhanced CD", "8cm CD", "8cm CD+G", "HDCD", "HQCD", "LaserDisc",
+    "Minidisc", "Minimax CD", "Mixed Mode CD", "SACD", "SHM-CD", "UHQCD",
+    "VHS", "Vinyl", "XRCD",
     # "Web" is MusicBrainz's own spelling for a release published online only
     # (its release pages say "Web" where a download's says "Digital Media").
     # It is the SAME kind of medium to every rule that reads one — the
@@ -81,14 +83,33 @@ MEDIA_VALUES: Tuple[str, ...] = (
     "Web",
 )
 
-# The media values that name a CD-DA DISC. "HDCD" is a CD carrying the extra
-# High Definition Compatible Digital encoding — the same disc, the same
-# 16-bit/44.1 kHz audio and the same rip evidence — so every rule that asks
-# "is this album a CD?" (the grader's CD checks, the audit verdict's log CRC
-# legs, the .log/.cue passes and AccurateRip) answers yes for both. It is a
-# value of its own rather than a spelling of "CD" because MusicBrainz states
-# it as a format of its own, which is what an import writes.
-CD_MEDIA_VALUES: Tuple[str, ...] = ("CD", "HDCD")
+# The media values that name a CD-DA DISC — MusicBrainz's whole CD family, not
+# just the plain one. Every entry is the same physical thing to every rule that
+# asks "is this album a CD?": a red-book 16-bit/44.1 kHz disc that a ripper
+# logs, cues and checksums exactly like any other pressing. HDCD (the High
+# Definition Compatible Digital encoding), SHM-CD / UHQCD / HQCD (better
+# polycarbonate), Blu-spec CD / Blu-spec CD2 (a blue-laser-cut stamper), XRCD
+# (an extended-resolution mastering chain), Enhanced CD (data tracks beside the
+# audio), Copy Control CD (the copy-protection scheme), plus the shapes and
+# oddities MusicBrainz states as formats of their own: Mixed Mode CD, Data CD,
+# DTS CD, Minimax CD, 8cm CD, CD-R and the CD+G graphics variants.
+#
+# They keep their own spelling in the tag rather than being rewritten to "CD":
+# MusicBrainz states them as formats of their own and an import writes what the
+# release says. What they must NOT do is fall out of every CD rule — before
+# this list, an album whose MEDIA said "SHM-CD" answered NO to "is this a CD?"
+# and so took the digital path: no .log/.cue requirement, no log-CRC audit, a
+# decode check instead of the rip's own evidence, and "Unrecognized MEDIA
+# value" from the grader.
+#
+# Deliberately NOT in the family: SACD (a DSD disc — its own MEDIA value, and
+# its own evidence rules; a SACD rip is not an EAC log), and the video discs
+# (VCD/SVCD) whose names merely END in "CD".
+CD_MEDIA_VALUES: Tuple[str, ...] = (
+    "CD", "CD-R", "CD+G", "8cm CD", "8cm CD+G", "Blu-spec CD", "Blu-spec CD2",
+    "Copy Control CD", "Data CD", "DTS CD", "Enhanced CD", "HDCD", "HQCD",
+    "Minimax CD", "Mixed Mode CD", "SHM-CD", "UHQCD", "XRCD",
+)
 
 # MusicBrainz release types, primary and secondary, in MusicBrainz's own
 # casing (mlo.naming resolves the same vocabulary for the folder path — its
@@ -174,19 +195,35 @@ def _closed(values: Tuple[str, ...]) -> Callable[[str], str]:
     return lambda part: table.get(part.casefold(), part)
 
 
-# The CD values, folded once for the predicate every CD rule asks.
+# The CD values, folded once for the predicate every CD rule asks — both as
+# written and with every separator removed, so a tagger's "SHMCD" and
+# MusicBrainz's "SHM-CD" are the same disc.
 _CD_MEDIA_FOLDED = frozenset(v.casefold() for v in CD_MEDIA_VALUES)
+_CD_MEDIA_FOLDED_ALNUM = frozenset(
+    re.sub(r"[^a-z0-9]+", "", v.casefold()) for v in CD_MEDIA_VALUES)
 
 
 def is_cd_media(value: Optional[str]) -> bool:
-    """Whether a MEDIA value names a CD-DA disc (CD, or a CD variant: HDCD).
+    """Whether a MEDIA value names a CD-DA disc — "CD" or any CD variant.
 
-    The ONE place the question "is this medium a CD?" is answered. MEDIA is
-    user-written tag data, so the test is case-insensitive — "cd" a different
-    tagger wrote is the same medium this app means by "CD" — and callers pass
-    either one file's own value or an album's summary of them.
+    The ONE place the question "is this medium a CD?" is answered, and every
+    CD rule in the app asks it here: the grader's CD checks, the audit
+    verdict's log-CRC legs, the `.log`/`.cue` passes, the per-disc log grade,
+    AccurateRip and the SOURCE strip. MEDIA is user-written tag data, so the
+    test is case-insensitive — "cd" a different tagger wrote is the same medium
+    this app means by "CD", and "shm-cd"/"SHM-CD" are one value — and callers
+    pass either one file's own value or an album's summary of them.
+
+    The family, and why the variants are equal here, is `CD_MEDIA_VALUES`.
     """
-    return str(value or "").strip().casefold() in _CD_MEDIA_FOLDED
+    text = str(value or "").strip().casefold()
+    if text in _CD_MEDIA_FOLDED:
+        return True
+    # MusicBrainz spells some of these with a hyphen the app's own list may
+    # carry differently ("Blu-spec CD" / "Blu spec CD", "SHM-CD" / "SHMCD"):
+    # folding the separators is what keeps one medium from needing two entries.
+    folded = _CD_MEDIA_FOLDED_ALNUM
+    return re.sub(r"[^a-z0-9]+", "", text) in folded
 
 
 def _upper_code(part: str) -> str:

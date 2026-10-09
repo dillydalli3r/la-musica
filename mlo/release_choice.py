@@ -107,7 +107,7 @@ from dataclasses import dataclass, replace
 from typing import Mapping, Optional
 
 from mlo.naming import DERIVED_RELEASE_TYPES, RELEASE_TYPES
-from mlo.tagtext import CD_MEDIA_VALUES, canonical_text
+from mlo.tagtext import canonical_text, is_cd_media
 
 # Editions a response may list. A group with more is still ranked in full —
 # only the response is capped, so a page never carries hundreds of rows.
@@ -379,22 +379,19 @@ def media_formats(rel):
     return [single] if single else []
 
 
-# The MusicBrainz FORMAT names of a CD-DA disc: "CD", and the "HDCD" a CD
-# carrying the extra HDCD encoding is stated as. One disc to every rule that
-# reads a format, and the same pair mlo.tagtext.CD_MEDIA_VALUES names for a
-# MEDIA tag — derived from it so the two vocabularies cannot drift apart.
-_CD_FORMATS = frozenset(v.casefold() for v in CD_MEDIA_VALUES)
-
-
 def is_cd_format(name):
-    """Whether a MusicBrainz format NAME is a CD-DA pressing ("CD", "HDCD").
+    """Whether a MusicBrainz format NAME is a CD-DA pressing.
 
-    The format-name half of mlo.tagtext.is_cd_media: a release MusicBrainz
-    states this way is searched by its pressing traits, verified against its
-    rip log's CRCs and required to carry its .log/.cue sheets exactly as its
-    plain-CD sibling is.
+    "CD" and its whole family — HDCD, SHM-CD, UHQCD, HQCD, Blu-spec CD,
+    Enhanced CD, XRCD, CD-R and the rest MusicBrainz states as formats of their
+    own (mlo.tagtext.CD_MEDIA_VALUES) — are ONE medium to every rule that reads
+    a format: a release MusicBrainz states this way is searched by its pressing
+    traits, verified against its rip log's CRCs and required to carry its
+    `.log`/`.cue` sheets exactly as its plain-CD sibling is. The predicate is
+    `mlo.tagtext.is_cd_media` itself, so a format name and a MEDIA tag can
+    never disagree about what a CD is.
     """
-    return str(name or "").strip().casefold() in _CD_FORMATS
+    return is_cd_media(name)
 
 
 def cd_media_value(rel):
@@ -915,8 +912,16 @@ def medium_rank(rel, order):
             # Labels compare case-insensitively, and a configured label matches
             # the formats that CONTAIN it — "CD" must catch MusicBrainz's
             # "8cm CD"/"HDCD", "Vinyl" its 7"/12" pressings.
+            #
+            # A VIDEO format only matches a label that is itself one: a Video
+            # CD contains the letters "cd" and must not be claimed by the "CD"
+            # label (its own order entry "Video CD" matches it exactly, which
+            # is what that entry is for), while "DVD-Video" and even the audio
+            # "DVD Audio" still match the label "DVD".
             p = pref.lower()
-            if p and (n == p or p in n):
+            if p and (n == p or (p in n
+                                 and not (is_video_format(n)
+                                          and not is_video_format(pref)))):
                 if i < best:
                     best, label = i, name
                 break

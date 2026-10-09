@@ -77,7 +77,8 @@ from mlo.stats import worker_count
 # acquisition_route). `video_only` is that same policy reading the TRACK-level
 # flags (`media[].video`), i.e. the app's one answer to "is this release itself
 # made of music videos" — which is what a candidate search must not penalise.
-from mlo.release_choice import media_formats, video_formats, video_only
+from mlo.release_choice import (cd_media_value, is_cd_format, media_formats,
+                              video_formats, video_only)
 # The library's definition of a track, for the one step that must see a
 # music-video album's files as tracks (the MB stamping below), and its
 # definition of a music VIDEO — the app's ONE container vocabulary, which the
@@ -92,7 +93,7 @@ from mlo.naming import sanitize_segment
 # The app's own multi-value separator: RELEASECOUNTRY is written "; "-joined
 # (mlo.audio joins repeated fields with it, mlo.naming._first_multi reads the
 # first entry back), so the writer and the reader cannot disagree.
-from mlo.tagtext import _LIST_SEP
+from mlo.tagtext import _LIST_SEP, is_cd_media
 
 # --------------------------------------------------------------------------- #
 # Job state
@@ -1717,7 +1718,7 @@ def release_queries(release, cfg, templates=None):
             templates = [templates]
         templates = [str(t).strip() for t in templates if str(t).strip()]
     if not explicit:
-        templates = _templates_for(cfg, digital, "CD" in formats)
+        templates = _templates_for(cfg, digital, any(is_cd_format(f) for f in formats))
 
     # The RAW spellings: `_expand_template` is the one place a query is
     # assembled, and `_search_text` normalizes there — running `_norm_text`
@@ -2264,7 +2265,11 @@ def find_candidates(results, release, cfg):
     min_ratio = float(cfg.get("soulseek_auto_complete_ratio", 1.0) or 1.0)
     expected = _expected_tracks(release)
     discs_expected = _disc_numbers(release)
-    is_cd = "CD" in (release.get("medium_formats") or [])
+    # Any CD-family pressing is a CD here (HDCD, SHM-CD, Enhanced CD…): the
+    # same predicate mlo.tagtext answers for the MEDIA tag, so a variant
+    # keeps the CD path — the .log/.cue requirement, the log-CRC audit and
+    # the MEDIA it is stamped with.
+    is_cd = any(is_cd_format(f) for f in media_formats(release))
     # Whether the RELEASE is itself made of music videos (every recording its
     # payload states is a video — `mlo.release_choice.video_only`, the same
     # reading `acquisition_route` routes on). Read once, because it switches the
@@ -3983,7 +3988,7 @@ def _candidate_got(ddir, attempt):
     return out
 
 
-def _verify_group(slsk, ddir, group, cfg, is_cd):
+def _verify_group(slsk, ddir, group, cfg, is_cd, media=None):
     """Verify several candidates' albums AT ONCE: [(o, root, ok, problems)].
 
     The .log-vs-track CRC check (CD) and the decode check (digital) are the
@@ -3994,7 +3999,11 @@ def _verify_group(slsk, ddir, group, cfg, is_cd):
     that folder before it is verified, so nothing is shared but the read-only
     release payload. A candidate whose files did not land in one folder answers
     with root None and the problem."""
-    media = "CD" if is_cd else "Digital Media"
+    # `media` is the value the caller stamped this batch with — the medium the
+    # RELEASE states ("HDCD", "SHM-CD", "CD"), read by a caller that holds the
+    # release; this function only has the batch. A caller that passes none gets
+    # the plain word for the kind of medium the checks below are for.
+    media = str(media or ("CD" if is_cd else "Digital Media"))
     from concurrent.futures import ThreadPoolExecutor
 
     # The batch job's own id, captured HERE (the submitting thread): a worker
@@ -4277,7 +4286,10 @@ def _try_batch(slsk, ddir, batch, release, cfg, is_cd, min_score):
             continue
         _stage("verifying", "Verifying downloads against the rip log / decoders…")
         _log("Verifying downloads against the rip log / decoders…")
-        media = "CD" if is_cd else "Digital Media"
+        # The medium the RELEASE states ("HDCD", "SHM-CD", "CD"): the tag is
+        # what the library row, the grader and every later CD rule read, so it
+        # says which pressing this is rather than flattening it to "CD".
+        media = (cd_media_value(release) or "CD") if is_cd else "Digital Media"
         _stamped, tag_problems = _stamp_media(local_root, media, cfg)
         ok, problems = _verify_album(local_root, cfg, is_cd)
         # A MEDIA tag that could not be written makes verify_album_checksums
@@ -4300,7 +4312,8 @@ def _try_batch(slsk, ddir, batch, release, cfg, is_cd, min_score):
                      and _batch_arrived(slsk, ddir, o)]
             if mates:
                 _log(f"Verifying {len(mates)} other complete candidate(s) at once…")
-                for o, root, ok_o, probs in _verify_group(slsk, ddir, mates, cfg, is_cd):
+                for o, root, ok_o, probs in _verify_group(slsk, ddir, mates, cfg,
+                                                          is_cd, media):
                     verdicts[id(o)] = (o, root, ok_o, probs)
         # Reject every candidate the batch verified and found wanting — the
         # reason names the cause, not just the count: a CD rip is judged on its
@@ -5573,7 +5586,7 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
         # is what every job has always passed — and this only ADDS the YouTube
         # route for a release that could not be read earlier.
         route = acquisition_route(release)
-        is_cd = "CD" in (release.get("medium_formats") or [])
+        is_cd = any(is_cd_format(f) for f in media_formats(release))
         # DIGITAL decides whether the broad `artist album year` second pass may
         # run at all (see the search block below): a pressing is searched by
         # what identifies the pressing and nothing else, found or not.
@@ -5586,7 +5599,8 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
                 "artist": ((release.get("artists") or [{}])[0].get("name", "")),
                 "date": release.get("date"), "country": release.get("country"),
                 "catalog_number": release.get("catalog_number"),
-                "media": is_cd and "CD" or "Digital Media",
+                "media": (cd_media_value(release) or "CD") if is_cd
+                         else "Digital Media",
                 # What the release's OWN data says, for a row that shows which
                 # release is being fetched: the medium(s) it is pressed on and
                 # how many tracks it has, plus the two facts that tell two
@@ -6156,7 +6170,8 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
             # that the namer then moved). Passing the boolean wrote MEDIA=True
             # on those.
             result = _import(found["root"], release, cfg,
-                             "CD" if is_cd else "Digital Media")
+                             (cd_media_value(release) or "CD") if is_cd
+                             else "Digital Media")
             if lossy:
                 # WHAT this album is rides with the result, because every
                 # surface that reports the job reads it: the queue row says "a
@@ -6250,7 +6265,7 @@ def _stamp_media(album_dir, media, cfg):
                     continue
                 if not str(af.get_tag("MEDIA") or "").strip():
                     af.set_tag("MEDIA", media)
-                if media == "CD" and str(af.get_tag("SOURCE") or "").strip():
+                if is_cd_media(media) and str(af.get_tag("SOURCE") or "").strip():
                     # DELETE it: set_tag("SOURCE", "") wrote an empty tag that
                     # stays on the file forever (nothing re-clears a blank
                     # one) and reads as a cleared tag only to this app.
