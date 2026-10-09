@@ -160,7 +160,7 @@ LEGACY_DEFAULT_MEDIUM_ORDER = (
 # is idempotent, and it is the same move `beets_organize_after` already makes
 # for 14.
 # Keep in step with web/src/lib/scripts.ts (tests/test_script_menus).
-DEFAULT_RUN_ALL_ORDER = [11, 3, 14, 15, 2, 1, 13, 17, 8, 24, 5, 19, 6, 7, 9, 12, 16, 10, 23, 20, 21, 4]
+DEFAULT_RUN_ALL_ORDER = [11, 3, 14, 15, 2, 1, 13, 17, 8, 24, 5, 25, 26, 19, 6, 7, 9, 12, 16, 10, 23, 20, 21, 4]
 
 # The genre-source order that shipped before the two-source default: recognizing
 # it lets normalize_config treat it as "never customized" (see below).
@@ -1599,6 +1599,13 @@ DEFAULT_CONFIG = {
     # already on the file survives every run unless this is set. Set by hand
     # (a config edit), never by a menu — the same shape script 13 has.
     "force_web_ratings": False,
+    # Scripts 25/26 (fetch artist images / descriptions) fill only: an image
+    # or description the artist folder already holds survives every run unless
+    # these are set, in which case the fetch OVERWRITES it. The force tables
+    # (server/script_runners._FORCE_KEYS, web/src/lib/force.ts) expose them as
+    # the "25/26 · … re-fetch" switches.
+    "force_artist_image": False,
+    "force_artist_description": False,
     # Advisory (ITUNESADVISORY) auto-fetch on import: EVERY applicable source
     # is asked in one pass and cross-referenced — Deezer by ISRC, Spotify by
     # ISRC when configured below, Apple's explicit-edition album route and
@@ -2451,6 +2458,12 @@ def normalize_config(user=None) -> dict:
             # it runs when a person put it in their chain (or pressed it in a
             # menu), never because an install was upgraded
             # (server.script_runners.OPT_IN_SCRIPTS).
+            #
+            # 25/26 (fetch artist images / descriptions) are ANCHORED, not
+            # kept, like 19 whose position they share: their slot IS "fetch,
+            # then re-fit" (see the anchors below), so a saved position that
+            # separates them from 19 would have the re-fit run before the
+            # fetch it is meant to normalise.
             if ((1 <= script_id <= 14 or script_id in (20, 21, 22, 23, 24))
                     and script_id not in clean_order):
                 clean_order.append(script_id)
@@ -2472,12 +2485,12 @@ def normalize_config(user=None) -> dict:
     #   13 lyric fetching  — after autotag (needs final ARTIST/TITLE), before grade
     #   12 Key & BPM       — after 13 (grading wants its tags)
     #   15 tracklist       — after beets (needs its MusicBrainz match)
-    def _insert_script(order, sid, anchors):
+    def _insert_script(order, sid, anchors, before=False):
         if sid in order:
             return
         for anchor in anchors:
             if anchor in order:
-                order.insert(order.index(anchor) + 1, sid)
+                order.insert(order.index(anchor) + (0 if before else 1), sid)
                 return
         order.append(sid)
 
@@ -2510,6 +2523,14 @@ def normalize_config(user=None) -> dict:
         # identity 14/beets has settled, and both must land before 10's trim
         # and 4's grade.
         _insert_script(clean_order, 24, [8, 14, 13])
+        # 25/26 fetch artist images / descriptions — right BEFORE 19 (Optimize
+        # artist images), where the shipped order puts them: fetch first, then
+        # re-fit what was fetched, so the image 19 measures is the one 25 just
+        # stored rather than one the re-fit has to crop again next run. They
+        # sit with script 5's image pass, and 26 goes behind 25 so the two
+        # reads stay in the order their own names imply.
+        _insert_script(clean_order, 25, [19, 5, 8, 16], before=True)
+        _insert_script(clean_order, 26, [19, 25, 5, 8, 16], before=True)
     cfg["run_all_order"] = clean_order or list(DEFAULT_RUN_ALL_ORDER)
     # --- Soulseek / acquisition settings (restored from 4.8.0) ---
     try:

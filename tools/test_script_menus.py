@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Menu-consistency gate: every surface that lists the 23 scripts must agree.
+"""Menu-consistency gate: every surface that lists the 25 scripts must agree.
 
 Sources checked:
   * ``EXPECTED_SCRIPTS`` below — the frozen expected registry (number + name)
@@ -74,6 +74,12 @@ EXPECTED_SCRIPTS = {
     # public score on every track and each track's own, from the configured
     # sources. Album-scoped, fill-only, and gated on `web_ratings_enabled`.
     24: "Web ratings",
+    # 25/26 fetch the artist art the import's metadata step fills, over a
+    # library that arrived another way. Two scripts because the two features
+    # are separately switchable (artist_image_enabled / *_enabled): a user may
+    # want one and not the other. Present-only; the force flag is the OVERWRITE.
+    25: "Fetch artist images",
+    26: "Fetch artist descriptions",
 }
 
 
@@ -272,7 +278,7 @@ def check_wizard_finish_list(check):
 
 
 def table_scripts():
-    """The 23 ids `mlo/scripts.py` declares, read from the FILE.
+    """The 25 ids `mlo/scripts.py` declares, read from the FILE.
 
     It is the one table the menus print (mlo.cli re-exports it, server/api_stack
     and server/script_menu include it, tags_registry's writer column names it),
@@ -410,6 +416,23 @@ def check_apply_force(check):
     cleared = apply({})
     check("an empty dict clears force_web_ratings first",
           cleared["force_web_ratings"] is False, str(cleared))
+    # Scripts 25/26 joined the same way: pin their aliases, their ids, and that
+    # the authoritative clear reaches the artist fetch flags too.
+    img = apply({"artist_image": True})
+    check("the artist_image alias sets force_artist_image",
+          img["force_artist_image"] is True and sum(img.values()) == 1, str(img))
+    img_by_id = apply({"25": True})
+    check("script id 25 sets the same flag as the artist_image alias",
+          img_by_id == img, f"id={img_by_id}")
+    desc = apply({"artist_description": True})
+    check("the artist_description alias sets force_artist_description",
+          desc["force_artist_description"] is True and sum(desc.values()) == 1, str(desc))
+    desc_by_id = apply({"26": True})
+    check("script id 26 sets the same flag as the artist_description alias",
+          desc_by_id == desc, f"id={desc_by_id}")
+    check("an empty dict clears the artist fetch flags first",
+          apply({})["force_artist_image"] is False
+          and apply({})["force_artist_description"] is False, str(apply({})))
 
 
 def import_paths_do_not_send_an_empty_force():
@@ -471,7 +494,7 @@ def check_run_all_migration(check):
     check("the stale script-15 entry is shed and 15 is re-anchored after beets",
           got.count(15) == 1 and got.index(15) == got.index(14) + 1, str(got))
     check("every script lands exactly once in a normalized order",
-          sorted(got) == [i for i in range(1, 25) if i not in (18, 22)], str(sorted(got)))
+          sorted(got) == [i for i in range(1, 27) if i not in (18, 22)], str(sorted(got)))
     # 17 was never in a saved order before it existed; the same shed-and-anchor
     # rule has to place it after the fetch it reads from.
     check("17 (AI transforms) lands after 13 (fetch lyrics) in a normalized order",
@@ -496,6 +519,13 @@ def check_run_all_migration(check):
     # there rather than having the script pushed to the end of its own chain.
     check("24 (web ratings) lands right behind 8 for an existing install",
           got.count(24) == 1 and got.index(24) == got.index(8) + 1, str(got))
+    # 25 (artist images) and 26 (artist descriptions) join in front of 19
+    # (Optimize artist images): a saved order that predates them gets fetch,
+    # then re-fit, and the two fetches keep their own order.
+    check("25 (artist images) lands right before 19 for an existing install",
+          got.count(25) == 1 and got.index(25) == got.index(19) - 2, str(got))
+    check("26 (artist descriptions) lands right after 25 for an existing install",
+          got.count(26) == 1 and got.index(26) == got.index(25) + 1, str(got))
     # ...and on a later load they are KEPT where the user put them: unlike 15,
     # their ids never meant anything else, so a saved position is a real choice
     # and re-anchoring them would silently undo the drag.
@@ -506,7 +536,7 @@ def check_run_all_migration(check):
 
     junk = cfg.normalize_config({"music_folder": "X", "run_all_order": [99, "a", 4, 4, -1]})
     check("unknown / duplicate run-all ids are dropped",
-          all(1 <= n <= 24 for n in junk["run_all_order"]) and len(set(junk["run_all_order"])) == len(junk["run_all_order"]),
+          all(1 <= n <= 26 for n in junk["run_all_order"]) and len(set(junk["run_all_order"])) == len(junk["run_all_order"]),
           str(junk["run_all_order"]))
 
     twice = cfg.normalize_config(cfg.normalize_config({"music_folder": "X"}))
@@ -604,9 +634,9 @@ def main():
     check("the web and the server declare the same opt-in scripts",
           opt_in_py == opt_in_web and bool(opt_in_py),
           f"server={sorted(opt_in_py)} web={sorted(opt_in_web)}")
-    check("canonical registry has 23 scripts", len(canon) == 23, str(sorted(canon)))
-    check("canonical numbers are 1..24 less the retired 18",
-          sorted(canon) == [i for i in range(1, 25) if i != 18])
+    check("canonical registry has 25 scripts", len(canon) == 25, str(sorted(canon)))
+    check("canonical numbers are 1..26 less the retired 18",
+          sorted(canon) == [i for i in range(1, 27) if i != 18])
     check("every opt-in script is a real script", opt_in_py <= set(canon),
           f"unknown={sorted(opt_in_py - set(canon))}")
     check("server RUNNERS == canonical numbers", runners == set(canon), f"server={sorted(runners)}")
@@ -654,6 +684,16 @@ def main():
           '{ key: "web_ratings", label: "24 · Web ratings re-fetch" }' in read("web/src/lib/force.ts"))
     check("the Settings master list offers force_web_ratings",
           '{ k: "force_web_ratings", label: "24 · Web ratings re-fetch" }' in read("web/src/pages/SettingsPage.tsx"))
+    # 25/26 joined the force tables with the scripts themselves; pin both
+    # spellings, both UI surfaces, and that the label says OVERWRITE ("re-fetch").
+    check("the Force menu offers 25 · Artist images re-fetch",
+          '{ key: "artist_image", label: "25 · Artist images re-fetch" }' in read("web/src/lib/force.ts"))
+    check("the Force menu offers 26 · Artist descriptions re-fetch",
+          '{ key: "artist_description", label: "26 · Artist descriptions re-fetch" }' in read("web/src/lib/force.ts"))
+    check("the Settings master list offers force_artist_image",
+          '{ k: "force_artist_image", label: "25 · Artist images re-fetch" }' in read("web/src/pages/SettingsPage.tsx"))
+    check("the Settings master list offers force_artist_description",
+          '{ k: "force_artist_description", label: "26 · Artist descriptions re-fetch" }' in read("web/src/pages/SettingsPage.tsx"))
     fallbacks, wrong = force_defaults_are_false()
     check("one-shot force treats unselected keys as off",
           not fallbacks and not wrong,

@@ -19,7 +19,7 @@ Edit the committed `./music:/music` bind mount to a real absolute host path firs
 python -m pip install -r server/requirements.txt
 cd web && npm install && npm run build && cd ..
 python -m uvicorn server.main:app --host 127.0.0.1 --port 8000   # http://127.0.0.1:8000
-python -m mlo    # the console menu (scripts 1–24), run from the server's environment
+python -m mlo    # the console menu (scripts 1–26), run from the server's environment
 ```
 
 **Editing the app** — `python dev.py`, from the repo root (double-clicking it
@@ -40,7 +40,7 @@ are there for the rest.
 - **Library** — artists → albums → tracks with grade/audit badges, five views (Grid, Compact, Albums, Artists, Tracks), sort/columns/presets, a query builder saved as smart playlists, bulk tag tools, half-star ratings, favourites, podcasts and music videos.
 - **Player** — a persistent bar and a fullscreen player: queue, gapless playback, `infinite_playback` similarity queue, ReplayGain (track/album/off), equalizer, sleep timer, visualizer, synced **or plain** lyrics, and a per-device accent colour. It remembers where you were.
 - **Import** — archives, folders and uploads all run one pipeline through the eight-step wizard (Select → Links → Match → Covers → Genres → Lyrics → Advisory → Finish), then the import script chain (the Finish step ticks the chain's scripts and can force a re-run of the ones it ticks). A whole-CD image rip (one `.flac` plus its `.cue`) is split into one file per track on the way in. AcoustID matching, MBID assignment, and a framework album for a release you add before its audio exists.
-- **Optimization** — 23 scripts, Run All or one at a time: lyrics, CUEs, FLAC re-encode, covers, audits, DR/ReplayGain, AccurateRip, key/BPM, beets tags, transliteration, artist images, layout, tag strip, web ratings. Each script, its force flags and its order: the spec.
+- **Optimization** — 25 scripts, Run All or one at a time: lyrics, CUEs, FLAC re-encode, covers, audits, DR/ReplayGain, AccurateRip, key/BPM, beets tags, transliteration, artist images (fetch then re-fit), artist bios, layout, tag strip, web ratings. Each script, its force flags and its order: the spec.
 - **Grading** — 70 checks over tracks, albums, artist folders and folders, toggleable per check with Strict/Balanced/Relaxed presets; Home and the Library open with the verdict and what fails.
 - **Discover & export** — genre browse and recommendations from the library's own tags and from online providers; export as MP3/AAC/Opus/Vorbis/FLAC-copy in `zip` or server-side; offline downloads; notifications (including Web Push) in six languages.
 

@@ -1,6 +1,5 @@
 #!/usr/bin/env node
-/* The STATES a page claims — the downloads page's four, and the one-click
- * whole-library apply gate on /optimize.
+/* The STATES a page claims — the downloads page's four.
  *
  * The bug class this pins (found by a read-only UI audit): a page stating a
  * fact it never read.
@@ -13,12 +12,10 @@
  * beside it that evicts every downloaded byte. Loading is its own state, a
  * failed fetch is its own state, and Clear all belongs to the state it clears.
  *
- * Same class one page over: /optimize's "Apply fixes" renamed and moved files
- * across the WHOLE library from one unconfirmed click, and its Run All reported
- * a partial failure as "see console" — a place the user cannot open. The apply
- * now asks first and names what it will touch; the run reports its own results
- * on the page. This check pins the gate: cancelling performs no request, and
- * confirming performs exactly one.
+ * The /optimize "Apply fixes" gate this file used to pin is gone with the
+ * standalone Library-layout panel: layout fixes are script 20 now, and its
+ * whole-library pass is the script's own run rather than an unconfirmed click.
+ * That surface is pinned by tools/check_layout.cjs.
  *
  * Needs a live backend serving the built app (`web/dist`) and a library with a
  * few tracks in it:
@@ -62,14 +59,6 @@ const LIB_FAILED = "Could not read the library";
  * `cachedTracks()` reads it straight off the path key. */
 const GHOST = "Nope/Deleted/ghost.flac";
 const CACHE = "mlo-media-v2";
-
-/* What the canned apply response carries — a report with nothing left wrong,
- * so a check can prove the request was made without renaming the library it is
- * measuring. */
-const CANNED_REPORT = {
-  folder: "", artists_dir: "", exists: true, issues: [], counts: {}, total: 0,
-  albums: 0, artists: 0, audio_files: 0, fixes: [], fixed: 0, fix_failed: 0, skipped: 0,
-};
 
 (async () => {
   const browser = await chromium.launch();
@@ -178,60 +167,6 @@ const CANNED_REPORT = {
   check("an empty cache says so and offers no Clear all",
     (await bodyText()).includes(NOTHING) && (await clearAll().count()) === 0);
   await page.evaluate(async () => { await caches.delete("mlo-media-v2"); });
-
-  /* ---- /optimize: Apply fixes asks first ---------------------------------
-   * One click used to rename and move files across the whole library. The gate
-   * is asserted the only way a gate can be: what it does NOT do when it is
-   * dismissed, and that it does exactly one request when it is confirmed. */
-  let applies = 0;
-  page.on("request", (r) => {
-    if (r.method() === "POST" && r.url().includes("/api/library/layout/apply")) applies++;
-  });
-  await goto("/optimize");
-  await page.getByRole("button", { name: /^(Scan library layout|Rescan)$/ }).click();
-  const applyTrigger = page.getByRole("button", { name: "Apply fixes" });
-  await applyTrigger.waitFor({ timeout: 120000 }).catch(() => {});
-  check("a scanned library offers Apply fixes", (await applyTrigger.count()) === 1);
-
-  if (await applyTrigger.count()) {
-    const dialog = page.locator('[role="dialog"][aria-modal="true"]');
-    await applyTrigger.click();
-    await dialog.waitFor({ timeout: 10000 }).catch(() => {});
-    check("Apply fixes opens a confirmation", (await dialog.count()) === 1);
-    const words = (await dialog.count()) ? await dialog.innerText() : "";
-    check("the confirmation says what it will do",
-      /whole music folder/i.test(words) && /rename/i.test(words) && /move/i.test(words) && /trash/i.test(words),
-      words.slice(0, 200));
-    check("the confirmation carries the report's own scope",
-      /\d|no row/i.test(words) && /row/i.test(words), words.slice(0, 200));
-    check("nothing has been applied yet, only confirmed",
-      applies === 0, `apply requests: ${applies}`);
-
-    // Dismissed: Escape, then the Cancel button. Neither may reach the
-    // endpoint — the gate's whole point is that a change this large is asked
-    // for, not assumed.
-    await page.keyboard.press("Escape");
-    await sleep(300);
-    check("Escape closes the confirmation", (await dialog.count()) === 0);
-    check("Escape applies nothing", applies === 0, `apply requests: ${applies}`);
-
-    await applyTrigger.click();
-    await dialog.getByRole("button", { name: "Cancel" }).click();
-    await sleep(300);
-    check("Cancel closes the confirmation", (await dialog.count()) === 0);
-    check("Cancel applies nothing", applies === 0, `apply requests: ${applies}`);
-
-    // Confirmed: exactly one request, answered here so the check never touches
-    // the library it measures.
-    await page.route("**/api/library/layout/apply", (route) =>
-      route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(CANNED_REPORT) }));
-    await applyTrigger.click();
-    await dialog.getByRole("button", { name: /Rename, move/ }).click();
-    await sleep(800);
-    check("confirming performs the apply", applies === 1, `apply requests: ${applies}`);
-    check("the confirmation closes on confirm", (await dialog.count()) === 0);
-    await page.unroute("**/api/library/layout/apply");
-  }
 
   /* ---- /favorites: the row goes to the playlist, and a failed fetch is not
    *      an empty list ----------------------------------------------------- */

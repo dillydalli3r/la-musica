@@ -107,7 +107,7 @@ An issue is `{code, label, where, reason}` for album-level and artist problems
 
 ---
 
-## 2. The 23 optimization scripts
+## 2. The 25 optimization scripts
 
 Ids, titles and the shipped order are `mlo/scripts.py:SCRIPTS` and
 `mlo/config.py:DEFAULT_RUN_ALL_ORDER`; the runners are
@@ -115,10 +115,14 @@ Ids, titles and the shipped order are `mlo/scripts.py:SCRIPTS` and
 chain both call).
 
 **R8 — Run All runs `run_all_order`**, shipped as
-`[11, 3, 14, 15, 2, 1, 13, 17, 8, 24, 5, 19, 6, 7, 9, 12, 16, 10, 23, 20,
-21, 4]`: everything that moves a file first, everything that reads it last. A
-saved order is honoured as saved (ids outside 1–24 are dropped; legacy 8/9-id
-orders are migrated).
+`[11, 3, 14, 15, 2, 1, 13, 17, 8, 24, 5, 25, 26, 19, 6, 7, 9, 12, 16, 10, 23,
+20, 21, 4]`: everything that moves a file first, everything that reads it last.
+25/26 (fetch the artist images / descriptions) sit right in front of 19
+(Optimize artist images): fetch first, then re-fit what was fetched. A saved
+order is honoured as saved (ids outside 1–26 are dropped; legacy 8/9-id
+orders are migrated), except that 25/26 are ANCHORED beside 19 — a saved
+position that separated the fetch from the re-fit would have 19 normalise an
+image that the fetch was about to overwrite.
 **R9 — the import chain is DERIVED from the run order, minus a declared
 exception.** `import_scripts` replaces it outright; an empty list means the
 default, which is `DEFAULT_RUN_ALL_ORDER` minus `LIBRARY_WIDE_SCRIPTS` — one
@@ -187,6 +191,31 @@ publishes, including the ones that write nothing until they do.
 | 21 | Fix AcoustID pairs | Completes (or CREATES) a track's `ACOUSTID_ID`/`ACOUSTID_FINGERPRINT` pair — the failures `Missing ACOUSTID_ID and ACOUSTID_FINGERPRINT` and `Missing ACOUSTID_ID` / `Missing ACOUSTID_FINGERPRINT` (all `(run Fix AcoustID pairs)`). The recording the pair must name is a question the FILE answers itself (its own `ACOUSTID_ID`, its `MUSICBRAINZ_TRACKID`, or the recording MBID this app's naming script wrote into the file name), and the fingerprint is taken from the audio locally by fpcalc — so a CD rip AcoustID has never seen, or a run with no usable key, is repairable with no request at all. The service is asked only for a half pair whose file names no recording anywhere; a file carrying no AcoustID tag and naming no recording is skipped, never written from a guess | `ACOUSTID_ID`, `ACOUSTID_FINGERPRINT` | no | only for a half pair that names no recording |
 | 22 | Submit fingerprints (AcoustID) | Gives AcoustID the fingerprint and the MusicBrainz recording id a file already states (`mlo.acoustid.submit_files`): the recording is read the way script 21 reads it, the fingerprint is taken locally, the service is asked what it already links (`pair_known`) and what this app already handed over (`load_submissions`), and only what is genuinely new goes in ONE batched `v2/submit` — each track reported ACCEPTED, ALREADY_KNOWN, REJECTED or skipped with a named cause. **Not in the shipped order** (`OPT_IN_SCRIPTS`): a submission is a public, outward-facing write, so it runs only when someone asks — a details menu, `POST /api/import/acoustid/submit`, the wizard's AcoustID step, or a `run_all_order` the user put it in themselves | nothing locally | no | **yes** (AcoustID database) |
 | 23 | Optimize tags | The tag strip script 10 already performs as a step of its own pass, on its own and scoped (`mlo/taghygiene.py`): every tag the grader calls excess — a name outside the shared vocabulary, a `COMMENT` carrying a value, an alias nothing needs (R16a/R16b: the name is one the locale reads, the spelling is for another locale, a second spelling of the same alias, or the value is the name itself) | tags | **yes** (deletes the excess tags) | no |
+| 25 | Fetch artist images | Fetches the artist photo every artist folder is missing, from the configured image sources (`server.discovery.artist_image` → `mlo.artistdata.save_image`), through the SAME per-folder helper the import's metadata step calls | `Artists/<Artist>/artist.jpg`/`.png` (only where missing, unless forced) | overwrites only with `force_artist_image` | **yes** (Deezer / TheAudioDB / iTunes / Wikipedia) |
+| 26 | Fetch artist descriptions | Fetches the artist biography / article every artist folder is missing, from the configured description sources (`server.discovery.artist_description` → `mlo.artistdata.write_description`) | `Artists/<Artist>/description.txt` (only where missing, unless forced) | overwrites only with `force_artist_description` | **yes** (Wikipedia / TheAudioDB / MusicBrainz) |
+
+**R379 — the artist fetches (25, 26) fill only, and their force flag is the
+OVERWRITE.** Both walk the library's artist folders
+(`mlo.artistdata.artist_folders(cfg, cfg["targets"], require_image=False)` — a
+targeted run resolves each album/file to the artist it sits in and touches only
+those, a whole-library Run All walks every artist) and, for each folder, call the
+ONE per-folder helper the import's metadata step already uses
+(`server.imports.fetch_artist_image` / `fetch_artist_description` — `apply_metadata`
+calls the same two), so there is no second discovery/save path to drift: the
+image is cropped/resized/encoded by `mlo.artistdata.save_image`, the description
+written by `write_description`, and the provenance entry recorded the same way.
+A folder that already holds the asset is left BYTE FOR BYTE alone and the
+provider is never asked; `force_artist_image` / `force_artist_description` is
+what re-fetches and replaces it — an OVERWRITE, the opposite of 20's
+`layout_apply`, so the UI labels read "re-fetch". Each is gated by its feature's
+own switch (`artist_image_enabled` / `artist_description_enabled`, ON), the same
+keys the import's metadata step reads: with one off the script fetches nothing
+(the runner says so and the chain skips it, R12), so a script can never fetch
+what the settings forbid. They are two scripts, not one, because the two features
+are separately switchable — a user may want the photos and not the bios. Each
+reports per artist what it wrote / skipped / failed and the four counts the
+other runners do (R10a: `scanned == modified + unchanged + skipped + errors`).
+Pinned by `tools/test_artist_fetch.py` (stubbed providers, a scratch folder).
 
 **R343 — Optimize tags (23) is the excess-tag strip on its own: scoped, and it
 only deletes.** The list it deletes is the grader's own —
@@ -256,9 +285,12 @@ is what makes the script look at a file it has already processed:
 `force_lyrics` (1), `force_cue` (2), `force_reencode_flac` (3), `force_reencode_images`
 (5), `force_audit` (6), `force_dr_replaygain` (7), `force_auto_tag` (8),
 `force_accurip` (9), `force_audiometa` (12), `force_mood` (16), `force_xlit` (17),
-`force_tracklist` (15), `force_web_ratings` (24). Grade (4) needs none — it re-reads.
+`force_tracklist` (15), `force_web_ratings` (24), `force_artist_image` (25),
+`force_artist_description` (26). Grade (4) needs none — it re-reads.
 Script 24 is fill-only, so its flag is what re-fetches a rating a file already
-carries (R362).
+carries (R362). Fetch artist images (25) and Fetch artist descriptions (26) are
+fill-only too, so their flags are the OVERWRITE of a stored image / description
+(R379).
 Fetch lyrics (13) has NO flag since v4.4.0: a run fills what is missing and
 never replaces stored words, so there is no "redo" for it to force (R330) —
 replacing one track's lyrics is the manual route's job.
@@ -293,7 +325,9 @@ no-op: `dr_replaygain_enabled` (7), `audiometa_enabled` (12), `mood_enabled` (16
 refuses on, so a run says WHY it did nothing instead of reporting an empty
 pass), `strip_unknown_tags` (23 — with that switch off nothing in this app is
 excess, since the excess-tag grade and script 10's strip read it too, so the
-hygiene pass would have no subject). Scripts 9/10/11/12/13/16/17 whose module is missing are reported
+hygiene pass would have no subject), `artist_image_enabled` (25) and
+`artist_description_enabled` (26 — the two keys the import's metadata step
+reads, so a script cannot fetch what the settings forbid). Scripts 9/10/11/12/13/16/17 whose module is missing are reported
 unavailable rather than silently passing.
 **R13 — scripts clean up after themselves**: folders a run emptied are pruned
 bottom-up (never a folder that holds anything, never the music root), and the run

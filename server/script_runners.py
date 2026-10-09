@@ -1,4 +1,4 @@
-"""The 23 library scripts, in one place every caller shares.
+"""The 25 library scripts, in one place every caller shares.
 
 Extracted from ``server/main.py``'s ``RUNNERS`` table so the import pipeline
 (:mod:`server.imports`) and the bulk queue run exactly
@@ -181,6 +181,152 @@ def run_release_tracklist(config):
     return stats
 
 
+# --------------------------------------------------------------------------- #
+# Scripts 25 / 26 — Fetch artist images / Fetch artist descriptions
+# --------------------------------------------------------------------------- #
+# The two fetches are ONE pass each over the library's artist folders, and they
+# are separate scripts because the two features are separately switchable in
+# Settings (artist_image_enabled / artist_description_enabled): a user may want
+# the photos and not the bios, or the bios and not the photos. The import's
+# metadata step (server.imports.apply_metadata) already fetches both for an
+# album as it arrives, through the SAME per-folder helpers these runners call —
+# these scripts are the walk over a library that arrived another way (beets, a
+# hand-placed rip, an install from before the fetch existed), and a folder that
+# already holds the asset is left byte for byte alone unless the script's force
+# flag is set. See spec R379.
+def _fetch_artist_folders(config):
+    """The artist folders a fetch script walks: the library's, or the artists
+    a targeted run's paths sit under. ``require_image=False`` because a fetch's
+    subject is the folder MISSING the asset."""
+    from mlo import artistdata
+    return artistdata.artist_folders(config, config.get("targets"),
+                                     require_image=False)
+
+
+def _artist_folder_name(folder):
+    """(the name the log prints, the artist name a provider is asked about)."""
+    from mlo import artistdata
+    where = os.path.basename(folder.rstrip("\\/")) or folder
+    return where, artistdata.strip_mbid_suffix(where)
+
+
+def run_fetch_artist_images(config):
+    """Script 25 — fetch the artist image every artist folder is missing.
+
+    Present-only by default: an image already on disk is left byte for byte
+    alone, and re-fetching it — overwriting whatever the folder holds, hand-
+    placed or provider-made — is the ``force_artist_image`` switch's job (the
+    "25 · Artist images re-fetch" Force entry). A folder with no provider image
+    is reported and skipped; the fetch is gated by ``artist_image_enabled``,
+    the same switch the import's metadata step reads, so a script can never
+    fetch what the settings forbid. The save (crop, resize, re-encode) is
+    mlo.artistdata's, shared with the import and with script 19."""
+    from server.imports import fetch_artist_image
+
+    config = config or {}
+    stats = mlo_stats.new_stats()
+    print_header("Fetch artist images")
+    log(f"library: {library_root(str(config.get('music_folder') or '')) or '(no music folder configured)'}")
+    if not config.get("artist_image_enabled", True):
+        log("Artist images are switched off (artist_image_enabled) — nothing fetched.")
+        return stats
+    force = bool(config.get("force_artist_image", False))
+    log(f"existing images: {'re-fetched (force)' if force else 'kept'}")
+
+    folders = _fetch_artist_folders(config)
+    if not folders:
+        log("No artist folders found.")
+        return stats
+
+    counts = {"ok": 0, "skip": 0, "fail": 0}
+    pbar = mlo_stats._make_pbar(len(folders), "Artist images", unit="image")
+    for folder in folders:
+        where, artist = _artist_folder_name(folder)
+        stats["total_scanned"] += 1
+        res = fetch_artist_image(folder, artist, config, force=force)
+        if res["status"] == "written":
+            stats["modified_count"] += 1
+            log(c(f"{where}: {os.path.basename(res['path'])} from {res['source']}", Color.GREEN))
+            mlo_stats._pbar_update(pbar, counts)
+        elif res["status"] == "skipped":
+            stats["unchanged_count"] += 1
+            mlo_stats._pbar_skip(pbar, counts)
+        elif res["status"] == "missing":
+            stats["skipped_count"] += 1
+            log(c(f"{where}: no provider had an image", Color.YELLOW))
+            mlo_stats._pbar_skip(pbar, counts)
+        else:
+            stats["error_count"] += 1
+            stats["errors"].append((folder, res["error"] or res["status"]))
+            log(c(f"{where}: {res['error'] or res['status']}", Color.YELLOW))
+            mlo_stats._pbar_update(pbar, counts, kind="fail")
+    if pbar:
+        pbar.close()
+    log(c(f"artist images: {stats['modified_count']} fetched · "
+          f"{stats['unchanged_count']} already there · "
+          f"{stats['skipped_count']} none found · "
+          f"{stats['error_count']} failed",
+          Color.GREEN if not stats["error_count"] else Color.YELLOW))
+    return stats
+
+
+def run_fetch_artist_descriptions(config):
+    """Script 26 — fetch the artist description every artist folder is missing.
+
+    The description twin of script 25, on its own because the two features have
+    their own switches (``artist_description_enabled`` here). Present-only, with
+    ``force_artist_description`` (the "26 · Artist descriptions re-fetch" Force
+    entry) as the OVERWRITE. A provider with no prose for the artist is reported
+    and skipped rather than left silently empty."""
+    from server.imports import fetch_artist_description
+
+    config = config or {}
+    stats = mlo_stats.new_stats()
+    print_header("Fetch artist descriptions")
+    log(f"library: {library_root(str(config.get('music_folder') or '')) or '(no music folder configured)'}")
+    if not config.get("artist_description_enabled", True):
+        log("Artist descriptions are switched off (artist_description_enabled) — nothing fetched.")
+        return stats
+    force = bool(config.get("force_artist_description", False))
+    log(f"existing descriptions: {'re-fetched (force)' if force else 'kept'}")
+
+    folders = _fetch_artist_folders(config)
+    if not folders:
+        log("No artist folders found.")
+        return stats
+
+    counts = {"ok": 0, "skip": 0, "fail": 0}
+    pbar = mlo_stats._make_pbar(len(folders), "Artist descriptions", unit="artist")
+    for folder in folders:
+        where, artist = _artist_folder_name(folder)
+        stats["total_scanned"] += 1
+        res = fetch_artist_description(folder, artist, config, force=force)
+        if res["status"] == "written":
+            stats["modified_count"] += 1
+            log(c(f"{where}: {os.path.basename(res['path'])} from {res['source'] or 'auto'}", Color.GREEN))
+            mlo_stats._pbar_update(pbar, counts)
+        elif res["status"] == "skipped":
+            stats["unchanged_count"] += 1
+            mlo_stats._pbar_skip(pbar, counts)
+        elif res["status"] == "missing":
+            stats["skipped_count"] += 1
+            log(c(f"{where}: no provider had a description", Color.YELLOW))
+            mlo_stats._pbar_skip(pbar, counts)
+        else:
+            stats["error_count"] += 1
+            stats["errors"].append((folder, res["error"] or res["status"]))
+            log(c(f"{where}: {res['error'] or res['status']}", Color.YELLOW))
+            mlo_stats._pbar_update(pbar, counts, kind="fail")
+    if pbar:
+        pbar.close()
+    log(c(f"artist descriptions: {stats['modified_count']} fetched · "
+          f"{stats['unchanged_count']} already there · "
+          f"{stats['skipped_count']} none found · "
+          f"{stats['error_count']} failed",
+          Color.GREEN if not stats["error_count"] else Color.YELLOW))
+    return stats
+
+
 # id -> (label, runner). Labels are the ones web/src/lib/scripts.ts renders,
 # id for id; ids and names must stay in step with README.md and the frozen
 # EXPECTED_SCRIPTS in tools/test_script_menus.py.
@@ -246,6 +392,15 @@ RUNNERS: dict[int, tuple[str, "callable"]] = {
     # set (the "24 · Web ratings re-fetch" Force switch, or the config key by
     # hand). Its feature switch is `web_ratings_enabled`.
     24: ("Web ratings", _optional("mlo.web_ratings", "run_web_ratings")),
+    # 25/26 fetch the artist art the import's metadata step fills as an album
+    # arrives, over a library that arrived another way. Two scripts, because
+    # the two features have their own switches in Settings and a user may want
+    # one and not the other. Present-only; `force_artist_image` /
+    # `force_artist_description` is the OVERWRITE (the opposite of 20's flag),
+    # so the label says "re-fetch". Both live here rather than in mlo because
+    # the fetch is server.discovery + server.integrations (see spec R379).
+    25: ("Fetch artist images", run_fetch_artist_images),
+    26: ("Fetch artist descriptions", run_fetch_artist_descriptions),
 }
 
 # Scripts the Run All order deliberately does NOT carry. Every other script
@@ -302,6 +457,11 @@ _FORCE_KEYS = {
     # 24 re-fetches the web-rating tags for tracks that already carry them
     # (otherwise an existing value is left alone).
     24: ("force_web_ratings",),
+    # 25/26 re-fetch the artist art for folders that already hold it (otherwise
+    # a stored image / description is left byte for byte alone). These flags
+    # mean OVERWRITE — the opposite of 20's — so their UI labels say "re-fetch".
+    25: ("force_artist_image",),
+    26: ("force_artist_description",),
 }
 _FORCE_ALIASES = {
     "lyrics": "force_lyrics",
@@ -318,6 +478,8 @@ _FORCE_ALIASES = {
     "xlit": "force_xlit",
     "layout": "layout_apply",
     "web_ratings": "force_web_ratings",
+    "artist_image": "force_artist_image",
+    "artist_description": "force_artist_description",
 }
 # Scripts whose feature has its own on/off switch: with it off the runner is a
 # no-op at best and a crash at worst, so a chain skips them instead. A tuple
@@ -352,6 +514,11 @@ _DISABLED = {
     # writer would refuse the same tags anyway, which is what "off means off in
     # both halves" means.
     24: "web_ratings_enabled",
+    # 25/26 fetch the same art the import's metadata step fetches, and these
+    # two keys are that step's own gates: off means the app must not fetch it
+    # on the user's behalf at all, so the walk is a no-op and a chain skips it.
+    25: "artist_image_enabled",
+    26: "artist_description_enabled",
 }
 
 

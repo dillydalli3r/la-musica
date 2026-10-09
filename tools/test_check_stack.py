@@ -349,8 +349,10 @@ check("the toggle survives a re-read", row(put({}).json(), "grade_check_mood")
 # The list is what a client PUTs as a whole chain, so it has to be a complete,
 # anchor-consistent order: normalize_config re-inserts every registry id the
 # saved order does not name (20, 21 and 23 among them, at their anchors), and
-# the check below is that a full order survives verbatim.
-order_new = [4, 1, 11, 3, 14, 15, 2, 13, 17, 8, 24, 5, 19, 6, 7, 9, 12, 16,
+# the check below is that a full order survives verbatim. 25/26 (the artist
+# fetches) sit at their anchor — right before 19 — so a full order names them
+# there too.
+order_new = [4, 1, 11, 3, 14, 15, 2, 13, 17, 8, 24, 5, 25, 26, 19, 6, 7, 9, 12, 16,
              10, 23, 20, 21]
 r = put({"order": order_new})
 check("a new chain order is accepted", r.status_code == 200, r.text[:200])

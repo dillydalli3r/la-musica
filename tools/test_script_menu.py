@@ -115,6 +115,8 @@ EXPECTED_FOLDER_SCOPED = {
     19,  # the artist folder's image                    (mlo/artistdata.py)
     20,  # the layout of a subtree                      (mlo/layout.py)
     24,  # one album's public rating, and each track's  (mlo/web_ratings.py)
+    25,  # the artist folder's missing image            (server/script_runners.py)
+    26,  # the artist folder's missing description      (server/script_runners.py)
 }
 # Kinds whose menu holds folders; the other two hold files.
 EXPECTED_FOLDER_KINDS = {"album", "artist", "library"}
@@ -126,8 +128,9 @@ EXPECTED_FILE_KINDS = {"track", "playlist"}
 # so it has no re-run to force (R330) — replacing one track's lyrics is
 # `POST /api/lyrics/auto` with force, not a library-wide script run. 24 is here
 # since its flag joined the UI force tables (R362): the pass fills only, and
-# forcing it re-fetches a rating the file already carries.
-EXPECTED_FORCED = {1, 2, 3, 5, 6, 7, 8, 9, 10, 12, 15, 16, 17, 20, 24}
+# forcing it re-fetches a rating the file already carries. 25/26 own the
+# OVERWRITE flags of the artist-image / description fetches (R379).
+EXPECTED_FORCED = {1, 2, 3, 5, 6, 7, 8, 9, 10, 12, 15, 16, 17, 20, 24, 25, 26}
 
 FAILED: list = []
 

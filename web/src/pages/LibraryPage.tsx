@@ -387,8 +387,8 @@ export default function LibraryPage() {
     void refetch();
   };
   const { data: config } = useQuery({ queryKey: ["config"], queryFn: api.config });
-  // The layout report the last scan stored (script 20, or the Optimization
-  // panel's Scan). Read, never walked: this is what lets the page state a
+  // The layout report the last scan stored (script 20's own scan or apply).
+  // Read, never walked: this is what lets the page state a
   // library-wide condition on every visit without scanning the library for
   // it — and `exists: false` is what keeps a warning off the screen until a
   // scan has actually run.
@@ -1291,12 +1291,13 @@ export default function LibraryPage() {
           library rather than an album: it says part of the music folder is
           not a graded album at all, which no per-album badge can show. The
           count and the moment it was measured come from the stored report,
-          and the click goes straight to the panel that can act on it. */}
+          and the click goes straight to the script that can act on it
+          (20 · Optimize library layout). */}
       {layoutProblems > 0 && (
         <Link
           to="/optimize"
           className="text-xs text-amber-200 bg-amber-950/30 border border-amber-900/60 rounded-lg px-3 py-2 flex items-start gap-2 tap"
-          title="Open the Optimization page's library-layout panel"
+          title="Run 20 · Optimize library layout on the Optimization page"
         >
           <FolderTree className="h-3.5 w-3.5 shrink-0 mt-0.5" />
           <span className="min-w-0">

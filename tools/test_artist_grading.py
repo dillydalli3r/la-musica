@@ -187,8 +187,8 @@ ok(grade_artist("", {})["issues"][0]["code"] == "ARTIST_FOLDER_MISSING",
 
 # An artist folder with NO album folder in it is not a graded artist: the same
 # shape as an absent folder (one issue, no checks invented), because a perfect
-# image and description describe an artist, never an album. The removal the
-# layout panel offers for it goes through the Trash.
+# image and description describe an artist, never an album. The removal script
+# 20 offers for it goes through the Trash.
 solo = os.path.join(MF, "Artists", "Solo")
 os.makedirs(solo, exist_ok=True)
 write(os.path.join(solo, "artist.jpg"), image_bytes(fmt="JPEG"))

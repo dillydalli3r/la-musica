@@ -4835,14 +4835,14 @@ def grade_artist(artist_dir, cfg=None) -> dict:
     # because the artefact checks describe a folder that can hold an album, and
     # reporting image/description grades for one that cannot would be a score
     # for the wrong question. `mlo.layout` reports the same folder as
-    # `empty_artist`, and the removal the panel offers goes through the Trash.
+    # `empty_artist`, and the removal script 20 offers goes through the Trash.
     if not artist_album_folders(folder):
         out["issues"].append({
             "code": "ARTIST_EMPTY", "label": "Artist albums", "where": where,
             "reason": "no album folder in this artist folder — nothing here is "
                       "an album, so there is nothing to grade as music. Add "
                       "one of the artist's albums, or remove the folder to the "
-                      "Trash (Optimize → Library layout → remove)",
+                      "Trash (script 20, Optimize library layout)",
         })
         return out
 

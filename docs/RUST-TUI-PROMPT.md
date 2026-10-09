@@ -338,7 +338,7 @@ fallback).
 
 ### 7.1 The table
 
-23 passes, ids 1–24 (there is no 18). Appendix A is the authoritative table; the TUI
+25 passes, ids 1–26 (there is no 18). Appendix A is the authoritative table; the TUI
 shows it as a menu, the CLI as `mlo run <id|name> [--scope …]`, and both read one
 list. Scripts whose feature has its own switch (`dr_replaygain_enabled`,
 `audiometa_enabled`, `mood_enabled`, `lyrics_xlit_enabled`,
@@ -677,7 +677,7 @@ one empty album, one artist folder with no albums, one `.mlo_data` leftover.
 
 ---
 
-## Appendix A — the 23 scripts
+## Appendix A — the 25 scripts
 
 | # | Name | What it does |
 |---|---|---|
@@ -704,6 +704,8 @@ one empty album, one artist folder with no albums, one `.mlo_data` leftover.
 | 22 | Submit fingerprints | give AcoustID the fingerprint + recording |
 | 23 | Optimize tags | delete excess tags: junk names, a valued `COMMENT`, unneeded aliases |
 | 24 | Web ratings | aggregated public album + track scores |
+| 25 | Fetch artist images | missing artist photos from the provider chain (force re-fetches) |
+| 26 | Fetch artist descriptions | missing artist biographies from the provider chain (force re-fetches) |
 
 ## Appendix B — default writers
 

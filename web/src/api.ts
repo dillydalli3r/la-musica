@@ -2808,7 +2808,7 @@ export const api = {
    *  folders, and anything that breaks the Artists/<Artist>/<Album> shape. */
   libraryLayout: () => json<LayoutReport>(`${API}/library/layout`),
 
-  /** The report the LAST layout scan stored (script 20, or the panel's Scan) —
+  /** The report the LAST layout scan stored (script 20's own scan or apply) —
    *  walk-free, which is why the Library page can afford to ask on load. */
   libraryLayoutReport: () => json<LayoutSnapshot>(`${API}/library/layout/report`),
 
@@ -2829,29 +2829,6 @@ export const api = {
     json<LogReportPayload>(
       `${API}/log/report?path=${encodeURIComponent(path)}${disc ? `&disc=${disc}` : ""}`
     ),
-
-  /** Scan the library AND settle what the folder itself proves (script 20's
-   *  apply phase): wrong-case names, audio outside any album folder, and what
-   *  is excess — a stray file, an album folder with no audio, a folder inside
-   *  an album that holds no audio, a foreign root folder holding no audio, an
-   *  album-less artist folder, the old layout's leftovers — all to the Trash,
-   *  never deleted. A foreign folder that HOLDS AUDIO and a hidden folder are
-   *  reported, not moved, and every removal's reason is re-derived server-side.
-   *  Returns the rows that are left plus `fixes`, and stores the report, so the
-   *  panel and the Library page's warning stay the same answer. Long-running:
-   *  it walks and reads one file's tags per album. */
-  libraryLayoutApply: () =>
-    json<LayoutReport>(`${API}/library/layout/apply`, { method: "POST" }, 1800000),
-
-  /** Move an album-less artist folder into the app's Trash. The server
-   *  re-derives the finding, so a folder that gained an album since the scan
-   *  is refused instead of moved. */
-  libraryLayoutRemoveEmptyArtist: (path: string) =>
-    json<{ ok: boolean; trash: string }>(`${API}/library/layout/remove-empty-artist`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ path }),
-    }),
 
   namingPreview: (script: string, shortFolderNames: boolean, sample?: Record<string, string>) =>
     json<{ path: string | null; ok: boolean; error?: string }>(`${API}/naming/preview`, {

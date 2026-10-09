@@ -41,6 +41,15 @@ SCRIPTS = (
      "delete excess tags: junk names, a valued COMMENT, unneeded aliases"),
     (24, "Web ratings",
      "aggregated public album + track scores (MusicBrainz / RYM / Discogs)"),
+    # 25/26 walk the artist folders and fetch only what is missing — the same
+    # fetch the import's metadata step makes, for a library that arrived
+    # another way. Two scripts because artist_image_enabled and
+    # artist_description_enabled are separate switches: a user may want one and
+    # not the other. Force = OVERWRITE (spec R379).
+    (25, "Fetch artist images",
+     "missing artist photos from the configured provider chain"),
+    (26, "Fetch artist descriptions",
+     "missing artist biographies from the configured provider chain"),
 )
 SCRIPT_LABELS = {sid: name for sid, name, _ in SCRIPTS}
 
@@ -51,4 +60,7 @@ SCRIPT_GATES = {7: "dr_replaygain_enabled", 12: "audiometa_enabled",
                 16: "mood_enabled", 17: ("lyrics_xlit_enabled", "lyrics_translate_enabled"),
                 21: "acoustid_enabled",
                 22: "acoustid_enabled", 23: "strip_unknown_tags",
-                24: "web_ratings_enabled"}
+                24: "web_ratings_enabled",
+                # 25/26 fetch what the import's metadata step fetches, and
+                # these two keys are that step's own gates.
+                25: "artist_image_enabled", 26: "artist_description_enabled"}

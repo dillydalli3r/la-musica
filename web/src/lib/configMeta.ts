@@ -895,6 +895,8 @@ export const HIDDEN_KEYS: string[] = [
   // script that reads it, one click from where it matters, and a first run
   // that shipped them ticked would re-encode everything it touched.
   "force_accurip",
+  "force_artist_description",
+  "force_artist_image",
   "force_audiometa",
   "force_audit",
   "force_auto_tag",

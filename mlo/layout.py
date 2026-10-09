@@ -16,13 +16,11 @@ guessed at.
 
 One scan answers every surface, so their numbers cannot disagree:
 
-  * script 20 (``run_optimize_layout``) — the Run All step: scans, applies (the
-    ``layout_apply`` config key / the runner's force flag) and persists what is
-    left;
-  * ``POST /api/library/layout/apply`` (server/main.py) — the same scan and
-    fix on demand, run by the Optimization page's Apply fixes button;
-  * ``GET /api/library/layout`` — the panel's read-only scan, which reports
-    and changes nothing;
+  * script 20 (``run_optimize_layout``) — the one path that reports AND fixes:
+    it scans, applies (the ``layout_apply`` config key / the runner's force
+    flag) and persists what is left;
+  * ``GET /api/library/layout`` — the read-only scan, which reports and
+    changes nothing;
   * ``GET /api/library/layout/report`` — the persisted report the Library
     page warns from, so its warning costs no second walk of the library.
 
@@ -444,7 +442,7 @@ def _case_issues(artist, album, album_dir, folder, script, seen, names=None):
             "%s \u201c%s\u201d differs from the naming script\u2019s \u201c%s\u201d "
             "in letter case only" % (what, actual_name, expected_name),
             "run Organize \u2014 it rewrites this to the script\u2019s exact "
-            "casing; Apply fixes renames the name itself",
+            "casing; script 20 renames the name itself",
             # Case-only is the one name mismatch that can be fixed without
             # knowing anything the scan has not already read: the expected
             # name is the same name, so the target is the row's own folder
@@ -593,7 +591,7 @@ def scan_library(cfg=None, stats=None):
                 "folder in the music folder root%s" % (" holding audio" if holds else ""),
                 "the library lives in Artists/ \u2014 move anything real into "
                 "Artists/<Artist>/<Album>/"
-                + ("" if holds else "; Apply fixes moves the folder itself to "
+                + ("" if holds else "; script 20 moves the folder itself to "
                                   "the Trash"),
                 fix=None if holds else {"action": "trash"}))
             closed(stats, reported=True)
@@ -610,7 +608,7 @@ def scan_library(cfg=None, stats=None):
             issues.append(_issue(
                 "legacy_state_file", p, folder,
                 "leftover from the old .mlo_data layout",
-                "the app does not read it any more \u2014 Apply fixes moves it "
+                "the app does not read it any more \u2014 script 20 moves it "
                 "to the Trash, which can put it back",
                 fix={"action": "trash"}))
             closed(stats, reported=True)
@@ -688,7 +686,7 @@ def scan_library(cfg=None, stats=None):
                 rows.append(_issue(
                     "empty_album", ap, folder,
                     "album folder \u201c%s / %s\u201d holds no audio" % (name, an),
-                    "an empty album grades as an error \u2014 Apply fixes moves "
+                    "an empty album grades as an error \u2014 script 20 moves "
                     "the folder to the Trash, so put the album in it first if "
                     "it is one you are still filling",
                     fix={"action": "trash"}))
@@ -718,7 +716,7 @@ def scan_library(cfg=None, stats=None):
                             "folder \u201c%s\u201d inside album \u201c%s / %s\u201d"
                             % (f, name, an),
                             "only disc folders (CD1, Disc 2, \u2026) belong "
-                            "inside an album \u2014 Apply fixes moves it to the "
+                            "inside an album \u2014 script 20 moves it to the "
                             "Trash",
                             fix={"action": "trash"}))
                         closed(sink, reported=True)
@@ -759,7 +757,7 @@ def scan_library(cfg=None, stats=None):
                             "\u201c%s\u201d" % (name, an, f, canonical),
                             "a duplicate of the description the app already "
                             "reads \u2014 nothing reads \u201c%s\u201d, and "
-                            "Apply moves it to the Trash" % f,
+                            "script 20 moves it to the Trash" % f,
                             fix={"action": "trash"}))
                         closed(sink, reported=True)
                     else:
@@ -768,7 +766,7 @@ def scan_library(cfg=None, stats=None):
                             "album \u201c%s / %s\u201d stores its description as "
                             "\u201c%s\u201d" % (name, an, f),
                             "rename it to \u201c%s\u201d — the app reads either "
-                            "name, and Apply fixes renames without touching the "
+                            "name, and script 20 renames without touching the "
                             "text" % canonical,
                             fix={"action": "rename",
                                  "to": os.path.join(ap, canonical)}))
@@ -781,7 +779,7 @@ def scan_library(cfg=None, stats=None):
                         "file \u201c%s\u201d is not audio, artwork or a known "
                         "sidecar" % f,
                         "dead weight in the library (an nfo, a db, a stray "
-                        "text file) \u2014 Apply fixes moves it to the Trash, "
+                        "text file) \u2014 script 20 moves it to the Trash, "
                         "which lists it and can put it back",
                         fix={"action": "trash"}))
                     closed(sink, reported=True)
@@ -794,14 +792,14 @@ def scan_library(cfg=None, stats=None):
         # folder with ANY audio anywhere beneath is never this finding — that
         # audio is a real problem the rows above already name
         # (audio_in_artist / audio_in_artists / empty_album) — which is what
-        # empty_artist() decides, the same question the grade and the removal
-        # route ask.
+        # empty_artist() decides, the same question the grade and script 20's
+        # apply ask.
         if empty_artist(p):
             opened(sink)
             rows.append(_issue(
                 "empty_artist", p, folder,
                 "artist folder \u201c%s\u201d holds no album folder" % name,
-                "remove it to the Trash (Optimize → Library layout → remove), "
+                "remove it to the Trash (script 20, Optimize library layout), "
                 "or put one of the artist's albums inside it",
                 fix={"action": "trash"}))
             closed(sink, reported=True)
@@ -838,7 +836,7 @@ def scan_library(cfg=None, stats=None):
                         "stray_in_artists", p, folder,
                         "non-audio file directly in Artists/",
                         "nothing here can name the album it belongs to \u2014 "
-                        "Apply fixes moves it to the Trash, which lists it and "
+                        "script 20 moves it to the Trash, which lists it and "
                         "can put it back",
                         fix={"action": "trash"})]
                 closed(stats, reported=True)
@@ -1100,8 +1098,8 @@ def carry_track_files(src_file, dst_file):
 
 
 # What a removal is called in the report, per kind: "the stray file" and "the
-# foreign folder" are what the user saw in the panel, so the outcome line reads
-# as the same finding being settled rather than as a second vocabulary.
+# foreign folder" are the words the rows themselves use, so the outcome line
+# reads as the same finding being settled rather than as a second vocabulary.
 _TRASH_WORDS = {
     "empty_artist": "the album-less artist folder",
     "empty_album": "the empty album folder",

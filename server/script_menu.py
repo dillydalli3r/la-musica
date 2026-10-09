@@ -124,6 +124,14 @@ SCOPES: Dict[int, str] = {
                   # is the album, exactly like 8. A file on its own has no
                   # release-group id to ask about, so a track row is not a menu
                   # this script can finish.
+    25: "folder", # server/script_runners.py: the ARTIST folder's image is the
+                  # subject — artist_folders resolves a target to the artist it
+                  # sits in, exactly like 19, and writes artist.jpg beside the
+                  # albums. A FILE target would be collected the same way by
+                  # _artist_folder_of, so an album's menu and an artist's both
+                  # offer it; the artist is the work unit.
+    26: "folder", # server/script_runners.py: the ARTIST folder's description.txt
+                  # is the subject, same walk and same target resolution as 25.
 }
 
 # One line per script, for the report and for the test's non-empty check.
@@ -151,6 +159,8 @@ BECAUSE: Dict[int, str] = {
     22: "submits one file's fingerprint with its MusicBrainz recording",
     23: "deletes one file's excess tags (unneeded aliases included)",
     24: "fills one album's public rating, and each track's own",
+    25: "fetches the artist folder's missing image",
+    26: "fetches the artist folder's missing description",
 }
 
 # --------------------------------------------------------------------------- #

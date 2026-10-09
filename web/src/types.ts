@@ -340,8 +340,8 @@ export interface LayoutIssue {
   abs: string;
   detail: string;
   hint: string;
-  /** What Apply fixes would do about this row (absent = nothing may act on
-   *  it, so the row is a report and nothing else). */
+  /** What script 20's apply would do about this row (absent = nothing may act
+   *  on it, so the row is a report and nothing else). */
   fix?: { action: "rename" | "move" | "trash"; to?: string };
 }
 
@@ -367,8 +367,8 @@ export interface LayoutReport {
   albums: number;
   artists: number;
   audio_files: number;
-  /** Only after an apply (script 20 with layout_apply on, or the panel's
-   *  Apply fixes): every row the run acted on, or decided not to. */
+  /** Only after an apply (script 20 with layout_apply on): every row the run
+   *  acted on, or decided not to. */
   fixes?: LayoutFix[];
   fixed?: number;
   fix_failed?: number;

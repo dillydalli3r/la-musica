@@ -749,13 +749,19 @@ def optimize_artist_image(folder, cfg, path=None) -> dict:
     return out
 
 
-def artist_folders(cfg, targets=None):
-    """Every artist folder holding an artist image, sorted by name.
+def artist_folders(cfg, targets=None, require_image=True):
+    """Every artist folder under the library root, sorted by name.
 
     The direct children of the library root are the artists (an artist's albums
     live under them). *targets* limits the answer to the artist folders those
     paths sit in, so a run started from an album never sweeps the whole
-    library."""
+    library.
+
+    *require_image* True keeps only folders that already hold an artist image —
+    script 19's subject, which re-fits one. A FETCH passes False: its subject is
+    the folder MISSING the image, so a folder with none has to be IN the walk
+    rather than filtered out of it (the same walk also feeds the description
+    fetch, whose subject is a folder that may hold an image and no text)."""
     root = library_root(_music_folder(cfg))
     if not root or not os.path.isdir(root):
         return []
@@ -766,7 +772,7 @@ def artist_folders(cfg, targets=None):
     if targets is None:
         return [os.path.join(root, n) for n in names
                 if os.path.isdir(os.path.join(root, n))
-                and has_image(os.path.join(root, n))]
+                and (not require_image or has_image(os.path.join(root, n)))]
     out = []
     for target in targets or ():
         folder = _artist_folder_of(target, root)

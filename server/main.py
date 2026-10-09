@@ -2668,17 +2668,6 @@ def soulseek_staging_clear(req: StagingRequest):
     return {"ok": True, "cleared": cleared, "freed": freed, "failed": failed}
 
 
-# --------------------------------------------------------------------------- #
-# Library layout — is the music folder shaped the way the app expects?
-# --------------------------------------------------------------------------- #
-# The walk itself lives in mlo.layout — the same one Run All runs as script 20
-# — so this route, the panel and the script can never report different numbers.
-# The GET route stays a READ-ONLY report: it says what is wrong and where, and
-# never moves anything on its own. The fixing half is mlo.layout.apply_fixes,
-# reached from here through POST /api/library/layout/apply (the panel's Apply
-# fixes) and by script 20 itself, which applies what its scan proved.
-
-
 @app.get("/api/soulseek/status")
 def soulseek_status():
     """Managed slskd availability, running state, login and download dir."""
@@ -7314,11 +7303,10 @@ def downloads_import(req: DownloadsImport = DownloadsImport()):
 # Library layout — is the music folder shaped the way the app expects?
 # --------------------------------------------------------------------------- #
 # The walk itself lives in mlo.layout — the same one Run All runs as script 20
-# — so this route, the panel and the script can never report different numbers.
-# The GET route stays a READ-ONLY report: it says what is wrong and where, and
-# never moves anything on its own. The fixing half is mlo.layout.apply_fixes,
-# reached from here through POST /api/library/layout/apply (the panel's Apply
-# fixes) and by script 20 itself, which applies what its scan proved.
+# — so this route and the script can never report different numbers. The GET
+# route stays a READ-ONLY report: it says what is wrong and where, and never
+# moves anything on its own. The fixing half is mlo.layout.apply_fixes, applied
+# by script 20 itself, which settles what its own scan proved.
 @app.get("/api/library/layout")
 def library_layout():
     """Scan the whole music folder for misplaced files, unexpected folders and
@@ -7333,8 +7321,8 @@ def library_layout():
     cover art, and inside an artist folder its artist.jpg / artist.png and
     description.txt (only audio with no album folder is reported there).
 
-    The rows that CAN be fixed carry what the fix would do; POST
-    /api/library/layout/apply is what carries it out."""
+    The rows that CAN be fixed carry what the fix would do; script 20
+    (Optimize library layout) is what carries it out."""
     cfg = load_config()
     report = mlo_layout.scan_library(cfg)
     # A manual scan IS a scan: it is what "the last scan" means to the Library
@@ -7346,7 +7334,7 @@ def library_layout():
 
 @app.get("/api/library/layout/report")
 def library_layout_report():
-    """The layout report the last scan stored (script 20, or this panel's Scan).
+    """The layout report the last scan stored (script 20's own scan or apply).
 
     Nothing is walked here: the Library page asks for this on every load, and
     the point of the stored report is that its warning costs no second scan of
@@ -7369,100 +7357,6 @@ def grades_summary():
     to count the library themselves and could disagree."""
     from server import recommendations
     return recommendations.grade_warning(lib_mod.build_library(load_config()))
-
-
-@app.post("/api/library/layout/remove-empty-artist")
-def library_layout_remove_empty_artist(req: AlbumRemove, request: Request = None):
-    """Move an album-less artist folder into <music>/.mlo/trash/<user>/.
-
-    The one thing the layout panel may act on, and the removal goes through the
-    app's own Trash — never shutil.rmtree — so it is recoverable from the Trash
-    page like any album the library removed.
-
-    The finding is re-derived HERE, from the folder itself, instead of trusting
-    the panel: an artist folder is removable only while mlo.layout's
-    `empty_artist` says so — no album folder under it, and no audio anywhere
-    beneath. A folder that gained an album since the scan, or that was never
-    one of these, is refused, not moved.
-    """
-    cfg = load_config()
-    folder = cfg.get("music_folder") or ""
-    if not folder or not os.path.isdir(folder):
-        raise HTTPException(400, "music_folder not set or not found")
-    p = os.path.normpath(req.path)
-    if not os.path.isdir(p):
-        raise HTTPException(404, "artist folder not found")
-    if not _in_music_folder(p, folder):
-        raise HTTPException(400, "artist folder outside music folder")
-    lib = library_root(folder)
-    # Directly inside <music>/Artists: an album folder is not an artist folder,
-    # and nothing above Artists/ is ever removable through this route.
-    if not lib or os.path.normcase(os.path.dirname(p)) != os.path.normcase(
-            os.path.normpath(lib)):
-        raise HTTPException(400, "not an artist folder (must sit in Artists/)")
-    if not mlo_layout.empty_artist(p):
-        raise HTTPException(
-            400, "this artist folder is not an empty artist — it holds an album "
-                 "or audio, and this route never moves an artist with music")
-    # The same mlo.paths helper mlo.layout's apply phase trashes through, so
-    # the panel's "remove" and script 20's automatic removal land an entry in
-    # the identical bin with the identical origin recorded.
-    dest = trash_path(p, folder, auth_mod.current_user(request))
-    if not dest:
-        raise HTTPException(
-            500,
-            f"could not move {os.path.basename(p) or 'artist'} to the trash — a "
-            f"file inside it is still in use (stop playback and retry)")
-    tagcache.invalidate_album(p)
-    mbresolve.invalidate()
-    return {"ok": True, "trash": dest.replace("\\", "/")}
-
-
-@app.post("/api/library/layout/apply")
-@job_locks.holds(
-    lambda request=None, **_: [library_root(load_config().get("music_folder") or "")],
-    kind="layout", label="Optimize library layout")
-def library_layout_apply(request: Request = None):
-    """Scan the library and SETTLE what the folder itself proves — script 20,
-    on demand.
-
-    What the Optimization page's Apply fixes button runs, and the same call
-    script 20 makes for itself: names spelled in the wrong letter case are
-    renamed to the naming script's spelling, audio that is not in an album
-    folder is moved into the one its own tags name, and what is EXCESS goes to
-    the app's Trash — a stray file, a folder inside an album that holds no
-    audio, an album folder with no audio in it, a foreign root folder holding
-    no audio, an album-less artist folder, the old layout's ``.mlo_*``
-    leftovers. A foreign folder that HOLDS AUDIO and a hidden folder inside
-    ``Artists/`` are reported and left: nothing here can say where their
-    contents belong (R185). Every removal's reason is re-derived from the
-    folder at the move, so a folder that gained audio since the scan is
-    refused. Nothing is ever deleted — the Trash lists every removal and can
-    put it back — and no file outside the music folder is touched.
-
-    The whole library, not a target list: this is the panel's action on the
-    library it is showing. A targeted run is what the import chain does with
-    script 20, where the target IS the album just written.
-
-    Returns the report — the rows left AFTER the fixes, plus `fixes`
-    (fixed/failed/skipped, in words) — and stores it, because the panel and the
-    Library page's warning read the same numbers by design.
-
-    It runs whether or not ``layout_apply`` is on: that setting is about what a
-    SCAN does on its own, and a button reading "Apply fixes" is the user's own
-    instruction rather than the scanner's default.
-    """
-    cfg = load_config()
-    folder = cfg.get("music_folder") or ""
-    if not folder or not os.path.isdir(folder):
-        raise HTTPException(400, "music_folder not set or not found")
-    report = mlo_layout.scan_library(cfg)
-    mlo_layout.apply_fixes(cfg, report, user=auth_mod.current_user(request))
-    mlo_layout.save_report(cfg, report)
-    # The library moved under both caches, exactly as a removal does.
-    tagcache.invalidate_all()
-    mbresolve.invalidate()
-    return report
 
 
 # --------------------------------------------------------------------------- #

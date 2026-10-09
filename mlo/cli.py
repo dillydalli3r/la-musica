@@ -557,6 +557,12 @@ def build_script_runners():
         # with the rest of the network code (server.integrations) and the
         # module is resolved on first use like every other fetching script.
         24: ("mlo.web_ratings", "run_web_ratings"),
+        # 25/26 fetch artist art through server.discovery + server.integrations,
+        # so their runners live beside script 15's in the server module — the
+        # same lazy resolution, for the same reason (mlo must run without a
+        # server at module level).
+        25: ("server.script_runners", "run_fetch_artist_images"),
+        26: ("server.script_runners", "run_fetch_artist_descriptions"),
     }
     runners = {}
     for sid, name, _desc in SCRIPTS:

@@ -14,12 +14,16 @@ pins the three things that are easy to get wrong:
     name that is not actually correct),
   * the scan alone moves nothing.
 
-The second half covers the apply phase (`POST /api/library/layout/apply`,
-script 20): the canonical spelling is restored on an artist folder, an album
-folder and a file; audio loose in an artist folder is moved into the album
-folder its own tags name; an album-less artist folder goes to the Trash with
-its origin recorded; `layout_apply: false` leaves everything alone; and a run
-with targets touches only the target's subtree.
+The second half covers the apply phase — script 20, run through the server's
+own path (`POST /api/run` with the `layout` option, the same call the
+Optimization page makes): the canonical spelling is restored on an artist
+folder, an album folder and a file; audio loose in an artist folder is moved
+into the album folder its own tags name; an album-less artist folder goes to
+the Trash with its origin recorded; `layout_apply: false` leaves everything
+alone; and a run with targets touches only the target's subtree. The
+single-artist "remove empty artist" route the old panel offered is gone with
+it, so nothing here drives it — the album-less-artist removal is covered by
+script 20's own apply, below.
 
 Run:  python tools/test_layout_case.py
 """
@@ -192,7 +196,8 @@ with open(os.path.join(MF, "Artists", "Caps", "Untagged", "1-01 Song.flac"), "wb
 
 # an artist folder with NO album folder in it: the artist's own image and
 # description are everything it holds, and the library still lists it as an
-# artist (the `empty_artist` finding, and the one row the panel may remove).
+# artist (the `empty_artist` finding, and the one row script 20's apply
+# removes to the Trash).
 SOLO = os.path.join(MF, "Artists", "Solo")
 os.makedirs(SOLO, exist_ok=True)
 for _name in ("artist.jpg", "description.txt"):
@@ -346,38 +351,6 @@ ok("ARTIST_EMPTY" not in [i["code"] for i in g2["issues"]] and g2["checks"] == 2
    f"and an artist that holds an album is graded on its own artefacts, not "
    f"failed for the folder ({g2['checks']} checks, {[i['code'] for i in g2['issues']]})")
 
-print("== removing an empty artist goes through the Trash ==")
-BIN = os.path.join(MF, ".mlo", "trash")
-r = _client.post("/api/library/layout/remove-empty-artist", json={"path": SOLO})
-ok(r.status_code == 200, f"the route accepts it ({r.status_code}: {r.text[:160]})")
-dest = str(r.json().get("trash") or "")
-ok(not os.path.exists(SOLO), "the artist folder is gone from Artists/")
-ok(os.path.isdir(dest)
-   and os.path.normcase(dest).startswith(os.path.normcase(BIN)),
-   f"…and landed in <music>/.mlo/trash/<user>/ ({dest})")
-ok(os.path.isfile(os.path.join(dest, "artist.jpg"))
-   and os.path.isfile(os.path.join(dest, "description.txt")),
-   f"every file travelled with it — nothing was deleted "
-   f"({sorted(os.listdir(dest))})")
-with open(os.path.join(os.path.dirname(dest), ".mlo_manifest.json"),
-          encoding="utf-8") as f:
-    manifest = json.load(f)
-entries = manifest.get("entries", manifest)
-ok(str(entries.get(os.path.basename(dest), {}).get("origin", "")).replace("\\", "/")
-   == SOLO.replace("\\", "/"),
-   f"its origin is recorded, so the Trash page can put it back ({manifest})")
-
-# The guards: the route re-derives the finding instead of trusting the panel.
-for path, what in ((os.path.join(MF, "Artists", "Good"), "an artist with an album"),
-                   (os.path.join(MF, "Artists", "Loose"), "a folder holding audio"),
-                   (MF, "the music folder itself")):
-    r2 = _client.post("/api/library/layout/remove-empty-artist", json={"path": path})
-    ok(r2.status_code == 400,
-       f"{what} is refused, not moved ({r2.status_code}: {r2.text[:120]})")
-ok(os.path.isdir(os.path.join(MF, "Artists", "Good"))
-   and os.path.isdir(os.path.join(MF, "Artists", "Loose")),
-   "and both are still on disk")
-
 print("== read-only ==")
 # Read-only means the LIBRARY is untouched: the scan renames, moves and
 # rewrites nothing it reports on. It writes exactly one thing of its own — the
@@ -407,10 +380,20 @@ os.makedirs(NOBODY, exist_ok=True)
 with open(os.path.join(NOBODY, "artist.jpg"), "wb") as f:
     f.write(b"x")
 
-print("== apply fixes ==")
-r = _client.post("/api/library/layout/apply")
-ok(r.status_code == 200, f"the apply route accepts it ({r.status_code}: {r.text[:160]})")
-res = r.json()
+print("== apply fixes (script 20 through /api/run) ==")
+# The real path, exactly as the Optimization page's Run button takes it: the
+# script id and its `layout` option to /api/run. Script 20 stores its report
+# for the Library page, so the post-fix report below is read back from there —
+# the same copy every other surface warns from.
+r = _client.post("/api/run", json={"ids": [20], "force": {"layout": True}})
+ok(r.status_code == 200, f"/api/run accepts it ({r.status_code}: {r.text[:160]})")
+out = r.json()["results"][0]
+ok(out.get("id") == 20 and not out.get("error"),
+   f"script 20 ran without an error ({out.get('error')})")
+snap = _client.get("/api/library/layout/report").json()
+ok(bool(snap.get("exists") and snap.get("report")),
+   "the run stored its report where the Library page reads it")
+res = snap["report"]
 fixes = {f["path"]: f for f in res.get("fixes", [])}
 
 ok(stored(os.path.join(MF, "Artists"), "Lower")
@@ -426,13 +409,13 @@ ok(stored(os.path.join(MF, "Artists", "Loose"), "Loose Album")
    and stored(os.path.join(MF, "Artists", "Loose", "Loose Album"), "1-01 Song.flac")
    and not os.path.exists(os.path.join(MF, "Artists", "Loose", "1-01 Song.flac")),
    "audio loose in an artist folder moved into the album folder its own tags name")
-ok(not os.path.exists(NOBODY),
-   "the album-less artist folder is gone from Artists/")
+ok(not os.path.exists(NOBODY) and not os.path.exists(SOLO),
+   "both album-less artist folders are gone from Artists/")
 
 # The counts, and the rows: what is settled leaves `issues`, what may not move
 # stays — with its reason.
-ok(res.get("fixed") == 8 and res.get("fix_failed") == 0,
-   f"eight fixes, none failed (got fixed={res.get('fixed')} failed={res.get('fix_failed')})")
+ok(res.get("fixed") == 9 and res.get("fix_failed") == 0,
+   f"nine fixes, none failed (got fixed={res.get('fixed')} failed={res.get('fix_failed')})")
 ok(res.get("skipped") == 2
    and sorted(res["counts"]) == ["hidden_folder", "unexpected_folder"],
    f"the two rows nothing may act on are still reported — the foreign folder "
@@ -487,7 +470,7 @@ ok("empty album folder" in fixes.get("Artists/Caps/Empty", {}).get("action", "")
    f"…and so is the folder's ({fixes.get('Artists/Caps/Empty')})")
 ok(all(f["result"] in ("fixed", "failed", "skipped") and f["action"]
        for f in res.get("fixes", [])),
-   "every outcome is a result plus words, so the panel can say what happened")
+   "every outcome is a result plus words, so a reader can say what happened")
 ok("renamed" in fixes.get("Artists/lower", {}).get("action", ""),
    f"the rename is worded for the user ({fixes.get('Artists/lower')})")
 ok("moved" in fixes.get("Artists/Loose/1-01 Song.flac", {}).get("action", "")
@@ -497,22 +480,34 @@ ok("no longer" in fixes.get("Artists/Loose/1-01 Song.flac", {}).get("action", ""
    or "Loose Album" in fixes.get("Artists/Loose/1-01 Song.flac", {}).get("action", ""),
    "…and the row is about the file, not an internal path")
 
-# The removal goes to the app's Trash, with its origin recorded — never a delete.
-r = _client.post("/api/library/layout/remove-empty-artist", json={"path": NOBODY})
-ok(r.status_code == 404, f"a folder that is already gone is a 404, not a crash ({r.status_code})")
+# The removal goes to the app's Trash, with its origin recorded — never a
+# delete. Both album-less artist folders the apply settled are there, with the
+# files they held and the origin the Trash page restores from.
 bin_dir = os.path.join(MF, ".mlo", "trash")
-landed = [os.path.join(bin_dir, n, entry)
-          for n in os.listdir(bin_dir)
-          if os.path.isdir(os.path.join(bin_dir, n))
-          for entry in os.listdir(os.path.join(bin_dir, n))
-          if entry == "Nobody"]
-ok(len(landed) == 1 and os.path.isfile(os.path.join(landed[0], "artist.jpg")),
-   f"the artist folder landed in <music>/.mlo/trash/<scope>/Nobody with its file ({landed})")
-with open(os.path.join(os.path.dirname(landed[0]), ".mlo_manifest.json"), encoding="utf-8") as f:
-    entries = json.load(f).get("entries", {})
-ok(str(entries.get("Nobody", {}).get("origin", "")).replace("\\", "/")
-   == NOBODY.replace("\\", "/"),
-   "…and the bin records where it came from, so the Trash page can restore it")
+
+
+def landed_entry(name):
+    """The path a Trash entry called *name* has, or "" when there is none."""
+    for scope in os.listdir(bin_dir):
+        p = os.path.join(bin_dir, scope, name)
+        if os.path.exists(p):
+            return p
+    return ""
+
+
+for name, folder, files in (("Nobody", NOBODY, ["artist.jpg"]),
+                            ("Solo", SOLO, ["artist.jpg", "description.txt"])):
+    dest = landed_entry(name)
+    ok(bool(dest) and all(os.path.isfile(os.path.join(dest, f)) for f in files),
+       f"the album-less artist folder {name} landed in the Trash with every "
+       f"file — nothing was deleted ({dest})")
+    with open(os.path.join(os.path.dirname(dest), ".mlo_manifest.json"),
+              encoding="utf-8") as f:
+        entries = json.load(f).get("entries", {})
+    ok(str(entries.get(name, {}).get("origin", "")).replace("\\", "/")
+       == folder.replace("\\", "/"),
+       f"…and the bin records where {name} came from, so the Trash page can "
+       f"restore it")
 
 print("== layout_apply off: report only ==")
 from mlo import layout as layoutmod  # noqa: E402
@@ -740,9 +735,9 @@ shutil.rmtree(DEEP_SRC, ignore_errors=True)
 shutil.rmtree(DEEP_DST, ignore_errors=True)
 
 print("== the re-derivation: a report that no longer describes the folder ==")
-# apply_fixes is handed a report by its callers. The panel's route re-scans
-# first, but a runner passes the report it just built, and either way a row is
-# only a claim about the folder: what may go is asked again AT THE MOVE. Here
+# apply_fixes is handed a report by its callers. Script 20 builds its own
+# report a moment earlier, and either way a row is only a claim about the
+# folder: what may go is asked again AT THE MOVE. Here
 # the folder the report calls an empty album is FILLED between the two — the
 # user's own edit, mid-run — and the removal has to refuse rather than act.
 LATER = os.path.join(MF, "Artists", "Caps", "Later")

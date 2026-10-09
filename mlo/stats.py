@@ -300,7 +300,7 @@ def _decode_mp4_value(v):
 # --------------------------------------------------------------------------- #
 # Chain-scoped library scan
 # --------------------------------------------------------------------------- #
-# A script CHAIN (Run All, an import's chain) runs up to 22 scripts over ONE
+# A script CHAIN (Run All, an import's chain) runs up to 24 scripts over ONE
 # library, and every album-walking script used to discover that library for
 # itself: `_find_albums` re-walked the whole music folder per script — the same
 # answer, re-derived a dozen times, on a library where one walk is thousands of

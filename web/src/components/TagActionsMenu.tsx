@@ -462,7 +462,7 @@ export default function TagActionsMenu({
         ]}
       />
       {confirmRunAll && (
-        // The app's confirmation idiom, the one `Apply fixes` uses: a Modal
+        // The app's confirmation idiom: a Modal
         // that names what will happen, where Cancel, Escape and an outside
         // click all close it without a request, and only the confirm button
         // reaches /api/run. The list IS the request's ids, in the order it

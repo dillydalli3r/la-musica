@@ -21,6 +21,10 @@ export const FORCE_SCRIPTS: { key: string; label: string }[] = [
   // Script 24's runner only FILLS a missing web-rating tag; this switch is
   // what re-fetches one a file already carries.
   { key: "web_ratings", label: "24 · Web ratings re-fetch" },
+  // Scripts 25/26 fill only; these switches are what OVERWRITE an image /
+  // description the artist folder already holds (the opposite of 20's flag).
+  { key: "artist_image", label: "25 · Artist images re-fetch" },
+  { key: "artist_description", label: "26 · Artist descriptions re-fetch" },
 ];
 
 const KEY = "mlo.force.sel";

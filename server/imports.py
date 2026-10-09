@@ -749,7 +749,7 @@ def finish_album(album_dir, cfg=None, progress=None, force=None, release=None,
     if wait:
         # ONE IMPORT PER ALBUM. A second autonomous caller used to QUEUE behind
         # the claim and then run the whole pipeline again — the six pre-chain
-        # lookups and all 22 scripts, over an album the first caller had just
+        # lookups and all 24 scripts, over an album the first caller had just
         # finished ("it's doing the scripts again", with nothing about the
         # second run wanted). The album is already being imported, so this call
         # answers that instead of duplicating the work; the user's own press
@@ -2427,18 +2427,105 @@ def album_identity_label(album_dir, cfg=None):
     return f"{name} ({year})" if year else name
 
 
+def fetch_artist_image(folder, artist, cfg=None, force=False):
+    """Fetch the best available image for *artist* and store it in *folder*.
+
+    The ONE artist-image fetch: the import's metadata step
+    (:func:`apply_metadata`), the manual apply route and script 25 (Fetch
+    artist images) all go through here, so no second network/save path can
+    drift from this one. Returns ``{"status", "path", "source", "error"}``
+    where *status* is one of:
+
+      ``"off"``     — ``artist_image_enabled`` is off, so nothing is fetched
+      ``"skipped"`` — *folder* already holds an image and *force* is off
+      ``"missing"`` — no configured provider had an image to offer
+      ``"failed"``  — the download or the write raised (why is in *error*)
+      ``"written"`` — new bytes were saved to *folder* (its path in *path*)
+
+    NEVER overwrites unless *force* is on. Never raises."""
+    from mlo import artistdata
+    from server import discovery
+    from server import integrations as intg
+
+    cfg = cfg or load_config()
+    out = {"status": "off", "path": None, "source": "", "error": ""}
+    if not folder or not artist or not cfg.get("artist_image_enabled", True):
+        return out
+    if not force and artistdata.has_image(folder):
+        out["status"] = "skipped"
+        return out
+    hit = discovery.artist_image(artist, mbid=artistdata.folder_mbid(folder), cfg=cfg)
+    if not (hit and hit.get("url")):
+        out["status"] = "missing"
+        return out
+    try:
+        data, _ctype = intg.fetch_image_bytes(hit["url"])
+        path = artistdata.save_image(
+            folder, data, cfg, source=hit.get("source") or "auto",
+            source_url=hit.get("url"), kind="artist", label=hit.get("label"))
+    except Exception as e:
+        traceback.print_exc()
+        out.update(status="failed", error=str(e) or e.__class__.__name__)
+        return out
+    if not path:
+        out.update(status="failed", error="could not be written")
+        return out
+    out.update(status="written", path=path, source=hit.get("source") or "auto")
+    return out
+
+
+def fetch_artist_description(folder, artist, cfg=None, force=False):
+    """Fetch the best available prose for *artist* and store it in *folder*.
+
+    The description twin of :func:`fetch_artist_image`, same contract and the
+    same callers (the ``artist_description_enabled`` switch is the gate, and a
+    stored description is replaced only when *force* is on). Never raises."""
+    from mlo import artistdata
+    from server import discovery
+
+    cfg = cfg or load_config()
+    out = {"status": "off", "path": None, "source": "", "error": ""}
+    if not folder or not artist or not cfg.get("artist_description_enabled", True):
+        return out
+    if not force and artistdata.has_description(folder):
+        out["status"] = "skipped"
+        return out
+    try:
+        found = discovery.artist_description(
+            artist, mbid=artistdata.folder_mbid(folder), cfg=cfg)
+    except Exception as e:
+        traceback.print_exc()
+        out.update(status="failed", error=str(e) or e.__class__.__name__)
+        return out
+    if not (found and str(found.get("text") or "").strip()):
+        out["status"] = "missing"
+        return out
+    path = artistdata.write_description(
+        folder, found["text"], cfg=cfg, source=found.get("source"),
+        source_url=found.get("source_url"), kind="artist")
+    if not path:
+        out.update(status="failed", error="could not be written")
+        return out
+    artistdata.write_provenance(folder, {
+        "description_source": found.get("source"),
+        "description_source_url": found.get("source_url"),
+        "description_title": found.get("title")}, kind="artist", cfg=cfg)
+    out.update(status="written", path=path, source=found.get("source") or "")
+    return out
+
+
 def apply_metadata(album_dir, cfg=None):
     """Fetch and store the best artist image / descriptions for an album.
 
     The import chain's metadata step and the manual apply route share this:
     it honours the per-feature switches (artist_image_enabled,
     artist_description_enabled, album_description_enabled — what the app may
-    fetch on the user's behalf) and NEVER overwrites stored content. Returns
-    {"artist_image", "artist_description", "album_description"} with the paths
-    written (None where nothing was written). Never raises."""
+    fetch on the user's behalf) and NEVER overwrites stored content. The two
+    ARTIST fetches are the shared per-folder helpers above (script 25/26 call
+    the same ones); the album description is this album's own and stays here.
+    Returns {"artist_image", "artist_description", "album_description"} with the
+    paths written (None where nothing was written). Never raises."""
     from mlo import artistdata
-    from server import discovery
-    from server import integrations as intg
 
     cfg = cfg or load_config()
     out = {"artist_image": None, "artist_description": None, "album_description": None}
@@ -2447,31 +2534,15 @@ def apply_metadata(album_dir, cfg=None):
         return out
     folder = artistdata.artist_dir(cfg, artist)
 
-    if folder and cfg.get("artist_image_enabled", True) and not artistdata.has_image(folder):
-        hit = discovery.artist_image(artist, mbid=artistdata.folder_mbid(folder), cfg=cfg)
-        if hit and hit.get("url"):
-            try:
-                data, _ctype = intg.fetch_image_bytes(hit["url"])
-                out["artist_image"] = artistdata.save_image(
-                    folder, data, cfg, source=hit.get("source") or "auto",
-                    source_url=hit.get("url"), kind="artist",
-                    label=hit.get("label"))
-            except Exception:
-                traceback.print_exc()
-
-    if folder and cfg.get("artist_description_enabled", True) and not artistdata.has_description(folder):
-        found = discovery.artist_description(artist, mbid=artistdata.folder_mbid(folder), cfg=cfg)
-        if found and str(found.get("text") or "").strip():
-            out["artist_description"] = artistdata.write_description(
-                folder, found["text"], cfg=cfg, source=found.get("source"),
-                source_url=found.get("source_url"), kind="artist")
-            artistdata.write_provenance(folder, {
-                "description_source": found.get("source"),
-                "description_source_url": found.get("source_url"),
-                "description_title": found.get("title")}, kind="artist", cfg=cfg)
+    if folder:
+        res = fetch_artist_image(folder, artist, cfg)
+        out["artist_image"] = res["path"]
+        res = fetch_artist_description(folder, artist, cfg)
+        out["artist_description"] = res["path"]
 
     if (album and cfg.get("album_description_enabled", True)
             and not artistdata.has_description(album_dir)):
+        from server import discovery
         found = discovery.album_description(artist, album, cfg=cfg)
         if found and str(found.get("text") or "").strip():
             out["album_description"] = artistdata.write_description(

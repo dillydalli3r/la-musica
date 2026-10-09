@@ -31,6 +31,11 @@ export const SCRIPTS: { ids: number[]; label: string }[] = [
   // tag-filling fetches that want the release identity 14/beets has settled,
   // and both must land before 10's canonical trim and 4's grade.
   { ids: [24], label: "Web ratings" },
+  // 25/26 fetch the artist art the import's metadata step fills, over a
+  // library that arrived another way. They ride right in front of 19 in
+  // DEFAULT_RUN_ALL: fetch first, then re-fit what was fetched.
+  { ids: [25], label: "Fetch artist images" },
+  { ids: [26], label: "Fetch artist descriptions" },
 ];
 
 /** The scripts the SHIPPED Run All chain deliberately does not carry
@@ -61,11 +66,12 @@ export const SCRIPT_LABEL: Record<number, string> = Object.fromEntries(
  *  tagger that gives it its release id), 10 format all, 23 the tag strip (the
  *  same excess lists 10 trims by, on their own) right behind it, 20 the layout
  *  report of the tree format all just settled, 21 the AcoustID pair the grader
- *  then reads as complete, and 4 grade last. This mirrors
- *  server/imports.py's DEFAULT_CHAIN, which lists the same steps minus the
- *  opt-in 16/17 and 19 — and minus 20, which describes the whole music folder
- *  and so has nothing to say about the one album a chain is finishing. */
-export const DEFAULT_RUN_ALL = [11, 3, 14, 15, 2, 1, 13, 17, 8, 24, 5, 19, 6, 7, 9, 12, 16, 10, 23, 20, 21, 4];
+ *  then reads as complete, and 4 grade last. It also carries 25 fetch artist
+ *  images and 26 fetch artist descriptions right in front of 19: fetch first,
+ *  then re-fit what was fetched. This mirrors
+ *  server/imports.py's DEFAULT_CHAIN, which is this same list — its declared
+ *  library-wide exception set is empty today. */
+export const DEFAULT_RUN_ALL = [11, 3, 14, 15, 2, 1, 13, 17, 8, 24, 5, 25, 26, 19, 6, 7, 9, 12, 16, 10, 23, 20, 21, 4];
 
 /** True when the id is a script the runner knows about. */
 export function isScriptId(n: unknown): n is number {
