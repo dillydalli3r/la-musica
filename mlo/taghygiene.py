@@ -19,7 +19,9 @@ ONE stripper with two callers, so the two passes can never disagree about what
     tags, beets/Picard's spellings, the app's own AUDIOAUDITOR_OVERRIDE) —
     what a vendor or ripper left behind;
   * a `COMMENT` that carries a value — the one name the vocabulary HOLDS whose
-    value nothing in this pipeline writes;
+    value nothing in this pipeline writes — or any value that names an
+    external LINK (a URL such as a RateYourMusic page; a bare MusicBrainz id
+    is not a link and is kept);
   * an ALIAS tag nothing needs (spec R16a/R16b): the name is one the
     configured locale already reads, the spelling is for a locale the app does
     not write (TITLEALIAS-JA in an `en` library), it is a second spelling of

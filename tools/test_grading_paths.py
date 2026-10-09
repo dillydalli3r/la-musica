@@ -140,7 +140,6 @@ ISO_CFG = {
     "grade_check_excess_tags": False,
     "grade_check_audit": False,
     "grade_check_mb_links": False,
-    "grade_check_rym_links": False,
     # Checks added after this file was written: off here (the fixtures carry
     # no MOOD / ReplayGain tags) and switched on in the dedicated cases below.
     "grade_check_mood": False,

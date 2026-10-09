@@ -108,7 +108,7 @@ function Opt({ checked, onChange, label, hint, danger }: {
   danger?: boolean;
 }) {
   return (
-    <label className="flex items-start gap-2 mt-2 text-xs text-zinc-300 cursor-pointer">
+    <label className="flex items-start gap-2 mt-1.5 text-xs text-zinc-300 cursor-pointer">
       <input
         type="checkbox"
         className="mt-0.5"
@@ -170,6 +170,11 @@ export interface ExportOptions {
   target: "server" | "zip";
   /** The server's equalizer presets and imported profiles. */
   eq: ExportEq | undefined;
+  /** Drops an equalizer id that names no profile: clears the form's
+   *  `eq_profile` and, when the SAVED DEFAULT still names the same profile,
+   *  rewrites the default too — otherwise reopening the menu would put the
+   *  dead id straight back and the warning would never clear. */
+  clearEqProfile: (staleId: string) => void;
   /** The source tab this surface is on and its setter — the Export page's own
    *  state, so a saved config can carry the tab it was saved from and put it
    *  back. The per-page export dialog has no tabs (its selection is the page it
@@ -350,11 +355,27 @@ export function useExportOptions(paths: string[], seconds = 0, page?: ExportPage
     toast("Form reset to the saved defaults");
   };
 
+  /** Drop a profile id the catalogue no longer holds. The FORM always lets go
+   *  of it; the SAVED DEFAULT is rewritten only when it is the very profile
+   *  that is missing, so the stale id cannot come back on the next open while
+   *  an unrelated edit the user has not saved stays unsaved. */
+  const clearEqProfile = (staleId: string) => {
+    setForm((prev) => ({ ...(prev ?? savedDefaults ?? BLANK_FORM), eq_profile: "" }));
+    if (savedDefaults?.eq_profile === staleId) {
+      api.exportSaveDefaults({ ...savedDefaults, eq_profile: "" })
+        .then(() => {
+          queryClient.invalidateQueries({ queryKey: ["exportDefaults"] });
+          queryClient.invalidateQueries({ queryKey: ["config"] });
+        })
+        .catch((err) => toast.error(String(err)));
+    }
+  };
+
   return {
     f, set, setMany, customValue, setCustomValue, busy, spec, kbps, estBytes,
     specs, structures, fileFamilies: fileMenu?.families ?? [],
     drives, selectedDrive, overCapacity, target, eq, paths,
-    seconds, run, cancel, cancelling, saveDefaults, resetDefaults,
+    seconds, run, cancel, cancelling, saveDefaults, resetDefaults, clearEqProfile,
     sourceKind: page?.sourceKind,
     setSourceKind: page?.setSourceKind,
     refreshDrives: () => void queryClient.invalidateQueries({ queryKey: ["exportDrives"] }),
@@ -379,7 +400,7 @@ export function ExportOptionsPanel({ e, hint }: {
   hint?: ReactNode;
 }) {
   const queryClient = useQueryClient();
-  const { f, set, setMany, spec, kbps, estBytes, seconds, paths, busy, target, eq, cancelling } = e;
+  const { f, set, setMany, spec, kbps, estBytes, seconds, paths, busy, target, eq, cancelling, clearEqProfile } = e;
   const zip = target === "zip";
   const eqSelected = [...(eq?.presets ?? []), ...(eq?.profiles ?? [])].find((p) => p.id === f.eq_profile);
   /* The id the form carries but the catalogue does not: a profile that was
@@ -391,12 +412,14 @@ export function ExportOptionsPanel({ e, hint }: {
   const [importing, setImporting] = useState(false);
   const removeProfile = async () => {
     if (!f.eq_profile) return;
+    const id = f.eq_profile;
     try {
-      await api.exportEqDelete(f.eq_profile);
-      // The removal was deliberate, so the form lets go of the id too; a SAVED
-      // config that still names it will say the profile is gone when it loads.
-      set("eq_profile", "");
-      toast(`Removed the equalizer profile “${f.eq_profile}”`);
+      await api.exportEqDelete(id);
+      // The removal was deliberate, so the form lets go of the id too — and so
+      // does a saved default that still names it, or reopening the menu would
+      // greet the user with "profile missing" for a profile they just removed.
+      clearEqProfile(id);
+      toast(`Removed the equalizer profile “${id}”`);
       void queryClient.invalidateQueries({ queryKey: ["exportEq"] });
       // ...and the saved configs, whose rows carry whether the profile they
       // name is still there: a cached list would keep saying "fine" about a
@@ -437,11 +460,38 @@ export function ExportOptionsPanel({ e, hint }: {
 
   return (
     <div className="min-w-0">
-      {hint && <div className="text-[11px] text-zinc-500 mb-3">{hint}</div>}
+      {hint && <div className="text-[11px] text-zinc-500 mb-2 leading-snug">{hint}</div>}
 
-      <div className="text-xs font-bold text-zinc-300 mb-2">Destination</div>
+      {/* A saved default (or the form) can name an equalizer profile the server
+          no longer holds. The refusal is real — a run rejects the id rather
+          than exporting a different curve — so the fix has to be reachable
+          WITHOUT hunting the Equalizer select far down the menu: this says
+          which profile is gone, right where the form opens, and clears it in
+          one click (from the form AND the saved default, so it cannot return). */}
+      {missingEq && (
+        <div className="flex items-start gap-2 mb-2 text-[11px] text-amber-300 border border-amber-500/30 bg-amber-500/10 rounded-md p-2">
+          <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+          <div className="min-w-0 flex-1">
+            <span>
+              The equalizer profile “{f.eq_profile}” is not on this server any
+              more — it was deleted or renamed. An export that names it is
+              refused rather than exporting a different curve. Pick another
+              profile under Audio processing, or clear it here.
+            </span>
+            <button
+              className="btn-ghost !py-0.5 !px-1.5 text-[10px] mt-1 tap"
+              onClick={() => clearEqProfile(f.eq_profile)}
+              title="Clear the missing equalizer profile and drop it from the saved defaults"
+            >
+              <Trash2 className="h-3 w-3" /> Clear the equalizer
+            </button>
+          </div>
+        </div>
+      )}
+
+      <div className="text-xs font-bold text-zinc-300 mb-1">Destination</div>
       <Segmented value={target} onChange={(v) => set("target", v)} options={DESTINATIONS} className="mb-2" />
-      <div className="text-[11px] text-zinc-500 mb-2">
+      <div className="text-[11px] text-zinc-500 mb-2 leading-snug">
         {zip
           ? "The server builds a .zip and this browser saves it to its downloads folder. Nothing lands on the server, so there is no drive or subfolder to choose."
           : "Written to a drive this machine can see; a re-run skips what is already there."}
@@ -471,7 +521,7 @@ export function ExportOptionsPanel({ e, hint }: {
               <span className="sr-only">Rescan drives</span>
             </button>
           </div>
-          <label className="flex items-center gap-2 mt-2 text-xs text-zinc-300">
+          <label className="flex items-center gap-2 mt-1.5 text-xs text-zinc-300">
             <span className="shrink-0">Subfolder</span>
             {/* Capped: this holds a folder name, and on the Export page's wide
                 column a `flex-1` box would be 600 px of empty field beside a
@@ -484,7 +534,7 @@ export function ExportOptionsPanel({ e, hint }: {
         </>
       )}
 
-      <div className="text-[11px] text-zinc-500 mt-2 flex items-center gap-2 flex-wrap">
+      <div className="text-[11px] text-zinc-500 mt-1.5 flex items-center gap-2 flex-wrap">
         <span>
           {paths.length} track{paths.length === 1 ? "" : "s"} selected
           {seconds > 0 ? ` · ${fmtDuration(seconds)}` : ""}
@@ -496,7 +546,7 @@ export function ExportOptionsPanel({ e, hint }: {
         )}
       </div>
       {!zip && e.overCapacity && (
-        <div className="flex items-start gap-2 mt-2 text-[11px] text-amber-300 border border-amber-500/30 bg-amber-500/10 rounded-md p-2">
+        <div className="flex items-start gap-2 mt-1.5 text-[11px] text-amber-300 border border-amber-500/30 bg-amber-500/10 rounded-md p-2">
           <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
           <span>
             Estimated output (~{(estBytes! / 1024 ** 3).toFixed(2)} GB) may not fit this drive
@@ -505,8 +555,8 @@ export function ExportOptionsPanel({ e, hint }: {
         </div>
       )}
 
-      <div className="text-xs font-bold text-zinc-300 mt-4 mb-2">Format</div>
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+      <div className="text-xs font-bold text-zinc-300 mt-3 mb-1">Format</div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-2 gap-y-1.5">
         <label className="text-[10px] text-zinc-500 flex flex-col gap-1">
           Codec
           <select
@@ -554,7 +604,7 @@ export function ExportOptionsPanel({ e, hint }: {
       </div>
       {/* custom bitrate / q — the server clamps to the same range again */}
       {spec?.custom && f.quality === CUSTOM && (
-        <label className="flex flex-wrap items-center gap-2 mt-2 text-[10px] text-zinc-500">
+        <label className="flex flex-wrap items-center gap-2 mt-1.5 text-[10px] text-zinc-500">
           {spec.custom.mode === "q"
             ? `Custom q (${spec.custom.min}–${spec.custom.max})`
             : `Custom bitrate (${spec.custom.min}–${spec.custom.max} kbps)`}
@@ -569,7 +619,7 @@ export function ExportOptionsPanel({ e, hint }: {
           {kbps !== null && <span className="text-zinc-600">~{kbps} kbps effective</span>}
         </label>
       )}
-      <label className="text-[10px] text-zinc-500 flex flex-col gap-1 mt-2">
+      <label className="text-[10px] text-zinc-500 flex flex-col gap-1 mt-1.5">
         Folder structure
         <select
           className="input !py-1 text-xs w-full min-w-0 tap"
@@ -588,7 +638,7 @@ export function ExportOptionsPanel({ e, hint }: {
       </label>
       {f.structure === CUSTOM_STRUCTURE ? (
         <>
-          <label className="text-[10px] text-zinc-500 flex flex-col gap-1 mt-2">
+          <label className="text-[10px] text-zinc-500 flex flex-col gap-1 mt-1.5">
             Custom structure
             <input
               className="input font-mono !py-1 text-xs min-w-0 tap"
@@ -629,7 +679,7 @@ export function ExportOptionsPanel({ e, hint }: {
       )}
 
       {/* ---- artwork, tags, extras -------------------------------- */}
-      <div className="text-xs font-bold text-zinc-300 mt-4 mb-2">Artwork &amp; tags</div>
+      <div className="text-xs font-bold text-zinc-300 mt-3 mb-1">Artwork &amp; tags</div>
       <Opt
         checked={f.embed_covers}
         onChange={(v) => set("embed_covers", v)}
@@ -637,7 +687,7 @@ export function ExportOptionsPanel({ e, hint }: {
         hint="The album's cover.* (or the file's own art when the folder has none) is embedded, re-encoded at the quality below. Off leaves art exactly as the source had it."
       />
       {f.embed_covers && (
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-1 pl-6">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-2 gap-y-1.5 mt-1 pl-6">
           <label className="text-[10px] text-zinc-500 flex flex-col gap-1">
             Embedded JPEG quality — {f.embed_cover_jpeg_quality}
             <input
@@ -667,7 +717,7 @@ export function ExportOptionsPanel({ e, hint }: {
         label="Write only the canonical tag set"
         hint="Transcodes drop the source's leftover frames instead of carrying them along beside the tags this app writes."
       />
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-2 items-end">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-2 gap-y-1.5 mt-1.5 items-end">
         <label className="text-[10px] text-zinc-500 flex flex-col gap-1">
           ID3 version (MP3)
           <select
@@ -690,7 +740,7 @@ export function ExportOptionsPanel({ e, hint }: {
           the export's words: what travels INSIDE the file, beside it, or both.
           The default follows the library, so an export writes lyrics the way
           the app keeps them until the user says otherwise. */}
-      <label className="text-[10px] text-zinc-500 flex flex-col gap-1 mt-2 max-w-xs">
+      <label className="text-[10px] text-zinc-500 flex flex-col gap-1 mt-1.5 max-w-xs">
         Lyrics
         <select
           className="input !py-1 text-xs min-w-0 tap"
@@ -706,8 +756,8 @@ export function ExportOptionsPanel({ e, hint }: {
       {/* ---- audio processing ------------------------------------- */}
       {/* The section the applied-audio work lives in: what a run does to the
           SOUND, as opposed to what it writes beside it. */}
-      <div className="text-xs font-bold text-zinc-300 mt-4 mb-2">Audio processing</div>
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+      <div className="text-xs font-bold text-zinc-300 mt-3 mb-1">Audio processing</div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-2 gap-y-1.5">
         <label className="text-[10px] text-zinc-500 flex flex-col gap-1">
           ReplayGain
           <select
@@ -730,7 +780,13 @@ export function ExportOptionsPanel({ e, hint }: {
             aria-labelledby="eq-profile-label"
             value={f.eq_profile}
             onChange={(ev) => set("eq_profile", ev.target.value)}
-            disabled={!eq || (!eq.presets.length && !eq.profiles.length)}
+            title={missingEq
+              ? "This profile is gone — pick another, “No equalizer”, or clear it with the button at the top"
+              : "The equalizer curve an export bakes into the audio"}
+            /* Enabled whenever there is a stale id to move OFF, even if the
+               catalogue has not loaded (or failed): a disabled select would
+               leave the missing-profile warning with no control to fix it. */
+            disabled={!missingEq && (!eq || (!eq.presets.length && !eq.profiles.length))}
           >
             <option value="">No equalizer</option>
             {/* A saved config (or a saved default) can name a profile that has
@@ -782,7 +838,14 @@ export function ExportOptionsPanel({ e, hint }: {
             : "No ReplayGain measurement or tags."}
         {f.eq_profile && " The equalizer is applied to the exported audio."}
         {missingEq
-          ? " This equalizer profile is not on this server any more — pick another profile or “No equalizer”; an export that names it is refused rather than exporting a different curve."
+          ? (
+            <span className="text-amber-300">
+              {" "}This equalizer profile is not on this server any more —
+              pick another profile or “No equalizer”, or use “Clear the
+              equalizer” at the top; an export that names it is refused rather
+              than exporting a different curve.
+            </span>
+          )
           : eqSelected?.errors?.length
             ? ` This profile has ${eqSelected.errors.length} band line(s) this server cannot read — it is refused at import and by a run, rather than applying a different curve.`
             : eqSelected?.empty && importedEq
@@ -800,8 +863,8 @@ export function ExportOptionsPanel({ e, hint }: {
           engine's own copy pass are one vocabulary, so a tick the run would
           ignore cannot be drawn, and what the run reports as left behind is
           exactly what was not ticked. */}
-      <div className="text-xs font-bold text-zinc-300 mt-4 mb-2">What gets copied</div>
-      <div className="text-[11px] text-zinc-500 mb-2">
+      <div className="text-xs font-bold text-zinc-300 mt-3 mb-1">What gets copied</div>
+      <div className="text-[11px] text-zinc-500 mb-1.5">
         Everything an export writes, family by family. A family you leave
         unticked stays in the library and is named in the run report — never
         dropped in silence.
@@ -809,17 +872,22 @@ export function ExportOptionsPanel({ e, hint }: {
       {!e.fileFamilies.length && (
         <div className="text-[11px] text-zinc-600">Loading the file families…</div>
       )}
-      {e.fileFamilies.map((fam) => (
-        <Opt
-          key={fam.v}
-          checked={f.copy_files.includes(fam.v)}
-          onChange={(on) => toggleFamily(fam.v, on)}
-          label={fam.label}
-          hint={fam.hint}
-        />
-      ))}
+      {/* Two columns from `sm`: eight one-line checkboxes stacked full width
+          was the single tallest block in the menu, and each row already fits
+          in half the dialog's own width. */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-3">
+        {e.fileFamilies.map((fam) => (
+          <Opt
+            key={fam.v}
+            checked={f.copy_files.includes(fam.v)}
+            onChange={(on) => toggleFamily(fam.v, on)}
+            label={fam.label}
+            hint={fam.hint}
+          />
+        ))}
+      </div>
       {!f.copy_files.length && (
-        <div className="flex items-start gap-2 mt-2 text-[11px] text-amber-300 border border-amber-500/30 bg-amber-500/10 rounded-md p-2">
+        <div className="flex items-start gap-2 mt-1.5 text-[11px] text-amber-300 border border-amber-500/30 bg-amber-500/10 rounded-md p-2">
           <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
           <span>
             Nothing is ticked, so there would be no files to copy. An export
@@ -830,7 +898,7 @@ export function ExportOptionsPanel({ e, hint }: {
       )}
 
       {/* ---- files written beside the audio ----------------------- */}
-      <div className="text-xs font-bold text-zinc-300 mt-4 mb-2">Files written beside the audio</div>
+      <div className="text-xs font-bold text-zinc-300 mt-3 mb-1">Files written beside the audio</div>
       <Opt
         checked={f.manifest}
         onChange={(v) => set("manifest", v)}
@@ -843,7 +911,7 @@ export function ExportOptionsPanel({ e, hint }: {
         label="Verify every written file"
         hint="Re-opens each export and proves it parses with the source's duration before reporting success."
       />
-      <label className="flex flex-wrap items-center gap-2 mt-2 text-xs text-zinc-300">
+      <label className="flex flex-wrap items-center gap-2 mt-1.5 text-xs text-zinc-300">
         <span className="shrink-0">Parallel workers</span>
         {/* A `.input` in a wrapping flex row is `w-full`, so on the Export
             page's wide column this one select claimed the whole line for a
@@ -864,7 +932,7 @@ export function ExportOptionsPanel({ e, hint }: {
           so the switch is not drawn there at all. */}
       {!zip && (
         <>
-          <div className="text-xs font-bold text-zinc-300 mt-4 mb-2">Sync</div>
+          <div className="text-xs font-bold text-zinc-300 mt-3 mb-1">Sync</div>
           <Opt
             checked={f.prune}
             onChange={(v) => set("prune", v)}
@@ -880,7 +948,7 @@ export function ExportOptionsPanel({ e, hint }: {
       {/* The row is a template either way, so the two small buttons keep their
           places as a run starts and ends; Cancel takes a column of its own
           only while there is a run to cancel. */}
-      <div className={`grid grid-cols-2 gap-2 mt-4 ${busy ? "sm:grid-cols-[2fr_auto_1fr_auto]" : "sm:grid-cols-[2fr_1fr_auto]"}`}>
+      <div className={`grid grid-cols-2 gap-2 mt-3 ${busy ? "sm:grid-cols-[2fr_auto_1fr_auto]" : "sm:grid-cols-[2fr_1fr_auto]"}`}>
         <button className="btn-primary text-xs col-span-2 sm:col-span-1 tap" disabled={busy || !paths.length} onClick={e.run}>
           <HardDriveDownload className="h-3.5 w-3.5" />
           {busy
@@ -920,7 +988,7 @@ export function ExportOptionsPanel({ e, hint }: {
           }}
         />
       )}
-      <div className="text-[10px] text-zinc-600 mt-2">
+      <div className="text-[10px] text-zinc-600 mt-1.5">
         {f.codec === "copy"
           ? f.replaygain_mode === "apply" || f.eq_profile
             /* A copy run that also processes the audio is no longer a copy of
@@ -1032,8 +1100,8 @@ function SavedConfigs({ e }: { e: ExportOptions }) {
   const updating = !!picked && picked.name === name.trim();
 
   return (
-    <div className="mt-4">
-      <div className="text-xs font-bold text-zinc-300 mb-2">Saved configs</div>
+    <div className="mt-3">
+      <div className="text-xs font-bold text-zinc-300 mb-1">Saved configs</div>
       <div className="flex flex-wrap items-center gap-2">
         <select
           className="input !py-1 text-xs min-w-0 max-w-xs tap"

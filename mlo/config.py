@@ -163,7 +163,7 @@ AUDIO_TAG_FAMILIES = [
     "DYNAMIC_RANGE",  # DYNAMIC RANGE + ALBUM DYNAMIC RANGE (in-process, mlo/dr)
     "MEDIA_SOURCE",   # MEDIA + SOURCE (Digital Media normalization)
     "INSTRUMENTAL",   # INSTRUMENTAL (lyrics presence)
-    "ADVISORY",       # ITUNESADVISORY + ALBUMITUNESADVISORY
+    "ADVISORY",       # ITUNESADVISORY (the per-track advisory)
     "LYRICS",         # embedded LYRICS tag (and .lrc sidecar)
     "BPM",            # BPM (Key & BPM analysis)
     "INITIALKEY",     # INITIALKEY (Key & BPM analysis)
@@ -187,7 +187,6 @@ _TAG_TO_FAMILY = {
     "SOURCE": "MEDIA_SOURCE",
     "INSTRUMENTAL": "INSTRUMENTAL",
     "ITUNESADVISORY": "ADVISORY",
-    "ALBUMITUNESADVISORY": "ADVISORY",
     "LYRICS": "LYRICS",
     "UNSYNCEDLYRICS": "LYRICS",
     "BPM": "BPM",
@@ -214,13 +213,14 @@ def _audio_tag_family(tag_name):
     return _TAG_TO_FAMILY.get(name)
 
 
-# The two ADVISORY tags answer to DIFFERENT switches, because different things
-# write them: `ALBUMITUNESADVISORY` is script 8's derivation — "Auto Album
-# Advisory", derived from the per-track values — while `ITUNESADVISORY` is what
-# the advisory FETCH resolves from the providers (script 8 only ever zeroes it
-# for an instrumental). One family switch for both meant that turning the
-# derivation off silently disabled the explicit "Fetch advisory rating" action,
-# and the refused run replied exactly like "no provider knew this track".
+# ITUNESADVISORY is the one ADVISORY tag, and it answers to its OWN switch:
+# the advisory FETCH resolves it from the providers, and script 8 only ever
+# zeroes it for an instrumental track. A family switch of its own would mean a
+# second name for the same thing, so the family defers to the tag's switch.
+# (ALBUMITUNESADVISORY is deliberately NOT a tag this app knows any more: the
+# album-level Apple advisory is not part of its vocabulary, so one is excess —
+# see mlo.audio.TAG_MAP / mlo.grader.TAG_ALLOWLIST — and the strip passes
+# remove it.)
 _TAG_WRITE_SWITCH = {"ITUNESADVISORY": "advisory_auto_fetch"}
 
 # family -> the config key that is its master switch (None where two keys or a
@@ -234,7 +234,7 @@ _FAMILY_GLOBAL = {
     "DYNAMIC_RANGE": "write_dynamic_range_tags",
     "MEDIA_SOURCE": "normalize_media_source",
     "INSTRUMENTAL": None,  # gated by two keys; handle below
-    "ADVISORY": "auto_advisory",
+    "ADVISORY": None,      # ITUNESADVISORY's own switch handles it
     "GENRE": "genre_autofill",
     "MOOD": "mood_enabled",
     # ENERGY is written by the same analysis pass as MOOD, so it answers
@@ -602,7 +602,6 @@ DEFAULT_CONFIG = {
     # script 11 to normalize them to MKV. Remuxed MKV/MP4 videos are fine.
     "grade_check_raw_video": True,
     "grade_check_mb_links": True,   # MusicBrainz release (or group) link required
-    "grade_check_rym_links": True,  # RateYourMusic release link required
     # Lossless but uncompressed sources (WAV/AIFF/APE/WV/SHN) fail grading —
     # script 3 converts them to FLAC.
     "grade_check_lossless_source": True,
@@ -823,7 +822,6 @@ DEFAULT_CONFIG = {
     "lossless_remove_original": True,
 
     # Auto Tagging (script 8)
-    "auto_advisory": True,
     "auto_instrumental": True,
     # ON by default: a track with no words cannot be explicit, so an
     # instrumental's advisory is 0. Turn it off to leave an instrumental's
@@ -1160,8 +1158,8 @@ DEFAULT_CONFIG = {
     # album (1 req/s, and cached for 30 days like every other RYM page) — the
     # fallback is skipped entirely when the live page can answer.
     "rym_archive_fallback": True,
-    # Auto-resolve RateYourMusic album + artist links during import; off =
-    # links are only ever set by hand in the link editor.
+    # Whether the RateYourMusic link resolver may ask rateyourmusic.com (the
+    # Sources probe); off = it answers without making a request.
     "rym_links_auto": True,
     # Advisory (ITUNESADVISORY) auto-fetch on import: EVERY applicable source
     # is asked in one pass and cross-referenced — Deezer by ISRC, Spotify by

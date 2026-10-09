@@ -83,7 +83,7 @@ from mlo import naming                                         # noqa: E402
 from mlo.config import load_config                             # noqa: E402
 from server import api_query as aq                             # noqa: E402
 from server import artcache, pending_albums, tagcache           # noqa: E402
-from server import integrations as intg_mod                    # noqa: E402
+from mlo import paths as mlo_paths                            # noqa: E402
 from server import library as lib_mod                          # noqa: E402
 from server import main as mlo_main                            # noqa: E402
 
@@ -113,12 +113,6 @@ def fake_fetch_art(url, **kwargs):
 
 
 artcache.fetch_art = fake_fetch_art
-# The add-time content pre-fetch is off in `create` below, but the links
-# resolver is reached by the metadata step a caller could still run: stub it so
-# nothing here can open a socket.
-intg_mod.rym_links = lambda artist="", album="", cfg=None, mbid=None: {
-    "album": "https://rateyourmusic.com/release/album/a/b/",
-    "artist": "https://rateyourmusic.com/artist/a", "note": "stub"}
 
 RELEASE = {
     "id": "11111111-1111-1111-1111-111111111111",

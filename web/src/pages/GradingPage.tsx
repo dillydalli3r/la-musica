@@ -80,10 +80,9 @@ const GROUPS: Group[] = [
   {
     id: "links",
     title: "Identity links",
-    desc: "The two release-level identity links, graded per track.",
+    desc: "The release-level MusicBrainz identity link, graded per track.",
     keys: [
       "grade_check_mb_links",
-      "grade_check_rym_links",
     ],
   },
   {
@@ -192,7 +191,6 @@ const CHECK_DESC: Record<string, string> = {
   grade_check_accuraterip: "A .accurip whose verdict is not REAL marks the album's AUDIT FAKE (and each affected track red) — grading itself is reserved to tagging, so this key never costs a grade point. Turn on 'Require audit tag' for that verdict to fail the album.",
   grade_check_log_grade: "LOG_GRADE tag must exist and be 0–100.",
   grade_check_mb_links: "The MusicBrainz release (or its release group) must be tagged.",
-  grade_check_rym_links: "The RateYourMusic release page URL must be tagged.",
   grade_check_cover: "The album must have cover art meeting the configured size, squareness and crop rules.",
   grade_check_cover_crop: "The cover's width/height must be square within cover_crop_threshold — an aspect-ratio test, not crop detection (issue: 'Cover aspect ratio WxH not square').",
   grade_check_sidecar_cover: "Sidecar covers (01 - Song.jpg) must meet the same cover rules.",
@@ -375,7 +373,7 @@ export default function GradingPage() {
       "grade_check_lyrics_blank_lines", "grade_check_cue_blank_lines",
       "grade_check_filename_case", "grade_check_ext_case", "grade_check_excess_tags",
       "grade_check_alias_excess",
-      "grade_check_mb_links", "grade_check_rym_links",
+      "grade_check_mb_links",
       // content checks — nothing breaks if the library ships without them
       "grade_check_replaygain",
     ];

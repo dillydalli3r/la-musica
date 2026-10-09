@@ -74,10 +74,9 @@ const albumAt = (n) => served.artists.flatMap((a) => a.albums)[n];
 const explicitByTracks = albumAt(0);
 const cleanEverywhere = albumAt(1);
 explicitByTracks.meta = { ...(explicitByTracks.meta || {}), ITUNESADVISORY: "0" };
-delete explicitByTracks.meta.ALBUMITUNESADVISORY;
 for (const t of explicitByTracks.tracks ?? []) t.tags = { ...(t.tags || {}), ITUNESADVISORY: "0" };
 if (explicitByTracks.tracks?.[0]) explicitByTracks.tracks[0].tags.ITUNESADVISORY = "1";
-cleanEverywhere.meta = { ...(cleanEverywhere.meta || {}), ITUNESADVISORY: "0", ALBUMITUNESADVISORY: "0" };
+cleanEverywhere.meta = { ...(cleanEverywhere.meta || {}), ITUNESADVISORY: "0" };
 for (const t of cleanEverywhere.tracks ?? []) t.tags = { ...(t.tags || {}), ITUNESADVISORY: "0" };
 const titleOf = (al) => al.meta?.ALBUM || al.path.split("/").pop();
 

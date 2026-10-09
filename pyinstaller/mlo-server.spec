@@ -13,7 +13,7 @@ import os
 from pathlib import Path
 ROOT = Path(SPECPATH).resolve().parent
 
-from PyInstaller.utils.hooks import collect_all
+from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 
 block_cipher = None
@@ -39,6 +39,19 @@ hiddenimports = [
 # console scripts with — which a hidden-import list alone would drop.
 pip_datas, pip_binaries, pip_hiddenimports = collect_all("pip")
 hiddenimports += pip_hiddenimports
+
+# Every script module travels, not just the ones PyInstaller can SEE. The
+# script registry (server/script_runners.RUNNERS) resolves an optional runner by
+# NAME — `_optional("mlo.taghygiene", "run_tag_hygiene")` is a string, invisible
+# to static analysis — and mlo/__init__ re-exports its entry points through
+# importlib for the same reason. A frozen backend that only carried the
+# statically-imported modules answered "runner 23 not available" for Optimize
+# tags (mlo.taghygiene, never imported any other way), and any future
+# name-resolved module would fail the same way. collect_submodules packs the
+# whole engine and API, so a script the source checkout can run the desktop
+# build can run too.
+hiddenimports += collect_submodules("mlo")
+hiddenimports += collect_submodules("server")
 
 extra_datasets = list(pip_datas)
 

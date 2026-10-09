@@ -326,7 +326,6 @@ def check_autotag_no_reopen_after_fix(tmp):
     try:
         autotag.run_auto_tagging(cfg(
             music_folder=lib,
-            auto_advisory=False,
             auto_instrumental=False,
             mood_enabled=False,
             genre_autofill=True,
@@ -1627,7 +1626,7 @@ def main():
         ("script 13 Fetch lyrics (lanes)", check_lyrics_fetch_concurrency),
         ("script 13 Fetch lyrics (fills only)", check_lyrics_fetch_never_replaces),
         ("script 9  AccurateRip (lanes)", check_accurip_album_lanes),
-        ("script 20 Scan library layout (lanes)", check_layout_scan_lanes),
+        ("script 20 Optimize library layout (lanes)", check_layout_scan_lanes),
         ("script 1  Format lyrics (one open)", check_lyrics_one_open_per_track),
         ("script 1  Format lyrics (album pass reads)", check_lyrics_album_pass_still_reads),
         ("script 10 Format all (cover cache)", check_format_all_cover_prepared_once),

@@ -3,7 +3,7 @@
 Builds the artist -> album -> track tree from `mlo.grader` output and
 enriches every track with sortable metadata (audio tech info + tags),
 so the frontend can sort/filter by grade, audit, genre, year, advisory,
-instrumental, MBIDs, RYM links, duration, bitrate, sample rate, etc.
+instrumental, MBIDs, duration, bitrate, sample rate, etc.
 """
 import os
 import re
@@ -37,7 +37,6 @@ TRACK_TAGS = [
     "MUSICBRAINZ_ARTISTID", "MUSICBRAINZ_TRACKID",
     "MUSICBRAINZ_RELEASEGROUPID", "MUSICBRAINZ_RELEASETRACKID",
     "MUSICBRAINZ_WORKID",
-    "RATEYOURMUSIC_ALBUM", "RATEYOURMUSIC_TRACK", "RATEYOURMUSIC_ARTIST",
     "ALBUMARTISTSORT", "ORIGINALDATE", "RELEASETYPE", "RELEASESTATUS",
     "RELEASECOUNTRY", "CATALOGNUMBER", "LABEL", "BARCODE", "SCRIPT",
     # MusicBrainz's other-language names (mlo.autotag writes them), read here
@@ -67,10 +66,10 @@ TRACK_TAGS = [
 # Tags read from the first track to represent album-level metadata.
 ALBUM_LEVEL_TAGS = [
     "ALBUM", "ALBUMARTIST", "ARTIST", "DATE", "ORIGINALDATE", "ORIGINALYEAR",
-    "ITUNESADVISORY", "ALBUMITUNESADVISORY",
+    "ITUNESADVISORY",
     "MUSICBRAINZ_ALBUMID", "MUSICBRAINZ_ALBUMARTISTID",
     "MUSICBRAINZ_RELEASEGROUPID",
-    "RATEYOURMUSIC_ALBUM", "MEDIA", "CATALOGNUMBER", "LABEL", "BARCODE",
+    "MEDIA", "CATALOGNUMBER", "LABEL", "BARCODE",
     "RELEASETYPE", "RELEASESTATUS", "RELEASECOUNTRY", "SCRIPT",
     # Album-level alias facts: one release states one album name and one
     # credited artist, so the first readable track speaks for the album (the
@@ -511,11 +510,9 @@ def _pending_album_row(folder, root):
                            if row["cover_file"] else "")
     row["album_artist"] = str(info.get("artist") or "")
     meta = {t: None for t in ALBUM_LEVEL_TAGS}
-    # The links and the page content the ADD pre-fetched (`server.imports
-    # .prefetch_album`): they are on the marker because a framework album has
-    # no tags to carry them yet, and the album's page shows them from the
-    # moment the album is added.
-    links = info.get("links") or {}
+    # The page content the ADD pre-fetched (`server.imports.prefetch_album`):
+    # it is on the marker because a framework album has no tags to carry it
+    # yet, and the album's page shows it from the moment the album is added.
     meta.update({
         "ALBUM": info.get("title") or None,
         "ALBUMARTIST": info.get("artist") or None,
@@ -524,8 +521,6 @@ def _pending_album_row(folder, root):
         "MUSICBRAINZ_ALBUMID": info.get("release_id") or None,
         "MUSICBRAINZ_RELEASEGROUPID": info.get("release_group_id") or None,
         "RELEASETYPE": info.get("release_type") or None,
-        "RATEYOURMUSIC_ALBUM": links.get("album") or None,
-        "RATEYOURMUSIC_ARTIST": links.get("artist") or None,
     })
     # THE RELEASE'S OWN FACTS, while it is still arriving (the owner's ask:
     # an album being imported must not read as a blank cell). The pressing's
@@ -550,17 +545,15 @@ def _pending_album_row(folder, root):
         row["media"] = identity["MEDIA"]
     row["meta"] = meta
     for key, val in (("ALBUM", info.get("title")), ("ALBUMARTIST", info.get("artist")),
-                     ("ARTIST", info.get("artist")), ("DATE", info.get("year")),
-                     ("RATEYOURMUSIC_ALBUM", links.get("album")),
-                     ("RATEYOURMUSIC_ARTIST", links.get("artist"))):
+                     ("ARTIST", info.get("artist")), ("DATE", info.get("year"))):
         if key in row["album_values"]:
             row["album_values"][key] = str(val or "").strip()
     # The release's own tracklist, with nothing on disk matching it: every
     # entry is missing, which is exactly what the album page should show.
     _add_expected_tracks(row, folder)
     # What the ADD already fetched for this folder (see `server.imports
-    # .prefetch_album`): the cover candidates and the RYM links are listed, so
-    # a reader can see the page content exists before a byte of audio does.
+    # .prefetch_album`): the cover candidates are listed, so a reader can see
+    # the page content exists before a byte of audio does.
     row["prefetched"] = info.get("prefetched") or None
     return row
 

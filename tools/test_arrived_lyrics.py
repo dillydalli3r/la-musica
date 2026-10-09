@@ -143,7 +143,7 @@ def canonical(text):
 ANSWER = {"synced": "", "plain": ""}
 
 _real = {n: getattr(imports, n) for n in
-         ("stamp_rym_links", "fetch_advisories", "fetch_instrumentals",
+         ("fetch_advisories", "fetch_instrumentals",
           "run_cover_step", "_stamp_release")}
 _real_chain = script_runners.run_chain
 _real_resolve = None
@@ -205,7 +205,6 @@ def stub_step(**payload):
 
 def install_stubs():
     global _real_resolve, _real_absent
-    imports.stamp_rym_links = stub_step(album=None, artist=None, note="")
     imports.fetch_advisories = stub_step(updated=0, values={}, sources={}, answers={})
     imports.fetch_instrumentals = stub_step(updated=0, values={}, evidence={})
     imports.run_cover_step = stub_step(fetched=False, applied={}, source=None,

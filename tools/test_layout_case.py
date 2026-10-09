@@ -14,9 +14,11 @@ pins the three things that are easy to get wrong:
     name that is not actually correct),
   * the scan alone moves nothing.
 
-The second half covers the apply phase (`POST /api/library/layout/apply`,
-script 20): the canonical spelling is restored on an artist folder, an album
-folder and a file; audio loose in an artist folder is moved into the album
+The second half covers the apply phase (script 20,
+`mlo.layout.run_optimize_layout`, driving the engine helpers the removed panel
+routes also reached — `mlo.layout.apply_fixes`, `mlo.layout.empty_artist`,
+`mlo.paths.trash_path`): the canonical spelling is restored on an artist
+folder, an album folder and a file; audio loose in an artist folder is moved into the album
 folder its own tags name; an album-less artist folder goes to the Trash with
 its origin recorded; `layout_apply: false` leaves everything alone; and a run
 with targets touches only the target's subtree.
@@ -317,10 +319,15 @@ ok("ARTIST_EMPTY" not in [i["code"] for i in g2["issues"]] and g2["checks"] == 0
    f"album-level checks run on it ({g2['checks']} checks, {[i['code'] for i in g2['issues']]})")
 
 print("== removing an empty artist goes through the Trash ==")
+# The panel's route is gone; the engine helpers it called are the ones script
+# 20's apply reaches too. `empty_artist` is the guard (it re-derives the
+# finding instead of trusting the caller) and `mlo.paths.trash_path` is the
+# removal — a move into the app's Trash, never a delete.
+from mlo import layout as layoutmod  # noqa: E402
 BIN = os.path.join(MF, ".mlo", "trash")
-r = _client.post("/api/library/layout/remove-empty-artist", json={"path": SOLO})
-ok(r.status_code == 200, f"the route accepts it ({r.status_code}: {r.text[:160]})")
-dest = str(r.json().get("trash") or "")
+ok(layoutmod.empty_artist(SOLO),
+   "the engine's own guard agrees the folder is an empty artist")
+dest = pathmod.trash_path(SOLO, MF)
 ok(not os.path.exists(SOLO), "the artist folder is gone from Artists/")
 ok(os.path.isdir(dest)
    and os.path.normcase(dest).startswith(os.path.normcase(BIN)),
@@ -337,13 +344,12 @@ ok(str(entries.get(os.path.basename(dest), {}).get("origin", "")).replace("\\", 
    == SOLO.replace("\\", "/"),
    f"its origin is recorded, so the Trash page can put it back ({manifest})")
 
-# The guards: the route re-derives the finding instead of trusting the panel.
+# The guards: the finding is re-derived from the folder, not taken on trust.
 for path, what in ((os.path.join(MF, "Artists", "Good"), "an artist with an album"),
                    (os.path.join(MF, "Artists", "Loose"), "a folder holding audio"),
                    (MF, "the music folder itself")):
-    r2 = _client.post("/api/library/layout/remove-empty-artist", json={"path": path})
-    ok(r2.status_code == 400,
-       f"{what} is refused, not moved ({r2.status_code}: {r2.text[:120]})")
+    ok(not layoutmod.empty_artist(path),
+       f"{what} is refused, not moved")
 ok(os.path.isdir(os.path.join(MF, "Artists", "Good"))
    and os.path.isdir(os.path.join(MF, "Artists", "Loose")),
    "and both are still on disk")
@@ -378,9 +384,10 @@ with open(os.path.join(NOBODY, "artist.jpg"), "wb") as f:
     f.write(b"x")
 
 print("== apply fixes ==")
-r = _client.post("/api/library/layout/apply")
-ok(r.status_code == 200, f"the apply route accepts it ({r.status_code}: {r.text[:160]})")
-res = r.json()
+# Script 20's apply half, driven the way the runner drives it (it scans and
+# settles in one pass): apply_fixes returns the report with one row per
+# outcome, which is what the panel used to render.
+res = layoutmod.apply_fixes({"music_folder": MF, "naming_script": SCRIPT})
 fixes = {f["path"]: f for f in res.get("fixes", [])}
 
 ok(stored(os.path.join(MF, "Artists"), "Lower")
@@ -457,9 +464,12 @@ ok("no longer" in fixes.get("Artists/Loose/1-01 Song.flac", {}).get("action", ""
    or "Loose Album" in fixes.get("Artists/Loose/1-01 Song.flac", {}).get("action", ""),
    "…and the row is about the file, not an internal path")
 
-# The removal goes to the app's Trash, with its origin recorded — never a delete.
-r = _client.post("/api/library/layout/remove-empty-artist", json={"path": NOBODY})
-ok(r.status_code == 404, f"a folder that is already gone is a 404, not a crash ({r.status_code})")
+# The removal goes to the app's Trash, with its origin recorded — never a
+# delete. The run above settled this album-less artist folder, so it is already
+# gone and the engine's guard no longer offers it as removable.
+ok(not os.path.exists(NOBODY) and not layoutmod.empty_artist(NOBODY),
+   "the album-less artist folder the run removed is gone, and is not offered "
+   "for removal a second time")
 bin_dir = os.path.join(MF, ".mlo", "trash")
 landed = [os.path.join(bin_dir, n, entry)
           for n in os.listdir(bin_dir)
@@ -475,7 +485,6 @@ ok(str(entries.get("Nobody", {}).get("origin", "")).replace("\\", "/")
    "…and the bin records where it came from, so the Trash page can restore it")
 
 print("== layout_apply off: report only ==")
-from mlo import layout as layoutmod  # noqa: E402
 
 # Two more wrong-case album folders, for this half and the target half below:
 # nothing has touched them yet, so a report-only run and a scoped run each have

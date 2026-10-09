@@ -642,11 +642,12 @@ export type TrackAnswers = Record<string, Record<string, string | number>>;
 
 /** Advisory fetch reply. `values` is what the rating is (0 clean, 1 explicit,
  *  2 clean edition) and `sources` the one provider whose answer was written;
- *  `answers` carries all of them. `albums` is the ALBUMITUNESADVISORY the
- *  server DERIVED per album folder from those values (`album_updated` counts
- *  the writes), `gated` is how many files the ADVISORY write gate refused, and
- *  `skipped` says why nothing was written when it refused every file — a fetch
- *  that wrote nothing is never a success. */
+ *  `answers` carries all of them. `albums`/`album_updated` are always empty/0
+ *  (the app no longer writes an album-level advisory tag — see
+ *  mlo.audio.TAG_MAP), kept so an older client reads the same shape. `gated`
+ *  is how many files the ADVISORY write gate refused, and `skipped` says why
+ *  nothing was written when it refused every file — a fetch that wrote nothing
+ *  is never a success. */
 export interface AdvisoryFetchResult {
   updated: number;
   values?: Record<string, string | number>;
@@ -1339,16 +1340,6 @@ export const api = {
       body: JSON.stringify(body),
     }, 300000).then(noteContainerSwap),
 
-  rymValidate: (url: string) => json<{ valid: boolean }>(`${API}/rym/validate?url=${encodeURIComponent(url)}`),
-
-  /** Verified RateYourMusic links for the link editor's auto-find. Each one is
-   *  null when RYM itself did not confirm that page and `note` says why — a
-   *  miss is a normal 200, never an error. */
-  rymResolve: (artist: string, album = "") =>
-    json<{ album: string | null; artist: string | null; note: string }>(
-      `${API}/rym/resolve?artist=${encodeURIComponent(artist)}&album=${encodeURIComponent(album)}`,
-    ),
-
   /** The cover URL. `token` (the `CoverWriteResult.token` of the write that
    *  just happened) rides along as `&v=`: a cover is replaced IN PLACE, so
    *  without it a replaced cover.jpg is the same URL — and neither the
@@ -1492,15 +1483,12 @@ export const api = {
       `${API}/import/ingest?source=${encodeURIComponent(source)}&target=${encodeURIComponent(target)}`,
       { method: "POST" }
     ),
-  /** Store the album's MB/RYM links. `rymArtistLink` is the artist page the
-   *  wizard already confirmed as an artist (server-side kind check) — it is
-   *  stamped per track as RATEYOURMUSIC_ARTIST in the same container write as
-   *  the album tags, so the Links step costs one pass over the album. */
-  importCommit: (targetDir: string, mbLink?: string, rymLink?: string, staged = false, rymArtistLink?: string) =>
+  /** Store the album's MusicBrainz release link. */
+  importCommit: (targetDir: string, mbLink?: string, staged = false) =>
     json<{ ok: boolean; changed: number }>(`${API}/import/commit`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ target_dir: targetDir, mb_link: mbLink || null, rym_link: rymLink || null, rym_artist_link: rymArtistLink || null, staged }),
+      body: JSON.stringify({ target_dir: targetDir, mb_link: mbLink || null, staged }),
     }),
   /** Record the release's full tracklist on the album, so a PARTIAL import
    *  can grey out the tracks that never came in. Empty tracks clears it. */
@@ -1541,29 +1529,6 @@ export const api = {
     json<LogReportPayload>(
       `${API}/log/report?path=${encodeURIComponent(path)}${disc ? `&disc=${disc}` : ""}`
     ),
-
-  /** Scan the library AND settle what the folder itself proves (script 20's
-   *  apply phase): wrong-case names, audio outside any album folder, and what
-   *  is excess — a stray file, an album folder with no audio, a folder inside
-   *  an album that holds no audio, a foreign root folder holding no audio, an
-   *  album-less artist folder, the old layout's leftovers — all to the Trash,
-   *  never deleted. A foreign folder that HOLDS AUDIO and a hidden folder are
-   *  reported, not moved, and every removal's reason is re-derived server-side.
-   *  Returns the rows that are left plus `fixes`, and stores the report, so the
-   *  panel and the Library page's warning stay the same answer. Long-running:
-   *  it walks and reads one file's tags per album. */
-  libraryLayoutApply: () =>
-    json<LayoutReport>(`${API}/library/layout/apply`, { method: "POST" }, 1800000),
-
-  /** Move an album-less artist folder into the app's Trash. The server
-   *  re-derives the finding, so a folder that gained an album since the scan
-   *  is refused instead of moved. */
-  libraryLayoutRemoveEmptyArtist: (path: string) =>
-    json<{ ok: boolean; trash: string }>(`${API}/library/layout/remove-empty-artist`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ path }),
-    }),
 
   namingPreview: (script: string, shortFolderNames: boolean, sample?: Record<string, string>) =>
     json<{ path: string | null; ok: boolean; error?: string }>(`${API}/naming/preview`, {

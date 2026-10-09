@@ -264,11 +264,6 @@ TAG_MAP = {
         "mp3": ("TXXX", "ITUNESADVISORY"),
         "mp4": ("freeform", "com.apple.iTunes", "ITUNESADVISORY"),
     },
-    "ALBUMITUNESADVISORY": {
-        "flac": "ALBUMITUNESADVISORY",
-        "mp3": ("TXXX", "ALBUMITUNESADVISORY"),
-        "mp4": ("freeform", "com.apple.iTunes", "ALBUMITUNESADVISORY"),
-    },
     "REPLAYGAIN_TRACK_GAIN": {
         "flac": "REPLAYGAIN_TRACK_GAIN",
         "mp3": ("TXXX", "REPLAYGAIN_TRACK_GAIN"),
@@ -616,22 +611,6 @@ TAG_MAP = {
         "flac": "MUSICBRAINZ_WORKID",
         "mp3": ("TXXX", "MusicBrainz Work Id"),
         "mp4": ("freeform", "com.apple.iTunes", "MusicBrainz Work Id"),
-    },
-    # RateYourMusic links (URLs).
-    "RATEYOURMUSIC_ALBUM": {
-        "flac": "RATEYOURMUSIC_ALBUM",
-        "mp3": ("TXXX", "RATEYOURMUSIC_ALBUM"),
-        "mp4": ("freeform", "com.apple.iTunes", "RATEYOURMUSIC_ALBUM"),
-    },
-    "RATEYOURMUSIC_TRACK": {
-        "flac": "RATEYOURMUSIC_TRACK",
-        "mp3": ("TXXX", "RATEYOURMUSIC_TRACK"),
-        "mp4": ("freeform", "com.apple.iTunes", "RATEYOURMUSIC_TRACK"),
-    },
-    "RATEYOURMUSIC_ARTIST": {
-        "flac": "RATEYOURMUSIC_ARTIST",
-        "mp3": ("TXXX", "RATEYOURMUSIC_ARTIST"),
-        "mp4": ("freeform", "com.apple.iTunes", "RATEYOURMUSIC_ARTIST"),
     },
 }
 

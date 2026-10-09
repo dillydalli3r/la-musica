@@ -300,7 +300,7 @@ FILE_FAMILIES = {
         "hint": "The audio files, as the codec and the quality above write them.",
     },
     "cover": {
-        "label": "Covers and artwork",
+        "label": "Covers",
         "hint": "The album's cover.*, copied as files. It travels EMBEDDED in "
                 "each exported file anyway (see above).",
     },

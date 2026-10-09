@@ -4,7 +4,7 @@ import { useSearchParams, Link } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   UploadCloud, ExternalLink, Check, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, Wand2,
-  Plus, Trash2, Disc3, FolderOpen, X, Search, Loader2, AlertTriangle,
+  Plus, Trash2, Disc3, FolderOpen, X, Loader2, AlertTriangle,
   Languages, FileArchive, Fingerprint,
 } from "lucide-react";
 import { api, answerSources, replyFor, IN_TAURI } from "../api";
@@ -13,7 +13,7 @@ import { toast, useStore } from "../store";
 import {
   advisoryLine, advisoryOutcome, allowPlainOf, LyricsKindChip,
 } from "../components/Badges";
-import { LinkValidChip } from "../components/Links";
+
 import LyricsViewer, { lyricsKindOf, parseLrc } from "../components/LyricsViewer";
 import CoverSearchModal from "../components/CoverSearchModal";
 import GenreSourcesTray from "../components/GenreSourcesTray";
@@ -445,20 +445,6 @@ export default function ImportWizard() {
   const [excluded, setExcluded] = useState<Set<string>>(new Set());
 
   const [mbLink, setMbLink] = useState("");
-  const [rymLink, setRymLink] = useState("");
-  const [rymValid, setRymValid] = useState<boolean | null>(null);
-  // Which page /api/rym/validate recognized: only an album page belongs in
-  // RATEYOURMUSIC_ALBUM (a song/artist page stored there looks resolved
-  // forever and blocks the automatic album lookup).
-  const [rymKind, setRymKind] = useState<string | null>(null);
-  const [rymNote, setRymNote] = useState("");
-  const [rymArtistLink, setRymArtistLink] = useState("");
-  // The artist field's own verdict, the same way the album field keeps one:
-  // only an ARTIST page may be written as RATEYOURMUSIC_ARTIST.
-  const [rymArtistValid, setRymArtistValid] = useState<boolean | null>(null);
-  const [rymArtistKind, setRymArtistKind] = useState<string | null>(null);
-  const [rymArtistNote, setRymArtistNote] = useState("");
-  const [findingLinks, setFindingLinks] = useState(false);
   const [detectedFromTags, setDetectedFromTags] = useState(false);
   const [mbSearch, setMbSearch] = useState("");
   const [searchHits, setSearchHits] = useState<any[]>([]);
@@ -935,83 +921,6 @@ export default function ImportWizard() {
     }
     pickRelease(id);
   };
-
-  // Debounced RYM link validation. The server reports WHICH page it is, so an
-  // artist paste is routed to the artist field instead of being written as the
-  // album link, and a song page is refused with the reason.
-  useEffect(() => {
-    if (!rymLink.trim()) {
-      setRymValid(null);
-      setRymKind(null);
-      return;
-    }
-    const t = setTimeout(async () => {
-      try {
-        const r = (await api.rymValidate(rymLink.trim())) as { valid: boolean; kind?: string | null };
-        if (r.kind === "artist") {
-          // Not a wrong paste, just the wrong field — move it, say so, and
-          // leave the album field empty so auto-find can fill it.
-          setRymArtistLink(rymLink.trim());
-          setRymLink("");
-          setRymValid(null);
-          setRymKind(null);
-          setRymNote("That is a RateYourMusic artist page — moved to the artist link");
-          return;
-        }
-        // `valid` from the server just means "a RYM URL"; for the ALBUM field
-        // only an album page counts, so a song/other page reads as invalid
-        // here (the chip and the note say which).
-        setRymValid(r.valid && (r.kind == null || r.kind === "album"));
-        setRymKind(r.kind ?? null);
-        setRymNote(
-          r.kind === "song"
-            ? "That is a RateYourMusic song page, not an album"
-            : r.kind === "other"
-              ? "That is a RateYourMusic page, but not an album"
-              : ""
-        );
-      } catch {
-        setRymValid(false);
-        setRymKind(null);
-        setRymNote("Could not check the link");
-      }
-    }, 400);
-    return () => clearTimeout(t);
-  }, [rymLink]);
-
-  // The artist field validates through the same call, and accepts only an
-  // artist page: a song or album paste here would be written to every track as
-  // RATEYOURMUSIC_ARTIST and never resolve to the artist.
-  useEffect(() => {
-    if (!rymArtistLink.trim()) {
-      setRymArtistValid(null);
-      setRymArtistKind(null);
-      setRymArtistNote("");
-      return;
-    }
-    const t = setTimeout(async () => {
-      try {
-        const r = (await api.rymValidate(rymArtistLink.trim())) as { valid: boolean; kind?: string | null };
-        const kind = r.kind ?? null;
-        setRymArtistValid(r.valid && (kind == null || kind === "artist"));
-        setRymArtistKind(kind);
-        setRymArtistNote(
-          kind === "artist" || kind == null
-            ? ""
-            : kind === "album"
-              ? "That is a RateYourMusic album page — paste the artist page"
-              : kind === "song"
-                ? "That is a RateYourMusic song page, not an artist"
-                : "That is a RateYourMusic page, but not an artist"
-        );
-      } catch {
-        setRymArtistValid(false);
-        setRymArtistKind(null);
-        setRymArtistNote("Could not check the link");
-      }
-    }, 400);
-    return () => clearTimeout(t);
-  }, [rymArtistLink]);
 
   const defaultTrackName = (p: string) => {
     const base = p.split("/").pop() ?? "";
@@ -1665,49 +1574,6 @@ export default function ImportWizard() {
   const albumTargets = (): string[] =>
     uploaded.length ? uploaded.map((a) => a.path) : albumPath ? [albumPath] : [];
 
-  /** Ask RYM for this album's and this artist's pages and PREFILL both fields.
-   *  Nothing is written here: an empty field is filled for review, and a field
-   *  the user already typed in is left alone. False = nothing to look up yet. */
-  const findRymLinks = async (): Promise<boolean> => {
-    // Who and what RYM is asked about: the fetched release first, else the
-    // album's own tags — the only source an auto-imported album has.
-    const artist =
-      (release?.artists ?? []).map((a) => a.name).join(", ").trim() ||
-      (stepTracks.length ? trackArtist(stepTracks[0].path) : "");
-    const album = trackAlbum ?? currentAlbumName;
-    if (!artist && !album) return false;
-    setFindingLinks(true);
-    try {
-      const r = await api.rymResolve(artist, album);
-      const foundAlbum = r.album;
-      const foundArtist = r.artist;
-      if (foundAlbum) setRymLink((cur) => (cur.trim() ? cur : foundAlbum));
-      if (foundArtist) setRymArtistLink((cur) => (cur.trim() ? cur : foundArtist));
-      setRymNote(
-        foundAlbum || foundArtist
-          ? "found on RateYourMusic — review, then Continue saves it"
-          : r.note || "nothing found on RateYourMusic — paste the URLs"
-      );
-    } catch {
-      setRymNote("Lookup failed — paste the URLs instead");
-    } finally {
-      setFindingLinks(false);
-    }
-    return true;
-  };
-
-  // Once per album on entering the Links step: an auto-imported album lands
-  // here with no links at all, so the lookup waits for the tags/release that
-  // give it a name, then runs itself.
-  const linksAutoFound = useRef<string | null>(null);
-  useEffect(() => {
-    if (step !== 1 || !albumPath || linksAutoFound.current === albumPath) return;
-    findRymLinks().then((ran) => {
-      if (ran) linksAutoFound.current = albumPath;
-    });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [step, albumPath, stepTracks, release]);
-
   const nextFromLinks = async () => {
     const typed = extractMbid(mbLink) || "";
     const rid = typed || releaseId || "";
@@ -1727,16 +1593,9 @@ export default function ImportWizard() {
       // null only after saying why.
       const rel = await pickRelease(rid, albumPath);
       if (!rel) return;
-      // Only an ALBUM page may be stored as the album link — rymValid is
-      // already false for a song/other page, and an artist paste never lands
-      // in this field at all. The artist page is artist-level, so it goes on
-      // every track as RATEYOURMUSIC_ARTIST — and only a link the server
-      // confirmed as an ARTIST page: a song or album paste in this field would
-      // be a wrong artist link forever. Both ride along on the commit, which
-      // is the step's ONE pass over the album.
-      const albumLink = rymValid ? rymLink.trim() : undefined;
-      const artistLink = rymArtistValid ? rymArtistLink.trim() : "";
-      await api.importCommit(albumPath, `https://musicbrainz.org/release/${rel.id}`, albumLink, staged, artistLink || undefined);
+      // The release the wizard matched rides along on the commit, which is the
+      // step's ONE pass over the album.
+      await api.importCommit(albumPath, `https://musicbrainz.org/release/${rel.id}`, staged);
       toast("Links saved to album");
       setStep(2);
     } catch (e) {
@@ -3041,15 +2900,7 @@ const finish = async () => {
     setGenres({});
     setDiscGenres({});
     setMbLink("");
-    setRymLink("");
-    setRymValid(null);
-    setRymKind(null);
-    setRymArtistValid(null);
-    setRymArtistKind(null);
-    setRymArtistNote("");
     setLyrOpen(new Set());
-    setRymNote("");
-    setRymArtistLink("");
     setSearchHits([]);
     // reset per-track drafts so album B never inherits album A's data
     setLyricsDrafts({});
@@ -3824,45 +3675,6 @@ const finish = async () => {
                   <span className="font-semibold text-zinc-200">{release.title}</span> · {release.artists.map((a) => a.name).join(", ")} · {release.date} · {release.medium_count} disc(s) · {release.media.length} tracks
                 </div>
               )}
-              <div className="text-sm font-semibold text-zinc-300 pt-2">RateYourMusic links (optional)</div>
-              <div className="flex flex-wrap items-center gap-2">
-                <input
-                  className={`input flex-1 ${rymValid === true ? "!border-emerald-700" : rymValid === false ? "!border-red-800" : ""} tap`}
-                  placeholder="Album: https://rateyourmusic.com/release/…"
-                  value={rymLink}
-                  onChange={(e) => {
-                    setRymLink(e.target.value);
-                    setRymNote(""); // a stale "That is an artist page" must not outlive the paste it described
-                  }}
-                />
-                <LinkValidChip state={rymValid} kind={rymKind} />
-                <button
-                  className="btn-ghost shrink-0 tap"
-                  onClick={findRymLinks}
-                  disabled={findingLinks || busy}
-                  title="Ask RateYourMusic for this album's and this artist's pages and fill both fields for review"
-                >
-                  {findingLinks ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Search className="h-3.5 w-3.5" />}{" "}
-                  Find links
-                </button>
-              </div>
-              {rymNote && <div className="text-[10px] text-amber-300/80">{rymNote}</div>}
-              <div className="flex flex-wrap items-center gap-2">
-                <input
-                  className={`input flex-1 ${rymArtistValid === true ? "!border-emerald-700" : rymArtistValid === false ? "!border-red-800" : ""} tap`}
-                  placeholder="Artist: https://rateyourmusic.com/artist/…"
-                  value={rymArtistLink}
-                  onChange={(e) => {
-                    setRymArtistLink(e.target.value);
-                    setRymArtistNote("");
-                  }}
-                />
-                <LinkValidChip state={rymArtistValid} kind={rymArtistKind} />
-              </div>
-              <div className="text-[10px] text-zinc-600">
-                Written to every track as RATEYOURMUSIC_ARTIST — only an artist page is accepted.
-              </div>
-              {rymArtistNote && <div className="text-[10px] text-amber-300/80">{rymArtistNote}</div>}
             </div>
             <div className="flex flex-wrap items-center gap-2">
               <button className="btn-primary tap" onClick={handleFetch} disabled={busy}>

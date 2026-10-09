@@ -1180,7 +1180,7 @@ export default function LibraryPage() {
         <Link
           to="/optimize"
           className="text-xs text-amber-200 bg-amber-950/30 border border-amber-900/60 rounded-lg px-3 py-2 flex items-start gap-2 tap"
-          title="Open the Optimization page's library-layout panel"
+          title="Open the Optimization page and run Optimize library layout (script 20)"
         >
           <FolderTree className="h-3.5 w-3.5 shrink-0 mt-0.5" />
           <span className="min-w-0">
@@ -1191,7 +1191,7 @@ export default function LibraryPage() {
             library-wide, not an album's tags: whatever sits outside{" "}
             <span className="font-mono">Artists/&lt;Artist&gt;/&lt;Album&gt;/</span> is not graded at all,
             so the library does not grade clean until it is dealt with.{" "}
-            <span className="text-amber-300/90 underline underline-offset-2">Review in Optimization →</span>
+            <span className="text-amber-300/90 underline underline-offset-2">Open Optimization and run Optimize library layout (script 20) →</span>
           </span>
         </Link>
       )}
@@ -1315,7 +1315,7 @@ export default function LibraryPage() {
             {sortOpen && (
               <>
                 <div className="fixed inset-0 z-30" onClick={() => setSortOpen(false)} />
-                <div className="absolute left-0 top-full mt-1 z-40 w-44 rounded-lg border border-border bg-zinc-950 shadow-2xl p-1.5">
+                <div className="absolute left-0 top-full mt-1 z-40 w-44 rounded-lg border border-border bg-zinc-950 shadow-2xl p-1.5 max-h-[70vh] overflow-y-auto overscroll-contain">
                   {ALBUM_SORTS.map((s) => (
                     <button
                       key={s.key}
@@ -1746,7 +1746,7 @@ export default function LibraryPage() {
                           dimmer than it ("1967–1970 (The Blue Album)") — the
                           same slot the table's album column draws it in. */}
                       <DisambiguationMark value={al.disambiguation} />
-                      <AdvisoryMark value={al.meta?.ITUNESADVISORY ?? al.meta?.ALBUMITUNESADVISORY} />
+                      <AdvisoryMark value={al.meta?.ITUNESADVISORY} />
                       {/* The folder itself is held (a run, an import, an
                           organize): its files are not playable right now. */}
                       <LockedChip path={al.path} />
@@ -2402,7 +2402,7 @@ function AlbumRowGroup({
         titleExtra={
           <>
             {showAlbumCol ? <DisambiguationMark value={album.disambiguation} /> : null}
-            {showAlbumCol ? <AdvisoryMark value={album.meta?.ITUNESADVISORY ?? album.meta?.ALBUMITUNESADVISORY} /> : null}
+            {showAlbumCol ? <AdvisoryMark value={album.meta?.ITUNESADVISORY} /> : null}
             {/* the same marker the compact rows and the cards carry — the
                 albums table is one more album-shaped surface */}
             <PendingMark album={album} />
@@ -2590,7 +2590,7 @@ function ScriptsDropdown({ onRun, runAllIds }: { onRun: (ids: number[], force?: 
       {open && (
         <>
           <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
-          <div className="absolute right-0 top-full mt-1 z-50 bg-zinc-950 border border-border rounded-lg p-1.5 w-44 shadow-2xl">
+          <div className="absolute right-0 top-full mt-1 z-50 bg-zinc-950 border border-border rounded-lg p-1.5 w-44 shadow-2xl max-h-[70vh] overflow-y-auto overscroll-contain">
             {items.map((s) => (
               <button
                 key={s.label}

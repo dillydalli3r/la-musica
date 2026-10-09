@@ -7269,12 +7269,12 @@ def parse_rym_album_url(url):
     return None
 
 
-# What a RYM URL points AT. Every one of these is a valid URL, but only an
-# album page belongs in RATEYOURMUSIC_ALBUM: a pasted artist or song page
-# stored there would look like a resolved link forever (the import stamp never
-# overwrites an existing one) and would block the automatic album lookup.
-# `/release/song/` is matched before `/release/`, or a song page would pass as
-# an album; every other release type (single, EP, comp…) IS an album.
+# What a RYM URL points AT. The scraper only accepts an ALBUM page (see the
+# caller at integration's genre/release lookup): a pasted artist or song page
+# would parse as a different page entirely, so the kind is classified rather
+# than assumed. `/release/song/` is matched before `/release/`, or a song page
+# would pass as an album; every other release type (single, EP, comp…) IS an
+# album.
 _RYM_KIND_RES = (
     ("song", re.compile(r"^/(?:release/)?song/", re.I)),
     ("album", re.compile(r"^/release/[^/]+/", re.I)),

@@ -23,11 +23,9 @@ export interface AlbumMeta {
   DATE?: string | null;
   ORIGINALDATE?: string | null;
   ITUNESADVISORY?: string | null;
-  ALBUMITUNESADVISORY?: string | null;
   MUSICBRAINZ_ALBUMID?: string | null;
   MUSICBRAINZ_ALBUMARTISTID?: string | null;
   MUSICBRAINZ_RELEASEGROUPID?: string | null;
-  RATEYOURMUSIC_ALBUM?: string | null;
   MEDIA?: string | null;
   /** Every country the release was released in. One code on most files, a
    *  list ("US; CA") on the ones tagged from a release group's events — the
@@ -81,9 +79,6 @@ export interface TrackTags {
   MUSICBRAINZ_ARTISTID?: string | null;
   MUSICBRAINZ_TRACKID?: string | null;
   MUSICBRAINZ_RELEASEGROUPID?: string | null;
-  RATEYOURMUSIC_ALBUM?: string | null;
-  RATEYOURMUSIC_TRACK?: string | null;
-  RATEYOURMUSIC_ARTIST?: string | null;
   CATALOGNUMBER?: string | null;
   LABEL?: string | null;
   RELEASETYPE?: string | null;
@@ -211,8 +206,7 @@ issues?: Record<string, string[]>;
   /** What the album is waiting for (the server's own sentence). */
   pending_reason?: string;
   /** What "Add to library" already fetched for this folder before its audio
-   *  existed: the cover candidates it ranked and the winner it picked, plus
-   *  the links it resolved. */
+   *  existed: the cover candidates it ranked and the winner it picked. */
   prefetched?: AlbumPrefetch | null;
 }
 
@@ -223,7 +217,6 @@ export interface AlbumPrefetch {
   cover_candidates: number;
   cover_pick: string | null;
   cover_source: string | null;
-  links: { album: string | null; artist: string | null };
 }
 
 /** One track of the MusicBrainz release an album was matched to. */

@@ -1,11 +1,10 @@
-"""MusicBrainz / LRCLIB / RYM: the metadata and lyrics lookups.
+"""MusicBrainz / LRCLIB: the metadata and lyrics lookups.
 
 GET /api/mb/* is the MusicBrainz browser (release, release-group, search,
 artist, recording, detect) and the import wizard's own match/assign writes;
-/api/lyrics/* is the LRCLIB-backed lyrics surface (search/get/write/publish);
-/api/rym/* validates and resolves RateYourMusic links. The network clients
-live in ``server.integrations`` and the release resolution in
-``server.mbresolve``, so these routes stay thin: parse, guard the path, hand
+/api/lyrics/* is the LRCLIB-backed lyrics surface (search/get/write/publish).
+The network clients live in ``server.integrations`` and the release resolution
+in ``server.mbresolve``, so these routes stay thin: parse, guard the path, hand
 over, answer.
 """
 import asyncio
@@ -43,7 +42,7 @@ class MatchRequest(BaseModel):
 
 
 class AssignTagsRequest(BaseModel):
-    """Write MB/RYM links to tags. `tracks` maps track path -> {tag: value}."""
+    """Write MB links to tags. `tracks` maps track path -> {tag: value}."""
     tracks: dict
     staged: bool = False  # the import wizard's not-yet-imported album
 
@@ -331,7 +330,7 @@ def mb_match(req: MatchRequest):
 @job_locks.holds(lambda req: list((req.tracks or {}).keys()), kind="tags",
                  label="Write MB links")
 def mb_assign(req: AssignTagsRequest):
-    """Write per-track MB/RYM link tags. tracks: {path: {TAG: value}}.
+    """Write per-track MB link tags. tracks: {path: {TAG: value}}.
 
     Videos are re-emitted losslessly, so a raw container comes back as a
     same-stem MKV: `container_changed`/`output_paths` name those files."""
@@ -373,7 +372,7 @@ def mb_assign(req: AssignTagsRequest):
         # 2 explicit) and a blank means "delete the tag" — an invalid value
         # written here would only surface as a grading failure later.
         bad = [k for k, v in tag_map.items()
-               if k.upper() in ("ITUNESADVISORY", "ALBUMITUNESADVISORY")
+               if k.upper() == "ITUNESADVISORY"
                and str(v or "").strip() not in ("", "0", "1", "2")]
         if bad:
             return [f"{p}: {', '.join(sorted(bad))} must be 0, 1, 2 or empty"], 0, None
@@ -582,32 +581,6 @@ def lyrics_write(req: LyricsWriteRequest):
         raise HTTPException(500, str(e))
     tagcache.invalidate_path(p)
     return {"ok": True, "lrc": lrc_path.replace("\\", "/")}
-
-
-@router.get("/api/rym/validate")
-def rym_validate(url: str = Query(...)):
-    """Is this a RateYourMusic link, and WHICH page is it?
-
-    `valid` keeps its old meaning ("a RYM URL") for callers that only accept
-    or reject a paste; `kind` is what lets the link editor put an artist page
-    in the artist field instead of storing it as the album link — a song page
-    written into RATEYOURMUSIC_ALBUM would look resolved forever and block the
-    automatic album lookup.
-    """
-    kind = intg.rym_url_kind(url)
-    return {"valid": kind is not None, "kind": kind}
-
-
-@router.get("/api/rym/resolve")
-def rym_resolve(artist: str = Query(""), album: str = Query("")):
-    """Verified RateYourMusic links for an album, for the link editor.
-
-    Same resolution the import uses (rym_links_auto gates it): each link is
-    None unless RYM itself confirmed that page, and `note` says why nothing
-    was found — "could not resolve" is the normal "paste the URL yourself"
-    answer, so it is a 200 here, never an error.
-    """
-    return intg.rym_links(artist, album, cfg=load_config())
 
 
 def _genre_names(value, cap):

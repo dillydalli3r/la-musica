@@ -212,7 +212,7 @@ defer_album = staging_album("Defer Album")
 DF_PATH = os.path.normpath(defer_album)
 _seen = {}
 _real_steps = {n: getattr(imports, n) for n in
-               ("stamp_rym_links", "fetch_advisories", "fetch_instrumentals",
+               ("fetch_advisories", "fetch_instrumentals",
                 "run_cover_step", "_stamp_release")}
 _real_run_chain = script_runners.run_chain
 
@@ -225,8 +225,6 @@ def _spy(name, value):
 
 
 try:
-    imports.stamp_rym_links = _spy("rym", {"album": None, "artist": None,
-                                           "note": "", "written": 0})
     imports.fetch_advisories = _spy("advisory", {})
     imports.fetch_instrumentals = _spy("instrumental", {})
     imports.run_cover_step = _spy("cover", {})
@@ -246,9 +244,8 @@ finally:
 # action is release-driven, and this fixture's files carry no MusicBrainz
 # identity to resolve a release from (tools/test_autonomous_import.py's album
 # has one and asserts the step runs there).
-assert default_seen == {"rym": 1, "cover": 1,
+assert default_seen == {"cover": 1,
                         "advisory": 1, "instrumental": 1, "chain": 1}, default_seen
-assert default_args["rym"][0][0] == (DF_PATH, DF_CFG), default_args["rym"]
 assert default_args["chain"][0][0][1] == [4, 3], default_args["chain"]
 assert default_args["chain"][0][1]["targets"] == [DF_PATH], default_args["chain"]
 assert full["chain"] == [4, 3] and full["chained"] is True, full

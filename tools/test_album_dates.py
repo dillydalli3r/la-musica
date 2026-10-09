@@ -571,7 +571,7 @@ try:
         cfg, music_folder=TMP, targets=run_files + [done_file],
         # only the release-identity stage is the subject: no audio decoding
         mood_enabled=False, auto_instrumental=False,
-        instrumental_auto_fetch=False, auto_advisory=False,
+        instrumental_auto_fetch=False,
         auto_zero_advisory_for_instrumental=False, genre_autofill=False))
 finally:
     srv_main.organize = _real_organize

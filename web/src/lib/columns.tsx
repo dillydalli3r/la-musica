@@ -837,7 +837,7 @@ export function ColumnsMenu({
       {open && (
         <>
           <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
-          <div className={`absolute right-0 top-full mt-1 z-50 bg-card border border-border rounded-lg p-2 ${onAddCustom ? "w-56" : "w-48"} shadow-2xl`}>
+          <div className={`absolute right-0 top-full mt-1 z-50 bg-card border border-border rounded-lg p-2 ${onAddCustom ? "w-56" : "w-48"} shadow-2xl max-h-[70vh] overflow-y-auto overscroll-contain`}>
             <div className="text-[10px] uppercase tracking-wider text-zinc-500 px-2 pt-1 pb-1.5">{title}</div>
             {cols.map((c) => (
               <div key={c.id} className="flex items-center gap-2 px-2 py-1.5 text-xs hover:bg-panel rounded tap">

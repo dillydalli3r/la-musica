@@ -18,11 +18,12 @@ One scan answers every surface, so their numbers cannot disagree:
 
   * script 20 (``run_optimize_layout``) — the Run All step: scans, applies (the
     ``layout_apply`` config key / the runner's force flag) and persists what is
-    left;
-  * ``POST /api/library/layout/apply`` (server/main.py) — the same scan and
-    fix on demand, run by the Optimization page's Apply fixes button;
-  * ``GET /api/library/layout`` — the panel's read-only scan, which reports
-    and changes nothing;
+    left. It is the ONLY way to apply the fixes: the Optimization page lists
+    it like any other script (the former separate Library-layout panel, with
+    its own Apply-fixes button and its own ``POST /api/library/layout/apply``
+    / ``remove-empty-artist`` routes, is gone);
+  * ``GET /api/library/layout`` — a read-only scan, which reports and changes
+    nothing (the Library/Album/Trash pages ask it after a move);
   * ``GET /api/library/layout/report`` — the persisted report the Library
     page warns from, so its warning costs no second walk of the library.
 
@@ -756,8 +757,8 @@ def scan_library(cfg=None, stats=None):
             rows.append(_issue(
                 "empty_artist", p, folder,
                 "artist folder \u201c%s\u201d holds no album folder" % name,
-                "remove it to the Trash (Optimize → Library layout → remove), "
-                "or put one of the artist's albums inside it",
+                "move it to the Trash (run Optimize library layout, script 20, to "
+                "settle it), or put one of the artist's albums inside it",
                 fix={"action": "trash"}))
             closed(sink, reported=True)
         return rows, sink

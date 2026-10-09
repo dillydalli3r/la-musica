@@ -430,7 +430,8 @@ def excess_tags(af, cfg=None):
         tags, beets'/Picard's spellings, the alias families and the app's own
         override (`mlo.grader.tag_key_allowed`),
       * a `COMMENT` that carries a value, the one name the vocabulary HOLDS
-        whose value nothing in this pipeline writes
+        whose value nothing in this pipeline writes, or any value that names
+        an external LINK (a URL — a bare MusicBrainz id is not a link)
         (`mlo.grader.tag_value_excess`),
       * an ALIAS tag nothing needs — the name is one the configured locale
         already reads, it is spelled for a locale the app does not write, it is

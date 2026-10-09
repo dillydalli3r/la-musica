@@ -75,11 +75,11 @@ An issue is `{code, label, where, reason}` for album-level and artist problems
 | `TITLE`, `ARTIST`, `ALBUM`, `ALBUMARTIST`, `DATE`, `TRACKNUMBER`, `DISCNUMBER`, `GENRE`, `MOOD`, `ENERGY`, `ITUNESADVISORY`, `INSTRUMENTAL`, `DYNAMIC RANGE`, `REPLAYGAIN_*`, `INITIALKEY`, `BPM`, `MEDIA`, `SOURCE`, `ENCODER_*`, `ACOUSTID_ID`, `ACOUSTID_FINGERPRINT`, `LOG_GRADE` | the tag (or its presence check) failed; the tag's own name is the code |
 | `MOOD_MISSING`, `ENERGY_MISSING`, `GENRE_MISSING` | the per-tag presence checks (`TAG_PRESENCE_CHECKS`) |
 | `GENRE_COUNT`, `GENRE_ORDER`, `GENRE_VOCAB`, `GENRE_CASE` | genre count, arrangement, vocabulary, and the spelling every writer produces (`metal` → `Metal`) |
-| `TAGS` | excess tags |
+| `TAGS`, `COMMENT`, `LINK` | excess tags: a tag name outside the vocabulary (`TAGS`), a `COMMENT` carrying a value, a tag value naming an external link (`LINK` — a bare MusicBrainz id/UUID is not a link) |
 | `PATH`, `PATH_CASE` | naming-script mismatch / case-only mismatch |
 | `LYRICS` | lyrics missing, wrongly formatted, or present on an instrumental |
 | `XLIT_MISSING`, `XLIT_UNNEEDED` | a needed transform is absent / an unneeded one is stored |
-| `MB_LINK`, `RYM_LINK` | a required identity link is missing |
+| `MB_LINK` | a required identity link is missing |
 | `COVER` | cover missing or failing the size/square rules |
 | `CRC`, `CRC_MISMATCH` | a track is not covered by its disc's `.log` CRC / its CRC does not match |
 | `CD_FORMAT` | a CD track is not 16-bit/44.1 kHz FLAC |
@@ -155,7 +155,7 @@ publishes, including the ones that write nothing until they do.
 | 5 | Process images | Resize/crop covers to `cover_target_size`, per-format targets, JPEG/PNG/JXL optimization, `cover.*` rename | image files in place | re-encodes in place | no |
 | 6 | Audit library | AudioAuditor detectors (spectral/DSP) + CD `.log` CRC verification, log scoring | `AUDIT`, `LOG_GRADE`, `LOG_CRC`, `INTEGRITY` | no | no |
 | 7 | DR & ReplayGain | in-process loudness-war DR (`mlo/dr.py`) + `rsgain` ReplayGain 2.0 | `DYNAMIC RANGE`, `ALBUM DYNAMIC RANGE`, the four `REPLAYGAIN_*` | no | no |
-| 8 | Auto tagging | `ITUNESADVISORY`, `ALBUMITUNESADVISORY`, `INSTRUMENTAL`, `MOOD`, `ENERGY`, `GENRE`, plus empty MusicBrainz identity/date completion | those tags | no | optional (advisory/genre providers) |
+| 8 | Auto tagging | `ITUNESADVISORY`, `INSTRUMENTAL`, `MOOD`, `ENERGY`, `GENRE`, plus empty MusicBrainz identity/date completion | those tags | no | optional (advisory/genre providers) |
 | 9 | AccurateRip | CUETools `.accurip` generation and verification; an existing file is regenerated only when a track's **audio** changed (each track's FLAC audio-md5, recorded per `.accurip` — a tag write no longer looks like a re-rip), and a PARTIAL album's file is left alone (R248) | writes `CD-N.accurip` | no | **yes** (AccurateRip DB) |
 | 10 | Format all | Final canonical pass: `.accurip`/`.cue`/`.lrc`/tag trim, the canonical tag-value spelling (`mlo/tagtext.py`) + embedded-cover policy | tags, sidecars, embedded art | **yes** (strips tags outside the allowlist) | no |
 | 11 | Remux videos (MKV) | Any video container → MKV, video copied bit-exact when possible, audio to FLAC, chapters kept | video files | **yes** when `video_remove_original` (ON) | no |
@@ -206,6 +206,26 @@ else, and drops the tag cache of exactly the folders it rewrote
 (`server.tagcache.invalidate_album`,
 never `invalidate_all` — the scoped drop `/api/run` and an import already make
 for the folders a run names).
+
+**R358 — a stored tag VALUE naming an external link is excess.** The app never
+keeps a URL in an audio tag: `mlo.grader.tag_value_excess_reason` answers
+`"link"` for any value matching `_URL_RE`, the excess-tag grade fails the track
+with its own issue code **`LINK`**, and the strip passes DELETE the tag — Format
+all (10), Optimize FLACs (3) and Optimize tags (23) all read the one predicate
+(`mlo.grader.tag_value_excess` via `mlo.format_all.excess_tags`), so a strip can
+never leave a value the grade flags, nor delete one it requires. A bare
+MusicBrainz id is an IDENTITY, not a link: a UUID does not match `_URL_RE`, so
+`MUSICBRAINZ_ALBUMID` and friends stay fine and the identity-link requirement
+(`grade_check_mb_links`, `MB_LINK`) still demands one — nothing writes a URL
+into a tag, so the grade never requires a URL. This is the general rule the
+former RateYourMusic link tags fell under: the app no longer writes
+`RATEYOURMUSIC_ALBUM` / `RATEYOURMUSIC_TRACK` / `RATEYOURMUSIC_ARTIST` (their
+names left the tag vocabulary, `mlo.audio.TAG_MAP`, so any such tag is now
+excess by NAME too), and `grade_check_rym_links` / `RYM_LINK` are gone with
+them. The RateYourMusic **scraper** survives for what it is good at — genres,
+the cookie (`rym_cookie`), the archive fallback and the link RESOLVER
+(`server.integrations.rym_links`, used by the Sources probe) — none of which
+writes a tag.
 
 **R243 — Fix AcoustID pairs (21) completes OR creates the pair from the file
 itself, and only asks the service for a half pair that names no recording.**
@@ -371,7 +391,7 @@ group still renders (section *Other checks*).
 | --- | --- | --- | --- |
 | `grade_check_unreadable` | Unreadable files | ON | every audio file opens and decodes (`UNREADABLE`) |
 | `grade_check_missing_tags` | Required tags | ON | every `PER_TRACK_TAGS` entry is present and non-empty: `TITLE`, `ARTIST`, `ALBUM`, `ALBUMARTIST`, `DATE`, `TRACKNUMBER`, `DISCNUMBER` (only when the album really has several discs), `GENRE`, `MOOD`, `ENERGY`, `ITUNESADVISORY`, `DYNAMIC RANGE`, `INSTRUMENTAL` (ReplayGain is graded by its own opt-in check) |
-| `grade_check_album_tags` | Album-level tags | ON | `ALBUMITUNESADVISORY` and `ALBUM DYNAMIC RANGE` are present |
+| `grade_check_album_tags` | Album-level tags | ON | `ALBUM DYNAMIC RANGE` is present |
 | `grade_check_mood` | Mood tag present | ON | `MOOD` exists (`MOOD_MISSING`) |
 | `grade_check_energy` | Energy tag present | ON | `ENERGY` (0-100) exists (`ENERGY_MISSING`) |
 | `grade_check_genre` | Genre tag present | ON | `GENRE` exists (`GENRE_MISSING`) |
@@ -418,7 +438,6 @@ group still renders (section *Other checks*).
 | Check id | Label | Default | Asserts |
 | --- | --- | --- | --- |
 | `grade_check_mb_links` | MusicBrainz release link | ON | `MUSICBRAINZ_ALBUMID` (or a release-group id) is tagged (`MB_LINK`) |
-| `grade_check_rym_links` | RateYourMusic release link | ON | `RATEYOURMUSIC_ALBUM` is tagged (`RYM_LINK`) |
 | `grade_check_cover` | Cover art | ON | the album has a cover (`cover.jpg`/`jpeg`/`png`/`jxl`) meeting the size rules (`COVER`) |
 | `grade_check_cover_crop` | Cover aspect ratio (squareness) | ON | `|w/h − 1| ≤ cover_crop_threshold` (an aspect test, not crop detection) |
 | `grade_check_sidecar_cover` | Per-track sidecar covers | ON | per-track covers meet the same rules |
@@ -535,13 +554,13 @@ already has, and pressing it on an edited config restores it.
 **R19 — Balanced** is the pre-strict set: the defaults with `grade_check_audit`
 and `grade_include_other` off — the one-click way back to the old behaviour for
 a collection nobody has audited.
-**R20 — Relaxed** loads the defaults and then switches these 16 keys **off**:
+**R20 — Relaxed** loads the defaults and then switches these 15 keys **off**:
 `grade_check_tag_spaces`, `grade_check_tag_case`, `grade_check_lyrics_spaces`,
 `grade_check_cue_spaces`, `grade_check_cover_crop`, `grade_check_lyrics_zero`,
 `grade_check_tag_blank_lines`, `grade_check_lyrics_blank_lines`,
 `grade_check_cue_blank_lines`, `grade_check_filename_case`,
 `grade_check_ext_case`, `grade_check_excess_tags`, `grade_check_alias_excess`,
-`grade_check_mb_links`, `grade_check_rym_links`, `grade_check_replaygain`.
+`grade_check_mb_links`, `grade_check_replaygain`.
 
 ---
 
@@ -659,7 +678,6 @@ The default writer of everything else is *Beets tagging (14) · import*.
 | `GENRE` | identity | Auto tagging (8) · genre import · Format all (10) trims | `grade_check_genre`, `_genre_count`, `_genre_order`, `_genre_vocab` |
 | `MEDIA`, `SOURCE` | release | Format lyrics (1) · media/source normalization | `grade_check_media`, `grade_check_source` |
 | `ITUNESADVISORY` | identity | Auto tagging (8) · advisory fetch | `grade_check_missing_tags` |
-| `ALBUMITUNESADVISORY` | release | Auto tagging (8) · advisory fetch | `grade_check_album_tags` |
 | `INSTRUMENTAL` | identity | Auto tagging (8) · instrumental fetch | `grade_check_missing_tags`, `grade_check_instrumental` |
 | `MOOD`, `ENERGY` | audio | Auto tagging (8) · Mood & Energy (16) | `grade_check_mood`, `grade_check_energy` |
 | `BPM`, `INITIALKEY` | audio | Key & BPM (12) | `grade_check_key_bpm` |
@@ -674,7 +692,7 @@ The default writer of everything else is *Beets tagging (14) · import*.
 | `TRANSLITERATION`, `TRANSLATION` | lyrics | Lyrics transliterate (AI) (17) | `grade_check_xlit_transliteration`, `_xlit_translation`, `_lyrics_lang_tags` |
 | `ACOUSTID_ID`, `ACOUSTID_FINGERPRINT` | provenance | the import wizard's AcoustID apply (fingerprint match) — the PAIR in one save, verified by re-read — and Fix AcoustID pairs (21), which every import chain runs over the album it just imported: it completes a half pair, and creates the pair for a file that names its recording but carries none (the id from the file, the fingerprint local) | `grade_check_acoustid` ; the pair is REQUIRED on every audio track (`grade_check_acoustid`), and BOTH spellings a tagger writes are read — this app's `ACOUSTID_ID` and beets/mediafile's `Acoustid Id` / `Acoustid Fingerprint`, the spelling its chroma plugin writes and this app's own import runs |
 | `ENCODER_PROGRAM`, `ENCODER_QUALITY`, `ENCODER_VERSION` | provenance | Optimize FLACs (3) | `grade_check_encoder` |
-| `MUSICBRAINZ_*`, `RATEYOURMUSIC_*`, `RELEASETYPE`, `CATALOGNUMBER`, `LABEL`, `BARCODE`, `ISRC`, `WORK`, `MOVEMENT`, … | release | Beets tagging (14) · import · MusicBrainz writes | `grade_check_album_tags`, `grade_check_mb_links`, `grade_check_rym_links`, `grade_check_naming` |
+| `MUSICBRAINZ_*`, `RELEASETYPE`, `CATALOGNUMBER`, `LABEL`, `BARCODE`, `ISRC`, `WORK`, `MOVEMENT`, … | release | Beets tagging (14) · import · MusicBrainz writes | `grade_check_album_tags`, `grade_check_mb_links`, `grade_check_naming` |
 | `PERFORMER`, `PRODUCER`, `ENGINEER`, `MIXER`, `ARRANGER`, `DJMIXER`, `CONDUCTOR`, `WRITER`, `DIRECTOR`, `COMPOSERSORT`, `MUSICBRAINZ_COMPOSERID` | release | Beets tagging (14, `beets_credits`) · Auto tagging (8) — the release's own artist/recording/work relations, fetched in ONE request per album | `grade_check_excess_tags` (allowlisted, never foreign) |
 | `ASIN`, `LANGUAGE`, `DISCSUBTITLE`, `LICENSE`, `ENCODEDBY` | release | Beets tagging (14) · Auto tagging (8) | `grade_check_excess_tags` |
 
@@ -715,12 +733,9 @@ the container's tag system (packaging, per-catalogue-entry labels, annotations)
 is not invented under an ad-hoc key: it stays out, and the writer says which
 fields it could not place.
 
-The two advisory tags answer to **different switches**, because different things
-write them: `ITUNESADVISORY` to `advisory_auto_fetch` (the provider fetch — the
-import step, the wizard and the *Fetch / refresh advisory rating* action) and
-`ALBUMITUNESADVISORY` to script 8's *Auto Album Advisory* derivation
-(`mlo/config.py::_TAG_WRITE_SWITCH`). The advisory fetch derives the album tag
-too, with script 8's own rule, so a manual fetch never leaves it stale.
+The advisory tag answers to **one switch**, `advisory_auto_fetch` (the
+provider fetch — the import step, the wizard and the *Fetch / refresh advisory
+rating* action).
 
 A fetch reports its provenance per track, and never invents one: per source the
 STRONGEST answer wins (every ISRC the file or MusicBrainz states is asked, so a
@@ -2368,8 +2383,8 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   every step it can and then reports what is left; it never stops to ask. What
   it decides on its own, each through the family's own writer (the same entry
   point the manual option in `mlo.import_policy.FAMILIES` calls, so the two can
-  never drift apart): the MusicBrainz/RateYourMusic **links**
-  (`imports._stamp_release`/`stamp_rym_links`), the **cover** (`cover_candidates`
+  never drift apart): the MusicBrainz **links**
+  (`imports._stamp_release`), the **cover** (`cover_candidates`
   → `mlo.cover_choice`, R163), the **genres** (`_stamp_release`), the
   **lyrics** — and, when the chain finds none, the **instrumental** mark that
   settles them (R162) — the **advisory** (`fetch_advisories`) and the
@@ -2478,8 +2493,7 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   measured on a bare-id add (`{"mbid": <release id>, "kind": "release"}`,
   scratch scope, real network) the reply took **13.4 s** wall clock, of which
   10.0–13.1 s was `prefetch_content`'s provider work in the request path —
-  `cover_search` 3.4–8.5 s, the RateYourMusic link lookup 2.7 s, the
-  MusicBrainz metadata step 3.0–5.3 s — for content only an OPENED album page
+  `cover_search` 3.4–8.5 s, the MusicBrainz metadata step 3.0–5.3 s — for content only an OPENED album page
   reads, while the album row, its manifest and its cover were already
   on disk. The same add answers in **1.3 s** with that content fetched behind
   the reply, and the remainder is the two MusicBrainz lookups that DO name the
@@ -2616,31 +2630,19 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   refused with the list of what it does take, rather than having its UUID read
   as a release.
 
-- **R154 — an import USES what the add already fetched, where the add's record
-  is an IDENTITY.** The add path resolves the album's page content before the
-  audio exists (`imports.prefetch_album`, R140) and the import then asked the
-  providers for the same answers a second time. Measured on one album through the
-  real chain with the real network (`.pi/import_reuse.py`, one process per side,
-  the pre-change sequence reproduced by stubbing the reuse seams off): the ADD
-  paid **1** `integrations.rym_links` and the IMPORT paid **1** of it AGAIN —
-  18.5 s of add, 73.9 s of import — for a RateYourMusic link the framework marker
-  already recorded. So `imports._marker_links` hands `stamp_rym_links` the links
-  the add resolved (the TAGS are still written — only the lookup is skipped, and
-  only for a link the marker really carries for THIS album: it must be a
-  framework marker, the release group the album's own tags state — when they
-  state one — must be the group the marker was created with, and the switch
-  `rym_links_auto` is checked here too, so "off" still writes no auto-resolved
-  link). The COVER candidates are deliberately NOT reused, and that is the rule and not
-  an omission: the staged cover record is a PICK SCREEN — any surface may restage
-  it, `staged_metadata` finds it by folder name or by MB id as well as by path,
-  and it carries no proof of which search, for which album, produced it — so
-  ranking it would mean writing an image the policy chose from ANOTHER search's
-  rows instead of the best of what exists for the album being imported. That is
-  the one thing both cover modes share (`test_covers` pins it: with
-  `cover_review` off, the same fresh candidate set is ranked and its winner
-  written), so `run_cover_step` still ranks a fresh set and the import pays that
-  search. What each step saves is bounded by that: a saved lookup must be
-  attributable to THIS album by identity, or it is not reused.
+- **R154 — an import does not reuse the add's fetched page content, and the
+  cover candidates are the reason.** The add path resolves the album's page
+  content before the audio exists (`imports.prefetch_album`, R140); the staged
+  cover record is a PICK SCREEN — any surface may restage it, `staged_metadata`
+  finds it by folder name or by MB id as well as by path, and it carries no
+  proof of which search, for which album, produced it — so ranking it would
+  mean writing an image the policy chose from ANOTHER search's rows instead of
+  the best of what exists for the album being imported. That is the one thing
+  both cover modes share (`test_covers` pins it: with `cover_review` off, the
+  same fresh candidate set is ranked and its winner written), so
+  `run_cover_step` still ranks a fresh set and the import pays that search. A
+  saved lookup is only ever reused where it is attributable to THIS album by
+  identity; the add's page content is not, so it is fetched fresh.
 
 - **R155 — one grade per import, and the invalidation is scoped to the album.**
   The import's own report and the chain's own Grade step were asking the grader
@@ -3026,10 +3028,10 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
 
 The canonical library is `<music>/Artists/<Artist>/<Album>/<files>`, and the
 layout module's job is to say where a library is not that — then, for what the
-folder itself proves, to settle it. ONE scan answers every surface (script 20,
-`GET /api/library/layout` for the Optimization panel, and the stored report the
-Library page warns from), so their numbers cannot disagree, and ONE apply does
-the work (`POST /api/library/layout/apply`, or script 20's own run).
+folder itself proves, to settle it. ONE scan answers every surface (script 20
+and the stored report the Library page warns from, read through
+`GET /api/library/layout` and `GET /api/library/layout/report`), so their
+numbers cannot disagree, and ONE apply does the work (script 20's own run).
 
 - **R185 — the optimize pass removes excess to the Trash, and re-derives every
   removal at the move.** The scan reports; the apply settles what the folder
@@ -4634,28 +4636,23 @@ different answers.
 
 ### 7.76 The library-layout report keeps itself up to date
 
-- **R378 — the layout panel SCANS when it opens, and every action that moves a
-  folder asks for a fresh scan.** The report the panel draws is a scan's output
-  (`mlo.layout.scan_library`, the walk script 20 runs) and what both it and the
-  Library page's own layout warning read is the STORED copy — so the panel used
-  to paint the last scan's answer and wait for the reader to press Rescan, and
-  a folder the app (or the reader) had already changed kept being reported until
-  they did (owner report: "I need to manually use this section under rescan for
-  the library to update. It should be done automatically"). Now: the panel
-  paints the stored report first (so it arrives with an answer instead of a
-  spinner) and then runs a scan of its own, and `web/src/lib/layoutScan.ts`'s
-  `rescanLayout` is called by every action that changes the tree — an album to
-  the Trash (`AlbumPage.removeAlbum`, `LibraryPage.removeAlbums`), a restore
-  from the Trash (`TrashPage`), an applied fix or an album-less artist folder
-  removed (the panel's own actions, which also republish the query the Library's
-  warning reads). The scan is the READ-ONLY half of the layout route, so nothing
-  behind a mutation can settle a reader's files by surprise — the fixing half
-  stays behind Apply fixes and script 20's own `layout_apply` — and a scan that
-  cannot run leaves the stored report standing, silently. Pinned by
-  `tools/check_layout.cjs`: opening the panel moves the stored report's
-  `scanned_at` with no Rescan press, and a folder deleted on disk behind the
-  app's back (the owner's actual case) is gone from both the report and the
-  panel when the page is reopened.
+- **R378 — the library-layout report keeps itself up to date, and every action
+  that moves a folder asks for a fresh scan.** The report a page draws is a
+  scan's output (`mlo.layout.scan_library`, the walk script 20 runs) and what
+  the Library page's own layout warning reads is the STORED copy — so a folder
+  the app (or the reader) had already changed kept being reported until somebody
+  pressed Rescan (owner report: "I need to manually use this section under
+  rescan for the library to update. It should be done automatically"). Now:
+  `web/src/lib/layoutScan.ts`'s `rescanLayout` is called by every action that
+  changes the tree — an album to the Trash (`AlbumPage.removeAlbum`,
+  `LibraryPage.removeAlbums`), a restore from the Trash (`TrashPage`) — and it
+  republishes the query the Library's warning reads. The scan is the READ-ONLY
+  half of the layout route, so nothing behind a mutation can settle a reader's
+  files by surprise — the fixing half is script 20's own `layout_apply` — and a
+  scan that cannot run leaves the stored report standing, silently. Pinned by
+  `tools/check_layout.cjs`: a folder deleted on disk behind the app's back (the
+  owner's actual case) is gone from the report the Library page warns from when
+  the page is reopened.
 
 ## 8. Runbook
 

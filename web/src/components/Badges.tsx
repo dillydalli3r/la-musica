@@ -303,15 +303,14 @@ export function AdvisoryMark({ value, size = "sm" }: { value: string | null | un
  *  otherwise. Anything else — no tag, or a bare "0" — draws nothing, which is
  *  what `AdvisoryMark` does with a value it cannot place. */
 export function albumAdvisory(al: {
-  meta?: { ALBUMITUNESADVISORY?: unknown; ITUNESADVISORY?: unknown } | null;
+  meta?: { ITUNESADVISORY?: unknown } | null;
   tracks?: { tags?: { ITUNESADVISORY?: unknown } | null }[] | null;
 }): "1" | "2" | null {
   const text = (v: unknown) => String(v ?? "").trim();
-  const album = text(al.meta?.ALBUMITUNESADVISORY);
   const own = text(al.meta?.ITUNESADVISORY);
   const tracks = (al.tracks ?? []).map((t) => text(t?.tags?.ITUNESADVISORY));
-  if (own === "1" || album === "1" || tracks.includes("1")) return "1";
-  if (album === "2" || own === "2" || tracks.includes("2")) return "2";
+  if (own === "1" || tracks.includes("1")) return "1";
+  if (own === "2" || tracks.includes("2")) return "2";
   // "0", a blank, or no tag at all: nothing is drawn, because nothing was said.
   return null;
 }

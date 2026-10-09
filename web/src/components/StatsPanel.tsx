@@ -183,7 +183,7 @@ export default function StatsPanel({
           </div>
           <div className="mt-1 text-amber-200/70">
             Library-wide, not per-album tag failures — audio outside the artist/album tree is not graded at all.
-            Script 20 and Optimization → Library layout both report and fix it.
+            Run Optimize library layout (script 20) on the Optimization page to report and fix it.
           </div>
         </div>
       )}

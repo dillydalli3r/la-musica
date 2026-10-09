@@ -83,13 +83,10 @@ export default function ArtistPage() {
     (s, a) => s + a.tracks.reduce((n, t) => n + (t.tech?.length ?? 0), 0),
     0
   );
-  // Identity links for this artist: MBID from any album's album-artist tag,
-  // RYM artist URL from any track that carries one.
+  // Identity links for this artist: the MusicBrainz artist id, from any
+  // album's album-artist tag.
   const artistTags = {
     MUSICBRAINZ_ARTISTID: artistMbid(data) ?? "",
-    RATEYOURMUSIC_ARTIST:
-      data.albums.flatMap((a) => a.tracks.map((t) => t.tags?.RATEYOURMUSIC_ARTIST ?? ""))
-        .find((v) => v) ?? "",
   };
 
   // The artist-level grade, watched by the identity dot and the chips below.
@@ -200,13 +197,18 @@ export default function ArtistPage() {
               {/* The actions sit in their OWN wrapping row under the title: a
                   header row of buttons sharing a line with the identity block
                   squeezes the title and the counts into a column at
-                  1024-1568px. Out of that row they just wrap. */}
+                  1024-1568px. Out of that row they just wrap.
+
+                  Every button is the same 36px `.btn-icon` square — the set
+                  the album page's action row uses — with no visible label:
+                  the glyph names the action, and `title`/`aria-label` (kept by
+                  each component from `title`/`buttonTitle`) name it on hover
+                  and to a screen reader. */}
               <div className="flex items-center gap-1.5 flex-wrap">
                 <ExportButton
                   paths={allTracks.map((t) => t.path)}
                   seconds={allSeconds}
-                  size="md"
-                  label="Export all"
+                  iconOnly
                   emptyReason="Nothing to export — this artist has no tracks"
                   title="Export this artist's tracks to a drive"
                   dialogSubtitle={`Every track by ${name}`}
@@ -219,11 +221,22 @@ export default function ArtistPage() {
                   // derived from the tracks one album at a time.
                   artistPath={data.path}
                   onDone={refresh}
+                  buttonClass="btn-icon"
                   buttonTitle="Tag actions on every track of this artist"
                 />
-                <LinkEditorButton mode="artist" paths={allTracks.map((t) => t.path)} current={artistTags} artist={data.name} />
-                <button className="btn-ghost" onClick={() => setStatsOpen(true)}>
-                  <BarChart3 className="h-4 w-4" /> Stats
+                <LinkEditorButton
+                  mode="artist"
+                  paths={allTracks.map((t) => t.path)}
+                  current={artistTags}
+                  iconOnly
+                />
+                <button
+                  className="btn-icon"
+                  onClick={() => setStatsOpen(true)}
+                  title="Stats for this artist"
+                  aria-label="Stats for this artist"
+                >
+                  <BarChart3 className="h-4 w-4" />
                 </button>
               </div>
             </PageHeader>

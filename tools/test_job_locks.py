@@ -1423,22 +1423,19 @@ if mlo_main is not None:
             # the temp library too, or the press runs the DEVELOPER's config
             # against the fixture.
             "imports_config": imports_mod.load_config,
-            "rym": imports_mod.stamp_rym_links,
             "adv": imports_mod.fetch_advisories,
             "inst": imports_mod.fetch_instrumentals,
             "cover": imports_mod.run_cover_step,
             "hook": getattr(mlo_stats, "progress_hook", None),
         }
         # The press runs the configured chain, so it is the suite's one stub
-        # script — and the import's own remote steps (links, cover art) are
+        # script — and the import's own remote steps (cover art) are
         # stubbed: those are /api/import's own test, what is pinned here is
         # WHEN the press is answered and what the surfaces say.
         press_cfg = lambda: {**_press["config"](), "music_folder": music,
                              "import_scripts": [3]}
         mlo_main.load_config = press_cfg
         imports_mod.load_config = press_cfg
-        imports_mod.stamp_rym_links = lambda path, cfg=None: {
-            "album": "", "artist": "", "note": "", "written": 0}
         imports_mod.fetch_advisories = lambda paths, cfg=None, progress=None: {
             "updated": 0, "values": {}}
         imports_mod.fetch_instrumentals = lambda paths, cfg=None: {
@@ -1588,7 +1585,6 @@ if mlo_main is not None:
         finally:
             mlo_main.load_config = _press["config"]
             imports_mod.load_config = _press["imports_config"]
-            imports_mod.stamp_rym_links = _press["rym"]
             imports_mod.fetch_advisories = _press["adv"]
             imports_mod.fetch_instrumentals = _press["inst"]
             imports_mod.run_cover_step = _press["cover"]

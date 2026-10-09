@@ -47,10 +47,12 @@ EXPECTED_SCRIPTS = {
     # 17 is the AI pass: the lyric transliteration / translation script the
     # no-AI core removed, back under a fresh id (15 stayed with the tracklist).
     17: "Lyrics transliterate (AI)",
-    # 20 reports the shape of the whole music folder (mlo/layout.py) and
-    # stores that report under <music>/.mlo/data, which is what the Library
-    # page warns from. Read-only: it is the one script that changes no file.
-    20: "Scan library layout",
+    # 20 reports the shape of the whole music folder (mlo/layout.py) and FIXES
+    # what it proves — rename, move, Trash. It is the app's only library-layout
+    # entry point (it replaced the old separate Optimization panel); Run All and
+    # every import chain run it too. It stores its report under <music>/.mlo/data,
+    # which is what the Library page warns from.
+    20: "Optimize library layout",
     # 21 completes an ACOUSTID_ID / ACOUSTID_FINGERPRINT pair a file only half
     # carries — the grading check that had no fixer in the registry at all
     # (mlo/acoustid.py run_fix_pairs).

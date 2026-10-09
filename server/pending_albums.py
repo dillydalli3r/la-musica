@@ -332,9 +332,9 @@ def prefetch_content(folder, cfg=None, *, background=False):
 
     "Add to library" puts the album in the library the moment it is asked for,
     so the page it links to must have something real on it before the download
-    lands: the artist image and descriptions, the album description, the
-    RateYourMusic links and the ranked cover candidates (with the policy's
-    winner marked) — see ``server.imports.prefetch_album``, which is the import
+    lands: the artist image and descriptions, the album description and the
+    ranked cover candidates (with the policy's winner marked) — see
+    ``server.imports.prefetch_album``, which is the import
     chain's own steps run early, gated by their own switches.
 
     Inline by default (the user is waiting for THIS album and the page is one

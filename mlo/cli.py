@@ -178,10 +178,9 @@ def show_config_menu(config):
         print(f" 33. Audit BPM                : {config.get('audit_bpm', True)}")
         print(f" 34. DR/ReplayGain Enabled    : {config.get('dr_replaygain_enabled', True)}")
         print(f" 35. ReplayGain Skip Existing : {config.get('replaygain_skip_existing', True)}")
-        print(f" 36. Auto Album Advisory      : {config.get('auto_advisory', True)}")
-        print(f" 37. Auto Instrumental Tag    : {config.get('auto_instrumental', True)}")
-        print(f" 38. Force Auto Tagging       : {config.get('force_auto_tag', False)}")
-        print(f" 39. Key & BPM Enabled        : {config.get('audiometa_enabled', True)}")
+        print(f" 36. Auto Instrumental Tag    : {config.get('auto_instrumental', True)}")
+        print(f" 37. Force Auto Tagging       : {config.get('force_auto_tag', False)}")
+        print(f" 38. Key & BPM Enabled        : {config.get('audiometa_enabled', True)}")
 
         print_separator()
         print("  Auto-detected encoder versions (.dependencies):")
@@ -435,24 +434,18 @@ def show_config_menu(config):
             pause_for_input()
 
         elif choice == "36":
-            config["auto_advisory"] = tf("Auto-derive ALBUMITUNESADVISORY from track ITUNESADVISORY? (y/n): ")
-            save_config(config)
-            print(f"\nSaved. Auto Album Advisory = {config['auto_advisory']}")
-            pause_for_input()
-
-        elif choice == "37":
             config["auto_instrumental"] = tf("Auto-set INSTRUMENTAL from lyrics presence? (y/n): ")
             save_config(config)
             print(f"\nSaved. Auto Instrumental = {config['auto_instrumental']}")
             pause_for_input()
 
-        elif choice == "38":
+        elif choice == "37":
             config["force_auto_tag"] = tf("Force re-tagging even when tags are already correct? (y/n): ")
             save_config(config)
             print(f"\nSaved. Force Auto Tagging = {config['force_auto_tag']}")
             pause_for_input()
 
-        elif choice == "39":
+        elif choice == "38":
             config["audiometa_enabled"] = tf("Enable Key & BPM analysis (script 12)? (y/n): ")
             save_config(config)
             print(f"\nSaved. Key & BPM Enabled = {config['audiometa_enabled']}")

@@ -684,13 +684,13 @@ def finish_album(album_dir, cfg=None, progress=None, force=None, release=None,
     import.
 
     The staged work is gated by its OWN keys, not by the chain switch:
-    ``cover_auto_fetch`` decides the cover art, ``rym_links_auto`` the links
-    and ``genre_autofill`` the genres (the family's only fetcher — see the step
-    itself), so an import with the chain switched off still does those (the
-    unattended import has fetched them since it existed, and turning the
-    scripts off must not silently take the cover art with it) — while
-    ``advisory_auto_fetch`` / ``instrumental_auto_fetch`` only run when a chain
-    is configured to read what they write.
+    ``cover_auto_fetch`` decides the cover art and ``genre_autofill`` the
+    genres (the family's only fetcher — see the step itself), so an import with
+    the chain switched off still does those (the unattended import has fetched
+    them since it existed, and turning the scripts off must not silently take
+    the cover art with it) — while ``advisory_auto_fetch`` /
+    ``instrumental_auto_fetch`` only run when a chain is configured to read
+    what they write.
 
     WHAT THE ALBUM ARRIVED WITH is dropped for the four families this import
     decides itself — lyrics, genre, advisory, embedded cover art — by
@@ -898,27 +898,6 @@ def _finish_album(path, cfg, progress=None, force=None, release=None,
     except Exception:
         album_mbid = album_rgid = ""
 
-    # RateYourMusic album + artist links: resolved and written once, only for
-    # the links the album does not carry yet. Deliberately BEFORE the chain
-    # check — an album imported with no scripts configured still gets its
-    # links. Gated by rym_links_auto; a lookup that finds nothing is one log
-    # line (the user pastes the URL in the links editor), never an error.
-    # Announced first: what the user pressed was "Run the import chain", and
-    # this is where the time before its first script goes. A family this import
-    # will NOT fetch is not announced at all: the text says what the album is
-    # having done to it, and a line about work that is switched off is a claim
-    # the run itself then contradicts (the owner's report: a step that is a
-    # no-op for this album must not be published). The cut is the SAME switch
-    # the step below reads, so the line and the work can never disagree.
-    if run_cfg.get("rym_links_auto", True):
-        _phase("Looking up links…")
-    try:
-        rym = stamp_rym_links(path, run_cfg)
-        if rym["note"].startswith("could not resolve"):
-            print(f"[mlo] rateyourmusic: {rym['note']} — {os.path.basename(path)}")
-    except Exception:
-        traceback.print_exc()
-
     # THE RELEASE'S OWN IDENTITY, at the moment it is known: MEDIA (the
     # medium the release is pressed on), RELEASECOUNTRY and the rest of what
     # MusicBrainz states about this release — label, catalogue number,
@@ -1097,9 +1076,10 @@ def _finish_album(path, cfg, progress=None, force=None, release=None,
     _files_pool = ThreadPoolExecutor(max_workers=1)
     _files = _files_pool.submit(_files_step)
 
-    # Advisory BEFORE the chain: script 8 derives ALBUMITUNESADVISORY from the
-    # per-track values, so writing ITUNESADVISORY afterwards would leave the
-    # album tag stale. Gated by advisory_auto_fetch; never fatal. Only fetched
+    # Advisory BEFORE the chain: the chain's lyrics/auto-tag steps read
+    # ITUNESADVISORY, so it is written first (the per-track tag only now —
+    # there is no album-level advisory tag). Gated by advisory_auto_fetch;
+    # never fatal. Only fetched
     # when a chain is configured to read them — they exist to feed script 8 and
     # the lyrics step, and a chain that is switched off must not leave those
     # tags behind as a side effect. The frame rides INSIDE that same condition:
@@ -1861,41 +1841,38 @@ def fetch_advisories(paths, cfg=None, force=False):
     answered and the answer was lost" when the truth is "nobody was asked".
 
     `force=True` is the re-rate: such a file is asked anyway and what the
-    sources state IS written (the write gate still applies, the album tag
-    still derives as below). It is the way out of a value that an earlier run
-    invented — the fallback writes 0 for a track nobody rated, and that 0 then
-    outlived every provider that later knew better. Only EVIDENCE lowers a
-    stored rating: a decided value that is that INVENTED `advisory_fallback`
-    leaves an existing 0/1/2 standing, still reported as the file's own tag.
-    A decided value equal to the one stored is decided, not rewritten.
+    sources state IS written (the write gate still applies). It is the way out
+    of a value that an earlier run invented — the fallback writes 0 for a
+    track nobody rated, and that 0 then outlived every provider that later
+    knew better. Only EVIDENCE lowers a stored rating: a decided value that is
+    that INVENTED `advisory_fallback` leaves an existing 0/1/2 standing, still
+    reported as the file's own tag. A decided value equal to the one stored is
+    decided, not rewritten.
 
-    ALBUMITUNESADVISORY is DERIVED here for every album folder the call
-    touched, from the per-track values by script 8's own rule
-    (`mlo.autotag._derive_advisory`: any explicit → 1, else any clean edition
-    → 2, else 0). Script 8 runs it behind the import chain, but the manual
-    surfaces — the wizard's advisory step, the album page's Check, the
-    tag-actions item — have no script 8 behind them, and leaving it to the
-    script left every track rated and the album tag empty, which the grader
-    reports as "Missing album tag ALBUMITUNESADVISORY".
+    No album-level advisory is derived or written: ALBUMITUNESADVISORY is not
+    part of this app's vocabulary (mlo.audio.TAG_MAP), so a file carrying one
+    is excess and Optimize tags (23) / Format all (10) remove it. The reply
+    keeps `albums`/`album_updated` (always `{}`/`0`) so an older client reads
+    the same shape.
 
     Returns ``{"updated": n, "values": {path: 0|1|2}, "sources": {path:
-    provider}, "answers": {path: {source: 0|1}}, "albums": {folder: 0|1|2},
-    "album_updated": n, "gated": n, "status":
+    provider}, "answers": {path: {source: 0|1}}, "albums": {},
+    "album_updated": 0, "gated": n, "status":
     {path: "written"|"unchanged"|"existing"|"gated"}}``
     — `updated`/`values`/`sources`/`answers` are the per-track writes
     (`sources` is who stated each value — "instrumental", "ai-lyrics", "ai"
     and "fallback" included, so a value NOBODY stated is
     distinguishable from one a provider stated: the ladder's stage is named —
     and "existing-tag" when the reported value is the file's own), `answers`
-    names every source that answered the track, the AI included, `albums`/
-    `album_updated` are the album tag derived from them, and `gated` counts
-    the files the ADVISORY write gate refused. `status` says what happened to
-    each reported value THIS run — `written` (the tag now holds what this run
-    wrote), `unchanged` (decided, and the tag already read it), `existing`
-    (echoed without asking anyone: `force=False` on a file that had a value)
-    or `gated` — so `updated == 0` can never be read as a re-rate that found
-    nothing. When the gate refused EVERY file, `skipped` carries the reason
-    instead of an empty result that would read as "nobody stated anything".
+    names every source that answered the track, the AI included, and `gated`
+    counts the files the ADVISORY write gate refused. `status` says what
+    happened to each reported value THIS run — `written` (the tag now holds
+    what this run wrote), `unchanged` (decided, and the tag already read it),
+    `existing` (echoed without asking anyone: `force=False` on a file that had
+    a value) or `gated` — so `updated == 0` can never be read as a re-rate
+    that found nothing. When the gate refused EVERY file, `skipped` carries
+    the reason instead of an empty result that would read as "nobody stated
+    anything".
     """
     from mlo.audio import AudioFile
     from mlo.config import should_write_audio_tag
@@ -2027,71 +2004,28 @@ def fetch_advisories(paths, cfg=None, force=False):
 
     if gated and not values:
         # Nothing at all was recorded because the write gate refused every file
-        # (Settings → "Set advisory automatically" is the ADVISORY family's
-        # master switch, or the per-filetype toggle). Say so: the all-zero
-        # reply this used to return reads exactly like "nobody stated
-        # anything", and a caller cannot act on a lie. Nothing was looked up
-        # and nothing was written, so there is no album tag to derive either.
+        # (Settings → "Fetch the advisory rating automatically" is
+        # ITUNESADVISORY's own switch, or the per-filetype toggle). Say so: the
+        # all-zero reply this used to return reads exactly like "nobody stated
+        # anything", and a caller cannot act on a lie.
         return {"updated": 0, "values": {}, "sources": {}, "answers": {},
                 "status": status, "albums": {}, "album_updated": 0,
                 "gated": gated,
                 "skipped": (f"{gated} track(s) not rated: writing "
                             "ITUNESADVISORY is off for their file type "
-                            "(auto_advisory / audio_tag_writes['ADVISORY'])")}
+                            "(advisory_auto_fetch / audio_tag_writes['ADVISORY'])")}
 
-    # The album tag, from the values this pass just settled (and from whatever
-    # the album's other tracks already carried — the rule is album-wide).
-    from mlo.autotag import _derive_advisory
-    albums = {}
-    album_updated = 0
-    album_gated = 0
-    for folder in sorted(per_folder):
-        try:
-            files = _audio_files(folder)
-            handles = {}
-            for p in files:
-                try:
-                    af = AudioFile(p)
-                except Exception:
-                    continue
-                if af.audio is None:
-                    continue
-                handles[p] = af
-            if not handles:
-                continue
-            advisories = [str(values[p]) if p in values
-                          else str(handles[p].get_tag("ITUNESADVISORY") or "").strip()
-                          for p in handles]
-            want = _derive_advisory(advisories)
-            albums[folder] = want
-            for p, af in handles.items():
-                if str(af.get_tag("ALBUMITUNESADVISORY") or "").strip() == str(want):
-                    continue
-                if not should_write_audio_tag(cfg, "ALBUMITUNESADVISORY", filepath=p):
-                    album_gated += 1
-                    continue
-                if af.set_tag("ALBUMITUNESADVISORY", str(want)):
-                    album_updated += 1
-        except Exception:
-            continue
-
-    if updated or album_updated:
+    if updated:
         # Scoped to the albums this pass wrote (spec R155): every other album's
         # cached tags are still valid, so they stay.
-        _invalidate_caches(*albums)
-    out = {"updated": updated, "values": values, "sources": sources,
-           "answers": answers, "status": status, "albums": albums,
-           "album_updated": album_updated, "gated": gated,
-           "album_gated": album_gated}
-    if album_gated and not album_updated:
-        # The per-track values landed and the ALBUM tag was refused: that tag
-        # answers to script 8's derivation switch ("Auto Album Advisory",
-        # `auto_advisory`), which is off. Say it — an album whose tracks are all
-        # rated and whose album tag is empty fails `grade_check_album_tags`,
-        # and the caller has to know which switch to flip.
-        out["skipped"] = (f"{album_gated} album tag(s) not written: "
-                          "ALBUMITUNESADVISORY derivation is off (auto_advisory)")
-    return out
+        _invalidate_caches(*per_folder)
+    # No album-level tag is DERIVED: ALBUMITUNESADVISORY is not part of this
+    # app's vocabulary any more (mlo.audio.TAG_MAP), so a file carrying one is
+    # excess and Optimize tags (23) / Format all (10) remove it. The keys stay
+    # in the reply so an older client reads the same shape with nothing in it.
+    return {"updated": updated, "values": values, "sources": sources,
+            "answers": answers, "status": status, "albums": {},
+            "album_updated": 0, "gated": gated, "album_gated": 0}
 
 
 def fetch_instrumentals(paths, cfg=None):
@@ -2814,75 +2748,22 @@ def _kept_placeholder(out, placeholder):
     return out
 
 
-def prefetch_links(album_dir, cfg=None):
-    """Resolve an album's / artist's RateYourMusic links onto its marker.
-
-    The tag half of the links step cannot run before the audio exists, but the
-    RESOLUTION can: the same resolver the stamp uses (`integrations.rym_links`,
-    MusicBrainz-relation first), the same switch (`rym_links_auto`), and a link
-    RYM itself confirmed is recorded in the framework marker so the album's
-    page shows it from the moment it is added. Nothing already recorded is ever
-    overwritten (a link the user pasted wins), and nothing is written when the
-    lookup resolves nothing. Returns ``{"album", "artist", "note", "saved"}``;
-    never raises.
-    """
-    cfg = cfg or load_config()
-    out = {"album": None, "artist": None, "note": "", "saved": False}
-    if not cfg.get("rym_links_auto", True):
-        out["note"] = "skipped: rym_links_auto is off"
-        return out
-    from mlo.paths import load_pending, save_pending
-    from server import integrations as intg
-
-    info = load_pending(album_dir) or {}
-    if not info:
-        out["note"] = "not a framework album — no marker to record a link in"
-        return out
-    have = dict(info.get("links") or {})
-    artist, album = album_identity(album_dir, cfg)
-    if not artist and not album:
-        out["note"] = "no artist/album to look a link up for"
-        return out
-    if not (have.get("album") and have.get("artist")):
-        links = {}
-        try:
-            links = intg.rym_links(
-                artist, album, cfg=cfg,
-                mbid=str(info.get("release_group_id")
-                         or info.get("release_id") or "")) or {}
-        except Exception:
-            traceback.print_exc()
-            out["note"] = "the link lookup failed"
-            return out
-        out["note"] = str(links.get("note") or "")
-        merged = {"album": have.get("album") or links.get("album"),
-                  "artist": have.get("artist") or links.get("artist")}
-        if any(merged.values()) and merged != have:
-            info["links"] = merged
-            out["saved"] = bool(save_pending(album_dir, info))
-            have = merged
-    out["album"], out["artist"] = have.get("album"), have.get("artist")
-    return out
-
-
 def prefetch_album(album_dir, cfg=None):
     """What a freshly added album can have BEFORE its audio exists.
 
     "Add to library" already creates the folder, its release manifest and a
     placeholder cover; this is the rest of what the album's page shows, fetched
-    the moment the album is asked for rather than when the download lands: its
-    RateYourMusic links and the ranked cover candidates with the policy's
-    winner marked.
+    the moment the album is asked for rather than when the download lands: the
+    ranked cover candidates with the policy's winner marked.
 
-    Every step is the import chain's own function and its own switch
-    (`rym_links_auto`, `cover_auto_fetch`), so nothing here is a second fetcher
-    and nothing is fetched that the import would not have fetched anyway. Never
-    fatal: the folder is already a real library album, and a provider that
-    refuses must not fail the add. The album's identity comes from the marker
-    when there is no audio to read tags from (`album_identity`).
+    The cover step is the import chain's own function and its own switch
+    (`cover_auto_fetch`), so nothing here is a second fetcher and nothing is
+    fetched that the import would not have fetched anyway. Never fatal: the
+    folder is already a real library album, and a provider that refuses must
+    not fail the add.
     """
     cfg = cfg or load_config()
-    out = {"links": None, "cover": None}
+    out = {"cover": None}
     # The same effective config the import chain runs under, so a family the
     # user kept for themselves is not decided here either.
     try:
@@ -2891,10 +2772,6 @@ def prefetch_album(album_dir, cfg=None):
     except Exception:
         traceback.print_exc()
         run_cfg = cfg
-    try:
-        out["links"] = prefetch_links(album_dir, run_cfg)
-    except Exception:
-        traceback.print_exc()
     try:
         if run_cfg.get("cover_auto_fetch", True):
             payload = cover_candidates(album_dir, run_cfg)
@@ -2918,8 +2795,6 @@ def prefetch_album(album_dir, cfg=None):
             "cover_candidates": int((out.get("cover") or {}).get("candidates") or 0),
             "cover_pick": chosen.get("big"),
             "cover_source": chosen.get("source"),
-            "links": {"album": (out.get("links") or {}).get("album"),
-                      "artist": (out.get("links") or {}).get("artist")},
         }})
     except Exception:
         traceback.print_exc()
@@ -4184,166 +4059,6 @@ def _stamp_release(album_dir, release, cfg, force_ids=False):
         outcomes = list(ex.map(_stamp_one, files))
     return (sum(1 for o in outcomes if o == "written"),
             sum(1 for o in outcomes if o == "failed"))
-
-
-def _marker_links(album_dir, cfg=None):
-    """The RateYourMusic links the ADD already resolved for this album, or {}.
-
-    `imports.prefetch_links` runs the SAME resolver at add time (same switch,
-    same MB-relation first ladder) and records what RYM confirmed in the
-    framework marker, so an import that looks the links up again pays a second
-    time for an answer the app itself wrote down.
-
-    Read only while the marker still SPEAKS FOR this album, and only while the
-    user's switch is on: the marker must carry the resolved `links` (the
-    `prefetched` echo is accepted for a marker written before this existed) and
-    the release GROUP the album's own tags state — when they state one — must
-    be the group the marker was created with, so a marker left behind by a
-    different album that landed in the same folder hands nothing over. The
-    switch is checked here because `integrations.rym_links` is where it
-    normally short-circuits: off must keep writing NO auto-resolved link, and
-    that has to hold for the marker path too.
-    """
-    cfg = cfg if cfg is not None else load_config()
-    if not cfg.get("rym_links_auto", True):
-        return {}
-    try:
-        from mlo.paths import load_pending
-        info = load_pending(album_dir) or {}
-    except Exception:
-        return {}
-    if not info:
-        return {}
-    links = dict(info.get("links") or {})
-    echo = (info.get("prefetched") or {}).get("links") or {}
-    for key in ("album", "artist"):
-        links[key] = str(links.get(key) or echo.get(key) or "").strip()
-    if not (links["album"] or links["artist"]):
-        return {}
-    _album_id, rg = _album_mbids(album_dir)
-    marker_rg = str(info.get("release_group_id") or "").strip().lower()
-    if rg and marker_rg and rg != marker_rg:
-        return {}
-    return links
-
-
-def stamp_rym_links(album_dir, cfg=None):
-    """Resolve and write the album's / artist's RateYourMusic links.
-
-    One RATEYOURMUSIC_ALBUM and one RATEYOURMUSIC_ARTIST on every track — the
-    state the grader and the links editor read. A link already present on ANY
-    track of the album is left alone and NOT looked up: the user's own link
-    wins, and nothing here ever overwrites one. Only a link RYM itself
-    confirmed (``server.integrations.rym_links``) is written, so a failed
-    lookup writes nothing at all and reports "could not resolve" in its note
-    instead of failing the import.
-
-    Gated by `rym_links_auto` (config.py, default True). Returns
-    ``{"album", "artist", "note", "written"}``; never raises.
-    """
-    from mlo.audio import AudioFile
-    from server import integrations as intg
-
-    cfg = cfg or load_config()
-    out = {"album": None, "artist": None, "note": "", "written": 0}
-    files = []
-    for path in _audio_files(album_dir):
-        try:
-            af = AudioFile(path)
-        except Exception:
-            continue
-        if af.audio is not None:
-            files.append(af)
-    if not files:
-        return out
-
-    def _tag(af, name):
-        try:
-            return str(af.get_tag(name) or "").strip()
-        except Exception:
-            return ""
-
-    have_album = any(_tag(af, "RATEYOURMUSIC_ALBUM") for af in files)
-    have_artist = any(_tag(af, "RATEYOURMUSIC_ARTIST") for af in files)
-    if have_album and have_artist:
-        return out                      # nothing missing: no lookup at all
-
-    artist, album = _album_identity(album_dir)
-    # The ADD already resolved these links and recorded them in the framework
-    # marker (`prefetch_links` — the same resolver, the same switch, the same
-    # artist/album), and this step is where an import would ask for them a
-    # SECOND time: the lookup measured 2.7 s of the add's pre-fetch, re-paid at
-    # import for an answer the app itself wrote down. The TAGS are still
-    # written below; only the lookup is skipped, and only for a link the marker
-    # really carries for THIS album.
-    links = _marker_links(album_dir, cfg)
-    if links.get("album") and links.get("artist"):
-        out["note"] = "links already resolved when the album was added"
-    else:
-        # With the album's MusicBrainz id the lookup is a url-relation read on
-        # MusicBrainz — no RYM scrape, no cookie, no guess — so the id is offered
-        # first and the slug/search ladder is only the fallback.
-        found = intg.rym_links(
-            artist, album, cfg=cfg,
-            mbid=(_tag(files[0], "MUSICBRAINZ_RELEASEGROUPID")
-                  or _tag(files[0], "MUSICBRAINZ_ALBUMID")))
-        out["note"] = found.get("note") or ""
-        # A marker holding only ONE of the two is not a reason to throw that one
-        # away: the lookup fills the other, the marker keeps what it has.
-        links = {"album": found.get("album") or links.get("album"),
-                 "artist": found.get("artist") or links.get("artist")}
-    if not have_album:
-        out["album"] = links.get("album")
-    if not have_artist:
-        out["artist"] = links.get("artist")
-    if not out["album"] and not out["artist"]:
-        return out
-
-    def _write_links(af):
-        """Write whichever of the two links is missing, in ONE rewrite.
-
-        Both were a whole-file copy of their own before this (mlo.audio saves
-        by writing a temp beside the file and renaming it over — mlo.atomic.
-        rewrite_via), so two links cost two rewrites per track. The deferral
-        holds them for a single flush, and its verdict IS the answer: deferred,
-        a write that cannot land no longer raises out of set_tag, and a file
-        that did not reach disk must not be counted as written. The deferral is
-        turned off even when a write raised, so a half-written file is flushed
-        rather than left holding changes nobody saved."""
-        try:
-            tags = {}
-            if out["album"] and not _tag(af, "RATEYOURMUSIC_ALBUM"):
-                tags["RATEYOURMUSIC_ALBUM"] = out["album"]
-            if out["artist"] and not _tag(af, "RATEYOURMUSIC_ARTIST"):
-                tags["RATEYOURMUSIC_ARTIST"] = out["artist"]
-            if not tags:
-                return False
-            # A stand-in for AudioFile (a test double) cannot defer: it writes
-            # per tag, exactly as it did before.
-            defer = hasattr(af, "defer_save")
-            if defer:
-                af.defer_save(True)
-            written = False
-            try:
-                for key, value in tags.items():
-                    af.set_tag(key, value)
-                written = True
-            finally:
-                if defer and af.defer_save(False) is False:
-                    written = False
-            return written
-        except Exception:
-            return False
-
-    # Distinct FILES share nothing: every rewrite_via copies beside its OWN
-    # target and swaps it in with os.replace (mlo.atomic), so the album's
-    # tracks write side by side instead of one after another.
-    workers = worker_count(cfg, maximum=8, items=len(files))
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        out["written"] = sum(1 for ok in ex.map(_write_links, files) if ok)
-    if out["written"]:
-        _invalidate_caches(album_dir)
-    return out
 
 
 # --------------------------------------------------------------------------- #

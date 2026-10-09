@@ -26,7 +26,7 @@ try {
 } catch (e) {
   console.error("[check_browse_sheet] Playwright not found — install it with " +
     "`npm i -D playwright` (or set PLAYWRIGHT=/path/to/playwright).");
-  process.exit(1);
+  process.exit(2);
 }
 
 const ARGS = process.argv.slice(2);

@@ -580,7 +580,6 @@ export default function SettingsPage() {
     {
       title: "AutoTag (script 8)",
       fields: [
-        { k: "auto_advisory", label: "Set advisory automatically", type: "bool" },
         { k: "advisory_auto_fetch", label: "Fetch the advisory rating automatically (import + advisory fetch)", type: "bool" },
         {
           k: "advisory_ai_classify", label: "Judge the lyrics with the AI provider", type: "bool",
@@ -770,7 +769,7 @@ export default function SettingsPage() {
         },
         {
           k: "rym_links_auto", label: "Auto-find RateYourMusic links", type: "bool",
-          help: "Asks rateyourmusic.com for the album and artist pages during an import (and from the link editor's Auto-find button). An existing link is never overwritten, and when RYM refuses the request the import carries on untouched — the link is then left for you to paste by hand.",
+          help: "Whether the app may ask rateyourmusic.com to resolve an album's or artist's RYM page (the RateYourMusic source probe, Settings → Sources → Test). A request the site refuses never fails anything — the caller carries on, and nothing is ever written into a tag.",
         },
         {
           k: "spotify_client_id", label: "Spotify client ID (optional)", type: "text",
@@ -913,7 +912,6 @@ export default function SettingsPage() {
     { k: "grade_check_lyrics_format", label: "Lyrics format", type: "bool" },
     { k: "grade_check_sidecar_cover", label: "Sidecar cover", type: "bool" },
     { k: "grade_check_mb_links", label: "MusicBrainz links (album/artist/track)", type: "bool" },
-    { k: "grade_check_rym_links", label: "RateYourMusic links (album/artist/track)", type: "bool" },
     { k: "grade_check_media", label: "MEDIA tag", type: "bool" },
     { k: "grade_check_source", label: "SOURCE tag", type: "bool" },
     { k: "grade_check_album_tags", label: "Album-level tags", type: "bool" },

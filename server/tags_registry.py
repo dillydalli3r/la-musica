@@ -102,7 +102,7 @@ TAG_FAMILY = {
     "ASIN": "release", "LANGUAGE": "release", "DISCSUBTITLE": "release",
     "LABEL": "release", "TRACKTOTAL": "release", "DISCTOTAL": "release",
     "ISRC": "release", "LICENSE": "release", "MEDIA": "release",
-    "SOURCE": "release", "ALBUMITUNESADVISORY": "release",
+    "SOURCE": "release",
     "MUSICBRAINZ_ALBUMID": "release",
     "MUSICBRAINZ_ALBUMARTISTID": "release",
     "MUSICBRAINZ_ARTISTID": "release",
@@ -111,8 +111,6 @@ TAG_FAMILY = {
     "MUSICBRAINZ_RELEASEGROUPID": "release",
     "MUSICBRAINZ_RELEASETRACKID": "release",
     "MUSICBRAINZ_WORKID": "release",
-    "RATEYOURMUSIC_ALBUM": "release", "RATEYOURMUSIC_TRACK": "release",
-    "RATEYOURMUSIC_ARTIST": "release",
     # What the analysis passes measured on the audio itself.
     "MOOD": "audio", "ENERGY": "audio", "BPM": "audio", "INITIALKEY": "audio",
     "DYNAMIC RANGE": "audio", "ALBUM DYNAMIC RANGE": "audio",
@@ -232,7 +230,6 @@ TAG_INFO = {
     "LICENSE": ("License", "Licence the release is published under."),
     "MEDIA": ("Media", "Medium of the release (CD, vinyl, digital media…) — decides which CD checks apply."),
     "SOURCE": ("Source", "Where this rip came from; required when MEDIA is digital media."),
-    "ALBUMITUNESADVISORY": ("Album advisory", "The strictest per-track advisory, repeated on every track of the album."),
     "MUSICBRAINZ_ALBUMID": ("MusicBrainz release", "The release's MusicBrainz id — what the import, the cover search and the album page resolve."),
     "MUSICBRAINZ_ALBUMARTISTID": ("MB album artist id", "MusicBrainz artist id of the album artist."),
     "MUSICBRAINZ_ARTISTID": ("MB track artist id", "MusicBrainz artist id of the track artist."),
@@ -241,9 +238,6 @@ TAG_INFO = {
     "MUSICBRAINZ_RELEASEGROUPID": ("MB release group id", "The release group the album belongs to."),
     "MUSICBRAINZ_RELEASETRACKID": ("MB release track id", "This track's own position id on this release."),
     "MUSICBRAINZ_WORKID": ("MB work id", "MusicBrainz work id the classical tags sit beside."),
-    "RATEYOURMUSIC_ALBUM": ("RYM album link", "RateYourMusic release page URL."),
-    "RATEYOURMUSIC_TRACK": ("RYM track link", "RateYourMusic track page URL."),
-    "RATEYOURMUSIC_ARTIST": ("RYM artist link", "RateYourMusic artist page URL."),
     "MOOD": ("Mood", "The mood word the classifier derived from the track's own audio."),
     "ENERGY": ("Energy", "0-100 arousal the MOOD verdict was scored from."),
     "BPM": ("BPM", "Tempo in beats per minute."),
@@ -298,7 +292,6 @@ TAG_WRITER = {
     "MEDIA": _script(1) + " · media/source normalization",
     "SOURCE": _script(1) + " · media/source normalization",
     "ITUNESADVISORY": f"{_AUTOTAG} · advisory fetch",
-    "ALBUMITUNESADVISORY": _AUTOTAG,
     "INSTRUMENTAL": f"{_AUTOTAG} · instrumental fetch",
     "GENRE": f"{_AUTOTAG} · genre import · {_script(10)} trims",
     "MOOD": f"{_AUTOTAG} · {_MOODS}",
@@ -382,7 +375,6 @@ DEFAULT_WRITER = _RELEASE_WRITER
 # REAL/FAKE, the seven-plus-one mood words in mlo.moods).
 _TAG_ENUM = {
     "ITUNESADVISORY": ("0", "1", "2"),
-    "ALBUMITUNESADVISORY": ("0", "1", "2"),
     "INSTRUMENTAL": ("0", "1"),
     # REAL / FAKE are what mlo.audit writes; MIX is foobar2000's verdict for a
     # file it heard both ways — a value the app reads (mlo.grader treats it as
@@ -464,7 +456,6 @@ TAG_CHECKS = {
     "TRANSLATION": ("grade_check_xlit_translation",),
     "TRANSLITERATION": ("grade_check_xlit_transliteration",),
     "MUSICBRAINZ_ALBUMID": ("grade_check_mb_links",),
-    "RATEYOURMUSIC_ALBUM": ("grade_check_rym_links",),
     # Tags whose VALUE has a canonical spelling (mlo.tagtext.CANONICAL_CASE)
     # are graded by grade_check_tag_case, beside whatever checks already
     # graded them.
@@ -493,7 +484,6 @@ TAG_ISSUE_CODES = {
     "TRANSLATION": ("XLIT_MISSING", "XLIT_UNNEEDED"),
     "TRANSLITERATION": ("XLIT_MISSING", "XLIT_UNNEEDED"),
     "MUSICBRAINZ_ALBUMID": ("MB_LINK",),
-    "RATEYOURMUSIC_ALBUM": ("RYM_LINK",),
     "ACOUSTID_ID": ("ACOUSTID_ID",),
     "ACOUSTID_FINGERPRINT": ("ACOUSTID_FINGERPRINT",),
     # The alias tag whose absence the check names, and the COMMENT value the
@@ -553,7 +543,6 @@ CHECK_LABELS = {
     "grade_check_accuraterip": "AccurateRip verified (audit only)",
     "grade_check_log_grade": "Log grade present & in range",
     "grade_check_mb_links": "MusicBrainz release link",
-    "grade_check_rym_links": "RateYourMusic release link",
     "grade_check_cover": "Cover art",
     "grade_check_cover_crop": "Cover aspect ratio (squareness)",
     "grade_check_sidecar_cover": "Per-track sidecar covers",

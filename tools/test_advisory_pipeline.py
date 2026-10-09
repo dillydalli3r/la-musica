@@ -8,19 +8,14 @@ What this file holds, and why each assertion is here (see
     fields with "; ", so an ISRC tag may name several pressings of the same
     recording; taking the first alone left the file's own tag contributing ONE
     code while the route's contract says "every ISRC the track has".
-  * `fetch_advisories` derives ALBUMITUNESADVISORY for the album folders it
-    touched. Script 8 (the album tag's writer) does not run behind the manual
-    surfaces — the wizard's advisory step, the album page's Check and the
-    tag-actions item — so without this pass every track was rated and the album
-    tag stayed empty, and the album failed grading on
-    "Missing album tag ALBUMITUNESADVISORY".
-  * a fetch refused by the write gate SAYS SO, and the two ADVISORY tags answer
-    to their own writer's switch: `ITUNESADVISORY` to the FETCH's
-    `advisory_auto_fetch`, `ALBUMITUNESADVISORY` to script 8's `auto_advisory`
-    derivation (`mlo/config.py::_TAG_WRITE_SWITCH`). One family switch for both
-    meant that turning the derivation off silently disabled the explicit
-    "Fetch advisory rating" action, whose reply read exactly like "nobody
-    stated anything" — a silent no-op instead of an answer.
+  * NO album-level advisory is derived or written: ALBUMITUNESADVISORY is not
+    part of this app's vocabulary (`mlo.audio.TAG_MAP`), so `fetch_advisories`
+    reports `albums == {}` / `album_updated == 0` and never writes the tag.
+    The grade flags a stored one as excess and Optimize tags (23) / Format all
+    (10) remove it.
+  * a fetch refused by the write gate SAYS SO: ITUNESADVISORY answers to its
+    own writer's switch (`advisory_auto_fetch`), and the reply names the gate
+    and counts what it refused.
   * titles are compared accent-folded: `_norm_compare` used to turn a letter it
     could not fold (ö, é, ü) into a SEPARATOR, so "Störagéd" read as
     "st rag d" — it matched neither "Storaged" nor anything else a provider
@@ -266,82 +261,39 @@ def deezer_routes():
 _real_audiofile = mlo_audio.AudioFile
 mlo_audio.AudioFile = FakeAudio
 try:
-    # 0 / 1 / nobody → the strictest per-track value (1) is the album's, and
-    # every track of the album carries it. The tag semantics are the grader's
-    # and the registry's own words: "the strictest per-track advisory,
-    # repeated on every track of the album".
+    # 0 / 1 / nobody → the per-track value the ladder settles. NO album-level
+    # advisory is derived or written any more: ALBUMITUNESADVISORY is not part
+    # of this app's vocabulary (mlo.audio.TAG_MAP), so `albums`/`album_updated`
+    # come back empty/0 and no file gains the tag. A stale one already on disk
+    # is left alone here — the strip passes (Optimize tags 23 / Format all 10)
+    # are what remove it, and the grade flags its name as excess.
     for path in FILES:
         FakeAudio.written[path].pop("ALBUMITUNESADVISORY", None)
     clear()
     stub_http(deezer_routes())
     out = imports.fetch_advisories([ALBUM], dict(CFG, advisory_auto_fetch=True))
     assert out["values"] == {FILES[0]: 0, FILES[1]: 1, FILES[2]: 0, FILES[3]: 0}, out
-    assert out["albums"] == {ALBUM: 1}, out
-    assert out["album_updated"] == 4, out
+    assert out["albums"] == {} and out["album_updated"] == 0, out
     for path in FILES:
-        assert FakeAudio.written[path]["ALBUMITUNESADVISORY"] == "1", \
+        assert "ALBUMITUNESADVISORY" not in FakeAudio.written[path], \
             (path, FakeAudio.written[path])
 
-    # a track already carrying a valid value is not re-asked, but it still
-    # counts toward the album's derivation: its 2 must not be lost
+    # a track already carrying a valid value is not re-asked — the reply says
+    # the value is the file's own and nothing is rewritten
     FakeAudio.written[FILES[2]]["ITUNESADVISORY"] = "2"
-    for path in FILES:
-        FakeAudio.written[path].pop("ALBUMITUNESADVISORY", None)
     clear()
     stub_http(deezer_routes())
     out = imports.fetch_advisories([ALBUM], dict(CFG, advisory_auto_fetch=True))
-    assert out["albums"] == {ALBUM: 1}, out
-    for path in FILES:
-        assert FakeAudio.written[path]["ALBUMITUNESADVISORY"] == "1", FakeAudio.written
-
-    # the album tag follows the per-track values DOWN too: with every track
-    # clean the album reads 0, not the previous 1
-    for path in FILES:
-        FakeAudio.written[path].pop("ITUNESADVISORY", None)
-        FakeAudio.written[path].pop("ALBUMITUNESADVISORY", None)
-    clear()
-    stub_http(dict(NO_APPLE, **{"api.deezer.com": {
-        "explicit_lyrics": False, "explicit_content_lyrics": 0}}))
-    out = imports.fetch_advisories([ALBUM], dict(CFG, advisory_auto_fetch=True))
-    assert out["albums"] == {ALBUM: 0}, out
-    for path in FILES:
-        assert FakeAudio.written[path]["ALBUMITUNESADVISORY"] == "0", FakeAudio.written
+    assert out["sources"][FILES[2]] == "existing-tag", out
+    assert out["albums"] == {} and out["album_updated"] == 0, out
+    assert "ALBUMITUNESADVISORY" not in FakeAudio.written[FILES[2]], FakeAudio.written
 
     # ----------------------------------------------------------------------- #
-    # 4) The two ADVISORY tags answer to their OWN writer's switch
+    # 4) The write gate refuses only PART of a selection — its per-filetype
+    #    half is the matrix's own ADVISORY column. The files that were written
+    #    are still written, the ones refused are COUNTED (not silently dropped),
+    #    and the reply is not a "nothing happened" one.
     # ----------------------------------------------------------------------- #
-    # `mlo/config.py::_TAG_WRITE_SWITCH` gives ITUNESADVISORY the FETCH's switch
-    # (`advisory_auto_fetch`) while ALBUMITUNESADVISORY keeps script 8's
-    # derivation switch (`auto_advisory`, "Auto Album Advisory"). One family
-    # switch for both meant that turning the derivation off silently disabled
-    # the explicit "Fetch advisory rating" action — and the refused run replied
-    # exactly like "no provider knew this track". So: the per-track values land,
-    # the album tag is refused, and the refusal is COUNTED and worded.
-    for path in FILES:
-        FakeAudio.written[path].pop("ITUNESADVISORY", None)
-        FakeAudio.written[path].pop("ALBUMITUNESADVISORY", None)
-    clear()
-    calls = stub_http(deezer_routes())
-    out = imports.fetch_advisories(
-        [ALBUM], {"advisory_auto_fetch": True, "auto_advisory": False})
-    assert out["updated"] == len(FILES), out
-    assert out["values"] == {p: out["values"][p] for p in FILES}, out
-    # The derived album value is still REPORTED (it is what the album reads),
-    # while the write is refused by its own switch and COUNTED — and worded, so
-    # an album whose tracks are all rated and whose album tag is empty says why.
-    assert out["albums"] == {ALBUM: 1}, out
-    assert out["album_updated"] == 0 and out["album_gated"] == len(FILES), out
-    assert out.get("skipped") and "auto_advisory" in out["skipped"], out
-    for path in FILES:
-        assert FakeAudio.written[path]["ITUNESADVISORY"] in ("0", "1"), FakeAudio.written[path]
-        assert "ALBUMITUNESADVISORY" not in FakeAudio.written[path], FakeAudio.written[path]
-    # ...and the route WAS asked: the derated switch no longer short-circuits it
-    assert gets(calls, "api.deezer.com"), calls
-
-    # The gate can also refuse only PART of a selection — its per-filetype half
-    # is the matrix's own ADVISORY column. The files that were written are
-    # still written, the ones refused are COUNTED (not silently dropped), and
-    # the reply is not a "nothing happened" one.
     for path in FILES:
         FakeAudio.written[path].pop("ITUNESADVISORY", None)
         FakeAudio.written[path].pop("ALBUMITUNESADVISORY", None)
@@ -357,10 +309,8 @@ try:
     for path in DELIVERABLE:
         assert FakeAudio.written[path]["ITUNESADVISORY"] == str(out["values"][path]), \
             (path, out, FakeAudio.written[path])
-    # the album tag is still derived, from the tracks whose values are known
-    assert out["albums"] == {ALBUM: 1}, out
-    assert out["album_updated"] == 3, out
-    assert "ALBUMITUNESADVISORY" not in FakeAudio.written[MP3], FakeAudio.written[MP3]
+    for path in FILES:
+        assert "ALBUMITUNESADVISORY" not in FakeAudio.written[path], FakeAudio.written
 
     # ----------------------------------------------------------------------- #
     # 3b) The AI is asked ONLY where it is the answer: when every source came
@@ -481,8 +431,8 @@ try:
     assert out["answers"][FILES[1]] == {"deezer-isrc": 1}, out
     assert out["updated"] == 1, out
     assert FakeAudio.written[FILES[1]]["ITUNESADVISORY"] == "1", FakeAudio.written
-    # the album tag follows the re-rated track up (any explicit → 1)
-    assert out["albums"] == {ALBUM: 1}, out
+    # the app writes no album-level advisory tag any more
+    assert out["albums"] == {} and out["album_updated"] == 0, out
     # ... while a track the re-rate could not improve keeps what it had and
     # says so (its own 0 is still Deezer's 0, so nothing was rewritten)
     assert out["status"][FILES[0]] == "unchanged", out
@@ -555,7 +505,7 @@ try:
     assert reply["updated"] == 2, reply
     assert set(reply["status"].values()) == {"written"}, reply
     assert set(reply["sources"].values()) == {"fallback"}, reply
-    assert reply["albums"] == {HTTP_ALBUM: 0}, reply
+    assert reply["albums"] == {}, reply
 
     # the second call asks nobody (the files carry a value now) and SAYS so
     clear()
@@ -574,7 +524,7 @@ try:
                          json={"paths": HTTP_FILES, "force": True}).json()
     assert reply["updated"] == 0, reply
     assert set(reply["status"].values()) == {"unchanged"}, reply
-    assert reply["albums"] == {HTTP_ALBUM: 0}, reply
+    assert reply["albums"] == {}, reply
 finally:
     mlo_main.load_config = _real_load_config
 

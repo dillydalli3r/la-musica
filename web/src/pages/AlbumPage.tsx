@@ -558,14 +558,13 @@ export default function AlbumPage() {
                     onClick={() => setIssuesOpen(!issuesOpen)}
                     aria-label="Grading verdict"
                   />
-                  {/* MusicBrainz / RateYourMusic identity links: exactly one
-                      of each — prefer the release over its group */}
+                  {/* MusicBrainz identity link: prefer the release over
+                      its group */}
                   <LinkChips
                     tags={(data.meta ?? {}) as Record<string, unknown>}
                     only={[
                       ...(data.meta?.MUSICBRAINZ_ALBUMID ? [] : ["MUSICBRAINZ_RELEASEGROUPID"]),
                       "MUSICBRAINZ_ALBUMID",
-                      "RATEYOURMUSIC_ALBUM",
                     ]}
                   />
                 </div>
@@ -621,15 +620,9 @@ export default function AlbumPage() {
                       )}
                     </div>
                     <div className="text-[11px] text-amber-200/60">{t("pending.note")}</div>
-                    {data.prefetched && (
+                    {data.prefetched && !!data.prefetched.cover_candidates && (
                       <div className="text-[11px] text-zinc-500">
-                        {[
-                          !!data.prefetched.cover_candidates &&
-                            `${data.prefetched.cover_candidates} cover candidates`,
-                          !!(data.prefetched.links?.album || data.prefetched.links?.artist) && "links",
-                        ]
-                          .filter((x): x is string => typeof x === "string" && !!x)
-                          .join(" · ")}
+                        {data.prefetched.cover_candidates} cover candidates
                       </div>
                     )}
                   </div>

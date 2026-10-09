@@ -289,7 +289,6 @@ VIDEO_SKIP_TAGS = {
 
 
 ALBUM_TAGS = [
-    "ALBUMITUNESADVISORY",
     "ALBUM DYNAMIC RANGE",
 ]
 
@@ -415,22 +414,52 @@ def tag_key_allowed(key):
     return ku.split(":", 1)[0] in BEETS_ID3_FRAMES
 
 
-def tag_value_excess(key, value):
-    """Whether a tag whose NAME is in the vocabulary still carries a value
-    nothing in this pipeline writes.
+# A value that NAMES AN EXTERNAL LINK. Nothing this pipeline writes is a link:
+# a MusicBrainz identity is a UUID/ID (a bare MBID), never a URL, and the store
+# a SOURCE names is a NAME ("Bandcamp"), not an address. A stored URL is
+# therefore always somebody else's — a ripper, a vendor tagger, a pasted
+# RateYourMusic page — and this app does not keep it (spec R343). The host the
+# app ITSELF used to stamp (rateyourmusic.com) is matched with or without a
+# scheme, so links written by an older version surface even when no "https://"
+# survived whatever rewrote them.
+_URL_RE = re.compile(
+    r"(?:[a-z][a-z0-9+.\-]*://\S+"     # any scheme://host/path
+    r"|www\.\S+"                        # www.host/path
+    r"|\brateyourmusic\.com\S*)",       # the app's old RYM link host
+    re.IGNORECASE)
 
-    COMMENT is the one such name: every writer this app has stores a name it
-    owns, and COMMENT is not one of them (mlo.tagtext leaves it alone as free
-    text, which is exactly why a value there is always somebody else's note —
-    a ripper, a vendor tagger, a friend's rip). The strip passes delete it
-    with the same predicate the grade uses (see mlo.containers /
-    mlo.format_all), gated on `strip_unknown_tags` like the name rule."""
+
+def tag_value_excess_reason(key, value):
+    """Why a vocabulary tag's VALUE is excess: ``"comment"``, ``"link"``, or
+    ``""`` when the value is one this pipeline writes.
+
+    Two value-level rules, both under the excess-tag grade and its strip
+    passes:
+
+      * COMMENT is the one NAME the vocabulary HOLDS whose value nothing here
+        writes (mlo.tagtext leaves it alone as free text, which is exactly why
+        a stored value is always somebody else's note);
+      * any value naming an external LINK (_URL_RE) — a bare MusicBrainz id is
+        not a link and is fine, so `MUSICBRAINZ_ALBUMID` and the rest are
+        untouched.
+    """
     ku = str(key).upper()
     if ku.startswith(("TXXX:", "----:")):
         ku = ku.rsplit(":", 1)[-1]
-    if _tag_key_norm(ku) != "COMMENT":
-        return False
-    return bool(str(value or "").strip())
+    if _tag_key_norm(ku) == "COMMENT" and str(value or "").strip():
+        return "comment"
+    if _URL_RE.search(str(value or "")):
+        return "link"
+    return ""
+
+
+def tag_value_excess(key, value):
+    """Whether a tag whose NAME is in the vocabulary still carries a value
+    nothing in this pipeline writes — a non-empty COMMENT, or a URL. One
+    predicate for the grade and for the strip passes (mlo.format_all,
+    mlo.taghygiene), gated on `strip_unknown_tags` like the name rule, so a
+    strip can never leave a value the grade flags."""
+    return bool(tag_value_excess_reason(key, value))
 
 
 def stored_alias_tags(af, base):
@@ -1738,10 +1767,10 @@ def _ambiguous_lrc_stems(filenames):
 # An episode of a podcast carries the PODCASTSERIES tag (mlo.autotag, written
 # from MusicBrainz's `part of` a series of type Podcast): it has no lyrics to
 # embed (the LYRICS check requires them of every non-instrumental track), no
-# RateYourMusic page to link, no album bio any source would write, and no
-# MusicBrainz genre vocabulary that describes it. Grading it with those checks
-# ON is what would fail a podcast FOR BEING a podcast — they are the music
-# catalogue's expectations, not defects of the episode.
+# album bio any source would write, and no MusicBrainz genre vocabulary that
+# describes it. Grading it with those checks ON is what would fail a podcast
+# FOR BEING a podcast — they are the music catalogue's expectations, not
+# defects of the episode.
 #
 # The CD-rip expectations need nothing here: every one of them is already
 # gated on MEDIA=CD (mlo.grader._is_cd, mlo.audit), and an episode's medium is
@@ -1750,7 +1779,6 @@ def _ambiguous_lrc_stems(filenames):
 # so this rule cannot weaken one existing check for a music release.
 _PODCAST_MUSIC_ONLY_CHECKS = (
     "grade_check_lyrics",
-    "grade_check_rym_links",
     "grade_check_genre",
     "grade_check_genre_count",
     "grade_check_genre_order",
@@ -2210,22 +2238,36 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                             "Optimize FLACs (script 3) / Format all (script 10) "
                             "to strip them)", basename)
                 track["issues"].append("TAGS")
-            # COMMENT is the one name the vocabulary HOLDS whose value this
-            # pipeline never writes (mlo.tagtext leaves it alone as free text,
-            # which is what makes a stored value always somebody else's note —
-            # a ripper's or a vendor tagger's). A VALUE-level rule of the same
-            # check and the same strip passes: a non-empty COMMENT fails the
-            # track with its own issue code and script 10 / Optimize delete it.
-            _comments = sorted({str(_k) for _k, _v in (af.all_tags() or {}).items()
-                                if tag_value_excess(_k, _v)})
-            if _comments:
+            # Value-level rules of the same check and the same strip passes:
+            # a non-empty COMMENT (the one allowed NAME whose value nothing
+            # here writes) and any value naming an external LINK (a URL — raw
+            # MusicBrainz ids are not links and stay fine) each fail the track
+            # with their own issue code, and script 10 / Optimize tags delete
+            # the tag.
+            _reasons: dict[str, set] = {}
+            for _k, _v in (af.all_tags() or {}).items():
+                _why = tag_value_excess_reason(_k, _v)
+                if _why:
+                    _reasons.setdefault(_why, set()).add(str(_k))
+            _value_issues = (
+                ("comment", "COMMENT",
+                 "Comment tag carries a value: ",
+                 "to clear it"),
+                ("link", "LINK",
+                 "Tag carries an external link: ",
+                 "to remove it"),
+            )
+            for _why, _code, _lead, _tail in _value_issues:
+                _keys = sorted(_reasons.get(_why) or ())
+                if not _keys:
+                    continue
                 total_checks += 1
                 failed_checks += 1
-                add_issue("Comment tag carries a value: " + ", ".join(_comments)
+                add_issue(_lead + ", ".join(_keys)
                           + " (run Optimize tags (script 23) on the album, or "
                             "Optimize FLACs (script 3) / Format all (script 10) "
-                            "to clear it)", basename)
-                track["issues"].append("COMMENT")
+                            + _tail + "; raw MusicBrainz ids are kept)", basename)
+                track["issues"].append(_code)
 
         if cfg.get("grade_check_key_bpm", True) and not is_video_track:
             for t in ("INITIALKEY", "BPM"):
@@ -2663,17 +2705,15 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                                        if md5_state == MD5_ABSENT
                                        else "FLAC_MD5_UNKNOWN")
 
-        # MusicBrainz / RateYourMusic identity links — required for a PASS.
-        # Exactly two links are graded: the MusicBrainz RELEASE (falling
-        # back to its release group) and the RateYourMusic release-group
-        # page. Artist / recording / per-track RYM links stay optional —
-        # they power extra buttons but are not graded.
+        # MusicBrainz identity link — required for a PASS.
+        # The MusicBrainz RELEASE (falling back to its release group) is the
+        # one link graded; artist / recording / per-track links stay optional
+        # (they power extra buttons but are not graded).
         mb_release = str(
             af.get_tag("MUSICBRAINZ_ALBUMID") or af.get_tag("MUSICBRAINZ_RELEASEGROUPID") or ""
         ).strip()
         if mb_release:
             album_has_mbid = True
-        rym_release = str(af.get_tag("RATEYOURMUSIC_ALBUM") or "").strip()
         if should_write_audio_tag(cfg, "MUSICBRAINZ_ALBUMID", filepath=ap) and cfg.get(
             "grade_check_mb_links", True
         ):
@@ -2682,14 +2722,6 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                 failed_checks += 1
                 add_issue("Missing MusicBrainz release link (import from MusicBrainz)", basename)
                 track["issues"].append("MB_LINK")
-        if should_write_audio_tag(cfg, "RATEYOURMUSIC_ALBUM", filepath=ap) and cfg.get(
-            "grade_check_rym_links", True
-        ):
-            total_checks += 1
-            if not rym_release:
-                failed_checks += 1
-                add_issue("Missing RateYourMusic release link", basename)
-                track["issues"].append("RYM_LINK")
 
         # Rip-log score (MEDIA=CD releases only, checked once MEDIA is
         # known - read here, graded in the CD section below).
@@ -4665,14 +4697,15 @@ def grade_artist(artist_dir, cfg=None) -> dict:
     # nothing under it can be graded as music, and the library still lists it
     # as an artist. It fails the way an absent folder does — one issue, no
     # checks invented. `mlo.layout` reports the same folder as `empty_artist`,
-    # and the removal the panel offers goes through the Trash.
+    # and removing it (script 20, Optimize library layout) goes through the
+    # Trash.
     if not artist_album_folders(folder):
         out["issues"].append({
             "code": "ARTIST_EMPTY", "label": "Artist albums", "where": where,
             "reason": "no album folder in this artist folder — nothing here is "
                       "an album, so there is nothing to grade as music. Add "
-                      "one of the artist's albums, or remove the folder to the "
-                      "Trash (Optimize → Library layout → remove)",
+                      "one of the artist's albums, or move the folder to the "
+                      "Trash (run Optimize library layout, script 20)",
         })
         return out
 

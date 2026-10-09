@@ -870,7 +870,6 @@ def grade_cfg(lib, **over):
         "grade_check_excess_tags": False,
         "grade_check_audit": False,
         "grade_check_mb_links": False,
-        "grade_check_rym_links": False,
         "grade_check_mood": False,
         "grade_check_energy": False,
         "grade_check_genre": False,
