@@ -391,7 +391,10 @@ export const CONFIG_GROUPS: CfgGroup[] = [
           k: "soulseek_download_slots", label: "Concurrent download slots (slskd)", type: "number", min: 1, max: 20,
           help: "How many transfers slskd runs at once — the OUTER ceiling, and the only one of the three numbers that is slskd's rather than this app's. The app enforces `Releases … at once` × `Candidate downloads per release` itself; at the shipped defaults that product is 5 × 3 = 15, which is why this defaults to 15. Set it below the product and the app narrows each release's batch to fit (`slots ÷ releases`), so nothing you configure here ends up queued inside slskd.",
         },
-        { k: "soulseek_upload_slots", label: "Concurrent upload slots (0 = unlimited)", type: "number", min: 0, max: 20 },
+        {
+          k: "soulseek_upload_slots", label: "Concurrent upload slots (0 = slskd's default of 10)", type: "number", min: 0, max: 50,
+          help: "How many peers may download from this share AT ONCE. A peer's queue only moves while it holds one of these slots, so a low count simply makes everyone else wait. 10 is slskd's own default (and what 0/blank is left to); the app ships 10. The per-transfer upload limit below is what bounds a slot's bandwidth, so a higher count does not by itself oversubscribe the line.",
+        },
         { k: "soulseek_upload_limit_kib", label: "Per-transfer upload limit (KiB/s, 0 = unlimited)", type: "number", min: 0, max: 1000000 },
         { k: "soulseek_download_limit_kib", label: "Per-transfer download limit (KiB/s, 0 = unlimited)", type: "number", min: 0, max: 1000000 },
         { k: "soulseek_web_https", label: "Serve the slskd web UI over HTTPS (extra listener, self-signed)", type: "bool" },
@@ -409,6 +412,10 @@ export const CONFIG_GROUPS: CfgGroup[] = [
         { k: "soulseek_share_library", label: "Share the library folder on the network", type: "bool" },
         { k: "soulseek_share_dirs", label: "Extra shared folders (; separated, blank = the library folder <music>/Artists)", type: "text" },
         { k: "soulseek_share_exclude", label: "Never share these paths (; separated)", type: "text" },
+        {
+          k: "soulseek_share_rescan_minutes", label: "Automatic share re-scan interval (minutes, 0 = never)", type: "number", min: 0, max: 44640,
+          help: "slskd's `shares.cache.retention`: the cache's retention limit doubles as the automatic re-scan interval, in minutes, and is empty (\"never\") unless set. The app already re-scans after every library change IT makes, so this is the backstop for edits made outside it — a manual file, a NAS sync, another organizer. Default 1440 (one day).",
+        },
       ],
     },
     {
@@ -586,7 +593,7 @@ export const CONFIG_GROUPS: CfgGroup[] = [
       fields: [
         { k: "mb_genre_count", label: "Genres per track (import, trimming and grading)", type: "number", min: 1, max: 3, help: "One value, three consumers: an import writes up to this many genres onto a track (specific genres first, the derived FAMILY last), script 8 / the genre import / script 10 trim any excess off, and grading fails a track carrying more than this. Fewer is fine — the family is derived from the specific genre, so one specific genre is a complete answer and nothing is topped up with filler. A per-run import limit may only lower this. Default 2." },
         { k: "genre_sources", label: "Genre sources — priority order: asked top to bottom, stopped as soon as a track's list is full; unticked = never asked", type: "multi", options: [], optionsFrom: "genres", help: "A PRIORITY list, not a set: the sources are asked top to bottom and the chain stops as soon as a track's list is complete. The shipped default is every source the app knows (RateYourMusic first, then MusicBrainz — the order shown here, which the wizard's tray saves back in the same order), and an unticked source is NEVER asked. The genres the sources answer with are merged, deduped and capped at the count above, per track. MusicBrainz is the app's own identity anchor — it also supplies the family every list ends with — so leave it on in most setups." },
-        { k: "ai_genre_inference", label: "Let a model rank the genres", type: "bool", help: "The model is given what the sources above already answered and picks which of them describe the track, most specific first. Needs a base URL and model in the AI section; with none configured the source list is used as it stands." },
+        { k: "ai_genre_inference", label: "Let a model rank — and, when nothing answered, name — the genres", type: "bool", help: "The model is given what the sources above already answered and picks which of them describe the track, most specific first. When NO source answered for a track at all it is asked to name the genres itself (see the research switch below), which is the fallback that keeps an unreleased or obscure album from landing genre-less. Needs a base URL and model in the AI section; with none configured the source list is used as it stands." },
         { k: "ai_genre_effort", label: "Reasoning effort for that ranking", type: "select", options: [["max","Max — the provider's highest thinking budget"],["high","High — reason, then research what the list misses (default)"],["medium","Medium"],["low","Low"],["minimal","Minimal — no thinking, fastest"]] },
         { k: "ai_genre_research", label: "Let the model go beyond the fetched genres", type: "bool", help: "On, the model may name a genre the sources did not answer with when it knows the artist better than they do — the name must still be a MusicBrainz genre to survive. Off, the answer is strictly a re-ranking of what was fetched." },
         { k: "strip_unknown_tags", label: "Remove non-canonical tags on optimize (script 10)", type: "bool" },
@@ -784,12 +791,12 @@ export const CONFIG_GROUPS: CfgGroup[] = [
     },
     {
       title: "Notifications",
-      blurb: "The events this server pushes to every client that has notifications enabled — an import that needs a decision, a finished import, a store the server pruned on its own. Each client still asks for its own permission.",
+      blurb: "The events this server pushes to every client that has notifications enabled — an import that needs a decision, a finished import, a store the server pruned on its own, a peer taking a file from you. Each client still asks for its own permission. Import progress is deliberately NOT one of them: a run of albums raises its per-album steps on the queue page, and the notification it earns is the ONE notice that says the run is done (or that an album needs a decision) — a failed download still speaks the moment every candidate for it has been rejected.",
       fields: [
-        { k: "notify_wish_found", label: "Wish found on Soulseek", type: "bool" },
-        { k: "notify_import_start", label: "Notify when an import starts", type: "bool", help: "One notification per album when the import chain picks it up — from Add to library, the wizard or the panel." },
-        { k: "notify_import_done", label: "Notify when an import finishes", type: "bool", help: "One notification per album when the chain has been over it, with its one-line summary (how many scripts ran, what failed)." },
-        { k: "notify_soulseek_download_start", label: "Soulseek download started", type: "bool" },
+        { k: "notify_wish_found", label: "Wish found on Soulseek", type: "bool", help: "A wish the background worker found and imported lands in the run's own summary, not as a notice of its own." },
+        { k: "notify_import_start", label: "Notify when an import starts", type: "bool", help: "An album being picked up is progress, and progress lives on the queue page: with this on it joins the run's summary, and on its own it never raises a notification." },
+        { k: "notify_import_done", label: "Notify when an import run finishes", type: "bool", help: "ONE notification when the work goes quiet — \"Imported 5 albums\" (or the album's own name and chain summary when it was a single one), with how many need a decision. This is the notice you get instead of one per album." },
+        { k: "notify_soulseek_download_start", label: "Soulseek download started", type: "bool", help: "A candidate's first bytes moving. Progress, so it joins the run's summary and never raises a notification by itself." },
         { k: "notify_soulseek_upload_start", label: "A peer started downloading from you", type: "bool" },
       ],
     },    {

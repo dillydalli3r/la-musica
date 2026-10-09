@@ -980,7 +980,10 @@ export default function SettingsPage() {
           k: "soulseek_download_slots", label: "Concurrent download slots (slskd)", type: "number", min: 1, max: 20,
           help: "How many transfers slskd runs at once — the OUTER ceiling, and the only one of the three numbers that is slskd's rather than this app's. The app enforces `Releases … at once` × `Candidate downloads per release` itself; at the shipped defaults that product is 5 × 3 = 15, which is why this defaults to 15. Set it below the product and the app narrows each release's batch to fit (`slots ÷ releases`), so nothing you configure here ends up queued inside slskd.",
         },
-        { k: "soulseek_upload_slots", label: "Concurrent upload slots (0 = unlimited)", type: "number", min: 0, max: 20 },
+        {
+          k: "soulseek_upload_slots", label: "Concurrent upload slots (0 = slskd's default of 10)", type: "number", min: 0, max: 50,
+          help: "How many peers may download from this share AT ONCE. A peer's queue only moves while it holds one of these slots, so a low count simply makes everyone else wait. 10 is slskd's own default (and what 0/blank is left to); the app ships 10. The per-transfer upload limit below is what bounds a slot's bandwidth, so a higher count does not by itself oversubscribe the line.",
+        },
         { k: "soulseek_upload_limit_kib", label: "Per-transfer upload limit (KiB/s, 0 = unlimited)", type: "number", min: 0, max: 1000000 },
         { k: "soulseek_download_limit_kib", label: "Per-transfer download limit (KiB/s, 0 = unlimited)", type: "number", min: 0, max: 1000000 },
         { k: "soulseek_web_https", label: "Serve the slskd web UI over HTTPS (extra listener, self-signed)", type: "bool" },
@@ -998,6 +1001,10 @@ export default function SettingsPage() {
         { k: "soulseek_share_library", label: "Share the library folder on the network", type: "bool" },
         { k: "soulseek_share_dirs", label: "Extra shared folders (; separated, blank = the library folder <music>/Artists)", type: "text" },
         { k: "soulseek_share_exclude", label: "Never share these paths (; separated)", type: "text" },
+        {
+          k: "soulseek_share_rescan_minutes", label: "Automatic share re-scan interval (minutes, 0 = never)", type: "number", min: 0, max: 44640,
+          help: "slskd's `shares.cache.retention`: the cache's retention limit doubles as the automatic re-scan interval, in minutes, and is empty (\"never\") unless set. The app already re-scans after every library change IT makes, so this is the backstop for edits made outside it — a manual file, a NAS sync, another organizer. Default 1440 (one day).",
+        },
       ],
     },
     {
@@ -1182,7 +1189,7 @@ export default function SettingsPage() {
         { k: "discovery_timeout_s", label: "Request timeout (s)", type: "number", min: 3, max: 30 },
         {
           k: "rym_cookie", label: "RateYourMusic cookie", type: "password",
-          help: "Only needed when RYM answers with a challenge. Two ways in: the import panel below takes a cookies.txt in Netscape format — what a browser-extension exporter like \"Get cookies.txt\" writes — pasted into the box or dropped on it, and keeps only its rateyourmusic.com cookies; or open the devtools route — sign in to rateyourmusic.com, press F12 → Network → reload → click any request to rateyourmusic.com → Headers → Request Headers → copy everything after \"Cookie:\" and paste it in the field above (newlines and the \"Cookie:\" label are handled for you). RYM's `session` cookie is HttpOnly, so a browser extension's export is the only way to get it out of a browser at all. It is a session credential — do not share it, and paste a fresh one when RYM starts refusing, since signing out or clearing cookies invalidates it. Blank = RYM is skipped like any other unavailable source; MusicBrainz still resolves RYM links for well-known releases. Test it with the Sources panel's Test button.",
+          help: "Only needed when RYM answers with a challenge. Two ways in: the import panel below takes a cookies.txt in Netscape format — what a browser-extension exporter like \"Get cookies.txt\" writes — pasted into the box or dropped on it, and keeps only its rateyourmusic.com cookies; it also takes the other shapes that same credential arrives in — the whole `Cookie:` header, a devtools \"Copy as cURL\" dump, or a cookie editor's JSON export — so the paste that obviously holds the session is imported rather than refused. Or open the devtools route — sign in to rateyourmusic.com, press F12 → Network → reload → click any request to rateyourmusic.com → Headers → Request Headers → copy everything after \"Cookie:\" and paste it in the field above (newlines and the \"Cookie:\" label are handled for you). RYM's `session` cookie is HttpOnly, so a browser extension's export is the only way to get it out of a browser at all. It is a session credential — do not share it, and paste a fresh one when RYM starts refusing, since signing out or clearing cookies invalidates it. Blank = RYM is skipped like any other unavailable source; MusicBrainz still resolves RYM links for well-known releases. Test it with the Sources panel's Test button.",
         },
         {
           k: "rym_links_auto", label: "Auto-find RateYourMusic links", type: "bool",

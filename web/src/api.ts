@@ -1910,6 +1910,38 @@ export interface SlskDownloads {
   downloads: SlskTransferUser[];
 }
 
+/** One file in a peer's upload history (server `uploads_summary`). `size` is
+ *  the FILE's own size; `bytesTransferred` is how much has moved so far, and
+ *  `last` is the newest timestamp slskd stamped on it (epoch seconds). */
+export interface SlskUploadFile {
+  filename: string;
+  dir: string;
+  size: number;
+  bytesTransferred: number;
+  state: string;
+  last: number | null;
+}
+
+/** One peer in the upload history, grouped server-side: how many files they
+ *  took (`files`), how many are still running (`active`), the total SIZE of
+ *  those files (`bytes`), the bytes moved so far (`transferred`), when they
+ *  last took something (`last`), and the most recent `items` —
+ *  `truncated` counts the older ones the cap left off. */
+export interface SlskUploadPeer {
+  username: string;
+  files: number;
+  active: number;
+  bytes: number;
+  transferred: number;
+  last: number | null;
+  items: SlskUploadFile[];
+  truncated: number;
+}
+
+export interface SlskUploads {
+  uploads: SlskUploadPeer[];
+}
+
 /** Which staging root an action targets. They are two directories —
  *  `<music>/.mlo/downloads` and its `<incomplete>` sibling — and a name is
  *  only unique INSIDE one of them, so every call names its root. */
@@ -2987,8 +3019,12 @@ export const api = {
     ),
 
   trackDownloadUrl: (path: string) => media(`${API}/track/download?path=${encodeURIComponent(path)}`),
-  trackExportUrl: (path: string, codec: string, bitrate: number, level = 5) =>
-    media(`${API}/track/export?path=${encodeURIComponent(path)}&codec=${encodeURIComponent(codec)}&bitrate=${bitrate}&level=${level}`),
+  /** A per-track export as a download URL. The vocabulary is the exporter's
+   *  own (server.exporter.CODECS): `codec` is any of its keys and `quality`
+   *  the preset key or custom number `server.exporter._codec_args` expands —
+   *  the same pair the Export page sends. */
+  trackExportUrl: (path: string, codec: string, quality: string) =>
+    media(`${API}/track/export?path=${encodeURIComponent(path)}&codec=${encodeURIComponent(codec)}&quality=${encodeURIComponent(quality)}`),
 
   likes: () => json<{ paths: string[] }>(`${API}/likes`),
   likeToggle: (path: string, mbid?: string) =>
@@ -3180,9 +3216,11 @@ export const api = {
    *  run was in flight (it had already finished, or was never started). */
   exportCancel: () =>
     json<{ ok: boolean; cancelled: boolean }>(`${API}/export/cancel`, { method: "POST" }),
-  /** Write the Export page's form back into config.json (its saved defaults).
-   * Every field maps onto the `export_<field>` config key the server reads. */
-  exportSaveDefaults: (form: ExportForm) =>
+  /** Write export defaults back into config.json (its saved defaults).
+   * Every field maps onto the `export_<field>` config key the server reads, so
+   * a PARTIAL form writes only those keys — the per-track export panel saves
+   * just `{codec, quality}` this way, the Export page sends its whole form. */
+  exportSaveDefaults: (form: Partial<ExportForm>) =>
     json<Record<string, unknown>>(`${API}/config`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -3828,7 +3866,7 @@ export const api = {
     json<{ ok: boolean }>(`${API}/soulseek/shares/rescan`, { method: "POST" }, 60000),
   soulseekSharesRefresh: () =>
     json<{ ok: boolean; message: string }>(`${API}/soulseek/shares/refresh`, { method: "POST" }, 120000),
-  soulseekUploads: () => json<any>(`${API}/soulseek/uploads`),
+  soulseekUploads: () => json<SlskUploads>(`${API}/soulseek/uploads`),
   /** The listen port's own check (server/api_soulseek.py): the listener here,
    *  what the router holds for the port, the addresses both depend on, a
    *  connection from this machine to the public address, and slskd's login —
