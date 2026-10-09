@@ -214,7 +214,10 @@ When they do ask for one:
 - **A console child gets `CREATE_NO_WINDOW`.** The server runs windowed and owns
   no console, so anything launched without it flashes a terminal window;
   `mlo/deps.py`'s spawn probe did exactly that on the first Dependencies request.
-  Every console spawn in `mlo/` and `server/` passes the flag — a new one must too.
+  Every console spawn in `mlo/` and `server/` passes the flag — a new one must too,
+  and so does the Rust helper's own ffmpeg child (`rust/src/main.rs`,
+  `ffmpeg_cmd()`): the helper is spawned windowed, so an unflagged ffmpeg under it
+  would allocate a console of its own.
 - **The desktop shell is undecorated, and the web app draws its window.**
   `web/src/components/TitleBar.tsx` is the only title bar, and every screen owes
   it room. Links that leave the app go through the shell

@@ -45,6 +45,8 @@ import urllib.request
 import xml.etree.ElementTree as ET
 from urllib.parse import urljoin
 
+from .subproc import CREATE_NO_WINDOW
+
 # SSDP: the UPnP discovery address every IGD listens on.
 SSDP_ADDR = "239.255.255.250"
 SSDP_PORT = 1900
@@ -273,8 +275,11 @@ def _route_print_default_gateway():
     192.168.1.1 192.168.1.5 25"), so only the localized header is skipped — by
     shape, never by name."""
     try:
+        # CREATE_NO_WINDOW: the server runs windowed and owns no console, so a
+        # bare `route` allocates one and a terminal flashes up (mlo/subproc.py).
         out = subprocess.run(["route", "print", "0.0.0.0"], capture_output=True,
-                             text=True, timeout=10).stdout
+                             text=True, timeout=10,
+                             creationflags=CREATE_NO_WINDOW).stdout
     except (OSError, subprocess.SubprocessError):
         return ""
     for line in out.splitlines():

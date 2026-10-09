@@ -48,6 +48,27 @@ const READ_SIZE: usize = 1 << 20;
 /// How much of ffmpeg's stderr is kept for one log line.
 const TAIL_LIMIT: usize = 160;
 
+/// The ffmpeg child, built with CREATE_NO_WINDOW on Windows.
+///
+/// The Python engine spawns this helper itself with CREATE_NO_WINDOW
+/// (mlo/subproc.py) so the helper owns no console; an ffmpeg launched WITHOUT
+/// the flag would allocate one of its own and flash a terminal window in the
+/// packaged desktop app.
+fn ffmpeg_cmd(exe: &str, args: &[String]) -> Command {
+    let mut cmd = Command::new(exe);
+    cmd.args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
 struct Opts {
     ffmpeg: String,
     input: String,
@@ -321,13 +342,7 @@ fn tail(text: &str) -> String {
 }
 
 fn run_dr(o: &Opts) -> String {
-    let mut child = match Command::new(&o.ffmpeg)
-        .args(&decode_argv(o)[1..])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-    {
+    let mut child = match ffmpeg_cmd(&o.ffmpeg, &decode_argv(o)[1..]).spawn() {
         Ok(c) => c,
         Err(e) => return report(None, &format!("ffmpeg could not be started: {e}"), true),
     };
@@ -426,13 +441,7 @@ fn analyze_decode_argv(o: &AnalyzeOpts) -> Vec<String> {
 }
 
 fn run_analyze(o: &AnalyzeOpts) -> String {
-    let mut child = match Command::new(&o.ffmpeg)
-        .args(&analyze_decode_argv(o)[1..])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-    {
+    let mut child = match ffmpeg_cmd(&o.ffmpeg, &analyze_decode_argv(o)[1..]).spawn() {
         Ok(c) => c,
         Err(e) => {
             return analysis::report(None, true, &format!("ffmpeg could not be started: {e}"))
