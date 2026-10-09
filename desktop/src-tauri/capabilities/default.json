@@ -21,6 +21,10 @@
     "allow-open-external",
     "allow-update-check",
     "allow-update-install",
+    "allow-set-now-playing-liked",
+    "allow-set-playback-active",
+    "allow-set-now-playing",
+    "allow-ios-audio-state",
     "allow-shell-backend-choice",
     "allow-choose-backend"
   ]

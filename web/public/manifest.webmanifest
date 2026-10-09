@@ -1,0 +1,35 @@
+{
+  "name": "la musica",
+  "short_name": "la musica",
+  "description": "Organise, grade and optimise a music library.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0a0a0c",
+  "theme_color": "#0a0a0c",
+  "icons": [
+    {
+      "src": "/icon.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Favorites",
+      "short_name": "Favorites",
+      "url": "/favorites"
+    },
+    {
+      "name": "Playlists",
+      "short_name": "Playlists",
+      "url": "/playlists"
+    },
+    {
+      "name": "Search",
+      "short_name": "Search",
+      "url": "/library"
+    }
+  ]
+}

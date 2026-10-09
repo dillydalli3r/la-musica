@@ -39,6 +39,10 @@ What this pins, with the HTTP layer stubbed (no network at all):
   * the genre path verifies its candidates exactly like the link path: a page
     that is not the release/artist asked about (a same-named cover version, a
     200 that landed on search/home) supplies NO genres;
+  * a lookup that resolves nothing writes NO link (imports.stamp_rym_links),
+    reports "could not resolve" and raises nothing;
+  * a link already on the album is never looked up and never overwritten,
+    and an unreachable RYM is not an exception;
   * the 30-day cache answers the second call instead of the network;
   * what a pasted URL points at (integrations.rym_url_kind): the release
     album/single/song and /song/ paths, /artist/, a label page ("other"),
@@ -56,6 +60,7 @@ import tempfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from mlo import audio as mlo_audio
+from server import imports
 from server import integrations as intg
 
 BASE = intg.RYM_BASE
@@ -411,6 +416,87 @@ try:
                    "note": "automatic lookup is off"}, got
     assert fake.calls == [], fake.calls
 
+    # ----------------------------------------------------------------------- #
+    # 8) stamping an album: verified links only, existing links untouched
+    # ----------------------------------------------------------------------- #
+    class FakeAudio:
+        """Tag-reading stand-in for mlo.audio.AudioFile."""
+
+        written = {}
+
+        def __init__(self, path):
+            self.path = path
+            self.audio = object()
+            self.tags = dict(FakeAudio.written.get(path) or {})
+
+        def get_tag(self, name):
+            return self.tags.get(name)
+
+        def set_tag(self, name, value):
+            self.tags[name] = value
+            FakeAudio.written[self.path] = dict(self.tags)
+            return True
+
+    root = tempfile.mkdtemp(prefix="mlo_rym_links_")
+    album = os.path.join(root, "Loud")
+    os.makedirs(album)
+    files = []
+    for i in (1, 2):
+        path = os.path.join(album, f"{i:02d} - track.wav")
+        with open(path, "wb") as fh:
+            fh.write(b"")
+        FakeAudio.written[path] = {"ARTIST": "Rihanna", "ALBUM": "Loud",
+                                   "TITLE": f"track {i}"}
+        files.append(path)
+    mlo_audio.AudioFile = FakeAudio
+
+    run({"/release/album/rihanna/loud/": ok(release_page("Rihanna", "Loud")),
+         "/artist/rihanna": ok(artist_page("Rihanna"))})
+    out = imports.stamp_rym_links(album, CFG)
+    assert out == {"album": f"{BASE}/release/album/rihanna/loud/",
+                   "artist": f"{BASE}/artist/rihanna", "note": "",
+                   "written": 2}, out
+    for path in files:
+        assert FakeAudio.written[path]["RATEYOURMUSIC_ALBUM"] == \
+            f"{BASE}/release/album/rihanna/loud/", FakeAudio.written[path]
+        assert FakeAudio.written[path]["RATEYOURMUSIC_ARTIST"] == \
+            f"{BASE}/artist/rihanna", FakeAudio.written[path]
+
+    # both links already there → not one request, nothing rewritten
+    run({})
+    before = {p: dict(FakeAudio.written[p]) for p in files}
+    out = imports.stamp_rym_links(album, CFG)
+    assert out["written"] == 0 and out["album"] is None and out["artist"] is None
+    assert intg.httpx.calls == [], intg.httpx.calls
+    assert {p: FakeAudio.written[p] for p in files} == before
+
+    # only the artist link missing → only that one is resolved, and the
+    # album link the user set is not fetched or overwritten
+    run({"/release/album/rihanna/loud/": ok(release_page("Rihanna", "Loud")),
+         "/artist/rihanna": ok(artist_page("Rihanna"))})
+    for path in files:
+        FakeAudio.written[path].pop("RATEYOURMUSIC_ARTIST")
+    mine = f"{BASE}/release/album/rihanna/loud/?user-edited"
+    FakeAudio.written[files[0]]["RATEYOURMUSIC_ALBUM"] = mine
+    out = imports.stamp_rym_links(album, CFG)
+    assert out["album"] is None and out["artist"] == f"{BASE}/artist/rihanna", out
+    assert FakeAudio.written[files[0]]["RATEYOURMUSIC_ALBUM"] == mine
+    for path in files:
+        assert FakeAudio.written[path]["RATEYOURMUSIC_ARTIST"] == \
+            f"{BASE}/artist/rihanna", FakeAudio.written[path]
+
+    # a lookup that finds nothing writes nothing and still returns a note
+    for path in files:
+        FakeAudio.written[path].pop("RATEYOURMUSIC_ARTIST", None)
+        FakeAudio.written[path].pop("RATEYOURMUSIC_ALBUM", None)
+    run({}, boom=True)
+    log = io.StringIO()
+    with contextlib.redirect_stdout(log):
+        out = imports.stamp_rym_links(album, CFG)
+    assert out["written"] == 0 and out["note"].startswith("could not resolve"), out
+    for path in files:
+        assert "RATEYOURMUSIC_ALBUM" not in FakeAudio.written[path], FakeAudio.written[path]
+        assert "RATEYOURMUSIC_ARTIST" not in FakeAudio.written[path], FakeAudio.written[path]
     # ----------------------------------------------------------------------- #
     # 9) what a pasted URL points at — the field the link editor writes to
     # ----------------------------------------------------------------------- #

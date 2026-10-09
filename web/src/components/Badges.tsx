@@ -1,5 +1,6 @@
 import { Link } from "react-router-dom";
-import { Check, X, Disc3, CircleAlert, Loader2 } from "lucide-react";
+import { Check, X, Disc3, CircleAlert, ArrowDown, Loader2 } from "lucide-react";
+import { useCachedPaths } from "../lib/mediaCache";
 import { useI18n, type MessageKey } from "../lib/i18n";
 import type { AdvisoryFetchResult } from "../api";
 import type { Album } from "../types";
@@ -141,6 +142,14 @@ export function mediaCountryLabel(
   return parts.length ? parts.join(" · ") : null;
 }
 
+export function AdvisoryBadge({ value }: { value: string | null | undefined }) {
+  if (value === "1")
+    return <span className="chip bg-red-900/50 text-red-300 border border-red-900">EXPLICIT</span>;
+  if (value === "2")
+    return <span className="chip bg-emerald-900/50 text-emerald-300 border border-emerald-900">CLEAN</span>;
+  return null;
+}
+
 /** ITUNESADVISORY in words for the provenance readouts — the same three
  *  states the badges draw. Anything else is unknown: a missing advisory is
  *  "unrated", never 0/clean. */
@@ -169,6 +178,7 @@ const ADVISORY_SOURCE_WORDS: Record<string, string> = {
   "apple-album": "Apple (album editions)",
   "itunes-song": "iTunes (song search)",
   "discogs-parental": "Discogs (parental advisory)",
+  "youtube-age": "YouTube (age gate)",
   "ai-lyrics": "the AI's read of the lyrics",
   ai: "the AI (no lyrics in the file)",
   instrumental: "the track is instrumental",
@@ -303,15 +313,22 @@ export function AdvisoryMark({ value, size = "sm" }: { value: string | null | un
  *  otherwise. Anything else — no tag, or a bare "0" — draws nothing, which is
  *  what `AdvisoryMark` does with a value it cannot place. */
 export function albumAdvisory(al: {
-  meta?: { ITUNESADVISORY?: unknown } | null;
+  meta?: { ALBUMITUNESADVISORY?: unknown; ITUNESADVISORY?: unknown } | null;
   tracks?: { tags?: { ITUNESADVISORY?: unknown } | null }[] | null;
 }): "1" | "2" | null {
   const text = (v: unknown) => String(v ?? "").trim();
+  const album = text(al.meta?.ALBUMITUNESADVISORY);
   const own = text(al.meta?.ITUNESADVISORY);
   const tracks = (al.tracks ?? []).map((t) => text(t?.tags?.ITUNESADVISORY));
-  if (own === "1" || tracks.includes("1")) return "1";
-  if (own === "2" || tracks.includes("2")) return "2";
+  if (own === "1" || album === "1" || tracks.includes("1")) return "1";
+  if (album === "2" || own === "2" || tracks.includes("2")) return "2";
   // "0", a blank, or no tag at all: nothing is drawn, because nothing was said.
+  return null;
+}
+
+export function InstrumentalBadge({ value }: { value: string | null | undefined }) {
+  if (value === "1")
+    return <span className="chip bg-zinc-800 text-zinc-400 border border-border">INSTRUMENTAL</span>;
   return null;
 }
 
@@ -353,12 +370,12 @@ export function allowPlainOf(cfg: Record<string, unknown> | undefined): boolean 
  *  tag is 0/1, so anything else (absent included) is unknown, not
  *  instrumental.
  *
- *  Every surface that makes a claim about a track's LYRICS reads it: an
- *  instrumental's stored words are hidden instead of shown or refused, and the
- *  kind chip follows — a stored plain text on an instrumental is not a lyrics
- *  failure, because there are no words to sync ("it shouldn't say 'x plain'
- *  for instrumental tracks", reported from the track page and the stored
- *  readout). */
+ *  Every surface that makes a claim about a track's LYRICS reads it: the
+ *  player's state rule hides an instrumental's stored words instead of showing
+ *  or refusing them (`npLyricsMode`), and the kind chip follows — a stored
+ *  plain text on an instrumental is not a lyrics failure, because there are no
+ *  words to sync ("it shouldn't say 'x plain' for instrumental tracks",
+ *  reported from the track page and the stored readout). */
 export function isInstrumental(tags: { INSTRUMENTAL?: unknown } | null | undefined): boolean {
   return String(tags?.INSTRUMENTAL ?? "").trim() === "1";
 }
@@ -366,7 +383,7 @@ export function isInstrumental(tags: { INSTRUMENTAL?: unknown } | null | undefin
 /** The one lyrics-kind mark every surface wears, so a track's lyrics read the
  *  same in a table row, a page header and the stored readout:
  *
- *  * "synced" — the timed-lyrics chip: the lines carry timestamps, so this is
+ *  * "synced" — the timed-lyrics chip: the player follows the line, so this is
  *    a fact, not a verdict (the same green the lyric candidates wear);
  *  * "plain" — the same chip in the neutral tone WHEN the user's own
  *    `lyrics_allow_plain` says untimed lyrics are acceptable, and the app's
@@ -427,6 +444,58 @@ export function LyricsKindChip({
   );
 }
 
+/** Linear grade meter (rectangular language — no progress rings): a slim
+ * bar filled by the % of checks passed, quiet colors, details on hover. */
+export function GradeBar({ pct, width = 64 }: { pct: number | null; width?: number }) {
+  const v = Math.max(0, Math.min(100, pct ?? 0));
+  const color = v >= 100 ? "bg-emerald-600/60" : v >= 80 ? "bg-amber-500/60" : "bg-red-500/70";
+  return (
+    <span
+      className="inline-block h-1 rounded-sm bg-border/80 overflow-hidden align-middle shrink-0"
+      style={{ width }}
+      title={pct == null ? "Not graded" : `${pct}% of checks passed`}
+    >
+      <span className={`block h-full ${color}`} style={{ width: `${v}%` }} />
+    </span>
+  );
+}
+
+export function ScoreRing({ pct, size = 44 }: { pct: number | null; size?: number }) {  const r = (size - 6) / 2;
+  const c = 2 * Math.PI * r;
+  const v = pct ?? 0;
+  const ok = v >= 100;
+  const color = ok ? "#34d399" : v >= 80 ? "#fbbf24" : "#f87171";
+  return (
+    <svg width={size} height={size} className="-rotate-90">
+      <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="#26262c" strokeWidth={5} />
+      <circle
+        cx={size / 2}
+        cy={size / 2}
+        r={r}
+        fill="none"
+        stroke={color}
+        strokeWidth={5}
+        strokeLinecap="round"
+        strokeDasharray={c}
+        strokeDashoffset={c - (c * v) / 100}
+      />
+      <text
+        x="50%"
+        y="50%"
+        textAnchor="middle"
+        dominantBaseline="central"
+        className="rotate-90"
+        style={{ transform: "rotate(90deg)", transformOrigin: "center" }}
+        fill="#e8e8e8"
+        fontSize={size / 4}
+        fontWeight={600}
+      >
+        {pct === null ? "–" : v}
+      </text>
+    </svg>
+  );
+}
+
 export function IssueList({ issues }: { issues: string[] }) {
   if (!issues?.length)
     return (
@@ -483,6 +552,31 @@ export function PageLoading({ label = "Loading…" }: { label?: string }) {
       <Loader2 className="h-4 w-4 animate-spin" />
       {label}
     </div>
+  );
+}
+
+/** The downloaded mark for a track title: a small down arrow, the same
+ *  download family the download buttons wear, rendered only while the audio
+ *  is in the offline cache (lib/mediaCache) — a track that was never
+ *  downloaded gets NO mark, so the badge means "you can play this without the
+ *  server" and nothing else.
+ *
+ *  It used to be a green circled check, which is what a passing grade looks
+ *  like two columns to the left: the reader saw two near-identical ticks and
+ *  could tell neither what was graded from what was downloaded (#39). The
+ *  grade keeps the check; the download takes the arrow. */
+export function CachedMark({ path, size = "sm" }: { path: string; size?: "sm" | "md" }) {
+  const cached = useCachedPaths();
+  if (!cached.has(path)) return null;
+  return (
+    <span
+      role="img"
+      aria-label="Downloaded"
+      title="Downloaded"
+      className="shrink-0 inline-flex text-emerald-500"
+    >
+      <ArrowDown className={size === "sm" ? "h-3.5 w-3.5" : "h-4 w-4"} />
+    </span>
   );
 }
 

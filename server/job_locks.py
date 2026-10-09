@@ -122,8 +122,8 @@ def refusal(path, holder):
 def normalize(path):
     """The identity a path is locked under: absolute, normalized, case-folded.
 
-    Case-folded because the two paths that reach the same file — a library
-    walk and a user-supplied route argument — must lock under ONE key.
+    The same comparison the rest of the app makes for "is this the same file"
+    (see server.playlists._norm, mlo.loudness._cache_key).
     """
     return os.path.normcase(os.path.normpath(os.path.abspath(str(path))))
 

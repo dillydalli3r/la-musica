@@ -20,16 +20,17 @@ that added this file; the rest is staged and the reason is stated.
 | ~~aiofiles~~ | 25.1.0 | **nowhere** | **REMOVED** — dead wheel |
 | httpx | 0.28.1 | the one shared provider client (`httpclient.py`) | **Keep** (measured −31 % run) |
 | mutagen | 1.48.1 | the whole tag layer (`mlo/audio.py`, `containers.py`, `flac.py`) | **Keep** (Rust `lofty` is the port target) |
-| Pillow | 12.3.0 | cover decode-crop-resize (7 modules) | **Keep** (Rust `image` is the port target) |
+| Pillow | 12.3.0 | cover/artist decode-crop-resize (7 modules) | **Keep** (Rust `image` is the port target) |
 | numpy | 2.5.2 | `mlo/dr.py` (block math), `audiometa.py`/`moods.py` (DSP) | **Keep, but no longer required for DR** |
 | threadpoolctl | 3.6.0 | `mlo/stats.py` — caps BLAS/OpenMP pools | **Keep** (follows numpy) |
+| cryptography | 50.0.1 | Web Push (P-256 + AES-GCM) | **Keep** (stdlib cannot) |
 | eac-logchecker | 0.8.1 | `mlo/discs.py` — EAC log checksum | **Keep** (swap staged; needs the reference to pin parity) |
 
 Transitive weight worth knowing: `numpy` ships a 19.5 MB OpenBLAS DLL and its
-own thread pools (why `threadpoolctl` exists); the **vendored** `librosa 0.11.0`
-tree drags scipy, scikit-learn, numba + llvmlite (LLVM), soundfile and cffi; the
-**vendored** `beets 2.4.0` tree drags numpy, lap, jellyfish, musicbrainzngs and
-friends.
+own thread pools (why `threadpoolctl` exists); `cryptography` is a native
+extension; the **vendored** `librosa 0.11.0` tree drags scipy, scikit-learn,
+numba + llvmlite (LLVM), soundfile and cffi; the **vendored** `beets 2.4.0`
+tree drags numpy, lap, jellyfish, musicbrainzngs and friends.
 
 Undeclared/vestigial: `tqdm` (optional import in `mlo/deps.py`; the server
 nulls it in `server/ws.py`) — left as an optional CLI nicety, not declared.
@@ -37,7 +38,7 @@ nulls it in `server/ws.py`) — left as an optional CLI nicety, not declared.
 
 ## 2. Vendored native / pip tools
 
-All are launched only through `mlo/subproc.run_tool`, resolved by
+All are launched only through `mlo/subproc.run_tool`, discovered by
 `mlo/tools.py`, installed under `<music>/.mlo/tools`.
 
 | Tool | Kind | Invoked from | Rust replaceable? |
@@ -50,7 +51,7 @@ All are launched only through `mlo/subproc.run_tool`, resolved by
 | AudioAuditor | .NET | `mlo/audit.py` | No |
 | CUETools (mono), Logchecker (php) | .NET / PHP | `mlo/accurip.py`, `mlo/discs.py` | Not without a port |
 | chromaprint (fpcalc) | C++ | `mlo/acoustid.py` | No |
-| beets | Python (vendored) | `server/beetscfg.py` (Tagging stage 14 and the import plugin) | **No equivalent upstream** |
+| beets, yt-dlp | Python (vendored) | `server/beetscfg.py`, `mlo/lyrics_providers.py`, `server/youtube.py` | **No equivalent upstream** |
 | librosa | Python (vendored) | `mlo/moods.py`, `mlo/audiometa.py` | No drop-in; spec pins its numbers |
 | eac-logchecker | Python | `mlo/discs.py` | Yes, small — staged |
 | simple-dr-meter | Python (vendored) | **test oracle only** | Kept: it is the independent reference the DR parity test measures against |
@@ -75,9 +76,10 @@ Lockfile drift: `web/package-lock.json` root `version` said 3.11.0 while
 ## 4. Rust (Tauri shell)
 
 tauri 2 (`tray-icon`, `image-png`), tauri-build, tauri-plugin-dialog /
--autostart / -notification / -single-instance, parking_lot and
-tauri-plugin-updater. ~500 transitive crates (wry, tao, gtk/webkit on Linux).
-Nothing removable — this is a Tauri v2 desktop shell. `-single-instance` is
+-autostart / -notification / -single-instance, parking_lot, and iOS-only
+objc2 / block2 / objc2-foundation. ~500 transitive crates (wry, tao,
+gtk/webkit on Linux). Nothing removable — this is a Tauri v2 shell, and the
+iOS crates are `cfg`-gated so they compile only there. `-single-instance` is
 the one that is not about a feature the user asks for but about a hazard: two
 shells would mean two local backends over one library.
 

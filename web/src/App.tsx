@@ -3,8 +3,8 @@ import type { ReactNode } from "react";
 import { Link, Navigate, NavLink, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Activity, ArrowUpRight, ChevronLeft, ChevronRight, ClipboardCheck, Disc3, Gauge, HardDriveDownload, Import,
-  Keyboard, Library, ListChecks, Loader2, Menu, Music2, Music4, PanelLeftClose, Search, Sliders, SlidersHorizontal, Tags, Trash2, User, X,
+  Activity, ArrowUpRight, BarChart3, ChevronLeft, ChevronRight, ClipboardCheck, Compass, Disc3, Download, Gauge, HardDriveDownload, Heart, HeartHandshake, Home, Import,
+  Keyboard, Library, ListChecks, ListMusic, Loader2, Menu, Music2, Music4, PanelLeftClose, Search, Sliders, SlidersHorizontal, Sparkles, Tags, Trash2, User, WifiOff, X,
   Settings as SettingsIcon, Wrench,
 } from "lucide-react";
 import { api, AuthError, getToken, IN_TAURI, onAuthLost, serverUrl } from "./api";
@@ -20,16 +20,21 @@ import NotificationBell from "./components/NotificationBell";
 import { GradeTraySync } from "./components/GradeWarning";
 import ShortcutsOverlay from "./components/Shortcuts";
 import { applyConfigLocale, useI18n, type MessageKey } from "./lib/i18n";
+import { applyAccentVars, resolveAccent } from "./lib/accent";
 import { useJobLocks, type LocksPayload } from "./lib/locks";
 
 // Route-level code splitting: only the landing page ships in the initial
 // bundle, every other page is fetched on first visit. Without this the whole
-// app (library, import wizard, settings) loads up front.
+// app (library, player, import wizard, settings) loads up front.
+const HomePage = lazy(() => import("./pages/HomePage"));
 const LibraryPage = lazy(() => import("./pages/LibraryPage"));
 const TrashPage = lazy(() => import("./pages/TrashPage"));
 const ArtistPage = lazy(() => import("./pages/ArtistPage"));
 const AlbumPage = lazy(() => import("./pages/AlbumPage"));
 const TrackPage = lazy(() => import("./pages/TrackPage"));
+const PlaylistsPage = lazy(() => import("./pages/PlaylistsPage"));
+const PlaylistDetailPage = lazy(() => import("./pages/PlaylistDetailPage"));
+const FavoritesPage = lazy(() => import("./pages/FavoritesPage"));
 const SettingsPage = lazy(() => import("./pages/SettingsPage"));
 const SetupPage = lazy(() => import("./pages/SetupPage"));
 const ExportPage = lazy(() => import("./pages/ExportPage"));
@@ -38,9 +43,17 @@ const OptimizationPage = lazy(() => import("./pages/OptimizationPage"));
 const EqualizerPage = lazy(() => import("./pages/EqualizerPage"));
 const DependenciesPage = lazy(() => import("./pages/DependenciesPage"));
 const GenrePage = lazy(() => import("./pages/GenrePage"));
+const DownloadsPage = lazy(() => import("./pages/DownloadsPage"));
 const ImportWizard = lazy(() => import("./pages/ImportWizard"));
+const DonationsPage = lazy(() => import("./pages/DonationsPage"));
 const InProgressPage = lazy(() => import("./pages/InProgressPage"));
+// A podcast SERIES page (route only — podcasts are reached from Home's shelf
+// and from an episode's own page, so the sidebar needs no entry for them).
+const PodcastPage = lazy(() => import("./pages/PodcastPage"));
 const BrowsePage = lazy(() => import("./pages/BrowsePage"));
+const DiscoverPage = lazy(() => import("./pages/DiscoverPage"));
+const RecommendedPage = lazy(() => import("./pages/RecommendedPage"));
+const ChartsPage = lazy(() => import("./pages/ChartsPage"));
 const CheckStackPage = lazy(() => import("./pages/CheckStackPage"));
 const MBSearchPage = lazy(() => import("./pages/MusicBrainzPage").then((m) => ({ default: m.MBSearchPage })));
 const MBArtistPage = lazy(() => import("./pages/MusicBrainzPage").then((m) => ({ default: m.MBArtistPage })));
@@ -69,11 +82,14 @@ import {
   subscribeBackendFailure,
   subscribeBackendStarting,
 } from "./lib/backendShell";
+import { isOffline, onOfflineFallback } from "./api";
+import type { OfflineInfo } from "./api";
 // The app event stream's own outcome kinds, and the ONE invalidation a write
 // to the library implies (see the subscription below).
 import { onAppEvent } from "./lib/notify";
 import { affectsLibrary, invalidateLibrary } from "./lib/invalidate";
 
+import PlayerBar from "./components/PlayerBar";
 import { ProgressStack } from "./components/ProgressBar";
 import { EmptyState, PendingMark } from "./components/Badges";
 
@@ -138,17 +154,26 @@ const NAV_GROUPS: { labelKey: MessageKey; items: { to: string; labelKey: Message
   {
     labelKey: "nav.group.library",
     items: [
+      { to: "/", labelKey: "nav.home", icon: Home, end: true },
       { to: "/library", labelKey: "nav.library", icon: Library, end: false },
-      // Complex browsing (tag/technical queries, facets, grouping) is a
-      // view OF the library, so it sits with it.
+      // Complex browsing (tag/rating/technical queries, facets, grouping) is a
+      // view OF the library, so it sits with it rather than under Discover.
       { to: "/browse", labelKey: "nav.browse", icon: SlidersHorizontal, end: false },
       { to: "/genres", labelKey: "nav.genres", icon: Tags, end: true },
       { to: "/trash", labelKey: "nav.trash", icon: Trash2, end: true },
+      { to: "/playlists", labelKey: "nav.playlists", icon: ListMusic, end: false },
+      { to: "/favorites", labelKey: "nav.favorites", icon: Heart, end: false },
+      { to: "/downloads", labelKey: "nav.downloads", icon: Download, end: true },
     ],
   },
   {
-    labelKey: "nav.group.acquire",
+    labelKey: "nav.group.discover",
     items: [
+      { to: "/discover", labelKey: "nav.discover", icon: Compass, end: false },
+      { to: "/recommended", labelKey: "nav.recommended", icon: Sparkles, end: false },
+      // Charts sits with Discover: the same sources, ranked, over the windows
+      // the user picked — and beside them the library's own play history.
+      { to: "/charts", labelKey: "nav.charts", icon: BarChart3, end: false },
       { to: "/import", labelKey: "nav.import", icon: Import, end: false },
       // MusicBrainz sits with acquiring: browsing the database IS how a user
       // finds the release they are about to import, and every entity page
@@ -169,11 +194,16 @@ const NAV_GROUPS: { labelKey: MessageKey; items: { to: string; labelKey: Message
       { to: "/in-progress", labelKey: "nav.inProgress", icon: Activity, end: false },
       { to: "/checks", labelKey: "nav.checks", icon: ListChecks, end: false },
       { to: "/dependencies", labelKey: "nav.dependencies", icon: Wrench, end: false },
-      // The equalizer is the EXPORT-EQ configurator (a curve baked into an
-      // export), so it sits with the app's other configuration — one page away
-      // from Settings.
+      // The equalizer shapes what the player SOUNDS like, so it sits with the
+      // app's other configuration — one page away from Settings, in the sidebar
+      // the issue asked for, and one key (`playback_eq_profile`) shared by every
+      // client of the server.
       { to: "/equalizer", labelKey: "nav.equalizer", icon: Sliders, end: false },
       { to: "/settings", labelKey: "nav.settings", icon: SettingsIcon, end: false },
+      // The donation page sits with the app's own pages rather than in a
+      // footer: it is a page like any other, and a user who wants to support
+      // the project should not have to hunt for it.
+      { to: "/donations", labelKey: "nav.donations", icon: HeartHandshake, end: true },
     ],
   },
 ];
@@ -207,6 +237,20 @@ function useSettled<T>(value: T, ms = 400): T {
  *  locals readable and gives the pair one place to change. */
 type Timer = ReturnType<typeof setTimeout>;
 
+/** Paint the app's accent. The ONLY caller-facing setter: the shell calls it at
+ *  boot with whatever this browser stored, and the settings page calls it when
+ *  a swatch or a custom hex is picked. The colour maths, the table of presets
+ *  and the write itself live in lib/accent (which also announces the change to
+ *  the canvas consumers); this is the app's own entry point into it, kept here
+ *  because both the shell and the settings page already import it from App.
+ *
+ *  `name` is a preset id ("violet") or a custom "#rrggbb"; anything else —
+ *  including null, an empty string, a value from an older build — resolves to
+ *  the default black & white, never to an unset colour. */
+export function applyAccent(name: string | null) {
+  applyAccentVars(resolveAccent(name));
+}
+
 /** How often the bars check the lock registry for a producer that died without
  *  saying so. ONE timer for the whole stack, and none at all while no bar is
  *  up — never a timer per bar. */
@@ -225,7 +269,7 @@ const PROGRESS_SWEEP_MS = 1000;
  *  of waiting for the producer's next frame (see the effect below). */
 function useProgressSweep(count: number) {
   // Mounting the poll here keeps the fallback honest wherever the stack is
-  // drawn: same query key, so it is the request the progress bars already make.
+  // drawn: same query key, so it is the request the player bar already makes.
   const locks = useJobLocks();
   const qc = useQueryClient();
   const prune = useStore((s) => s.pruneProgress);
@@ -368,7 +412,7 @@ function Toasts() {
 
 /** Held until the config answers, in the SETUP frame rather than the shell's
  *  skeleton: on a first run the next thing on screen is the wizard, and the
- *  shell (sidebar, library) painting for a beat first is the library
+ *  shell (sidebar, player, library) painting for a beat first is the library
  *  UI flashing through setup. */
 function SetupLoading() {
   return (
@@ -428,10 +472,10 @@ function SearchHit({ to, icon: Icon, label, hint, onGo, external, marker }: {
 
 export default function App() {
   // Subscribed field by field, never as `useStore()`: a selector-less call
-  // re-renders App — and App is the ENTIRE shell, every route included — on
-  // EVERY store write, and the store has writers that fire
+  // re-renders App — and App is the ENTIRE shell, every route and the player
+  // bar included — on EVERY store write, and the store has writers that fire
   // many times a second (a progress frame per relay tick, a selection toggle
-  // per row click). That churn is what a phone shows as the
+  // per row click, a volume drag). That churn is what a phone shows as the
   // app refreshing under the user's finger, and it is what kills momentum
   // scrolling. The progress readout keeps a subscription of its own, in
   // LiveProgress, so a frame repaints a 40px bar and nothing else.
@@ -514,7 +558,7 @@ export default function App() {
   // goes true for any failed request, so once the server HAD answered, one
   // dropped poll — Wi-Fi hiccup, backend restarting on a config save, a phone
   // coming back from the lock screen — used to tear the entire shell out of
-  // the DOM (sidebar, page, scroll position) and remount it as this
+  // the DOM (sidebar, page, player, scroll position) and remount it as this
   // screen, and the next successful poll put it back. A network failure is not
   // a lost session: it must not gate. Only a real answer may — a 401 from the
   // server (`signedOut`, which stays latched until a sign-in), or the server
@@ -523,15 +567,33 @@ export default function App() {
     || (IN_TAURI && auth.data === null)
     || (!!auth.data?.required && !auth.data.authenticated);
 
-  // Global keyboard shortcuts. This layer adds only what belongs to the shell:
-  // the search box and the shortcuts sheet. Never fires while a field has focus
-  // (typing "?" in a search field must type it), nor under a modifier.
+  // ---- offline ------------------------------------------------------------
+  // `isOffline()` is true while the API is answering from the on-disk cache
+  // (see lib/offlineCache.ts): the app keeps working — that is the point of
+  // the cache — but the user has to know why the numbers stopped moving. The
+  // listener fires only on the offline↔online transition, so this cannot
+  // re-render per request.
+  const [offline, setOffline] = useState<boolean>(() => isOffline());
+  useEffect(() => onOfflineFallback((info: OfflineInfo | null) => setOffline(!!info)), []);
+
+  // Global keyboard shortcuts. The player owns its own transport keys
+  // (Space, arrows, brackets — see PlayerBar) and this layer deliberately adds
+  // only what belongs to the shell: the fullscreen viewer, the search box and
+  // this sheet. Never fires while a field has focus (typing "f" in a search
+  // field must type an f), nor under a modifier, nor while the lyrics editor
+  // is stamping (it owns the whole keyboard then).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.ctrlKey || e.metaKey || e.altKey) return;
       const t = e.target as HTMLElement | null;
       if (t && (t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement || t.isContentEditable)) return;
-      if (e.key === "?") {
+      if (document.querySelector("[data-lrc-editor]")) return;
+      if (e.key === "f" || e.key === "F") {
+        e.preventDefault();
+        // The viewer's state lives in the player bar (it owns the decoders);
+        // an event keeps the two from fighting over it.
+        window.dispatchEvent(new CustomEvent("mlo:fullscreen-toggle"));
+      } else if (e.key === "?") {
         e.preventDefault();
         setShortcutsOpen((v) => !v);
       } else if (e.key === "/") {
@@ -729,6 +791,10 @@ export default function App() {
   }, [navOpen]);
 
   useEffect(() => {
+    applyAccent(localStorage.getItem("mlo.accent"));
+  }, []);
+
+  useEffect(() => {
     // Nothing to talk to: the login screen is up, which means the shell has no
     // server (or no session). Opening a socket it cannot complete — and worse,
     // restarting that socket on a fixed timer — is request churn on a client
@@ -923,7 +989,7 @@ export default function App() {
   // The setup wizard's own screen — rendered BARE, never inside the library
   // shell. Two places reach it (a first run, and Settings → Run the setup
   // wizard again) and both must look the same: wrapped in the shell, a re-run
-  // kept the sidebar and the live event socket, so a script or
+  // kept the sidebar, player bar and the live event socket, so a script or
   // import finishing painted library toasts and progress over the wizard.
   const setupScreen = (
     <>
@@ -954,7 +1020,7 @@ export default function App() {
 
   return (
     // The sidebar owns the entire left edge, top to bottom (brand header, nav,
-    // footer); the top bar and content live in the column to
+    // footer); the top bar, content and player bar all live in the column to
     // its right. `.safe-shell` carries the notch / home-indicator insets for
     // everything inside it at once (index.html sets `viewport-fit=cover`, so
     // without it the chrome paints under them).
@@ -1112,10 +1178,10 @@ export default function App() {
                       <Icon className="h-4 w-4 shrink-0" />
                     </span>
                     {/* Wrapping, not nowrap: a translation is longer than the
-                        English label it was written beside ("In progress" is
-                        two words and its translations are no shorter) and a
-                        nowrap label in a 208 px drawer clipped the very words
-                        the rail exists to say. The drawer scrolls, so an
+                        English label it was written beside ("Now playing" is
+                        two words, "En lecture" or a German compound is not)
+                        and a nowrap label in a 208 px drawer clipped the very
+                        words the rail exists to say. The drawer scrolls, so an
                         extra line costs nothing. */}
                     <span className="min-w-0 break-words">{t(labelKey)}</span>
                   </NavLink>
@@ -1313,10 +1379,24 @@ export default function App() {
           {/* The session's own controls sit at the bar's top RIGHT: the left
               is navigation (menu, back, forward) and the middle is the search,
               so this is where a user looks for status and help. The bell is
-              also what opens the /ws/events socket (lib/notify.ts); the
-              shortcuts button hides on a phone, where the bar shares its width
-              with the input. */}
+              also what opens the /ws/events socket (lib/notify.ts); the pill
+              and the shortcuts button hide on a phone, where the bar shares
+              its width with the input. */}
           <div className="flex items-center gap-1.5 sm:gap-3 shrink-0 pointer-events-auto">
+            {/* Offline: the app is answering from its own cache, so it stays
+                usable with the server gone — but the user must be able to tell
+                "nothing changed" from "nothing can reach me". WifiOff is a
+                lucide icon; the pill is deliberately quiet (this is a state,
+                not an error). */}
+            {offline && (
+              <span
+                className="h-9 px-2.5 rounded-full border border-amber-900/60 bg-amber-950/40 backdrop-blur hidden sm:flex items-center gap-1.5 text-[11px] text-amber-200/90"
+                title={t("offline.help")}
+              >
+                <WifiOff className="h-3.5 w-3.5" />
+                {t("offline.label")}
+              </span>
+            )}
             <button
               className="tap-hit h-9 w-9 rounded-full border border-border bg-panel/60 backdrop-blur hidden sm:flex items-center justify-center text-zinc-300 hover:text-white hover:border-accent/50 transition-colors"
               onClick={() => setShortcutsOpen(true)}
@@ -1346,19 +1426,32 @@ export default function App() {
             {/* lazy routes: the page chunk is fetched on first visit */}
             <Suspense fallback={<PageLoading />}>
             <Routes>
-            <Route path="/" element={<LibraryPage />} />
+            <Route path="/" element={<HomePage />} />
             <Route path="/library" element={<LibraryPage />} />
             <Route path="/genres" element={<GenrePage />} />
+            {/* The offline downloads: the tracks this browser can play with
+                the server down, as the library's own album table. */}
+            <Route path="/downloads" element={<DownloadsPage />} />
             <Route path="/trash" element={<TrashPage />} />
             <Route path="/artist/:path" element={<ArtistPage />} />
+            <Route path="/podcast/:series" element={<PodcastPage />} />
             <Route path="/album/:path" element={<AlbumPage />} />
             <Route path="/track/:path" element={<TrackPage />} />
+            <Route path="/playlists" element={<PlaylistsPage />} />
+            <Route path="/playlist/:id" element={<PlaylistDetailPage />} />
+            <Route path="/favorites" element={<Navigate to="/favorites/tracks" replace />} />
+            <Route path="/favorites/:kind" element={<FavoritesPage />} />
             <Route path="/export" element={<ExportPage />} />
             <Route path="/optimize" element={<OptimizationPage />} />
             <Route path="/equalizer" element={<EqualizerPage />} />
             <Route path="/grading" element={<GradingPage />} />
             <Route path="/in-progress" element={<InProgressPage />} />
             <Route path="/browse" element={<BrowsePage />} />
+            <Route path="/discover" element={<DiscoverPage />} />
+            <Route path="/recommended" element={<RecommendedPage />} />
+            {/* What is being played: the user's own play history beside the
+                providers' charts, one window at a time. */}
+            <Route path="/charts" element={<ChartsPage />} />
             <Route path="/checks" element={<CheckStackPage />} />
             <Route path="/dependencies" element={<DependenciesPage />} />
             <Route path="/import" element={<ImportWizard />} />
@@ -1374,6 +1467,7 @@ export default function App() {
             <Route path="/mb/recording/:id" element={<MBRecordingPage />} />
             {/* /setup is handled ABOVE the shell (it must render bare, see
                 setupScreen) — it is deliberately not a route in here. */}
+            <Route path="/donations" element={<DonationsPage />} />
             <Route
               path="*"
               element={
@@ -1396,6 +1490,8 @@ export default function App() {
             </Suspense>
           </div>
         </main>
+
+        <PlayerBar />
       </div>
 
       {shortcutsOpen && <ShortcutsOverlay onClose={() => setShortcutsOpen(false)} />}

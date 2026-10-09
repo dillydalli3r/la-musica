@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""Verify artist-level grading (mlo.grader.grade_artist) and the layout
-scanner's matching empty_artist finding.
+"""Verify artist-level grading (mlo.grader.grade_artist) and the sidecar
+tolerance the artwork / description features depend on.
 
-An artist folder is graded on the ONE thing still left to it: that it holds an
-album folder at all. The artist image / description checks are gone with the
-features that fetched them, so the grade never runs an album-level check here
-and reports exactly two folder-level verdicts — ARTIST_FOLDER_MISSING (no
-folder) and ARTIST_EMPTY (no album folder under it) — each with no checks
-invented, because neither is a folder this app can grade whatever the settings
-say.
+Artist grading covers ONLY what applies to an artist folder: its artist.jpg
+and its description.txt. The image check reads the decoded file (its size,
+aspect and pixels, mlo.artistdata's policy), so the fixtures below are REAL
+images: a junk byte string named artist.jpg is a corrupt image, which is a
+failure of its own. The same files — plus the album's own
+description.txt — are legitimate library content for the album grader and for
+the read-only layout scanner, so neither may report them as stray.
+
+Run: python tools/test_artist_grading.py  (exit 0 pass, 1 fail)
 """
 import atexit
 import json
@@ -49,14 +51,12 @@ for _mod in (cfgmod, pathmod):
         _mod.LEGACY_DATA_DIR = os.path.join(REDIRECT, "legacy")
 
 MF = tempfile.mkdtemp(prefix="mlo-artist-test-")
-LAYOUT_MF = tempfile.mkdtemp(prefix="mlo-artist-layout-")
 
 
 def _cleanup():
     os.environ.pop("MLO_MUSIC_FOLDER", None)
     shutil.rmtree(REDIRECT, ignore_errors=True)
     shutil.rmtree(MF, ignore_errors=True)
-    shutil.rmtree(LAYOUT_MF, ignore_errors=True)
 
 
 atexit.register(_cleanup)
@@ -66,7 +66,9 @@ if _REAL:
     assert not MF.replace("\\", "/").lower().startswith(_REAL.lower()), \
         f"temp fixture {MF} sits inside the real music folder {_REAL}"
 
-from mlo.grader import _classify_file, _disallowed_files, grade_artist  # noqa: E402
+from mlo.grader import (  # noqa: E402
+    ARTIST_CHECKS, _classify_file, _disallowed_files, _extra_images, grade_artist,
+)
 from server import main as mlo_main  # noqa: E402  (heavy import)
 
 passed = 0
@@ -74,18 +76,27 @@ passed = 0
 
 def ok(cond, label):
     global passed
-    if not cond:
-        print(f"  FAIL: {label}")
-        raise SystemExit(1)
+    assert cond, f"FAILED: {label}"
     passed += 1
     print(f"  ok: {label}")
 
 
 def write(path, data=b"x"):
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "wb") as fh:
-        fh.write(data)
+    with open(path, "wb") as f:
+        f.write(data)
     return path
+
+
+def image_bytes(w=100, h=100, fmt="PNG"):
+    """A real (if flat) image, so the image check can decode and measure it."""
+    import io
+
+    from mlo.deps import Image, HAS_PIL
+    assert HAS_PIL, "these fixtures need Pillow"
+    buf = io.BytesIO()
+    Image.new("RGB", (w, h), (10, 120, 200)).save(buf, fmt)
+    return buf.getvalue()
 
 
 # --------------------------------------------------------------------------- #
@@ -93,119 +104,160 @@ def write(path, data=b"x"):
 # --------------------------------------------------------------------------- #
 print("== grade_artist ==")
 ART = os.path.join(MF, "Artists", "Artist")
-# An artist folder is only a graded artist while it holds an album folder: one
-# audio file in one album folder is the smallest thing that makes it one.
+# An artist folder is only a graded artist while it holds an album: a folder
+# with nothing but the artist's own image and description IS the ARTIST_EMPTY
+# finding (asserted on its own folder below). One audio file in one album
+# folder is the smallest thing that makes this one an artist with music.
 write(os.path.join(ART, "Ripped (2020)", "01 - Song.flac"))
-write(os.path.join(ART, "artist.jpg"))
+IMAGE = write(os.path.join(ART, "artist.jpg"), image_bytes(fmt="JPEG"))
+DESC = write(os.path.join(ART, "description.txt"), b"A band from nowhere.\n")
+
+ok([c["key"] for c in ARTIST_CHECKS]
+   == ["grade_check_artist_image", "grade_check_artist_description"],
+   "ARTIST_CHECKS lists the image check first")
+ok([c["label"] for c in ARTIST_CHECKS] == ["Artist image", "Artist description"],
+   "ARTIST_CHECKS carries the UI labels")
+ok(all(c.get("description") for c in ARTIST_CHECKS),
+   "every entry documents itself")
 
 res = grade_artist(ART)
 ok(res["path"] == ART, "the result carries the folder it graded")
-ok(res["issues"] == [], f"an artist with an album has nothing to report ({res['issues']})")
-ok((res["checks"], res["pass_count"], res["failed_checks"], res["pct"], res["pass"])
-   == (0, 0, 0, 100.0, True),
-   f"nothing graded is nothing failed — 100%, PASS ({res})")
+ok((res["checks"], res["pass_count"], res["failed_checks"]) == (2, 2, 0),
+   f"image + description grade 2/2 ({res['pass_count']}/{res['checks']})")
+ok(res["pct"] == 100.0 and res["pass"] is True and res["issues"] == [],
+   f"a complete artist folder passes ({res})")
+ok(res["artwork"] == {"image": True, "image_file": IMAGE, "description": True},
+   f"artwork reports the image file on disk ({res['artwork']})")
 
-# The grade owns no album-level check: settings cannot make it invent one
-# (tags, logs, covers and the removed artwork checks all belong to the album
-# grader, never here).
-res = grade_artist(ART, {"grade_check_missing_tags": True,
-                         "grade_check_cover": True,
-                         "grade_check_album_tags": True})
-ok(res["issues"] == [] and res["checks"] == 0 and res["pass"] is True,
-   f"album-level settings change nothing here ({res})")
+# each artefact missing fails only its own check
+os.remove(IMAGE)
+res = grade_artist(ART, {})
+ok(res["checks"] == 2 and res["failed_checks"] == 1 and res["pass"] is False,
+   f"a missing artist image fails exactly one check ({res['pass_count']}/{res['checks']})")
+ok([i["code"] for i in res["issues"]] == ["ARTIST_IMAGE_MISSING"],
+   f"only ARTIST_IMAGE_MISSING is raised ({res['issues']})")
+ok(res["issues"][0]["label"] == "Artist image"
+   and res["issues"][0]["where"] == "Artist",
+   f"the issue names the check and the folder ({res['issues'][0]})")
+ok(res["pct"] == 50.0, f"pct follows the graded checks ({res['pct']})")
+ok(res["artwork"]["image"] is False and res["artwork"]["image_file"] is None
+   and res["artwork"]["description"] is True,
+   "artwork says which half is missing")
 
-# A folder that is not there must not raise.
+os.remove(DESC)
+write(os.path.join(ART, "artist.png"), image_bytes())
+res = grade_artist(ART, {})
+ok([i["code"] for i in res["issues"]] == ["ARTIST_DESCRIPTION_MISSING"],
+   f"only ARTIST_DESCRIPTION_MISSING is raised ({res['issues']})")
+ok(res["artwork"]["image"] is True
+   and res["artwork"]["image_file"].endswith("artist.png"),
+   f"artist.png counts as the artist image ({res['artwork']})")
+
+# one toggle off: that artefact is neither required nor counted
+res = grade_artist(ART, {"grade_check_artist_description": False})
+ok(res["checks"] == 1 and res["pass_count"] == 1 and res["pass"] is True,
+   "a disabled check is not counted (1/1)")
+res = grade_artist(ART, {"grade_check_artist_image": False})
+ok([i["code"] for i in res["issues"]] == ["ARTIST_DESCRIPTION_MISSING"]
+   and res["pct"] == 0.0,
+   f"the other toggle still grades its own artefact ({res})")
+
+# both off: nothing graded is nothing failed — and nothing graded is 100%, not
+# 0%: the album rule (format_grade_report) reads the same state as a full
+# score, so a passing artist folder must not display an empty one.
+res = grade_artist(ART, {"grade_check_artist_image": False,
+                         "grade_check_artist_description": False})
+ok((res["checks"], res["pass_count"], res["failed_checks"], res["pct"],
+    res["pass"], res["issues"])
+   == (0, 0, 0, 100.0, True, []),
+   f"both checks disabled → checks=0, pct=100, pass=True ({res})")
+
+# a folder that is not there must not raise
 missing = os.path.join(MF, "Artists", "Nobody")
 res = grade_artist(missing, {})
 ok([i["code"] for i in res["issues"]] == ["ARTIST_FOLDER_MISSING"],
    f"a nonexistent folder reports ARTIST_FOLDER_MISSING ({res['issues']})")
-ok(res["issues"][0]["label"] == "Artist folder"
-   and res["issues"][0]["where"] == "Nobody",
-   f"the issue names the folder ({res['issues'][0]})")
 ok((res["checks"], res["pass_count"], res["failed_checks"], res["pct"],
     res["pass"]) == (0, 0, 0, 0.0, False),
    f"and fails without inventing checks ({res})")
+ok(res["artwork"] == {"image": False, "image_file": None, "description": False},
+   "and reports no artwork")
 ok(grade_artist("", {})["issues"][0]["code"] == "ARTIST_FOLDER_MISSING",
    "an empty path fails the same way instead of raising")
 
-# An artist folder with NO album folder in it is not a graded artist: the
-# shape of an absent folder (one issue, no checks invented). A loose audio
-# file does not count either — an album folder is a DIRECTORY the artist holds.
+# An artist folder with NO album folder in it is not a graded artist: the same
+# shape as an absent folder (one issue, no checks invented), because a perfect
+# image and description describe an artist, never an album. The removal the
+# layout panel offers for it goes through the Trash.
 solo = os.path.join(MF, "Artists", "Solo")
 os.makedirs(solo, exist_ok=True)
-write(os.path.join(solo, "artist.jpg"))
+write(os.path.join(solo, "artist.jpg"), image_bytes(fmt="JPEG"))
+write(os.path.join(solo, "description.txt"), b"A band from nowhere.\n")
 res = grade_artist(solo, {})
 ok([i["code"] for i in res["issues"]] == ["ARTIST_EMPTY"],
    f"an artist folder with no album folder reports ARTIST_EMPTY "
    f"({res['issues']})")
-ok(res["issues"][0]["label"] == "Artist albums"
-   and res["issues"][0]["where"] == "Solo",
-   f"the issue names the folder ({res['issues'][0]})")
 ok(res["pass"] is False and res["checks"] == 0 and res["pct"] == 0.0,
-   f"and FAILS without grading any artefact ({res})")
+   f"and FAILS without grading the artefacts as if it held an album ({res})")
+ok(res["artwork"]["image"] is True and res["artwork"]["description"] is True,
+   f"…while its artwork is still reported ({res['artwork']})")
 
-bare = os.path.join(MF, "Artists", "Bare")
-write(os.path.join(bare, "01 - Song.flac"))
-res = grade_artist(bare, {})
-ok([i["code"] for i in res["issues"]] == ["ARTIST_EMPTY"],
-   f"a loose audio file is not an album folder ({res['issues']})")
-
-# The album folder arrives: the same folder is a graded artist again — the
-# album's own problems are the album grader's to report, not this one's.
+# An album folder with audio under it is what makes it a graded artist again:
+# the album's own problems are the album grader's to report, not this one's.
 write(os.path.join(solo, "Album (2020)", "01 - Song.flac"))
 res = grade_artist(solo, {})
-ok(res["issues"] == [] and res["pass"] is True and res["checks"] == 0
-   and res["pct"] == 100.0,
+ok(res["issues"] == [] and res["pass"] is True and res["checks"] == 2,
    f"an album folder clears it ({res['pass_count']}/{res['checks']})")
 
-# A sub-folder is an album folder whatever it holds: the grade asks the one
-# question mlo.layout's empty_artist asks, so the two can never disagree.
-write(os.path.join(bare, "Some Folder", "readme.txt"))
-res = grade_artist(bare, {})
-ok(res["issues"] == [] and res["pass"] is True,
-   f"any directory under the artist is an album folder ({res})")
-
 # --------------------------------------------------------------------------- #
-# the removed description sidecar
+# grader file classification (album side)
 # --------------------------------------------------------------------------- #
-print("== removed description sidecar ==")
-ok(_classify_file("description.txt") == "other",
-   "description.txt has no special category any more")
+print("== grader sidecar tolerance ==")
+ok(_classify_file("description.txt") == "description",
+   "description.txt is its own (allowed) category")
 ok(_classify_file("notes.txt") == "other", "an unknown .txt is still unclassified")
-ok(_disallowed_files(ART, ["description.txt"], {}) == ["description.txt"],
-   f"it is an ordinary file the album refuses ({_disallowed_files(ART, ['description.txt'], {})})")
+ok(_disallowed_files(ART, ["description.txt", "notes.txt"], {}) == ["notes.txt"],
+   f"description.txt is not a disallowed file ({_disallowed_files(ART, ['description.txt', 'notes.txt'], {})})")
+ok(_disallowed_files(ART, ["description.txt"], {"grade_include_description": False})
+   == ["description.txt"],
+   "the category can still be turned off explicitly")
+ok(_extra_images(ART, ["artist.jpg", "artist.png", "description.txt"], []) == [],
+   "artist images are not stray album art")
+ok(_extra_images(ART, ["front.jpg"], []) == ["front.jpg"],
+   f"other loose images are still strays ({_extra_images(ART, ['front.jpg'], [])})")
 
 # --------------------------------------------------------------------------- #
-# layout scanner: the album-less artist folder is the same finding
+# layout scanner: the app's own sidecars are expected, not strays
 # --------------------------------------------------------------------------- #
 print("== layout scanner ==")
-LART = os.path.join(LAYOUT_MF, "Artists", "Artist")
-write(os.path.join(LART, "Ripped (2020)", "01 - Song.flac"))
-write(os.path.join(LART, "artist.jpg"))
-write(os.path.join(LART, "Album", "01 - Song.flac"))
-write(os.path.join(LART, "Album", "cover.jpg"))
-LSOLO = os.path.join(LAYOUT_MF, "Artists", "Solo")
-write(os.path.join(LSOLO, "artist.jpg"))
+ALBUM = os.path.join(MF, "Artists", "Artist", "Album")
+write(os.path.join(ALBUM, "01 - Song.flac"))
+write(os.path.join(ALBUM, "cover.jpg"))
+write(os.path.join(ALBUM, "description.txt"), b"Album notes.\n")
+write(os.path.join(ART, "artist.jpg"), image_bytes(fmt="JPEG"))
+write(os.path.join(ART, "description.txt"), b"A band from nowhere.\n")
 
-mlo_main.load_config = lambda: {"music_folder": LAYOUT_MF}
+mlo_main.load_config = lambda: {"music_folder": MF}
 res = mlo_main.library_layout()
 ok(res["counts"].get("stray_file", 0) == 0,
-   f"artist.jpg / cover.jpg are artwork, not strays ({res['counts']})")
-ok(res["counts"].get("empty_artist") == 1
-   and any(i["kind"] == "empty_artist"
-           and os.path.basename(str(i["path"]).replace("\\", "/")) == "Solo"
-           for i in res["issues"]),
-   f"the album-less artist folder is the scan's empty_artist ({res['issues']})")
-ok(res["total"] == 1, f"a clean library reports only that ({res['issues']})")
-ok(res["albums"] == 2 and res["artists"] == 2 and res["audio_files"] == 2,
+   f"no stray_file for artist.jpg / description.txt ({res['counts']})")
+ok(not {i["kind"] for i in res["issues"]}
+   & {"stray_file", "unexpected_subfolder", "stray_in_artists",
+      "audio_in_artist", "audio_at_root", "unexpected_folder"},
+   f"no shape issues for the sidecars ({res['issues']})")
+ok(res["total"] == 0, f"a clean library reports nothing at all ({res['issues']})")
+# Three album folders under two artists: the fixtures above (Artist's Ripped,
+# Artist's Album from this block, and Solo's) are all part of this tree.
+ok(res["albums"] == 3 and res["artists"] == 2 and res["audio_files"] == 3,
    f"the fixture was really scanned ({res['albums']} album, "
    f"{res['artists']} artist, {res['audio_files']} audio)")
 
 # control: a genuine stray in the same album is still reported
-write(os.path.join(LART, "Album", "notes.txt"))
+write(os.path.join(ALBUM, "notes.txt"))
 res = mlo_main.library_layout()
-ok(res["counts"].get("stray_file") == 1,
-   f"notes.txt is still a stray ({res['counts']})")
-os.remove(os.path.join(LART, "Album", "notes.txt"))
+ok(res["counts"].get("stray_file") == 1
+   and any(i["detail"].endswith("known sidecar") for i in res["issues"]),
+   f"notes.txt is still a stray ({res['issues']})")
+os.remove(os.path.join(ALBUM, "notes.txt"))
 
 print(f"\nAll {passed} checks passed.")

@@ -302,7 +302,7 @@ try:
     from server import auth as _auth_mod
     _auth_mod.requires_login = lambda request, state: False
     TRACKS = [one, two, d1, d2, m4a]
-    OPTS = dict(embed_covers=True, replaygain=True, verify=True,
+    OPTS = dict(embed_covers=True, replaygain=True, playlists=True, verify=True,
                 workers=4)
 
     # ------------------------------------------------------------ transcode
@@ -317,23 +317,24 @@ try:
     # even on a single-disc album ("1-01 Track 1"), and the " - " the old
     # preset used is gone (that is the library's spelling, not a choice here).
     # An export carries AUDIO: the cover travels EMBEDDED (asserted below) and
-    # the cover.jpg / description.txt / .lrc of the library stay there. No
-    # playlist is ever written — playlists are gone from the app.
+    # the cover.jpg / description.txt / .lrc of the library stay there. The
+    # album playlist IS here because this run asked for playlists=True; without
+    # it (the default) the album export writes no .m3u8 at all.
     assert sorted(os.listdir(album_dir)) == [
-        "1-01 Track 1.mp3", "1-02 Track 2.mp3"], os.listdir(album_dir)
+        "1-01 Track 1.mp3", "1-02 Track 2.mp3", "Album A.m3u8"], os.listdir(album_dir)
     assert stats["sidecars"] == 0, stats
+    assert stats["playlists"] == 4, stats   # 3 album playlists + all.m3u8
     # Nothing was left behind in silence: the report names every non-audio file
     # beside the selection with the reason it did not travel.
     assert {r["name"] for r in stats["excluded"]} == {
         "01 - One.lrc", "cover.jpg", "description.txt"}, stats["excluded"]
     # …classified by the family the file belongs to (the key the file
-    # selection offers): the cover, the .lrc, and the album's own .txt — which
-    # belongs to the text family now that album descriptions are gone.
-    assert stats["excluded_counts"] == {"cover": 1, "text": 1, "lyrics": 1}, \
+    # selection offers): the cover, the album's own description, the .lrc
+    assert stats["excluded_counts"] == {"cover": 1, "description": 1, "lyrics": 1}, \
         stats["excluded_counts"]
     assert stats["excluded_note"] and "not exported" in stats["excluded_note"]
     assert sorted(os.listdir(os.path.join(DEST, "Music", "Artist One", "Album B"))) == [
-        "1-01 Track 1.mp3", "2-01 Track 1.mp3"]
+        "1-01 Track 1.mp3", "2-01 Track 1.mp3", "Album B.m3u8"]
 
     exported = os.path.join(album_dir, "1-01 Track 1.mp3")
     af = AudioFile(exported)
@@ -348,6 +349,10 @@ try:
     with open(exported, "rb") as f:
         head = f.read(4)
     assert head[:3] == b"ID3" and head[3] == 3, head
+    # Playlists: relative paths, EXTINF with the duration, both levels present.
+    playlist = open(os.path.join(DEST, "Music", "all.m3u8"), encoding="utf-8").read()
+    assert playlist.startswith("#EXTM3U\n#EXTINF:") and "Artist One/Album A/1-01 Track 1.mp3" in playlist
+    assert os.path.isfile(os.path.join(DEST, "Music", "Artist One", "Album A", "Album A.m3u8"))
 
     # ------------------------------------------------------------ idempotent
     again = exporter.export_tracks(CFG, TRACKS, DEST, codec="mp3", quality="V2", **OPTS)
@@ -356,7 +361,7 @@ try:
     # A CHANGED CBR preset must be reported, not silently swallowed as "already
     # exported": the destination holds 128 kbps and the run asks for 320.
     switched = exporter.export_tracks(CFG, [one], DEST, codec="mp3", quality="320",
-                                      embed_covers=False,
+                                      embed_covers=False, playlists=False,
                                       verify=True, replaygain=False)
     assert (switched["exported"], switched["skipped"], switched["failed"]) == (0, 0, 1), switched
 
@@ -364,7 +369,7 @@ try:
     DEST2 = os.path.join(ROOT, "DestCopy")
     os.makedirs(DEST2)
     copied = exporter.export_tracks(CFG, [one, two], DEST2, codec="copy",
-                                    embed_covers=True, verify=True,
+                                    embed_covers=True, playlists=False, verify=True,
                                     workers=2)
     assert copied["failed"] == 0, copied["errors"]
     copy_of_one = os.path.join(DEST2, "Music", "Artist One", "Album A", "1-01 Track 1.flac")
@@ -381,7 +386,7 @@ try:
     custom_script = "$upper(%albumartist%)/%album%/%discnumber%-%tracknumber% %title%"
     custom = exporter.export_tracks(CFG, [one, two, d1, d2], custom_dest,
                                     structure="custom", structure_script=custom_script,
-                                    embed_covers=False, verify=True,
+                                    embed_covers=False, playlists=False, verify=True,
                                     sidecars=False)
     assert custom["failed"] == 0, custom["errors"]
     root_slash = custom_dest.replace("\\", "/")
@@ -408,7 +413,7 @@ try:
     stale = os.path.join(DEST2, "Music", "Artist One", "Album A", "99 - Stale.flac")
     shutil.copy2(two, stale)
     pruned = exporter.export_tracks(CFG, [one], DEST2, codec="copy", embed_covers=False,
-                                    prune=True, verify=True)
+                                    playlists=False, prune=True, verify=True)
     assert pruned["pruned"] == 2, (pruned["pruned"], pruned["pruned_files"])
     assert not os.path.exists(stale)
 
@@ -442,7 +447,7 @@ try:
             {"TITLE": title, "ARTIST": artist, "ALBUMARTIST": artist,
              "ALBUM": album, "TRACKNUMBER": track}))
     hostile_run = exporter.export_tracks(CFG, host_paths, HOST_DEST, codec="copy",
-                                         verify=True, workers=2)
+                                         playlists=False, verify=True, workers=2)
     assert hostile_run["failed"] == 0, hostile_run["errors"]
     host_root = HOST_DEST.replace("\\", "/")
     assert listing(HOST_DEST) == sorted(
@@ -470,7 +475,7 @@ try:
     # Idempotent at the ALBUM level: a second run under the same rule renames
     # nothing and re-copies nothing — "_"-vs-invalid is not a difference.
     again_host = exporter.export_tracks(CFG, host_paths, HOST_DEST, codec="copy",
-                                        verify=True, workers=2)
+                                        playlists=False, verify=True, workers=2)
     assert (again_host["exported"], again_host["skipped"], again_host["failed"]) == (0, 4, 0), again_host
     assert listing(HOST_DEST) == sorted(
         f"{host_root}/Music/{want}" for *_x, want in HOST_CASES), listing(HOST_DEST)
@@ -521,60 +526,61 @@ try:
     for name in ("Album.md5", "Album.sfv"):
         assert reported[name]["kind"] == "checksum", reported[name]
     assert reported["Album.cue"]["kind"] == "cue", reported["Album.cue"]
-    for name in ("notes.txt", "release.nfo", "description.txt"):
+    for name in ("notes.txt", "release.nfo"):
         assert reported[name]["kind"] == "text", reported[name]
+    assert reported["description.txt"]["kind"] == "description", reported["description.txt"]
     assert reported["Album.m3u8"]["kind"] == "playlist", reported["Album.m3u8"]
-    assert reported["cover.jpg"]["kind"] == "cover", reported["cover.jpg"]
-    for name in ("Thumbs.db", "liner.bak", "Artist.jpg"):
+    for name in ("cover.jpg", "Artist.jpg"):
+        assert reported[name]["kind"] == "cover", reported[name]
+    for name in ("Thumbs.db", "liner.bak"):
         assert reported[name]["kind"] == "other", reported[name]
     assert reported["Scans/"]["dir"] is True and reported["Scans/"]["kind"] == "other"
     assert all(r["reason"] for r in ex_run["excluded"]), ex_run["excluded"]
     assert all(r["album"] == "Artist One/Extras Album" for r in ex_run["excluded"])
     assert ex_run["excluded_total"] == 14, ex_run["excluded_total"]
     assert ex_run["excluded_counts"] == {"accurip": 1, "log": 1, "checksum": 2, "cue": 1,
-                                         "text": 3, "playlist": 1,
-                                         "cover": 1, "other": 4}, ex_run["excluded_counts"]
+                                         "text": 2, "description": 1, "playlist": 1,
+                                         "cover": 2, "other": 3}, ex_run["excluded_counts"]
     assert "14 non-audio file(s) not exported" in ex_run["excluded_note"], ex_run["excluded_note"]
     assert ex_run["copy_files"] == ["audio"], ex_run["copy_files"]
 
-    # The sidecar switch still exists for a device that wants the old
-    # behaviour: asking for it copies the classic sidecar set. Playlists are
-    # gone — no `.m3u8` is written by any run.
+    # The two switches still exist for a device that wants the old behaviour:
+    # asking for them copies the sidecars and writes the album playlists again.
     EX_OPT = os.path.join(ROOT, "ExtrasOptIn")
     os.makedirs(EX_OPT)
     opt_in = exporter.export_tracks(CFG, [ex_track], EX_OPT, codec="copy",
-                                    sidecars=True, verify=True)
+                                    sidecars=True, playlists=True, verify=True)
     assert opt_in["failed"] == 0, opt_in["errors"]
     opt_files = sorted(os.path.basename(p) for p in listing(EX_OPT))
     assert "cover.jpg" in opt_files and "Album.cue" in opt_files \
         and "Album.accurip" in opt_files, opt_files
-    assert "Extras Album.m3u8" not in opt_files, opt_files
-    assert opt_in["sidecars"], opt_in
+    assert "Extras Album.m3u8" in opt_files, opt_files
+    assert opt_in["sidecars"] and opt_in["playlists"], opt_in
     # The classic switch resolves to its own family set through the same code
-    # path, and copies what it always copied: the cover, the
-    # .lrc/.cue/.log/.accurip — never the .md5/.sfv/.nfo/Thumbs.db, never a
+    # path, and copies what it always copied: the cover and the description,
+    # the .lrc/.cue/.log/.accurip — never the .md5/.sfv/.nfo/Thumbs.db, never a
     # stray subfolder.
     assert opt_in["copy_files"] == list(exporter.LEGACY_SIDECAR_FAMILIES), opt_in["copy_files"]
     assert "notes.txt" not in opt_files and "release.nfo" not in opt_files \
         and "Album.md5" not in opt_files and "Thumbs.db" not in opt_files, opt_files
 
     # …and WHAT a run writes is the caller's selection, family by family: asked
-    # for the artwork and the text/notes, it writes exactly
+    # for the artwork, the notes and the album's description, it writes exactly
     # those beside the tracks and reports the rest as left behind.
     EX_PICK = os.path.join(ROOT, "ExtrasPicked")
     os.makedirs(EX_PICK)
     picked = exporter.export_tracks(CFG, [ex_track], EX_PICK, codec="copy",
-                                    copy_files=["audio", "cover", "text"],
+                                    copy_files=["audio", "cover", "text", "description"],
                                     embed_covers=False, verify=True)
     assert picked["failed"] == 0, picked["errors"]
-    assert picked["copy_files"] == ["audio", "cover", "text"], picked["copy_files"]
+    assert picked["copy_files"] == ["audio", "cover", "description", "text"], picked["copy_files"]
     assert sorted(os.path.basename(p) for p in listing(EX_PICK)) == [
-        "1-01 Track 1.flac", "cover.jpg", "description.txt",
+        "1-01 Track 1.flac", "Artist.jpg", "cover.jpg", "description.txt",
         "notes.txt", "release.nfo"], listing(EX_PICK)
-    assert picked["sidecars"] == 4, picked["sidecars"]
+    assert picked["sidecars"] == 5, picked["sidecars"]
     assert {r["name"] for r in picked["excluded"]} == {
         "Album.accurip", "Album.log", "Album.cue", "Album.m3u8", "Album.md5",
-        "Album.sfv", "Thumbs.db", "liner.bak", "Artist.jpg", "Scans/"}, picked["excluded"]
+        "Album.sfv", "Thumbs.db", "liner.bak", "Scans/"}, picked["excluded"]
 
     # …and "anything else" is honest about what it means: the files this app
     # cannot classify travel, a stray SUBFOLDER is still only reported — the
@@ -585,7 +591,7 @@ try:
                                     copy_files=["audio", "other"], verify=True)
     assert others["failed"] == 0, others["errors"]
     assert sorted(os.path.basename(p) for p in listing(EX_OTHER)) == [
-        "1-01 Track 1.flac", "Artist.jpg", "Thumbs.db", "liner.bak"], listing(EX_OTHER)
+        "1-01 Track 1.flac", "Thumbs.db", "liner.bak"], listing(EX_OTHER)
     scan_row = next(r for r in others["excluded"] if r["name"] == "Scans/")
     assert scan_row["dir"] is True and scan_row["kind"] == "other", scan_row
 
@@ -633,6 +639,23 @@ try:
         raise AssertionError("sync with no tracks must be refused")
     except ValueError as e:
         assert "sync mode" in str(e), e
+
+    # A PLAYLIST export is a different writer and still writes its .m3u8 (the
+    # rule above is about ALBUM exports, and a blunt "never write .m3u8" would
+    # have broken this).
+    from server import playlists as pl_mod
+    _pl_tmp = tempfile.mkdtemp(prefix="mlo_export_pl_")
+    _real_db = pl_mod.db_path
+    pl_mod.db_path = lambda: os.path.join(_pl_tmp, "playlists.db")
+    try:
+        pid = pl_mod.create_playlist("Export check")
+        pl_mod.add_tracks(pid, [ex_track])
+        body = pl_mod.export_m3u8(pid)
+        assert body.startswith("#EXTM3U"), body
+        assert ex_track.replace("\\", "/") in body, body
+    finally:
+        pl_mod.db_path = _real_db
+        shutil.rmtree(_pl_tmp, ignore_errors=True)
 
     # ------------------------------------------ the audit still finds the file
     # The other half of the rule: a cue sheet that still names the file the way
@@ -706,6 +729,6 @@ finally:
     shutil.rmtree(ROOT, ignore_errors=True)
 
 print("ok  export: shipped/custom structures + disc numbers, ID3v2.3, embedded "
-      "art, ReplayGain, the file selection (family by family, "
+      "art, ReplayGain, playlists, the file selection (family by family, "
       "classic sidecar set, empty refused), idempotent re-run, copy-with-art, "
       "prune, library-destination refusal")

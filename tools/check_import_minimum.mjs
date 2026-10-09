@@ -8,9 +8,8 @@
  * asserts what a user sees:
  *
  *   * on the step that answers a missing family (Covers, Lyrics, Advisory) the
- *     family's own controls are out in the open, and any OTHER block the step
- *     carries sits in ONE closed "show everything else on this step"
- *     disclosure (the Covers step is cover-only now, so it has none);
+ *     family's own controls are out in the open and the step's other blocks sit
+ *     in ONE closed "show everything else on this step" disclosure;
  *   * the unrelated families' controls (Links, Genres) are in none of it;
  *   * the banner still names every missing family, so the other one is a click
  *     away;
@@ -162,10 +161,12 @@ has(covers.open, ["Current album cover", "MusicBrainz release-group cover",
                   "Album cover from URL", "Per-track covers",
                   "Daftendirekt", "WDPK 83.7 FM", "Continue to genres"],
     "minimum covers step shows the cover controls");
-// The covers step is cover-only now (the metadata block went with the metadata
-// review UI), so a minimum visit has nothing else to hide.
-check("a cover-only step opens no disclosure", covers.blocks === 0,
-      "a disclosure appeared on a step with nothing else to collapse");
+// Everything else the covers step carries waits behind the one affordance.
+has(covers.collapsed, ["Show everything else on this step", "Artist & album metadata",
+                       "Fetch missing"],
+    "minimum covers step collapses the rest of the step");
+lacks(covers.open, ["Artist & album metadata", "Fetch missing"],
+      "minimum covers step hides the rest");
 // No step anywhere in the wizard is the other families' business: the families
 // this link does not name have no controls among them.
 lacks(covers.html, ["Genres from MusicBrainz", "Save genres", "Auto-import lyrics",
@@ -311,9 +312,7 @@ const ORDER_CSS = ".flex{display:flex}.flex-col{flex-direction:column}" +
 const browser = await chromium.launch();
 try {
   const page = await browser.newPage();
-  // The Advisory step carries the disclosure now (its per-track controls are
-  // the open step; the album-wide helpers sit behind the affordance).
-  await page.setContent(`<!doctype html><html><body>${advisory.html}</body></html>`);
+  await page.setContent(`<!doctype html><html><body>${covers.html}</body></html>`);
   await page.addStyleTag({ content: ORDER_CSS });
 
   /** The node whose OWN text starts with `needle` — an element, not an
@@ -332,16 +331,16 @@ try {
   const top = (needle) => page.evaluate(
     `Math.round((${node(needle)}).getBoundingClientRect().top)`);
 
-  check("the collapsed blocks are not rendered", (await shown("Apply to all tracks")) === false);
-  check("the open controls are rendered", (await shown("Save advisory")) === true);
-  const controlTop = await top("Save advisory");
+  check("the collapsed blocks are not rendered", (await shown("Artist & album metadata")) === false);
+  check("the cover controls are rendered", (await shown("Current album cover")) === true);
+  const controlTop = await top("Current album cover");
   const barTop = await top("Show everything else on this step");
-  check("the open controls come before the disclosure",
+  check("the cover controls come before the disclosure",
       controlTop !== null && barTop !== null && controlTop < barTop,
       `controls at ${controlTop}, disclosure at ${barTop}`);
 
   await page.click("summary");
-  check("the affordance reveals what it holds", (await shown("Apply to all tracks")) === true);
+  check("the affordance reveals what it holds", (await shown("Artist & album metadata")) === true);
 } finally {
   await browser.close();
   await server.close();

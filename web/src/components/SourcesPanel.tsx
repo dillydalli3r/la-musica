@@ -132,8 +132,30 @@ const KEY_HOME: Record<string, string> = {
   auth_password_hash: "first-run setup, or Sign-in & security",
 };
 
-/** `needs` mixes config keys with installed programs: only the keys get an
- *  input, the programs are a dependency note. */
+/** What to say about a `needs` entry that is an installed PROGRAM rather than
+ *  a config key. There is one today — yt-dlp, the only name in
+ *  `server/sources_health.py`'s `_TOOLS`, which checks for it in the app's
+ *  dependencies folder and on PATH — and it has no field to type, so it is a
+ *  note wherever the ROW that needs it is drawn (Settings → Sources) and once
+ *  in the panel's own copy wherever it is not (the wizard's Keys step draws
+ *  only the rows that ask for a key). Both halves of the YouTube cookie story
+ *  are in the note: yt-dlp is what searches, fetches and captions, and its
+ *  cookies are a Netscape-format cookies.txt like RYM's — `tab`/`tabLink` jump
+ *  to the box that imports them, where Settings is a page this render can
+ *  reach (see KEY_INFO). */
+const TOOL_INFO: Record<string, { label: string; hint: string; tab?: string; tabLink?: string }> = {
+  "yt-dlp": {
+    label: "yt-dlp",
+    hint:
+      "The downloader behind every YouTube path: it searches, fetches the missing music videos (script 11) and reads YouTube captions for lyrics (script 18). Installed from the Tools step (or Settings → Dependencies). " +
+      "Its cookies are a cookies.txt in Netscape format — what a browser-extension exporter like \"Get cookies.txt\" writes — imported by the cookie box below, or by the same box on the Videos tab, into the app's own YouTube cookie jar, which yt-dlp then reads for age-gated, members-only and throttled videos.",
+    tab: "videos",
+    tabLink: "Import its cookies — Settings → Videos",
+  },
+};
+
+/** `needs` mixes config keys with installed tools (yt-dlp): only the keys get
+ *  an input, the tools are a dependency note. */
 const promptKeysOf = (row: SourceHealth) => row.needs.filter((k) => k in KEY_INFO);
 
 /** A panel row: one PROVIDER, whatever number of roles it serves. */
@@ -327,15 +349,33 @@ export default function SourcesPanel({ only, askKeys }: { only?: SourceKind | So
         )}
       </div>
 
-      {/* The cookie login: the RYM credential is a cookies.txt, so its import
-          box is HERE too, so a first run (this step) and Settings → Sources can
-          hand the file over without hunting for the tab that owns the
-          credential — and so the box that asks for the value is the box that
-          accepts the export for it. ONE component for every place it is
-          offered, never a second paste box to keep in step. */}
+      {/* The one thing the Keys step names that is not a key: yt-dlp is a
+          PROGRAM, so it has no row here — its `needs yt-dlp` chips hang off
+          the YouTube rows, which are activity sources that Settings → Sources
+          unfolds — and the cookie half of it is part of what a first run
+          should know about the downloader it is about to lean on. */}
+      {askKeys && (
+        <div className="rounded-md border border-border bg-zinc-950/40 px-3 py-2 space-y-1">
+          <div className="text-[10px] uppercase tracking-widest text-zinc-500">Not a key — the programs behind the sources</div>
+          {Object.entries(TOOL_INFO).map(([id, tool]) => (
+            <div key={id} className="text-[10px] text-zinc-600 flex items-center gap-1 flex-wrap">
+              <span className="text-zinc-500">{tool.label}:</span>
+              <span>{tool.hint}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* The cookie logins: every credential whose auth is a cookies.txt gets
+          its import box HERE too, so a first run (this step) and Settings →
+          Sources can hand the file over without hunting for the tab that owns
+          the credential — and so the box that asks for the value is the box
+          that accepts the export for it. ONE component for both (and for the
+          Videos/Discovery tabs), never a second paste box to keep in step. */}
       <div className="rounded-md border border-border bg-zinc-950/40 px-3 py-2 space-y-1.5">
         <div className="text-[10px] uppercase tracking-widest text-zinc-500">{t("cookies.sectionTitle")}</div>
-        <CookieJarPanel compact />
+        <CookieJarPanel source="youtube" compact />
+        <CookieJarPanel source="rym" compact />
       </div>
 
       {groups.map(([kind, list]) => (
@@ -344,6 +384,9 @@ export default function SourcesPanel({ only, askKeys }: { only?: SourceKind | So
           <div className="rounded-md border border-border divide-y divide-border/60">
             {list.map((row) => {
               const promptKeys = promptKeysOf(row);
+              // Programs this row needs (`needs yt-dlp`): no field to type, so
+              // the note under the row is where it is named and explained.
+              const toolNeeds = row.needs.filter((k) => !(k in KEY_INFO) && k in TOOL_INFO);
               // The RYM rows need exactly one key — the cookie — so the chip
               // names it: "cookie missing" is what the fix (paste a logged-in
               // Cookie header) hangs off. The live failure reason arrives in
@@ -394,6 +437,7 @@ export default function SourcesPanel({ only, askKeys }: { only?: SourceKind | So
                       <span
                         key={k}
                         className="chip border border-white/15 bg-white/5 text-zinc-400"
+                        title={TOOL_INFO[k]?.hint}
                       >
                         {KEY_HOME[k] ? `set ${k} in ${KEY_HOME[k]}` : `needs ${k}`}
                       </span>
@@ -493,6 +537,22 @@ export default function SourcesPanel({ only, askKeys }: { only?: SourceKind | So
                     </div>
                   );
                 }),
+                // A needed program is the same shape of line, with no field
+                // above it to paste into.
+                ...toolNeeds.map((id) => {
+                  const tool = TOOL_INFO[id];
+                  return (
+                    <div key={id} className="text-[10px] text-zinc-600 flex items-center gap-1 flex-wrap">
+                      <span className="text-zinc-500">{tool.label}:</span>
+                      <span>{tool.hint}</span>
+                      {tool.tab && tool.tabLink && !askKeys && (
+                        <Link replace className="text-accent-soft hover:underline" to={`/settings?tab=${tool.tab}`}>
+                          {tool.tabLink}
+                        </Link>
+                      )}
+                    </div>
+                  );
+                }),
               ];
 
               if (askKeys) {
@@ -517,7 +577,7 @@ export default function SourcesPanel({ only, askKeys }: { only?: SourceKind | So
                 <div key={busyId(row)} className="px-3 py-2 space-y-1.5">
                   <div className="flex items-center gap-2 flex-wrap">{chips}</div>
                   {report}
-                  {promptKeys.length > 0 && (
+                  {(promptKeys.length > 0 || toolNeeds.length > 0) && (
                     <div className="space-y-1.5 pt-0.5">
                       {promptKeys.length > 0 && keyFields}
                       <div className="space-y-1">{hints}</div>

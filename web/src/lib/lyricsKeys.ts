@@ -4,23 +4,47 @@
 // are layout-independent (Space stays Space, letters are physical keys).
 
 export type LyricsAction =
+  | "playPause"
+  | "stampLine"
+  | "stampWord"
+  | "stampSyllable"
+  | "seekBack"
+  | "seekForward"
   | "prevLine"
   | "nextLine"
   | "undo"
-  | "save";
+  | "save"
+  | "speedSlower"
+  | "speedFaster";
 
 export const LYRICS_ACTIONS: { id: LyricsAction; label: string; hint: string }[] = [
+  { id: "stampLine", label: "Stamp line time", hint: "Assign the current playback time to the selected line and advance" },
+  { id: "stampWord", label: "Stamp word time", hint: "Assign the current time to the next word of the line (ELRC)" },
+  { id: "stampSyllable", label: "Stamp syllable time", hint: "Assign the current time to the next SYLLABLE of the line (tap along with the vocals)" },
+  { id: "playPause", label: "Play / pause", hint: "Toggle preview playback" },
+  { id: "seekBack", label: "Seek back 2s", hint: "Move playback back two seconds" },
+  { id: "seekForward", label: "Seek forward 2s", hint: "Move playback forward two seconds" },
   { id: "prevLine", label: "Previous line", hint: "Select the line above" },
   { id: "nextLine", label: "Next line", hint: "Select the line below" },
   { id: "undo", label: "Undo", hint: "Revert the last edit" },
   { id: "save", label: "Save", hint: "Save the lyrics" },
+  { id: "speedSlower", label: "Slower", hint: "Step preview playback speed down (timestamps stay in song time)" },
+  { id: "speedFaster", label: "Faster", hint: "Step preview playback speed up" },
 ];
 
 export const LYRICS_KEY_DEFAULTS: Record<LyricsAction, string> = {
+  playPause: "KeyK",
+  stampLine: "Space",
+  stampWord: "KeyW",
+  stampSyllable: "KeyD",
+  seekBack: "ArrowLeft",
+  seekForward: "ArrowRight",
   prevLine: "ArrowUp",
   nextLine: "ArrowDown",
   undo: "Ctrl+KeyZ",
   save: "Ctrl+KeyS",
+  speedSlower: "BracketLeft",
+  speedFaster: "BracketRight",
 };
 
 const STORAGE_KEY = "mlo.lyricsKeys";

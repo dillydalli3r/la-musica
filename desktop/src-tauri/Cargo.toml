@@ -17,6 +17,8 @@ tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-autostart = "2"
 # Native OS notifications for "import started" / "import done" / "import ready".
+# The only plugin that ships on all five targets, so it is registered outside
+# the desktop-only block in lib.rs.
 tauri-plugin-notification = "2"
 # The shell's per-user data dir (settings.json, the bundled backend's own
 # config): the standard OS answer on all three desktop platforms.
@@ -24,16 +26,66 @@ dirs = "6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 parking_lot = "0.12"
+
 # ONE shell per machine. A second launch — the login auto-start plus a click
 # on the icon is the ordinary way to get two — would otherwise start a second
 # local backend over the same library: two writers on <music>/.mlo/data, two
-# servers on 8011/8012, two tray icons.
+# servers on 8011/8012, two tray icons. Desktop only: a phone app gets one
+# process from its OS, and the crate has no mobile backend anyway.
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-single-instance = "2"
 
 # The in-app updater: the shell asks the release's own manifest whether a newer
 # build exists, downloads that build, verifies its signature against the public
-# key baked into `tauri.conf.json`, installs it and starts it.
+# key baked into `tauri.conf.json`, installs it and starts it. Desktop only —
+# a phone gets its updates from the store that shipped it, and this plugin does
+# not build for mobile at all.
 tauri-plugin-updater = "2"
+
+# The iOS Now Playing star only (src/ios_like.rs): MediaPlayer's
+# `MPRemoteCommandCenter.likeCommand` is Objective-C, and the Media Session API
+# the webview already uses has no like action at all, so this one piece of the
+# feature has to be native. All three crates are ALREADY in Cargo.lock as
+# transitive dependencies of Tauri on Apple targets (objc2 0.6.4 / block2 0.6.2
+# / objc2-foundation 0.3.2), so this makes them direct dependencies of the iOS
+# build without resolving anything new — and not one line of either module
+# compiles on any other target.
+#
+# objc2-foundation is for the iOS audio session (src/ios_audio.rs): AVFAudio's
+# category constants are `NSString *const` symbols, and objc2 0.6 cannot hand
+# `msg_send!` a raw pointer, so the symbols are declared the way objc2's own
+# bindings declare theirs — as `&'static NSString`.
+[target.'cfg(target_os = "ios")'.dependencies]
+objc2 = "0.6.4"
+block2 = "0.6.2"
+# `NSData` is the keep-alive player's input (the generated dither in
+# ios_audio.rs — `AVAudioPlayer initWithData:`), `NSString` is the audio
+# session's category/mode constants and the star's event name, and `NSTimer`
+# is the app-process heartbeat that tells the readout whether iOS suspended
+# this process.
+objc2-foundation = { version = "0.3", features = ["NSData", "NSTimer", "NSString"] }
+
+# Windows' own media session — the card Windows 11's media flyout draws for the
+# app ("now playing", Quick Settings) — in src/win_media.rs. The webview cannot
+# supply it: WebView2 publishes its Media Session under `msedgewebview2.exe`,
+# an Application User Model ID nothing can resolve, so the flyout says "Unknown
+# app" (see the module docs and release-notes-5.2.0.md). This crate owns the
+# session instead, which means the WinRT SystemMediaTransportControls API and
+# the Win32 interop that hands it a window.
+#
+# `windows` is ALREADY in Cargo.lock as a transitive dependency of Tauri on
+# Windows (0.61.3, via wry/webview2-com/tao), so this resolves nothing new —
+# it only asks for the features below to be compiled in: the media session
+# itself, the WinRT activation calls that reach it, the stream reference an
+# artwork URL becomes, and HWND.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.61", features = [
+    "Media",
+    "Foundation",
+    "Storage_Streams",
+    "Win32_Foundation",
+    "Win32_System_WinRT",
+] }
 
 [profile.release]
 codegen-units = 1

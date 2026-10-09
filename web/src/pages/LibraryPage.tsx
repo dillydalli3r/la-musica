@@ -6,7 +6,7 @@ import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import {
   ArrowDownAZ, ArrowDownUp, BarChart3, ChevronDown, ChevronRight, CloudDownload,
   FileVideo, FolderSync, FolderTree, Import, Info as InfoIcon, Layers, Library, ListChecks,
-  ListFilter, RefreshCw, Search, Tag, Trash2, Wand2, X,
+  ListFilter, ListPlus, Play, RefreshCw, Search, Tag, Trash2, Wand2, X,
 } from "lucide-react";
 import { api } from "../api";
 import { rescanLayout } from "../lib/layoutScan";
@@ -21,14 +21,14 @@ import {
   customColValue, customCols, ALBUM_TRACK_COLS, ALBUM_TRACK_COL_W, ALBUM_TRACK_MIN_W, TABLE_FIT, TAG_COL_W,
   // The track table's own columns, floors and phone folds — shared with the
   // Export page's preview so the two tables cannot drift apart.
-  TRACK_COLS, TRACK_COL_W, TRACK_PHONE_CLS, PHONE_HIDE, phoneHide,
+  TRACK_COLS, TRACK_COL_W, TRACK_PHONE_CLS, TRACK_RATING_COL, PHONE_HIDE, phoneHide,
   type Col, type CustomCol,
 } from "../lib/columns";
 import { gradeSliver, statusFor, auditFails } from "../lib/status";
 import { invalidateLibrary } from "../lib/invalidate";
-import { albumRef, trackRef, artistRef } from "../lib/refs";
+import { albumRef, trackRef, artistRef, entityLinkClick } from "../lib/refs";
 import { fmtTech, fmtDuration, fmtDateCell, originalYear, GRID_SIZE_MIN } from "../lib/fmt";
-import { EmptyState, GradeBadge, MediaChip, AdvisoryMark, DisambiguationMark, PageLoading, PendingMark } from "../components/Badges";
+import { EmptyState, GradeBadge, MediaChip, AdvisoryMark, CachedMark, DisambiguationMark, PageLoading, PendingMark } from "../components/Badges";
 import ArtistAvatar from "../components/ArtistAvatar";
 import ArtistName from "../components/ArtistName";
 import LockedChip from "../components/LockedChip";
@@ -38,7 +38,10 @@ import { forceDict, loadForceSel } from "../lib/force";
 import Segmented from "../components/Segmented";
 import PageHeader from "../components/PageHeader";
 import GradeWarning, { GradeDot } from "../components/GradeWarning";
+import StarRating from "../components/StarRating";
+import { ratingOf, useRatings, useSetRating, FOLDER_RATING_NOTE, albumWebRating, trackWebRating, webStarProps } from "../lib/ratings";
 import CoverImg, { TrackCover } from "../components/CoverImg";
+import FavHeart from "../components/FavHeart";
 import TrackTitleCell from "../components/TrackTitleCell";
 import AlbumCard from "../components/AlbumCard";
 import AlbumRow, { type AlbumRowCell } from "../components/AlbumRow";
@@ -51,9 +54,9 @@ import type { Album, Artist, Track } from "../types";
 // The Library's browse state and option lists live in lib/libraryView.ts —
 // Home's shelves offer the same cover size and read the same settings.
 import {
-  ALBUM_SORTS, AZ_LETTERS, GRID_SIZES, PRESETS, ADVISORY_FILTERS, VIEW_TABS,
+  ALBUM_SORTS, AZ_LETTERS, GRID_SIZES, PRESETS, RATING_FILTERS, ADVISORY_FILTERS, RATED_NOTE, VIEW_TABS,
   azCounts, azFilter, foldName, useGridSize, useLibraryAlphabet, useLibraryView, useLocalSort, useSelectMode,
-  type Preset, type AdvisoryFilter,
+  type Preset, type RatingFilter, type AdvisoryFilter,
 } from "../lib/libraryView";
 import { useI18n } from "../lib/i18n";
 import Popover from "../components/Popover";
@@ -90,6 +93,8 @@ const ALBUM_COL_W: Record<string, string> = {
   // the sort arrow is 67 px wide, and a nowrap header wider than its column
   // paints over the neighbour in a fixed-layout table.
   tracks: "w-[72px]",
+  // Five `sm` stars (14 px each) plus the hover room a click target needs.
+  rating: "w-[104px]",
   grade: "w-20",
   // "Digital Media" is the MediumChip's own longest label: 108 px, measured —
   // the old 88 broke the chip across two lines.
@@ -109,6 +114,9 @@ const ALBUM_COLS: Col[] = [
   { id: "artist", label: "Artist", sortKey: "artist" },
   { id: "year", label: "Year", sortKey: "meta.DATE" },
   { id: "tracks", label: "Tracks", sortKey: "track_count" },
+  // The album's OWN rating (the store's album scope), which the caller adds to
+  // the row as `rating` — see `ratedAlbums` in LibraryPage.
+  { id: "rating", label: "Rating", sortKey: "rating" },
   { id: "grade", label: "Grade", sortKey: "grade_pct" },
   { id: "media", label: "Media", sortKey: "media" },
   // ADR, not DR: the column sorts and shows the ALBUM's own dynamic range
@@ -148,7 +156,7 @@ const ARTIST_COLS: Col[] = [
  *  class). The two TRACK tables' fold map is `TRACK_PHONE_CLS` in
  *  lib/columns — shared with the Export page's preview. */
 const ALBUM_PHONE_CLS: Record<string, string> = {
-  artist: PHONE_HIDE, year: PHONE_HIDE, tracks: PHONE_HIDE,
+  artist: PHONE_HIDE, year: PHONE_HIDE, tracks: PHONE_HIDE, rating: PHONE_HIDE,
   grade: PHONE_HIDE, media: PHONE_HIDE, dr: PHONE_HIDE, source: PHONE_HIDE,
   videos: PHONE_HIDE, inst: PHONE_HIDE,
 };
@@ -405,6 +413,7 @@ export default function LibraryPage() {
   const toggleAlbum = useStore((s) => s.toggleAlbum);
   const toggleArtist = useStore((s) => s.toggleArtist);
   const clearSelection = useStore((s) => s.clearSelection);
+  const playNow = useStore((s) => s.playNow);
   const [view, setView] = useLibraryView();
   // checkboxes (and the batch toolbar they feed) only exist in select mode
   const { selectMode, toggleSelectMode } = useSelectMode();
@@ -424,9 +433,11 @@ export default function LibraryPage() {
     next.delete("filter");
     setSearchParams(next, { replace: true });
   }, [searchParams, setSearchParams]);
-  // The advisory facet beside the presets: a facet rather than a preset
-  // because it has more than one answer worth picking — the preset list is
-  // conditions you either want or do not.
+  // The two facets beside the presets: the user's OWN star ratings ("what have
+  // I not rated yet") and the advisory ladder. Both are facets rather than
+  // presets because each has more than one answer worth picking — the preset
+  // list is conditions you either want or do not.
+  const [ratingFilter, setRatingFilter] = useState<RatingFilter>("any");
   const [advisoryFilter, setAdvisoryFilter] = useState<AdvisoryFilter>("any");
   const [filterOpen, setFilterOpen] = useState(false);
   const [sortOpen, setSortOpen] = useState(false);
@@ -472,8 +483,14 @@ export default function LibraryPage() {
   const [albumCustom, addAlbumCustomCol, removeAlbumCustomCol] = useCustomColumns("albums");
   const [trackCustom, addTrackCustomCol, removeTrackCustomCol] = useCustomColumns("tracks");
   const albumDefs: Col[] = [...ALBUM_COLS, ...customCols(albumCustom, "meta")];
+  // The rating is the Library's own column and belongs beside the title (the
+  // thing being rated), so it is spliced in there rather than appended: the
+  // Columns menu and the row renderer both follow this order, and a column
+  // that appears in a different place in each is a column that drifts.
   const trackDefs: Col[] = [
-    ...TRACK_COLS,
+    ...TRACK_COLS.slice(0, 3),
+    TRACK_RATING_COL,
+    ...TRACK_COLS.slice(3),
     ...customCols(trackCustom, "tags"),
   ];
   const [albumCols, toggleAlbumCol] = useColumnPrefs("albums", albumDefs);
@@ -509,6 +526,18 @@ export default function LibraryPage() {
   const [albumWidths, albumBox] = useFittedWidths(albumW, albumDefs.filter((c) => albumCols.includes(c.id)).map((c) => c.id));
   const [artistWidths, artistBox] = useFittedWidths(artistW, ARTIST_COLS.filter((c) => artistCols.includes(c.id)).map((c) => c.id));
   const [trackWidths, trackBox] = useFittedWidths(trackW, trackDefs.filter((c) => trackCols.includes(c.id)).map((c) => c.id));
+
+  // One GET /api/ratings per scope for the whole page (react-query dedupes it
+  // across every row, and the star controls share the cache). Declared HERE,
+  // above the filter memo, because the rating facet filters on these maps: the
+  // rows this page draws depend on them, so they are an input to the memo and
+  // not a decoration applied afterwards. The album scope is what the album rows
+  // draw — each album's OWN rating, a different fact from the ratings of the
+  // tracks inside it.
+  const { data: ratingsData } = useRatings();
+  const { data: albumRatingsData } = useRatings("album");
+  const ratings = ratingsData?.ratings;
+  const albumRatings = albumRatingsData?.ratings;
 
   // Haystacks precomputed once per payload: the filter memo then only
   // does substring checks (no join/lowercase per keystroke). Each one is the
@@ -561,6 +590,11 @@ export default function LibraryPage() {
       case "instrumental": return t.tags.INSTRUMENTAL === "1";
       case "videos": return !!t.is_video;
       case "missingLyrics": return !t.lyrics_present;
+      // A podcast episode is recognised by the SERIES its release group is
+      // `part of` — MusicBrainz has no Podcast release-group type, so the
+      // RELEASETYPE tag says what it really is ("Broadcast") and the series
+      // is the tag the app derived from it (mlo.autotag).
+      case "podcasts": return !!t.tags.PODCASTSERIES;
     }
   };
   const albumPresetOK = (al: Album, preset: Preset) => {
@@ -569,16 +603,38 @@ export default function LibraryPage() {
       case "failing": return !al.pass;
       case "cd": return (al.media ?? "").toUpperCase().includes("CD");
       case "digital": return (al.media ?? "").toUpperCase().includes("DIGITAL");
+      case "podcasts": return !!al.podcast?.series;
       case "instrumental":
       case "videos":
       case "missingLyrics": return (al.tracks ?? []).some((t) => trackPresetOK(t, preset));
     }
   };
 
+  // ---- the rating facet ("what have I not rated yet") ----
+  //
+  // A folder's stars and a file's stars are different facts (the store keeps
+  // its own scope per path), so a row of either kind answers for what it IS:
+  // a track is rated when its own file has stars, and an ALBUM only when the
+  // user's verdict on the album is in (its folder rating) AND every track in
+  // it carries one of its own — an album is finished, or it is not. One
+  // starred track out of twelve used to mark the whole album done, which is
+  // the reported "detecting … not just one": the facet's question is "what
+  // have I not rated yet", and a half-rated album is exactly that. An artist
+  // counts as rated when any of its albums does. That is the sentence
+  // `RATED_NOTE` prints in the menu, and it is defined once here so the three
+  // tables cannot each mean something else by the same word.
+  const ratedTrack = (t: { path: string }) => ratingOf(ratings, t.path) > 0;
+  const ratedAlbum = (al: Album) => {
+    const tracks = al.tracks ?? [];
+    return ratingOf(albumRatings, al.path) > 0 && tracks.every((t) => ratedTrack(t));
+  };
+  const ratingOK = (rated: boolean) =>
+    ratingFilter === "any" ? true : ratingFilter === "rated" ? rated : !rated;
+
   // ---- the advisory facet ----
   //
-  // The ladder is three-state (0 not explicit / 1 explicit / 2 clean edition),
-  // read here as the two questions a listener asks of it.
+  // The ladder is three-state (0 not explicit / 1 explicit / 2 clean edition —
+  // see `AdvisoryBadge`), read here as the two questions a listener asks of it.
   // A track answers for itself; an album is explicit when ANY of its tracks is,
   // and clean only when NONE is — an album with one explicit track is an
   // explicit album, which is the direction that matters when the filter is
@@ -607,28 +663,32 @@ export default function LibraryPage() {
    *  but the current selection's size, and one that ignored the presets would
    *  promise rows the table is not going to draw.
    *
-   *  The three tables count their own rows: an artist counts as explicit when
-   *  any of its albums is, the same cascade the rows themselves filter by (see
-   *  `albumAdvisoryOK`). */
+   *  The three tables count their own rows: an artist counts as rated /
+   *  explicit when any of its albums is, the same cascade the rows themselves
+   *  filter by (see `ratingOK` / `albumAdvisoryOK`). */
   const facetCounts = useMemo(() => {
     const words = parseQueryTerms(debouncedQuery).words;
     const hayOK = (hay: string) => words.every((w) => hay.includes(w));
-    const rows: { explicit: boolean }[] =
+    const albumFacets = (al: Album) => ({
+      rated: ratedAlbum(al),
+      explicit: (al.tracks ?? []).some(explicitTrack),
+    });
+    const rows: { rated: boolean; explicit: boolean }[] =
       view === "tracks"
         ? flat.tracks.filter((t) => hayOK(t.hay) && trackPresetOK(t, preset))
-          .map((t) => ({ explicit: explicitTrack(t) }))
+          .map((t) => ({ rated: ratedTrack(t), explicit: explicitTrack(t) }))
         : view === "artists"
           ? (lib?.artists ?? []).map((a) => {
             const mine = flat.albums.filter(
               (al) => a.albums.some((x) => x.path === al.path) && hayOK(al.hay) && albumPresetOK(al, preset));
-            return { explicit: mine.some((al) => (al.tracks ?? []).some(explicitTrack)) };
+            return { rated: mine.some(ratedAlbum), explicit: mine.some((al) => (al.tracks ?? []).some(explicitTrack)) };
           })
-          : flat.albums.filter((al) => hayOK(al.hay) && albumPresetOK(al, preset))
-            .map((al) => ({ explicit: (al.tracks ?? []).some(explicitTrack) }));
+          : flat.albums.filter((al) => hayOK(al.hay) && albumPresetOK(al, preset)).map(albumFacets);
+    const rated = rows.filter((r) => r.rated).length;
     const explicit = rows.filter((r) => r.explicit).length;
-    return { explicit, clean: rows.length - explicit };
+    return { rated, unrated: rows.length - rated, explicit, clean: rows.length - explicit };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [flat, lib, view, debouncedQuery, preset]);
+  }, [flat, lib, view, debouncedQuery, preset, ratings, albumRatings]);
 
   // Album haystacks keyed by path (flat.albums covers every album in lib).
   const albumHay = useMemo(() => new Map(flat.albums.map((al) => [al.path, al.hay])), [flat]);
@@ -651,10 +711,11 @@ export default function LibraryPage() {
       terms.tags.every(({ key, value }) => tagTermOK(t.tags as Record<string, unknown>, key, value));
 
     const trOK = (t: FlatTrack) =>
-      trackPresetOK(t, preset) && trackTagOK(t) && wordsMatch(t.hay) && trackAdvisoryOK(t);
+      trackPresetOK(t, preset) && trackTagOK(t) && wordsMatch(t.hay)
+      && ratingOK(ratedTrack(t)) && trackAdvisoryOK(t);
 
     const alOK = (al: Album) =>
-      albumPresetOK(al, preset) && albumAdvisoryOK(al);
+      albumPresetOK(al, preset) && ratingOK(ratedAlbum(al)) && albumAdvisoryOK(al);
     const alTagOK = (al: Album) =>
       terms.tags.every(({ key, value }) =>
         tagTermOK((al.meta ?? {}) as Record<string, unknown>, key, value) ||
@@ -667,7 +728,7 @@ export default function LibraryPage() {
     const albums = flat.albums.filter((al) => alOK(al) && wordsMatch(al.hay) && alTagOK(al));
     const tracks = flat.tracks.filter(trOK);
     return { artists, albums, tracks };
-  }, [lib, debouncedQuery, preset, advisoryFilter, flat, albumHay]);
+  }, [lib, debouncedQuery, preset, ratingFilter, advisoryFilter, ratings, albumRatings, flat, albumHay]);
 
   // ---- selection helpers ----
   /* The store keeps the selection as path LISTS (it is `setSelection`'s own
@@ -712,6 +773,19 @@ export default function LibraryPage() {
 
   const selectionCount = selection.tracks.length + selection.albums.length + selection.artists.length;
 
+  const addToPlaylist = async (paths: string[]) => {
+    if (!paths.length) return;
+    const pls = await api.playlists();
+    const manual = pls.find((p) => p.kind === "manual");
+    if (!manual) {
+      const created = await api.createPlaylist("Library selection", "manual");
+      await api.playlistAdd(created.id, paths);
+    } else {
+      await api.playlistAdd(manual.id, paths);
+    }
+    toast(`Added ${paths.length} track(s) to playlist`);
+  };
+
   const removeAlbums = async (paths: string[]) => {
     if (!paths.length) return;
     const names = paths.map((d) => d.split("/").pop()).join(", ");
@@ -737,7 +811,7 @@ export default function LibraryPage() {
    *
    * Skips instrumentals, videos and tracks that already have lyrics; the
    * backend runs the configured synced chain (LRCLIB → NetEase → Kugou →
-   * QQ Music → Kuwo), writes per the global
+   * QQ Music → Kuwo → YouTube captions), writes per the global
    * lyrics_format and canonicalizes like
    * script 13. Batched (100 tracks per request) so a big selection does not
    * hold one API worker thread for minutes. */
@@ -897,6 +971,28 @@ export default function LibraryPage() {
     }
   };
 
+  // One GET /api/ratings per scope for the whole page (react-query dedupes it
+  // across every row) and the optimistic setters the star controls share.
+  // The maps themselves are declared above the filter memo (the facet reads
+  // them); only the setters live here, beside the actions that call them.
+  const { setRating, pending } = useSetRating();
+  const { setRating: setAlbumRating, pending: albumPending } = useSetRating("album");
+
+  const playSelection = () => {
+    const out: { path: string; file: string; albumPath: string; artist?: string; album?: string; title?: string; coverFile?: string | null; albumCover?: string | null; advisory?: string | null }[] = [];
+    for (const al of sortedAlbums)
+      if (selAlbumSet.has(al.path))
+        for (const t of al.tracks) out.push({ path: t.path, file: t.file, albumPath: al.path, artist: al.artist, album: al.meta?.ALBUM ?? undefined, title: t.tags.TITLE || undefined, coverFile: t.cover_file ?? null, albumCover: al.cover_file ?? null, advisory: t.tags.ITUNESADVISORY ?? null });
+    for (const a of sortedArtists)
+      if (selArtistSet.has(a.path))
+        for (const al of a.albums)
+          for (const t of al.tracks) out.push({ path: t.path, file: t.file, albumPath: al.path, artist: al.album_artist || a.display_name || a.name, album: al.meta?.ALBUM ?? undefined, title: t.tags.TITLE || undefined, coverFile: t.cover_file ?? null, albumCover: al.cover_file ?? null, advisory: t.tags.ITUNESADVISORY ?? null });
+    for (const tr of sortedTracks)
+      if (selTrackSet.has(tr.path))
+        out.push({ path: tr.path, file: tr.file, albumPath: tr.path.split("/").slice(0, -1).join("/"), artist: tr.artist, album: tr.album, title: tr.tags.TITLE || undefined, coverFile: tr.cover_file ?? null, albumCover: tr.albumCover ?? null, advisory: tr.tags.ITUNESADVISORY ?? null });
+    if (out.length) playNow(out);
+  };
+
   const runScriptsOnSelection = async (ids: number[], force = false) => {
     if (busy) {
       toast("Still working on the previous selection");
@@ -929,11 +1025,30 @@ export default function LibraryPage() {
       return next;
     });
 
+  // The album's own rating, in the row's own shape: the store keeps it (a
+  // folder has no RATING tag to read), and the album table sorts on what its
+  // columns show — `sortRows` resolves a dotted key against the row — so the
+  // albums the tables render carry it, like `video_count` above. Shallow
+  // copies: the track lists stay shared.
+  const ratedAlbums = useMemo(
+    () => filtered.albums.map((al) => ({ ...al, rating: ratingOf(albumRatings, al.path) })),
+    [filtered.albums, albumRatings]
+  );
+
+  // The tracks table's own Rating column reads the row, exactly like the
+  // albums one: `sortRows` resolves the dotted sort key against the row, so the
+  // star the column DRAWS is the value a click on its header sorts by. Shallow
+  // copies (the tags and tech records stay shared).
+  const ratedTracks = useMemo(
+    () => filtered.tracks.map((t) => ({ ...t, rating: ratingOf(ratings, t.path) })),
+    [filtered.tracks, ratings]
+  );
+
   // Sorting is memoized so typing in the search box / toggling selection
   // doesn't re-sort the whole library on every keystroke.
-  const albumsSorted = useMemo(() => sortRows(filtered.albums, albumSort), [filtered.albums, albumSort]);
+  const albumsSorted = useMemo(() => sortRows(ratedAlbums, albumSort), [ratedAlbums, albumSort]);
   const artistsSorted = useMemo(() => sortRows(filtered.artists, artistSort), [filtered.artists, artistSort]);
-  const tracksSorted = useMemo(() => sortRows(filtered.tracks, trackSort), [filtered.tracks, trackSort]);
+  const tracksSorted = useMemo(() => sortRows(ratedTracks, trackSort), [ratedTracks, trackSort]);
 
   /* ---- the toolbar's alphabet filter (lib/libraryView.ts) ----
    *
@@ -953,12 +1068,13 @@ export default function LibraryPage() {
   // it empties the shared query box — this page's box edits the same store
   // value — and fires this event for the toolbar state that lives HERE).
   // Everything the toolbar narrows the list by but the query is cleared:
-  // the quick preset, the advisory facet, the A–Z name box and letter, and the
+  // the quick preset, the two facets, the A–Z name box and letter, and the
   // `?filter=` parameter a link can arrive with.
   const { setName: setAzName, setLetter: setAzLetter } = alphabet;
   useEffect(() => {
     const onClear = () => {
       setPreset("all");
+      setRatingFilter("any");
       setAdvisoryFilter("any");
       setAzName("");
       setAzLetter(null);
@@ -1007,7 +1123,7 @@ export default function LibraryPage() {
    * The key is everything that changes WHICH rows a list holds: a new search,
    * filter, sort or view resets the cap to the first chunk (see `useRenderCap`). */
   const listKey = [
-    debouncedQuery, preset, advisoryFilter, azNeedle, alphabet.letter ?? "", groupByArtist,
+    debouncedQuery, preset, ratingFilter, advisoryFilter, azNeedle, alphabet.letter ?? "", groupByArtist,
   ].join("\u0000");
   const [shownAlbums, growAlbums] = useRenderCap(
     `${view}\u0000${listKey}\u0000${albumSort?.key ?? ""}:${albumSort?.dir ?? ""}`, sortedAlbums.length);
@@ -1180,7 +1296,7 @@ export default function LibraryPage() {
         <Link
           to="/optimize"
           className="text-xs text-amber-200 bg-amber-950/30 border border-amber-900/60 rounded-lg px-3 py-2 flex items-start gap-2 tap"
-          title="Open the Optimization page and run Optimize library layout (script 20)"
+          title="Open the Optimization page's library-layout panel"
         >
           <FolderTree className="h-3.5 w-3.5 shrink-0 mt-0.5" />
           <span className="min-w-0">
@@ -1191,7 +1307,7 @@ export default function LibraryPage() {
             library-wide, not an album's tags: whatever sits outside{" "}
             <span className="font-mono">Artists/&lt;Artist&gt;/&lt;Album&gt;/</span> is not graded at all,
             so the library does not grade clean until it is dealt with.{" "}
-            <span className="text-amber-300/90 underline underline-offset-2">Open Optimization and run Optimize library layout (script 20) →</span>
+            <span className="text-amber-300/90 underline underline-offset-2">Review in Optimization →</span>
           </span>
         </Link>
       )}
@@ -1315,7 +1431,7 @@ export default function LibraryPage() {
             {sortOpen && (
               <>
                 <div className="fixed inset-0 z-30" onClick={() => setSortOpen(false)} />
-                <div className="absolute left-0 top-full mt-1 z-40 w-44 rounded-lg border border-border bg-zinc-950 shadow-2xl p-1.5 max-h-[70vh] overflow-y-auto overscroll-contain">
+                <div className="absolute left-0 top-full mt-1 z-40 w-44 rounded-lg border border-border bg-zinc-950 shadow-2xl p-1.5">
                   {ALBUM_SORTS.map((s) => (
                     <button
                       key={s.key}
@@ -1374,7 +1490,7 @@ export default function LibraryPage() {
           />
         )}
 
-        {/* Quick filters: the presets plus the advisory facet. One menu, because
+        {/* Quick filters: the presets plus the two facets. One menu, because
             they narrow the same table — and the count beside each row is what
             keeps a quick filter honest (it says how many rows it would leave
             BEFORE the click). */}
@@ -1382,14 +1498,15 @@ export default function LibraryPage() {
           <button
             className={`btn-ghost !py-1.5 text-xs tap ${filterOpen ? "!text-white !bg-raise" : ""}`}
             onClick={() => setFilterOpen(!filterOpen)}
-            title="Filter the library — presets, and explicit/clean"
+            title="Filter the library — presets, your star ratings, and explicit/clean"
           >
             <ListFilter className="h-3.5 w-3.5" />
             {[
               PRESETS.find((p) => p.id === preset)?.label,
+              ratingFilter !== "any" ? RATING_FILTERS.find((f) => f.id === ratingFilter)?.label : null,
               advisoryFilter !== "any" ? ADVISORY_FILTERS.find((f) => f.id === advisoryFilter)?.label : null,
             ].filter(Boolean).join(" · ")}
-            {advisoryFilter !== "any" && (
+            {(ratingFilter !== "any" || advisoryFilter !== "any") && (
               <span className="h-1.5 w-1.5 rounded-full bg-accent inline-block" title="Filters are active" />
             )}
           </button>
@@ -1408,6 +1525,18 @@ export default function LibraryPage() {
                     />
                   ))}
                 </FilterGroup>
+                <FilterGroup label="Star rating" note={RATED_NOTE}>
+                  {RATING_FILTERS.map((f) => (
+                    <FilterRow
+                      key={f.id}
+                      label={f.label}
+                      hint={f.hint}
+                      count={f.id === "any" ? facetCounts.rated + facetCounts.unrated : facetCounts[f.id]}
+                      active={ratingFilter === f.id}
+                      onClick={() => setRatingFilter(f.id)}
+                    />
+                  ))}
+                </FilterGroup>
                 <FilterGroup label="Advisory">
                   {ADVISORY_FILTERS.map((f) => (
                     <FilterRow
@@ -1420,11 +1549,12 @@ export default function LibraryPage() {
                     />
                   ))}
                 </FilterGroup>
-                {(preset !== "all" || advisoryFilter !== "any") && (
+                {(preset !== "all" || ratingFilter !== "any" || advisoryFilter !== "any") && (
                   <button
                     className="w-full text-left px-2.5 py-1.5 rounded-md text-xs text-zinc-500 hover:text-white hover:bg-raise"
                     onClick={() => {
                       setPreset("all");
+                      setRatingFilter("any");
                       setAdvisoryFilter("any");
                       setFilterOpen(false);
                     }}
@@ -1528,6 +1658,12 @@ export default function LibraryPage() {
             {selection.albums.length} album{selection.albums.length === 1 ? "" : "s"} · {selection.artists.length} artist{selection.artists.length === 1 ? "" : "s"} · {selection.tracks.length} track{selection.tracks.length === 1 ? "" : "s"} · {selTracks.size} total tracks
           </span>
           <div className="ml-auto flex gap-1.5 flex-wrap">
+            <button className="btn-primary !py-1 text-xs tap" onClick={playSelection}>
+              <Play className="h-3.5 w-3.5" /> Play
+            </button>
+            <button className="btn-ghost !py-1 text-xs tap" onClick={() => addToPlaylist([...selTracks])}>
+              <ListPlus className="h-3.5 w-3.5" /> Playlist
+            </button>
             {(selection.albums.length > 0 || selection.artists.length > 0) && (
               <button
                 className="btn-danger !py-1 text-xs tap"
@@ -1746,7 +1882,7 @@ export default function LibraryPage() {
                           dimmer than it ("1967–1970 (The Blue Album)") — the
                           same slot the table's album column draws it in. */}
                       <DisambiguationMark value={al.disambiguation} />
-                      <AdvisoryMark value={al.meta?.ITUNESADVISORY} />
+                      <AdvisoryMark value={al.meta?.ITUNESADVISORY ?? al.meta?.ALBUMITUNESADVISORY} />
                       {/* The folder itself is held (a run, an import, an
                           organize): its files are not playable right now. */}
                       <LockedChip path={al.path} />
@@ -1769,6 +1905,24 @@ export default function LibraryPage() {
                   <span className={`text-[9px] font-mono shrink-0 ${st.text}`} title={st.label}>
                     {st.key === "fail" ? gradeSliver(!!al.pass, al.audit_summary) : ""}
                   </span>
+                  {/* the album's OWN rating, like the star row a track holds one
+                      level down — a verdict on the album, not the average of its
+                      tracks (and never a tag: a folder has none). The web
+                      rating script 24 fetched for the RELEASE rides the same
+                      control, labelled as the album's: it is written to every
+                      file of the album, and it is a different fact from any
+                      track's own WEBRATING. */}
+                  <StarRating
+                    size="sm"
+                    label="Album rating"
+                    hint={`Your rating for the album. ${FOLDER_RATING_NOTE}`}
+                    value={al.rating}
+                    onChange={(v) => setAlbumRating(al.path, v)}
+                    pending={albumPending(al.path)}
+                    {...webStarProps(albumWebRating(al.tracks))}
+                    webKind="album"
+                    webReadout="slot"
+                  />
                   <span className="text-[10px] text-zinc-600 shrink-0 w-8 text-right">{al.track_count}t</span>
                   <div className="opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100 flex gap-1 shrink-0 transition-opacity" onClick={(e) => e.stopPropagation()}>
                     <button
@@ -1788,9 +1942,14 @@ export default function LibraryPage() {
                       return (
                         <div
                           key={t.path}
-                          className={`group flex items-center gap-2 text-xs py-0.5 rounded ${tSel ? "bg-accent/10" : "hover:bg-white/[0.06]"}${selectMode ? " cursor-pointer" : ""}`}
-                          onClick={selectMode ? () => toggleTrack(t.path) : undefined}
-                          title={selectMode ? "Click to select" : undefined}
+                          className={`group flex items-center gap-2 text-xs py-0.5 rounded cursor-pointer ${tSel ? "bg-accent/10" : "hover:bg-white/[0.06]"}`}
+                          onClick={selectMode ? () => toggleTrack(t.path) : () =>
+                            playNow(
+                              tracks.map((x) => ({ path: x.path, file: x.file, albumPath: al.path, artist: al.artist, album: al.meta?.ALBUM ?? undefined, title: x.tags.TITLE || undefined, coverFile: x.cover_file ?? null, albumCover: al.cover_file ?? null, advisory: x.tags.ITUNESADVISORY ?? null })),
+                              tracks.findIndex((x) => x.path === t.path)
+                            )
+                          }
+                          title={selectMode ? "Click to select" : "Click to play"}
                         >
                           {selectMode && (
                             <div className="shrink-0">
@@ -1809,14 +1968,18 @@ export default function LibraryPage() {
                             className="flex-1"
                             trailing={
                               <>
+                                <span className="shrink-0"><FavHeart kind="track" id={t.path} mbid={t.tags.MUSICBRAINZ_TRACKID} iconClass="h-3.5 w-3.5" revealOnHover /></span>
                                 <span className="row-hover shrink-0" onClick={(e) => e.stopPropagation()}>
                                   <TrackActionsMenu path={t.path} releaseMbid={t.tags.MUSICBRAINZ_ALBUMID} />
                                 </span>
+                                <StarRating size="sm" webReadout="slot" value={ratingOf(ratings, t.path)} onChange={(v) => setRating(t.path, v)} pending={pending(t.path)} {...webStarProps(trackWebRating(t.tags))} />
                                 <span className="text-[10px] text-zinc-600 font-mono w-10 text-right shrink-0 cell-nowrap">{fmtDuration(t.tech.length)}</span>
                               </>
                             }
                           >
                             <Link to={trackRef(t)} className="break-words hover:text-accent-soft min-w-0"
+                              title="Click to play · Ctrl-click to open track page"
+                              onClick={(e) => entityLinkClick(e, () => navigate(trackRef(t)))}
                             >
                               {t.tags.TITLE ?? t.file}
                             </Link>
@@ -1836,6 +1999,7 @@ export default function LibraryPage() {
                               </button>
                             )}
                             <GradeBadge pass={!!t.grade_pass && !auditFails(t.audit)} size="sm" />
+                            <CachedMark path={t.path} />
                             {t.tags.INSTRUMENTAL === "1" && (
                               <span className="chip bg-zinc-800 text-zinc-400 border border-border text-[9px] shrink-0">INST</span>
                             )}
@@ -1918,6 +2082,7 @@ export default function LibraryPage() {
                       onToggleTrack={toggleTrack}
                       removing={removing !== null}
                       onRemove={() => removeAlbums([row.album.path])}
+                      onPlaylist={() => addToPlaylist(row.album.tracks.map((t) => t.path))}
                       onTrackDetails={(t) => setDetailTrack({ track: t, albumPath: row.album.path })}
                       colSpan={albumColSpan}
                       fullDates={fullDates}
@@ -2000,17 +2165,24 @@ export default function LibraryPage() {
                         </td>
                       )}
                       <td className="td">
-                        {/* The face beside the name: a representative album cover (the app
-                            stores no artist pictures). */}
+                        {/* The face beside the name: the artist's own picture
+                            when the folder holds one (`has_image` — the server
+                            reads it from the same helper Home's shelf asks, so
+                            the request is only made when the endpoint would
+                            answer), falling back to a representative album
+                            cover. A row here then names an artist the way a
+                            card on Home does. */}
                         <div className="flex items-center gap-2.5 min-w-0">
                           <ArtistAvatar
                             path={a.path}
+                            hasImage={a.has_image}
                             coverPath={a.albums?.[0]?.path}
                             coverFile={a.albums?.[0]?.cover_file}
                             /* A square tile, like every album row's own cover
                                cell and the artist page's hero: the circle was
                                the one round image in the library. */
                             className="h-8 w-8 rounded overflow-hidden shrink-0"
+                            title={a.display_name || a.name}
                           />
                           {/* the row click already opens the artist, so the link
                               must not push the same route a second time. The
@@ -2112,9 +2284,14 @@ export default function LibraryPage() {
                     <tr
                       key={tr.path}
                       style={ROW_CV}
-                      className={`table-row group ${selectMode ? "cursor-pointer" : ""} ${sel ? "bg-accent/15" : ""}`}
-                      title={selectMode ? "Click to select" : undefined}
-                      onClick={selectMode ? () => toggleTrack(tr.path) : undefined}
+                      className={`table-row group cursor-pointer ${sel ? "bg-accent/15" : ""}`}
+                      title={selectMode ? "Click to select" : "Click to play"}
+                      onClick={selectMode ? () => toggleTrack(tr.path) : () =>
+                        playNow(
+                          sortedTracks.map((t) => ({ path: t.path, file: t.file, albumPath: t.path.split("/").slice(0, -1).join("/"), artist: t.artist, album: t.album, title: t.tags.TITLE || undefined, coverFile: t.cover_file ?? null, albumCover: t.albumCover ?? null, advisory: t.tags.ITUNESADVISORY ?? null })),
+                          sortedTracks.findIndex((t) => t.path === tr.path)
+                        )
+                      }
                     >
                       {selectMode && (
                         <td className="td pr-0" onClick={(e) => e.stopPropagation()}>
@@ -2137,6 +2314,9 @@ export default function LibraryPage() {
                           <TrackTitleCell
                             trailing={
                               <>
+                                <span className="shrink-0" onClick={(e) => e.stopPropagation()}>
+                                  <FavHeart kind="track" id={tr.path} mbid={tr.tags.MUSICBRAINZ_TRACKID} iconClass="h-3.5 w-3.5" revealOnHover />
+                                </span>
                                 <span className="row-hover shrink-0" onClick={(e) => e.stopPropagation()}>
                                   <TrackActionsMenu path={tr.path} releaseMbid={tr.tags.MUSICBRAINZ_ALBUMID} />
                                 </span>
@@ -2156,8 +2336,9 @@ export default function LibraryPage() {
                             <Link
                               to={trackRef(tr)}
                               className="hover:text-accent-soft cell-ellipsis min-w-0"
-                              title={tr.tags.TITLE ?? tr.file}
-                              >
+                              title={`${tr.tags.TITLE ?? tr.file} · Click to play · Ctrl-click to open track page`}
+                              onClick={(e) => entityLinkClick(e, () => navigate(trackRef(tr)))}
+                            >
                               {tr.tags.TITLE ?? tr.file}
                             </Link>
                             <DisambiguationMark value={tr.disambiguation} />
@@ -2176,11 +2357,44 @@ export default function LibraryPage() {
                               </button>
                             )}
                             <GradeBadge pass={!!tr.grade_pass && !auditFails(tr.audit)} size="sm" />
+                            <CachedMark path={tr.path} />
                             {tr.is_video && <span title="Music video" className="shrink-0 inline-flex"><FileVideo className="h-3.5 w-3.5 text-zinc-500" /></span>}
                             {tr.tags.INSTRUMENTAL === "1" && (
                               <span className="chip bg-zinc-800 text-zinc-400 border border-border text-[10px] shrink-0">INST</span>
                             )}
                           </TrackTitleCell>
+                        </td>
+                      )}
+                      {/* The rating has its own column here, and that is the
+                          fix for the collapse this view shipped: the stars used
+                          to ride in the title cell's trailing slot, which made
+                          one narrow fixed-layout column hold the name AND the
+                          marks AND the stars — 220 px against ~200 px of
+                          controls, so the title lost and rendered one character
+                          per line. A column is also what a reader wants: a
+                          straight vertical scan of the ratings (the album
+                          table has drawn it this way all along). */}
+                      {trackCols.includes("rating") && (
+                        <td
+                          className={`td${phoneHide(TRACK_PHONE_CLS, "rating")}`}
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <StarRating
+                            size="sm"
+                            value={ratingOf(ratings, tr.path)}
+                            onChange={(v) => setRating(tr.path, v)}
+                            pending={pending(tr.path)}
+                            {...webStarProps(trackWebRating(tr.tags))}
+                            /* This cell IS a fixed column (TRACK_COL_W.rating is
+                               104 px: five `sm` stars and their gutter), so the
+                               web value cannot print a text readout beside the
+                               user's stars without painting over Duration. The
+                               dot says the file HAS a web rating and its
+                               tooltip carries the number and the sources; the
+                               two roomy surfaces — an album's tracklist and
+                               the Export preview — print it in full. */
+                            webReadout="mark"
+                          />
                         </td>
                       )}
                       {trackCols.includes("artist") && <td className={`td text-zinc-400 cell-ellipsis${phoneHide(TRACK_PHONE_CLS, "artist")}`} title={tr.artist}>{tr.artist}</td>}
@@ -2189,6 +2403,13 @@ export default function LibraryPage() {
                       {trackCols.includes("genre") && <td className={`td text-zinc-500 cell-ellipsis${phoneHide(TRACK_PHONE_CLS, "genre")}`} title={tr.tags.GENRE ?? "Genre"}>{tr.tags.GENRE ?? "—"}</td>}
                       {trackCols.includes("media") && <td className={`td${phoneHide(TRACK_PHONE_CLS, "media")}`}><MediaChip media={tr.tags.MEDIA} /></td>}
                       {trackCols.includes("duration") && (
+                        /* Duration only. A 64 px cell cannot hold the 70 px
+                           star block beside a length, and a fixed-layout
+                           table paints whatever does not fit over the next
+                           column — which is how the stars ended up on top of
+                           Bitrate. The rating rides in the Title cell, the
+                           one cell that wraps to hold its marks (the album
+                           page's tracklist has always drawn it there). */
                         <td className={`td text-zinc-500${phoneHide(TRACK_PHONE_CLS, "duration")}`}>
                           {fmtDuration(tr.tech.length)}
                         </td>
@@ -2245,11 +2466,15 @@ export default function LibraryPage() {
   );
 }
 
-/** One labelled block of the filter menu. */
-function FilterGroup({ label, children }: { label: string; children: ReactNode }) {
+/** One labelled block of the filter menu. The note rides under the group's
+ *  label rather than in a tooltip: `RATED_NOTE` and the advisory ladder are the
+ *  definitions of what the options below them mean, and a definition nobody can
+ *  read without hovering is one the reader has to guess at. */
+function FilterGroup({ label, note, children }: { label: string; note?: string; children: ReactNode }) {
   return (
     <div className="border-b border-border/60 last:border-b-0 py-1">
       <div className="px-2.5 pt-1 text-[10px] uppercase tracking-wider text-zinc-600">{label}</div>
+      {note && <div className="px-2.5 pb-1 text-[10px] text-zinc-600 leading-snug">{note}</div>}
       {children}
     </div>
   );
@@ -2287,6 +2512,7 @@ function AlbumRowGroup({
   onToggleTrack,
   removing,
   onRemove,
+  onPlaylist,
   onTrackDetails,
   colSpan,
   fullDates,
@@ -2308,6 +2534,7 @@ function AlbumRowGroup({
   onToggleTrack: (p: string) => void;
   removing: boolean;
   onRemove: () => void;
+  onPlaylist: () => void;
   onTrackDetails: (t: Track) => void;
   colSpan: number;
   fullDates: boolean;
@@ -2324,7 +2551,14 @@ function AlbumRowGroup({
   onResetTrackWidths: () => void;
 }) {
   // The rows this component renders are their own tree: same hooks as the
-  // page.
+  // page, and react-query serves them from one GET /api/ratings per scope.
+  const { data: ratingsData } = useRatings();
+  const { setRating, pending } = useSetRating();
+  const { data: albumRatingsData } = useRatings("album");
+  const { setRating: setAlbumRating, pending: albumPending } = useSetRating("album");
+  const ratings = ratingsData?.ratings;
+  const albumRatings = albumRatingsData?.ratings;
+  const navigate = useNavigate();
   const tracks = useMemo(() => [...(album.tracks ?? [])].sort(byDiscThenTrack), [album.tracks]);
   // The nested tracklist's own columns, in the order it draws them: the shared
   // album-tracklist spec plus the reader's tag columns — and the widths it
@@ -2354,6 +2588,24 @@ function AlbumRowGroup({
     });
   if (visibleCols.includes("tracks"))
     cells.push({ id: "tracks", cls: `td text-zinc-500${phoneHide(ALBUM_PHONE_CLS, "tracks")}`, node: album.track_count });
+  if (visibleCols.includes("rating"))
+    cells.push({
+      id: "rating",
+      cls: `td${phoneHide(ALBUM_PHONE_CLS, "rating")}`,
+      node: (
+        <StarRating
+          size="sm"
+          label="Album rating"
+          hint={`Your rating for the album. ${FOLDER_RATING_NOTE}`}
+          value={ratingOf(albumRatings, album.path)}
+          onChange={(v) => setAlbumRating(album.path, v)}
+          pending={albumPending(album.path)}
+          {...webStarProps(albumWebRating(album.tracks))}
+          webKind="album"
+          webReadout="slot"
+        />
+      ),
+    });
   if (visibleCols.includes("grade"))
     cells.push({
       id: "grade",
@@ -2402,7 +2654,7 @@ function AlbumRowGroup({
         titleExtra={
           <>
             {showAlbumCol ? <DisambiguationMark value={album.disambiguation} /> : null}
-            {showAlbumCol ? <AdvisoryMark value={album.meta?.ITUNESADVISORY} /> : null}
+            {showAlbumCol ? <AdvisoryMark value={album.meta?.ITUNESADVISORY ?? album.meta?.ALBUMITUNESADVISORY} /> : null}
             {/* the same marker the compact rows and the cards carry — the
                 albums table is one more album-shaped surface */}
             <PendingMark album={album} />
@@ -2416,6 +2668,9 @@ function AlbumRowGroup({
           <>
             {/* Row actions are always visible on touch, so they carry a 32 px
                 tap target on a phone and the library's compact size from `md`. */}
+            <button className="btn-ghost !px-1.5 !py-2 md:!py-1" title="Add to playlist" onClick={onPlaylist}>
+              <ListPlus className="h-3.5 w-3.5" />
+            </button>
             <button className="btn-danger !px-1.5 !py-2 md:!py-1" title="Remove album (to trash)" disabled={removing} onClick={onRemove}>
               <Trash2 className="h-3.5 w-3.5" />
             </button>
@@ -2461,9 +2716,19 @@ function AlbumRowGroup({
                       {g.tracks.map((t) => (
                         <tr
                           key={t.path}
-                          className={`table-row group ${selectMode ? "cursor-pointer" : ""} ${selTracks.has(t.path) ? "bg-accent/15" : ""}`}
-                          title={selectMode ? "Click to select" : undefined}
-                          onClick={selectMode ? () => onToggleTrack(t.path) : undefined}
+                          className={`table-row group cursor-pointer ${selTracks.has(t.path) ? "bg-accent/15" : ""}`}
+                          title={selectMode ? "Click to select" : "Click to play"}
+                          onClick={selectMode ? () => onToggleTrack(t.path) : () =>
+                            useStore.getState().playNow(
+                              tracks.map((x) => ({
+                                path: x.path, file: x.file, albumPath: album.path,
+                                artist: album.artist, album: album.meta?.ALBUM ?? undefined, title: x.tags.TITLE || undefined,
+                                coverFile: x.cover_file ?? null, albumCover: album.cover_file ?? null,
+                                advisory: x.tags.ITUNESADVISORY ?? null,
+                              })),
+                              tracks.findIndex((x) => x.path === t.path)
+                            )
+                          }
                         >
                           {selectMode && (
                             <td className="td pr-0" onClick={(e) => e.stopPropagation()}>
@@ -2489,6 +2754,9 @@ function AlbumRowGroup({
                               <TrackTitleCell
                                 trailing={
                                   <>
+                                    <span className="shrink-0" onClick={(e) => e.stopPropagation()}>
+                                      <FavHeart kind="track" id={t.path} mbid={t.tags.MUSICBRAINZ_TRACKID} iconClass="h-3.5 w-3.5" revealOnHover />
+                                    </span>
                                     <span className="row-hover shrink-0" onClick={(e) => e.stopPropagation()}>
                                       <TrackActionsMenu path={t.path} releaseMbid={t.tags.MUSICBRAINZ_ALBUMID} />
                                     </span>
@@ -2502,13 +2770,25 @@ function AlbumRowGroup({
                                     >
                                       <InfoIcon className="h-3.5 w-3.5" />
                                     </button>
+                                    {/* the rating in the row's fixed slot —
+                                        the same x on every track of the album,
+                                        and out of the 80 px Dur column beside
+                                        it, which cannot hold both. The readout
+                                        reserves its own box (`webReadout="slot"`)
+                                        so the stars really do stay on that x as
+                                        a row swaps its web reading for the
+                                        user's own number. */}
+                                    <span className="shrink-0" onClick={(e) => e.stopPropagation()}>
+                                      <StarRating size="sm" webReadout="slot" value={ratingOf(ratings, t.path)} onChange={(v) => setRating(t.path, v)} pending={pending(t.path)} {...webStarProps(trackWebRating(t.tags))} />
+                                    </span>
                                   </>
                                 }
                               >
                                 <Link
                                   to={trackRef(t)}
                                   className="hover:text-accent-soft cell-ellipsis min-w-0"
-                                  title={t.tags.TITLE ?? t.file}
+                                  title={`${t.tags.TITLE ?? t.file} · Click to play · Ctrl-click to open track page`}
+                                  onClick={(e) => entityLinkClick(e, () => navigate(trackRef(t)))}
                                 >
                                   {t.tags.TITLE ?? t.file}
                                 </Link>
@@ -2528,6 +2808,7 @@ function AlbumRowGroup({
                                   </button>
                                 )}
                                 <GradeBadge pass={!!t.grade_pass && !auditFails(t.audit)} size="sm" />
+                                <CachedMark path={t.path} />
                                 {t.is_video && <span title="Music video" className="shrink-0 inline-flex"><FileVideo className="h-3.5 w-3.5 text-zinc-500" /></span>}
                                 {t.tags.INSTRUMENTAL === "1" && (
                                   <span className="chip bg-zinc-800 text-zinc-400 border border-border text-[10px] shrink-0">INST</span>
@@ -2590,7 +2871,7 @@ function ScriptsDropdown({ onRun, runAllIds }: { onRun: (ids: number[], force?: 
       {open && (
         <>
           <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
-          <div className="absolute right-0 top-full mt-1 z-50 bg-zinc-950 border border-border rounded-lg p-1.5 w-44 shadow-2xl max-h-[70vh] overflow-y-auto overscroll-contain">
+          <div className="absolute right-0 top-full mt-1 z-50 bg-zinc-950 border border-border rounded-lg p-1.5 w-44 shadow-2xl">
             {items.map((s) => (
               <button
                 key={s.label}

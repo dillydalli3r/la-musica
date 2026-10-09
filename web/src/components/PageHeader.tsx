@@ -43,11 +43,13 @@ export default function PageHeader({
           the full row and wraps there instead of squeezing the title to a
           sliver — and the original side-by-side row from md up.
           Up there the actions box GROWS INTO the leftover room instead of
-          being held at its content width by `shrink-0`: a wide actions row
-          (Segmented + buttons) took its content width out of the one sibling
-          allowed to give any (the title column is `min-w-0`, for its own
-          truncation) — so the page title measured 0 px wide on a page whose
-          actions box was wider than the row.
+          being held at its content width by `shrink-0`: at 834 px the Favorites
+          actions row is 630 px (four tabs, two buttons) against a 594 px row,
+          so a content-sized box that may not shrink took its 630 px out of the
+          one sibling allowed to give any (the title column is `min-w-0`, for
+          its own truncation) — the page title measured 0 px wide on
+          /favorites/tracks and on /playlists, the title of the page with no
+          room at all.
           `md:basis-auto` is the other half of that, and the half a long
           subtitle needs: `flex-1` alone is `flex: 1 1 0%`, so a page whose
           title column asks for MORE than the row (Checks & scripts' four-line

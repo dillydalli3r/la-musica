@@ -25,8 +25,7 @@ REPORTS, what a script WRITES):
     case together — reports what it changed, and a second run changes nothing.
   * script 23 (Optimize tags, `mlo/taghygiene.py`) is that strip on its own and
     scoped: it deletes exactly the grader's excess list (junk names, a valued
-    COMMENT, a value naming an external URL, unneeded aliases —
-    `mlo.format_all.excess_tags`), leaves a NEEDED
+    COMMENT, unneeded aliases — `mlo.format_all.excess_tags`), leaves a NEEDED
     alias alone, and does not write a clean file at all (mtime + bytes).
 
 Run:  python tools/test_tag_hygiene.py   (exit 0 = pass, 1 = failure)
@@ -419,26 +418,6 @@ no_strip = _grade_album(fixture, "EMBEDDED",
                         dict(EXCESS, strip_unknown_tags=False))
 ok("COMMENT" not in no_strip["tracks"][0]["issues"],
    "strip_unknown_tags=False stops both the strip and the grade")
-
-# --------------------------------------------------------------------------- #
-print("== links: a URL in an allowed tag is excess, a bare MBID is not ==")
-# The app keeps no links in tags (spec R343): a value naming an external URL
-# fails the track (issue code LINK) and script 10 deletes the tag, while a raw
-# MusicBrainz id — an ID, not a link — is left exactly as it is.
-raw_tags(wrong, {"TITLE": "Song Name", "MEDIA": "CD", "SOURCE": "CD",
-                 "MUSICBRAINZ_ALBUMID": "11111111-2222-3333-4444-555555555555"})
-raw_tags(wrong, {"SOURCE": "https://rateyourmusic.com/release/album/x/"})
-linked = _grade_album(fixture, "EMBEDDED", EXCESS)
-ok("LINK" in linked["tracks"][0]["issues"],
-   f"a tag value naming a URL fails the track (got {linked['tracks'][0]['issues']})")
-stats_link = run_format_all(cfg)
-ok(AudioFile(wrong).get_tag("SOURCE") is None,
-   f"script 10 deleted the URL-valued tag ({AudioFile(wrong).get_tag('SOURCE')!r})")
-ok(AudioFile(wrong).get_tag("MUSICBRAINZ_ALBUMID"),
-   "…and left the bare MusicBrainz id alone")
-ok(AudioFile(wrong).get_tag("MUSICBRAINZ_ALBUMID") ==
-   "11111111-2222-3333-4444-555555555555",
-   "…byte for byte")
 
 # --------------------------------------------------------------------------- #
 print("== aliases: written only where the locale needs them (R16a / R16b) ==")

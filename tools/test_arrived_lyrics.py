@@ -143,8 +143,8 @@ def canonical(text):
 ANSWER = {"synced": "", "plain": ""}
 
 _real = {n: getattr(imports, n) for n in
-         ("fetch_advisories", "fetch_instrumentals",
-          "run_cover_step", "_stamp_release")}
+         ("stamp_rym_links", "fetch_advisories", "fetch_instrumentals",
+          "run_metadata_step", "run_cover_step", "_stamp_release")}
 _real_chain = script_runners.run_chain
 _real_resolve = None
 _real_providers = dict(lp._PROVIDERS)
@@ -152,7 +152,7 @@ _real_absent = None
 _real_metadata_account = None
 
 
-def _provider(artist, title, album, duration, cfg):
+def _provider(artist, title, album, duration, cfg, yt):
     """One stub provider for the whole chain: what ANSWER says, nothing else."""
     if not (ANSWER.get("synced") or ANSWER.get("plain")):
         return None
@@ -205,8 +205,10 @@ def stub_step(**payload):
 
 def install_stubs():
     global _real_resolve, _real_absent
+    imports.stamp_rym_links = stub_step(album=None, artist=None, note="")
     imports.fetch_advisories = stub_step(updated=0, values={}, sources={}, answers={})
     imports.fetch_instrumentals = stub_step(updated=0, values={}, evidence={})
+    imports.run_metadata_step = stub_step(staged=False, applied={})
     imports.run_cover_step = stub_step(fetched=False, applied={}, source=None,
                                        note="", staged=False, candidates=0)
     imports._stamp_release = lambda album_dir, release, cfg, **kwargs: (0, 0)

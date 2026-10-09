@@ -1,15 +1,16 @@
-"""One per-cookie view for the cookie logins — GET/POST /api/cookies/{source}.
+"""One per-cookie view for every cookie login — GET/POST /api/cookies/{source}.
 
-The cookie credential (RYM) lives as a header string in the config, but what a
-user does with it is the same for every cookie login: import a cookies.txt,
-look at the cookies it kept, and write a note against one of them. This module
-is that shared surface, so the UI has ONE panel for it
-(web/src/components/CookieJarPanel.tsx), and so another cookie login would need
-no new UI at all.
+The two cookie credentials (`youtube`, RYM) are different on disk — one is a
+jar file, the other a header string in the config — but what a user does with
+them is the same: import a cookies.txt, look at the cookies it kept, and write
+a note against one of them. This module is that shared surface, so the UI has
+ONE panel for both (web/src/components/CookieJarPanel.tsx) instead of two that
+drift, and so a third cookie login would need no new UI at all.
 
-It reads and writes nothing itself: the source owns its own storage
-(`server/api_rym.cookie_list`/`set_cookie_comment`), and this module only names
-it. What it adds is the shape the panel reads:
+It reads and writes nothing itself: the sources own their own storage
+(`server/api_youtube.cookie_list`/`set_cookie_comment`, and the same pair in
+`server/api_rym`), and this module only names them. What it adds is the shape
+the panel reads:
 
   * ``GET /api/cookies/{source}`` — the cookies that are STORED, one row each
     (domain, path, name, expiry, expired, comment) and ``hosts``: the hosts that
@@ -29,7 +30,7 @@ from typing import Callable, Dict, List
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from server import api_rym
+from server import api_rym, api_youtube
 
 router = APIRouter(tags=["cookies"])
 
@@ -53,6 +54,11 @@ class CookieComment(BaseModel):
 # entry for any other credential: a token or an API key is not a cookie, and
 # inventing a jar for one would be a surface that cannot work.
 SOURCES: Dict[str, dict] = {
+    "youtube": {
+        "hosts": list(api_youtube.COOKIE_HOSTS),
+        "list": api_youtube.cookie_list,
+        "comment": api_youtube.set_cookie_comment,
+    },
     "rym": {
         "hosts": [api_rym.RYM_HOST],
         "list": api_rym.cookie_list,

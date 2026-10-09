@@ -3,37 +3,147 @@
 <plist version="1.0">
 <dict>
 	<!--
-	  App Transport Security exemption for the webview.
+	  App Transport Security exemption for the webview — the file's other job
+	  is the background-audio declaration further down.
 
 	  A self-hosted la musica server is plain http on an address only the user
 	  knows: a LAN IP, a Tailscale/MagicDNS name, or 127.0.0.1:8000 for the
 	  Docker container running on the same machine. TLS is not optional for the
 	  project to run without it - the server ships without a certificate, so
-	  every request the React UI makes (fetch, WebSocket) is http:// or ws://.
-	  ATS blocks exactly those requests by default, which is what makes the app
-	  unusable against a real install.
+	  every request the React UI makes (fetch, WebSocket, audio/video playback)
+	  is http:// or ws://. ATS blocks exactly those requests by default, which
+	  is what makes the app unusable against a real install.
 
 	  NSAllowsArbitraryLoadsInWebContent keeps the exemption inside the webview:
 	  the shell's native URLSession calls (there are none today - lib.rs has no
 	  HTTP client) stay under full ATS, and NSExceptionDomains cannot be used
 	  here because the host is chosen by the user at runtime, not by us.
 
-	  Tauri looks for this file beside tauri.conf.json and merges it into the
-	  generated plist for the macOS .app bundle.
+	  Tauri merges this file into the generated plist for both iOS
+	  (`tauri ios build`, which is told about it explicitly through
+	  `bundle.iOS.infoPlist` in tauri.conf.json) and the macOS .app bundle,
+	  so one file covers both Apple platforms. Android is unaffected and
+	  documented in desktop/README.md.
 	-->
+	<!--
+	  Audio keeps playing when the app is not in front — a music client that
+	  stopped the moment the screen locked would be useless.
+
+	  This is the mode the app can claim honestly, because it IS a music
+	  player. It used to carry a second job as well: keeping the process (and
+	  so the embedded backend) alive in the background with a silent playback
+	  session. The app hosts no backend any more — the server is the user's own
+	  Docker container — so nothing here holds a session open for its own sake,
+	  which also removes what Apple's review guidance names as abuse.
+	-->
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>audio</string>
+	</array>
+
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsArbitraryLoadsInWebContent</key>
 		<true/>
 		<!--
+		  The MEDIA loader's own key, and the one that actually covers a track.
+
+		  An <audio>/<video> element's bytes are not fetched by the web content
+		  process: WebKit plays them through AVFoundation, in a process of its
+		  own, and that loader's ATS decisions read THIS key. Leaving it out is
+		  not a missing belt to go with the braces below — on iOS 10 and later
+		  the blanket key is IGNORED outright once a scoped one is present.
+		  Apple's own note on NSAllowsArbitraryLoads: "In iOS 10 and later and
+		  macOS 10.12 and later, the value of the NSAllowsArbitraryLoads key is
+		  ignored—and the default value of NO used instead—if any of the
+		  following keys are present: NSAllowsArbitraryLoadsForMedia,
+		  NSAllowsArbitraryLoadsInWebContent, NSAllowsLocalNetworking."
+
+		  So a build with only the two keys this file used to carry shipped a
+		  media exemption of NO while reading, one line further down, exactly
+		  like one of YES: the page, its scripts and its XHRs loaded (the
+		  web-content key) and every single track was then refused by ATS with no
+		  error the page can see — "pressing play just pauses it immediately".
+		  The mobile CI job and tools/check_ios_ipa.py both read this key back
+		  out of the built app for that reason: its absence has no other symptom.
+		-->
+		<key>NSAllowsArbitraryLoadsForMedia</key>
+		<true/>
+		<!--
 		  The blanket key: the coarse exemption for a system that reads no scoped
-		  key at all (macOS 10.11, per Apple's own note). It is kept because a
-		  reader who has only ever seen the blanket recipe must find it here -
-		  but on every macOS this app can run on it is the scoped key above that
-		  decides, and this one is inert.
+		  key at all (iOS 9 / macOS 10.11, per the note above). It is kept
+		  because this one file is merged into the macOS .app too, and because a
+		  reader who has only ever seen the blanket recipe must find it here —
+		  but on every OS this app can run on (iOS 14 floor) it is the two scoped
+		  keys above that decide, and this one is inert.
 		-->
 		<key>NSAllowsArbitraryLoads</key>
 		<true/>
 	</dict>
+
+	<!--
+	  iOS 14+ asks the user before an app may talk to devices on the local
+	  network, and the prompt only exists if the app declares why it wants to.
+	  Without this key the permission cannot even be requested, so a server on
+	  the LAN (the normal case) is unreachable — while a Tailscale address, which
+	  is not "local network" traffic, still works, which is what makes the
+	  failure look like a bug in the app rather than a missing prompt.
+
+	  TOP LEVEL, not inside NSAppTransportSecurity: it is a privacy key iOS reads
+	  by name from the bundle's root, and one nested inside the ATS dictionary is
+	  simply not there. The mobile CI job caught exactly that on this release's
+	  first run (`plutil -extract NSLocalNetworkUsageDescription` came back
+	  empty) — the check earns its place.
+	-->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>la musica connects to the la musica server you run on your own network — on this device, on your LAN, or through a VPN.</string>
+
+	<!--
+	  The name under the home-screen icon. Without it the generated plist has
+	  only CFBundleName, and iOS falls back to that - which today happens to be
+	  "la musica" because the CLI maps PRODUCT_NAME from productName by
+	  template. Both keys are named here so the sideloaded IPA shows the
+	  product's own name rather than whatever the template does with it.
+	-->
+	<key>CFBundleDisplayName</key>
+	<string>la musica</string>
+	<key>CFBundleName</key>
+	<string>la musica</string>
+
+	<!--
+	  Export-compliance declaration for the App Store question every upload
+	  asks. `false` is the honest answer for this app: it implements no
+	  cryptography of its own - HTTPS, the keychain and the TLS stack are the
+	  system's, and a self-hosted server is reached over plain http. Apple
+	  accepts this key in place of answering the question per build, which
+	  matters for the sideload flow (an ad-hoc re-sign of our unsigned IPA)
+	  because a re-signed bundle cannot be edited to add it afterwards without
+	  breaking the signature.
+	-->
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
+
+	<!--
+	  Orientation, iPhone and iPad separately because iOS reads the `~ipad`
+	  suffix. iPhone omits upside-down, the usual choice: nothing in the UI is
+	  drawn for it (the shell rotates fine, the player bar and library just
+	  ride along) and iOS only rotates to upside-down when an app asks. iPad
+	  gets all four - the library and the tag editors have the room for either
+	  landscape. Declared here instead of left to tauri-cli's project.yml
+	  template so a reader of this repo knows what the app ships with.
+	-->
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<key>UISupportedInterfaceOrientations~ipad</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationPortraitUpsideDown</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
 </dict>
 </plist>

@@ -1,11 +1,12 @@
 import { useState } from "react";
-import { ArrowLeft, ArrowRight, Check, KeyRound, Loader2, Server } from "lucide-react";
+import { ArrowLeft, ArrowRight, Bell, Check, KeyRound, Loader2, Server } from "lucide-react";
 import { api, normalizeServerUrl, serverUrl, setToken } from "../api";
 import PageHeader from "../components/PageHeader";
 import SetupRail from "../components/SetupRail";
 import ServerVersionNotice from "../components/ServerVersionNotice";
 import { toast } from "../store";
 import { useI18n } from "../lib/i18n";
+import { notificationState, requestNotifications, type NotifyState } from "../lib/notify";
 import {
   STEP_IDS,
   markClientSetupDone,
@@ -15,7 +16,7 @@ import {
   type StepId,
 } from "../lib/clientSetup";
 
-/** The first-run wizard for the client shells (the desktop shell).
+/** The first-run wizard for the client shells (desktop, iOS, Android).
  *
  *  Those builds bundle this SPA and open it from `tauri://localhost`, so
  *  there is no same-origin backend to fall back on: the device has to be told
@@ -39,6 +40,8 @@ export default function ClientSetup({ onDone }: { onDone: () => void }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [account, setAccount] = useState("");
+
+  const [notify, setNotify] = useState<NotifyState>(() => notificationState());
 
   // Only a false `has_password` means "claim this server"; an unknown one
   // (the status call failed) falls back to sign-in, which is never wrong.
@@ -73,7 +76,7 @@ export default function ClientSetup({ onDone }: { onDone: () => void }) {
       setPassword("");
       setConfirm("");
       toast.success(t(needsSetup ? "auth.setup_done" : "auth.signed_in"));
-      setStep("done");
+      setStep("notifications");
     } catch (err) {
       // The server's own words: "wrong password", "at least 8 characters",
       // "too many attempts".
@@ -81,6 +84,13 @@ export default function ClientSetup({ onDone }: { onDone: () => void }) {
     } finally {
       setBusy(false);
     }
+  };
+
+  const askNotifications = async () => {
+    const next = await requestNotifications();
+    setNotify(next);
+    if (next === "granted") toast.success(t("notify.enabled"));
+    else if (next === "denied") toast.error(t("notify.blocked_help"));
   };
 
   return (
@@ -96,6 +106,7 @@ export default function ClientSetup({ onDone }: { onDone: () => void }) {
           labels={{
             server: t("client.step_server"),
             account: t("client.step_account"),
+            notifications: t("client.step_notifications"),
             done: t("client.step_done"),
           }}
         />
@@ -235,7 +246,7 @@ export default function ClientSetup({ onDone }: { onDone: () => void }) {
                   <button type="button" className="btn-ghost" onClick={() => setStep("server")} disabled={busy}>
                     <ArrowLeft className="h-3.5 w-3.5" /> {t("client.back")}
                   </button>
-                  <button type="button" className="btn-ghost" onClick={() => setStep("done")} disabled={busy}>
+                  <button type="button" className="btn-ghost" onClick={() => setStep("notifications")} disabled={busy}>
                     {t("client.skip")}
                   </button>
                 </div>
@@ -245,6 +256,54 @@ export default function ClientSetup({ onDone }: { onDone: () => void }) {
                 </button>
               </div>
             </form>
+          )}
+
+          {step === "notifications" && (
+            <>
+              <div className="flex items-center gap-2">
+                <Bell className="h-4 w-4 text-accent" />
+                <span className="text-sm font-semibold">{t("client.step_notifications")}</span>
+              </div>
+              <p className="text-xs text-zinc-400 leading-relaxed">{t("client.notify_text")}</p>
+              <p className="text-[11px] text-zinc-500">
+                {notify === "granted"
+                  ? t("notify.enabled")
+                  : notify === "denied"
+                  ? t("notify.blocked_help")
+                  : ""}
+              </p>
+              {/* Two groups that cannot share a phone's line: at 390px
+                  "Enable notifications" is a 129px two-line button, and with
+                  "Next" beside it the row was 421px inside a 294px card — the
+                  primary action sat off-screen and the page scrolled sideways.
+                  Wrapping keeps the wording and the 44px targets; `ml-auto` is
+                  what right-aligns the right group on the line it wraps onto
+                  (justify-between leaves a lone item at the left edge). The
+                  same two attributes are on the footers of every other step. */}
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex flex-wrap gap-2">
+                  <button type="button" className="btn-ghost" onClick={() => setStep("account")}>
+                    <ArrowLeft className="h-3.5 w-3.5" /> {t("client.back")}
+                  </button>
+                  <button type="button" className="btn-ghost" onClick={() => setStep("done")}>
+                    {t("client.skip")}
+                  </button>
+                </div>
+                <div className="ml-auto flex flex-wrap justify-end gap-2">
+                  <button
+                    type="button"
+                    className="btn-primary"
+                    onClick={askNotifications}
+                    disabled={notify === "granted" || notify === "unsupported"}
+                  >
+                    <Bell className="h-3.5 w-3.5" /> {t("notify.enable")}
+                  </button>
+                  <button type="button" className="btn-primary" onClick={() => setStep("done")}>
+                    {t("client.next")} <ArrowRight className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              </div>
+            </>
           )}
 
           {step === "done" && (
@@ -266,7 +325,7 @@ export default function ClientSetup({ onDone }: { onDone: () => void }) {
                   one line that says so. Same notice as Settings → Security. */}
               <ServerVersionNotice />
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <button type="button" className="btn-ghost" onClick={() => setStep("account")}>
+                <button type="button" className="btn-ghost" onClick={() => setStep("notifications")}>
                   <ArrowLeft className="h-3.5 w-3.5" /> {t("client.back")}
                 </button>
                 <button

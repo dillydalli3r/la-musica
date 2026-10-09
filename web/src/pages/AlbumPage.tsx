@@ -1,24 +1,35 @@
 ﻿import { Fragment, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { ChevronDown, ChevronRight, CircleAlert, Wand2, Trash2, FolderSync, FolderOpen, BarChart3, ImageUp, Image as ImageIcon, FileVideo, Disc3, CloudDownload, Sparkles, ShieldCheck, FileMusic, ListChecks, Info as InfoIcon, Loader2, Tags, Users } from "lucide-react";
+import { ChevronDown, ChevronRight, CircleAlert, Play, Wand2, Trash2, FolderSync, FolderOpen, BarChart3, ImageUp, Image as ImageIcon, FileVideo, Film, Disc3, CloudDownload, Sparkles, ListPlus, ListStart, ShieldCheck, FileMusic, ListChecks, Info as InfoIcon, Loader2, Pencil, RefreshCw, Tags, Users } from "lucide-react";
 import { api } from "../api";
 import { rescanLayout } from "../lib/layoutScan";
 import { LinkChips, LinkEditorButton } from "../components/Links";
-import { EmptyState, AdvisoryMark, albumAdvisory, DisambiguationMark, GradeBadge, PageLoading, PendingMark, pendingSummary, mediaCountryLabel } from "../components/Badges";
+import { SubtitledVideo } from "../components/SubtitledVideo";
+import { EmptyState, AdvisoryMark, albumAdvisory, CachedMark, DisambiguationMark, GradeBadge, PageLoading, PendingMark, pendingSummary, mediaCountryLabel } from "../components/Badges";
 import CoverImg, { TrackCover } from "../components/CoverImg";
 import CoverSearchModal from "../components/CoverSearchModal";
+import Description from "../components/Description";
+import DownloadButton from "../components/DownloadButton";
 import { ExportButton } from "../components/ExportDialog";
+import FavHeart from "../components/FavHeart";
 import TrackTitleCell from "../components/TrackTitleCell";
-import { trackRef } from "../lib/refs";
+import { trackRef, entityLinkClick } from "../lib/refs";
 import { invalidateLibrary } from "../lib/invalidate";
 import { auditFails } from "../lib/status";
+import { isVideoFile } from "../lib/fmt";
+import { downloadTrackVideo } from "../lib/videoDownload";
 import { SCRIPT_LABEL } from "../lib/scripts";
 import BulkTagsDialog from "../components/BulkTagsDialog";
 import Modal from "../components/Modal";
+import MoreLikeThis from "../components/MoreLikeThis";
+import OnlineRecommendations from "../components/OnlineRecommendations";
 import LockedChip from "../components/LockedChip";
+import { useLockWhy } from "../lib/locks";
 import OverflowMenu from "../components/OverflowMenu";
 import PageHeader from "../components/PageHeader";
+import StarRating from "../components/StarRating";
+import { ratingOf, useRatings, useSetRating, FOLDER_RATING_NOTE, albumWebRating, trackWebRating, webStarProps } from "../lib/ratings";
 import TagActionsMenu, { TrackActionsMenu } from "../components/TagActionsMenu";
 import StatsPanel from "../components/StatsPanel";
 import TrackDetails, { CreditsPanel, creditTagsFrom } from "../components/TrackDetails";
@@ -27,7 +38,7 @@ import { SortHeader, sortRows, toggleSort, groupByDisc, type SortState } from ".
 import { ColumnsMenu, ColumnResizer, ColFloorHolder, useFittedWidths, useColumnPrefs, useColumnWidths, useCustomColumns, customCols, customColValue, ALBUM_TRACK_COLS, ALBUM_TRACK_COL_W, ALBUM_TRACK_MIN_W, ALBUM_TRACK_PHONE_CLS, ALBUM_TRACK_TITLE_FLOOR, phoneHide, TAG_COL_W, type Col } from "../lib/columns";
 import { useI18n } from "../lib/i18n";
 import { toast, useStore } from "../store";
-import { isVideoFile, fmtTech, albumTech } from "../lib/fmt";
+import { fmtTech, albumTech } from "../lib/fmt";
 import { fmtDuration } from "../lib/fmt";
 import type { CoverResult, ExpectedTrack, Track } from "../types";
 
@@ -44,6 +55,9 @@ const SOURCE_NAMES: Record<string, string> = {
   upload: "Uploaded",
   manual: "Manual",
 };
+
+/** Whether a track file is a music video container (playable with <video>). */
+export { isVideoFile };
 
 export default function AlbumPage() {
   const { path = "" } = useParams();
@@ -70,6 +84,13 @@ export default function AlbumPage() {
     retry: false,
   });
   const stagedCoverRows = stagedCovers.data?.results ?? null;
+  // A job holding this folder (a run, an import, an organize) means these files
+  // are not playable right now: the header and every row say so BEFORE the
+  // click, in the registry's own words.
+  const albumLockWhy = useLockWhy(data?.path ?? decoded);
+  const playNow = useStore((s) => s.playNow);
+  const queue = useStore((s) => s.queue);
+  const queueAdd = useStore((s) => s.queueAdd);
   const selection = useStore((s) => s.selection);
   const setSelection = useStore((s) => s.setSelection);
   const toggleTrack = useStore((s) => s.toggleTrack);
@@ -78,6 +99,7 @@ export default function AlbumPage() {
   const [sort, setSort] = useState<SortState | null>(null);
   const [statsOpen, setStatsOpen] = useState(false);
   const [detailTrack, setDetailTrack] = useState<Track | null>(null);
+  const [videoOpen, setVideoOpen] = useState<string | null>(null);
   const [remuxing, setRemuxing] = useState(false);
   // Cover finder modal: null = closed, else the candidates it opens on (empty
   // = search from scratch, staged rows = the import's own picks).
@@ -101,6 +123,13 @@ export default function AlbumPage() {
   // the track index the user assigned it to, plus the in-flight save flag.
   const [videoAssigned, setVideoAssigned] = useState<Record<string, number>>({});
   const [videoSaving, setVideoSaving] = useState(false);
+  // The album-level "download the missing videos" run (one at a time).
+  const [videosBusy, setVideosBusy] = useState(false);
+  // album description (description.txt in the album folder): the edit buffer
+  // and one busy flag for the fetch/save/clear trio
+  const [descEditing, setDescEditing] = useState(false);
+  const [descDraft, setDescDraft] = useState("");
+  const [descBusy, setDescBusy] = useState<string | null>(null);
   // tracklist columns: visible set + drag-resized widths, persisted under the
   // SAME key the library's expanded album rows use — one tracklist, one prefs
   // set, and the tag columns the user adds here (mlo-customcols-album-tracks)
@@ -125,8 +154,10 @@ export default function AlbumPage() {
   // of a framework album are read by the panel and the picker below.
   const { t } = useI18n();
   // The marker's sentence — the same one the library row and the cards show —
-  // used by the header chip and the panel below. Null for a complete album
-  // (and until the payload arrives).
+  // used by the header chip, the panel below and as the reason the play button
+  // is off. Null for a complete album (and until the payload arrives).
+  // Named apart from `albumPending` above, which is the RATING write's
+  // in-flight flag from useSetRating — a different fact entirely.
   const pendingNote = data ? pendingSummary(data, t) : null;
 
   // Raw video files (VOB/MKV/...) in this album folder that the remuxer
@@ -137,6 +168,19 @@ export default function AlbumPage() {
     retry: false,
   });
   const rawVideos = videosData?.videos ?? [];
+
+  // Whether the album-description check grades this folder (Settings →
+  // Grading). The config is already in the app-wide cache, so this is free.
+  const { data: config } = useQuery({ queryKey: ["config"], queryFn: api.config });
+  // One GET /api/ratings per scope for the whole page (react-query dedupes it
+  // across every row) and the optimistic setters the star controls share. The
+  // header needs the ALBUM scope beside the track one: the user's verdict on
+  // the album is a different fact from the average of its tracks' ratings, and
+  // only the average is derived from the track map.
+  const { data: ratingsData } = useRatings();
+  const { setRating, pending } = useSetRating();
+  const { data: albumRatingsData } = useRatings("album");
+  const { setRating: setAlbumRating, pending: albumPending } = useSetRating("album");
 
   const convertVideos = async () => {
     setRemuxing(true);
@@ -181,6 +225,14 @@ export default function AlbumPage() {
   if (isLoading || !data) return <PageLoading label="Loading album…" />;
 
   const tracks = sortRows(data.tracks, sort);
+  // Album identity (title/artist) for the description calls, and the stored
+  // description the folder carries (description.txt).
+  const albumTitle = data.meta?.ALBUM ?? data.path.split("/").pop() ?? "";
+  const albumArtist = data.meta?.ALBUMARTIST ?? data.meta?.ARTIST ?? "";
+  const desc = data.artwork ?? null;
+  // The grading check ("Album description missing") is on by default; with it
+  // off, a missing description is not a problem and gets no hint.
+  const descGraded = config?.grade_check_album_description !== false;
   // highest disc number across the album (filename fallback included) —
   // drives the "N discs" note in the header and the Disc rows below
   const maxDisc = data.tracks.reduce((m, t) => Math.max(m, t.discnumber ?? 1), 1);
@@ -188,6 +240,15 @@ export default function AlbumPage() {
   const verdictPass = !!data.pass && !auditFails(data.audit_summary);
   const issueEntries = Object.entries(data.issues ?? {});
   const verdictTrack = (tr: Track) => !!tr.grade_pass && !auditFails(tr.audit);
+
+  // Web/digital releases hand out a YouTube music video per track; the medium
+  // (album-level tag, then the API's own field) decides whether that is
+  // offered at all.
+  const digitalMedia = /digital|web|download/i.test(`${data.media ?? ""} ${data.meta?.MEDIA ?? ""}`);
+  // YouTube downloads are switchable off (Settings → Videos) and the server
+  // refuses them there, so the album's own button says why instead of firing
+  // a search that can only come back empty.
+  const youtubeOff = config?.youtube_enabled === false;
 
   /** The track a video row defaults to: the one whose length is closest (an
    *  untagged duration leaves the select empty rather than guessing). */
@@ -234,6 +295,72 @@ export default function AlbumPage() {
     }
   };
 
+  /** Download the music video for one track from YouTube (web/
+   *  digital releases only — see `digitalMedia`), then tag it as THAT track's
+   *  video.
+   *
+   *  The whole flow lives in lib/videoDownload (`downloadTrackVideo`): the
+   *  details menu's own entry on a single track runs the SAME one, so the two
+   *  entry points cannot drift in what they ask for or in what they report.
+   *  This wrapper is only the album page's own refreshing — its payloads are
+   *  the ones that went stale — and it answers whether a video was fetched. */
+  const downloadVideo = async (tr: Track): Promise<boolean> =>
+    downloadTrackVideo(
+      {
+        path: tr.path,
+        artist: tr.tags.ARTIST || albumArtist || undefined,
+        title: tr.tags.TITLE || undefined,
+        duration: tr.tech.length || undefined,
+        tracknumber: tr.tracknumber,
+        discnumber: tr.discnumber,
+      },
+      {
+        onSaved: () => {
+          qc.invalidateQueries({ queryKey: ["videos", decoded] });
+          qc.invalidateQueries({ queryKey: ["album", decoded] });
+        },
+      }
+    );
+
+  /** Tracks of this album that have no music video yet.
+   *
+   *  A video is a track's when it carries the same TITLE — exactly what the
+   *  tag write above (and the matching panel's Save) produces — so a file
+   *  name that happens to look like a title never counts as a match. */
+  const albumVideos = data.tracks.filter((t) => t.is_video);
+  const missingVideos = data.tracks.filter((t) => {
+    const title = (t.tags.TITLE ?? "").trim().toLowerCase();
+    if (t.is_video || !title) return false;
+    return !albumVideos.some((v) => (v.tags.TITLE ?? "").trim().toLowerCase() === title);
+  });
+
+  /** Fetch this album's missing music videos, one at a time.
+   *
+   *  The SAME per-track call the details menu's video entry and the video
+   *  overlay make (lib/videoDownload), so there is one download path and one
+   *  definition of "this track's video".
+   *  Sequential on purpose: each video is a multi-hundred-megabyte download
+   *  plus a tag remux, and firing the whole album at once would put every one
+   *  of them on the same connection. */
+  const downloadMissingVideos = async () => {
+    if (!missingVideos.length) {
+      toast("Every track already has its music video");
+      return;
+    }
+    setVideosBusy(true);
+    let saved = 0;
+    try {
+      for (const [i, tr] of missingVideos.entries()) {
+        toast(`Music video ${i + 1}/${missingVideos.length}: ${tr.tags.TITLE}`);
+        if (await downloadVideo(tr)) saved++;
+      }
+    } finally {
+      setVideosBusy(false);
+      refetchVideos();
+    }
+    toast(`${saved} of ${missingVideos.length} music video(s) saved`);
+  };
+
   const runScripts = async (ids: number[]) => {
     await api.run(ids, [data.path]);
     // scripts rewrite tags in place — the album payload (tags, grading,
@@ -242,7 +369,7 @@ export default function AlbumPage() {
   };
 
   // Every button in the album's action row is the same 36px square (`.btn-icon`
-  // in index.css).
+  // in index.css) — play is the accent-filled one, everything else is quiet.
   /** The library artist page for this album's artist: by album-artist MBID
    * when tagged, else the artist folder (the album's parent directory). */
   const artistHref = data.meta?.MUSICBRAINZ_ALBUMARTISTID
@@ -251,6 +378,8 @@ export default function AlbumPage() {
 
   // Tracks of THIS album that are ticked in the global selection.
   const selectedHere = data.tracks.filter((t) => selection.tracks.includes(t.path));
+  // The track behind the open video overlay — one of the album's own files.
+  const openVideoTrack = videoOpen ? data.tracks.find((t) => t.path === videoOpen) : undefined;
 
   // Quick-select (select mode): everything on the album, or one disc's
   // tracks at a time. Selection is global, so merge / subtract by path.
@@ -264,6 +393,63 @@ export default function AlbumPage() {
   };
   const selectNoneHere = () =>
     setSelection({ tracks: selection.tracks.filter((p) => !data.tracks.some((t) => t.path === p)) });
+
+  const ratings = ratingsData?.ratings;
+  // The album's OWN rating: the user's verdict on the album, out of the album
+  // scope. Deliberately NOT derived from the tracks below.
+  const albumVerdict = ratingOf(albumRatingsData?.ratings, data?.path);
+  // The track AVERAGE, for the labelled read-out beside it: the mean over the
+  // tracks that ARE rated (an unrated track must not drag it toward zero),
+  // snapped to a half star, plus how many tracks it is over.
+  const ratedTracks = (data?.tracks ?? []).map((t) => ratingOf(ratings, t.path)).filter((v) => v > 0);
+  const trackAverage = ratedTracks.length
+    ? Math.round((ratedTracks.reduce((a, b) => a + b, 0) / ratedTracks.length) * 2) / 2
+    : 0;
+  // The ALBUM's WEB rating — script 24's ALBUMWEBRATING, read off the album's
+  // own tracks (it writes it to every one of them). A third fact beside the
+  // two above, and a different one from the tracks' own WEBRATING: it belongs
+  // to the release, so it is drawn where the album verdict is.
+  const webAlbum = albumWebRating(data?.tracks);
+
+  const queueTracks = data.tracks.map((t) => ({
+    path: t.path, file: t.file, albumPath: data.path,
+    artist: data.meta?.ALBUMARTIST ?? data.meta?.ARTIST ?? undefined,
+    album: data.meta?.ALBUM ?? undefined, title: t.tags.TITLE || undefined,
+    coverFile: t.cover_file ?? null, albumCover: data.cover_file ?? null,
+    advisory: t.tags.ITUNESADVISORY ?? null,
+  }));
+
+  /** Append the album to the queue; an empty queue just starts playing. */
+  const enqueue = (position: "next" | "end") => {
+    if (!queue.length) {
+      playNow(queueTracks);
+      return;
+    }
+    queueAdd(queueTracks, position);
+    toast(position === "next" ? `Playing ${queueTracks.length} track(s) next` : `Added ${queueTracks.length} track(s) to the queue`);
+  };
+
+  const playSelection = () => {
+    if (!selectedHere.length) return;
+    playNow(
+      selectedHere.map((t) => ({
+        path: t.path, file: t.file, albumPath: data.path,
+        artist: data.meta?.ALBUMARTIST ?? data.meta?.ARTIST ?? undefined,
+        album: data.meta?.ALBUM ?? undefined, title: t.tags.TITLE || undefined,
+        coverFile: t.cover_file ?? null, albumCover: data.cover_file ?? null,
+        advisory: t.tags.ITUNESADVISORY ?? null,
+      }))
+    );
+  };
+
+  const addSelectionToPlaylist = async () => {
+    if (!selectedHere.length) return;
+    const pls = await api.playlists();
+    const manual = pls.find((p) => p.kind === "manual");
+    const target = manual ?? (await api.createPlaylist("Library selection", "manual"));
+    await api.playlistAdd(target.id, selectedHere.map((t) => t.path));
+    toast.success(`Added ${selectedHere.length} track(s) to playlist`);
+  };
 
   /** Import genres for the whole album through the CONFIGURED chain: every
    *  source ticked in Settings → Import (or in the wizard's tray), in their
@@ -346,7 +532,7 @@ export default function AlbumPage() {
   /** Auto-import missing lyrics for every track in this album.
    *
    * One backend call per album runs the whole synced provider chain
-   * (LRCLIB → NetEase → Kugou → QQ Music → Kuwo, in
+   * (LRCLIB → NetEase → Kugou → QQ Music → Kuwo → YouTube captions, in
    * the order Settings → Lyrics sets),
    * writes per the global lyrics_format and canonicalizes exactly like
    * script 13 — the same code path the track page's button uses. */
@@ -384,6 +570,54 @@ export default function AlbumPage() {
     }
   };
 
+  /** Description writes change the album's grade as well as its text, so both
+   *  the album payload and the library listing are refreshed. */
+  const refreshDescription = () => {
+    qc.invalidateQueries({ queryKey: ["album", decoded] });
+    qc.invalidateQueries({ queryKey: ["library"] });
+  };
+
+  const fetchDescription = async () => {
+    setDescBusy("fetch");
+    try {
+      await api.albumDescriptionSave(data.path, "", albumArtist, albumTitle);
+      toast("Description fetched");
+      refreshDescription();
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setDescBusy(null);
+    }
+  };
+
+  const saveDescription = async () => {
+    setDescBusy("save");
+    try {
+      await api.albumDescriptionSave(data.path, descDraft, albumArtist, albumTitle);
+      toast("Description saved");
+      setDescEditing(false);
+      refreshDescription();
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setDescBusy(null);
+    }
+  };
+
+  const clearDescription = async () => {
+    if (!window.confirm("Remove this album's stored description?")) return;
+    setDescBusy("clear");
+    try {
+      await api.albumDescriptionClear(data.path);
+      toast("Description removed");
+      refreshDescription();
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setDescBusy(null);
+    }
+  };
+
   return (
     <>
       {/* ambient blurred album cover behind the whole page */}
@@ -399,7 +633,7 @@ export default function AlbumPage() {
           album page was the only surface that stretched to the window, so on a
           wide monitor the tracklist's own floor plus the whole of the free
           width landed in the name column — the reported "columns are way too
-          long, rows too wide". 1600 px is what Library/Artist/Trash and
+          long, rows too wide". 1600 px is what Library/Artist/Favorites and
           the rest are capped at, so the tracklist column measures the same
           here as it does there. */}
       <div className="relative z-10 p-6 space-y-5 mx-auto max-w-[1600px]">
@@ -558,13 +792,47 @@ export default function AlbumPage() {
                     onClick={() => setIssuesOpen(!issuesOpen)}
                     aria-label="Grading verdict"
                   />
-                  {/* MusicBrainz identity link: prefer the release over
-                      its group */}
+                  {/* the album's OWN rating — the user's verdict on the album,
+                      editable, and a different fact from the mean of its
+                      tracks drawn beside it. It lives in the app's store: a
+                      folder has no file to carry a RATING tag, which the
+                      tooltip says outright. */}
+                  <span className="inline-flex items-center gap-1.5" title="Your rating for the album — kept in the app's database; an album folder has no file tag">
+                    <StarRating
+                      size="lg"
+                      showValue
+                      label="Album rating"
+                      hint={`Your rating for the album: click a star's left half for a half star, click the value already set to clear it (← / → nudge, Delete clears). ${FOLDER_RATING_NOTE}`}
+                      value={albumVerdict}
+                      onChange={(v) => setAlbumRating(data.path, v)}
+                      pending={albumPending(data.path)}
+                      {...webStarProps(webAlbum)}
+                      webKind="album"
+                    />
+                    <span className="text-[11px] text-zinc-500">Album rating</span>
+                  </span>
+                  {/* the mean over the RATED tracks only — an unrated track must
+                      not drag it toward zero — labelled as an average so it can
+                      never be read as the album's own rating */}
+                  {trackAverage > 0 && (
+                    <span
+                      className="inline-flex items-center gap-1.5"
+                      title="The mean of the ratings you gave this album's tracks — not the album rating beside it"
+                    >
+                      <StarRating readOnly size="sm" value={trackAverage} />
+                      <span className="text-[11px] text-zinc-500">
+                        avg {trackAverage} from {ratedTracks.length} rated track{ratedTracks.length === 1 ? "" : "s"}
+                      </span>
+                    </span>
+                  )}
+                  {/* MusicBrainz / RateYourMusic identity links: exactly one
+                      of each — prefer the release over its group */}
                   <LinkChips
                     tags={(data.meta ?? {}) as Record<string, unknown>}
                     only={[
                       ...(data.meta?.MUSICBRAINZ_ALBUMID ? [] : ["MUSICBRAINZ_RELEASEGROUPID"]),
                       "MUSICBRAINZ_ALBUMID",
+                      "RATEYOURMUSIC_ALBUM",
                     ]}
                   />
                 </div>
@@ -620,9 +888,18 @@ export default function AlbumPage() {
                       )}
                     </div>
                     <div className="text-[11px] text-amber-200/60">{t("pending.note")}</div>
-                    {data.prefetched && !!data.prefetched.cover_candidates && (
+                    {data.prefetched && (
                       <div className="text-[11px] text-zinc-500">
-                        {data.prefetched.cover_candidates} cover candidates
+                        {[
+                          data.prefetched.artist_image && "artist image",
+                          data.prefetched.artist_description && "artist description",
+                          data.prefetched.album_description && "album description",
+                          !!data.prefetched.cover_candidates &&
+                            `${data.prefetched.cover_candidates} cover candidates`,
+                          !!(data.prefetched.links?.album || data.prefetched.links?.artist) && "links",
+                        ]
+                          .filter((x): x is string => typeof x === "string" && !!x)
+                          .join(" · ")}
                       </div>
                     )}
                   </div>
@@ -659,6 +936,32 @@ export default function AlbumPage() {
                 )}
                 {/* the album's actions, directly under the problems line */}
                 <div className="flex items-center gap-2 flex-wrap pt-2">
+                    {/* A framework album has nothing to play yet, so its play
+                        button is OFF and says why (the lock reason first: a job
+                        holding the folder is the more immediate fact). */}
+                    <span title={pendingNote?.full}>
+                      <button
+                        className={`btn-icon-primary${albumLockWhy || pendingNote ? " opacity-60" : ""}`}
+                        onClick={() => playNow(queueTracks)}
+                        disabled={!!pendingNote}
+                        title={albumLockWhy || pendingNote?.full || "Play the album from the top"}
+                        aria-label={pendingNote?.full || "Play album"}
+                      >
+                        <Play className="h-4 w-4 fill-current" />
+                      </button>
+                    </span>
+                    <FavHeart
+                      kind="album"
+                      id={data.path}
+                      mbid={data.meta?.MUSICBRAINZ_ALBUMID}
+                      className="btn-icon"
+                      iconClass="h-4 w-4"
+                    />
+                    <DownloadButton
+                      paths={data.tracks.map((t) => t.path)}
+                      iconOnly
+                      emptyReason="Nothing to download — this album has no tracks"
+                    />
                     <ExportButton
                       paths={data.tracks.map((t) => t.path)}
                       seconds={data.tracks.reduce((s, t) => s + (t.tech?.length ?? 0), 0)}
@@ -673,6 +976,32 @@ export default function AlbumPage() {
                       current={(data.meta ?? {}) as Record<string, unknown>}
                       iconOnly
                     />
+                    {/* One album-level entry to the video download, for the
+                        whole release: a row's "…" menu and the video overlay
+                        each fetch a SINGLE track's video, and a digital album
+                        is missing every one of them at once. Same per-track
+                        call underneath — one shared implementation, see
+                        lib/videoDownload and downloadMissingVideos — so
+                        nothing here is a second download path. */}
+                    {digitalMedia && (
+                      <button
+                        className="btn-icon"
+                        onClick={downloadMissingVideos}
+                        disabled={videosBusy || youtubeOff || !missingVideos.length}
+                        title={
+                          youtubeOff
+                            ? "YouTube downloads are off (Settings → Videos)"
+                            : !missingVideos.length
+                              ? "No track here is missing a music video"
+                              : `Download ${missingVideos.length} missing music video${
+                                  missingVideos.length === 1 ? "" : "s"
+                                } from YouTube and tag ${missingVideos.length === 1 ? "it" : "them"} as this album's tracks`
+                        }
+                        aria-label="Download missing music videos"
+                      >
+                        {videosBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Film className="h-4 w-4" />}
+                      </button>
+                    )}
                     <TagActionsMenu
                       paths={data.tracks.map((t) => t.path)}
                       albumPath={data.path}
@@ -687,6 +1016,12 @@ export default function AlbumPage() {
               buttonClass="btn-icon"
               buttonTitle="All album actions"
               sections={[
+                {
+                  items: [
+                    { label: "Play next", icon: ListStart, onClick: () => enqueue("next") },
+                    { label: "Add to queue", icon: ListPlus, onClick: () => enqueue("end") },
+                  ],
+                },
                 {
                   title: "Album",
                   items: [
@@ -751,6 +1086,125 @@ export default function AlbumPage() {
           </div>
         </div>
 
+      {/* the folder's description.txt — fetch a Wikipedia summary or write
+          your own; it is one of the grading checks, so its absence is called
+          out here rather than only in the issue list */}
+      <div className="section">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Description</span>
+          {desc?.description_source && (
+            <span className="text-[10px] text-zinc-600">
+              {desc.description_url ? (
+                <a
+                  href={desc.description_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="hover:text-accent-soft underline decoration-dotted"
+                  title={desc.description_url}
+                >
+                  {SOURCE_NAMES[desc.description_source] ?? desc.description_source}
+                </a>
+              ) : (
+                SOURCE_NAMES[desc.description_source] ?? desc.description_source
+              )}
+            </span>
+          )}
+          {!desc?.description && descGraded && (
+            <span
+              className="text-[10px] text-amber-400/80 border border-amber-900/40 bg-amber-950/20 rounded px-1.5 py-0.5"
+              title="The album-description grading check fails while description.txt is missing (Settings → Grading)"
+            >
+              needs a description
+            </span>
+          )}
+          {/* Every description action sits in one boxed "…" at the block's
+              top right — the same square the columns chooser wears over a
+              table, so the header row stays two words and a chip. */}
+          <div className="ml-auto">
+            <OverflowMenu
+              buttonClass="p-1.5 rounded-lg border border-border bg-panel/60 text-zinc-500 hover:text-white hover:bg-raise transition-colors"
+              buttonTitle="Description actions"
+              sections={[
+                {
+                  items: [
+                    {
+                      label: descBusy === "fetch" ? "Fetching…" : "Fetch description",
+                      icon: RefreshCw,
+                      onClick: fetchDescription,
+                      disabled: !!descBusy,
+                      title: "Fetch the album description from the configured sources (Wikipedia first)",
+                    },
+                    {
+                      label: "Edit description",
+                      icon: Pencil,
+                      onClick: () => {
+                        setDescDraft(desc?.description_text ?? "");
+                        setDescEditing(true);
+                      },
+                      title: "Write or edit the description yourself",
+                    },
+                    {
+                      label: descBusy === "clear" ? "Removing…" : "Remove description",
+                      icon: Trash2,
+                      danger: true,
+                      hidden: !desc?.description,
+                      onClick: clearDescription,
+                      disabled: !!descBusy,
+                      title: "Remove the stored description",
+                    },
+                  ],
+                },
+              ]}
+            />
+          </div>
+        </div>
+        {descEditing ? (
+          <div className="mt-2.5 space-y-2">
+            <textarea
+              className="input w-full h-40 text-sm leading-relaxed"
+              value={descDraft}
+              onChange={(e) => setDescDraft(e.target.value)}
+              placeholder={`About ${albumTitle}…`}
+            />
+            <div className="flex items-center gap-2 flex-wrap">
+              <button
+                className="btn-primary !py-1 text-xs"
+                onClick={saveDescription}
+                disabled={descBusy === "save" || !descDraft.trim()}
+              >
+                {descBusy === "save" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null} Save
+              </button>
+              <button className="btn-ghost !py-1 text-xs" onClick={() => setDescEditing(false)}>
+                Cancel
+              </button>
+              <span className="text-[10px] text-zinc-600">
+                Stored as description.txt in the album folder — counts for the album grade.
+              </span>
+            </div>
+          </div>
+        ) : desc?.description_text ? (
+          <Description key={data.path} text={desc.description_text} />
+        ) : (
+          <div className="mt-2 text-xs text-zinc-500">
+            No description yet —{" "}
+            <button className="text-accent-soft hover:underline" onClick={fetchDescription} disabled={!!descBusy}>
+              fetch one
+            </button>{" "}
+            or{" "}
+            <button
+              className="text-accent-soft hover:underline"
+              onClick={() => {
+                setDescDraft("");
+                setDescEditing(true);
+              }}
+            >
+              write your own
+            </button>
+            .
+          </div>
+        )}
+      </div>
+
       {statsOpen && (
         <StatsPanel
           title={data.meta?.ALBUM ?? data.path.split("/").pop() ?? "album"}
@@ -775,6 +1229,26 @@ export default function AlbumPage() {
             .filter(([, files]) => files.includes(detailTrack.file))
             .map(([text]) => text)}
         />
+      )}
+
+      {videoOpen && (
+        <div className="fixed inset-0 z-50 bg-black/85 flex items-center justify-center p-6" onClick={() => setVideoOpen(null)}>
+          <div className="w-full max-w-4xl" onClick={(e) => e.stopPropagation()}>
+            <SubtitledVideo path={videoOpen} className="w-full max-h-[80vh] rounded-lg border border-border bg-black" />
+            <div className="flex justify-end items-center gap-2 mt-2">
+              {digitalMedia && openVideoTrack?.tags.TITLE && (
+                <button
+                  className="btn-ghost !py-1"
+                  onClick={() => downloadVideo(openVideoTrack)}
+                  title={`Download ${openVideoTrack.tags.TITLE} from YouTube`}
+                >
+                  <Film className="h-3.5 w-3.5" /> Download music video
+                </button>
+              )}
+              <button className="btn-ghost !py-1" onClick={() => setVideoOpen(null)}>Close</button>
+            </div>
+          </div>
+        </div>
       )}
 
       {coverInfoOpen && (
@@ -832,6 +1306,12 @@ export default function AlbumPage() {
             {selectedHere.length} track{selectedHere.length === 1 ? "" : "s"} selected
           </span>
           <div className="ml-auto flex gap-1.5 flex-wrap">
+            <button className="btn-primary !py-1 text-xs" onClick={playSelection} disabled={selectedHere.length === 0}>
+              <Play className="h-3.5 w-3.5" /> Play selection
+            </button>
+            <button className="btn-ghost !py-1 text-xs" onClick={addSelectionToPlaylist} disabled={selectedHere.length === 0}>
+              Playlist
+            </button>
             <button className="btn-ghost !py-1 text-xs" onClick={() => setTagsDialogOpen(true)} disabled={selectedHere.length === 0} title="Bulk remove or set tags on the selected tracks">
               Tags
             </button>
@@ -997,9 +1477,20 @@ export default function AlbumPage() {
                   {g.tracks.map((tr) => (
               <tr
                 key={tr.path}
-                className={`table-row group${selectMode ? " cursor-pointer" : ""}`}
-                title={selectMode ? "Click to select" : undefined}
-                onClick={selectMode ? () => toggleTrack(tr.path) : undefined}
+                className="table-row group cursor-pointer"
+                title={selectMode ? "Click to select" : "Click to play"}
+                onClick={selectMode ? () => toggleTrack(tr.path) : () =>
+                  playNow(
+                    tracks.map((t) => ({
+                      path: t.path, file: t.file, albumPath: data.path,
+                      artist: data.meta?.ALBUMARTIST ?? data.meta?.ARTIST ?? undefined,
+                      album: data.meta?.ALBUM ?? undefined, title: t.tags.TITLE || undefined,
+                      coverFile: t.cover_file ?? null, albumCover: data.cover_file ?? null,
+                      advisory: t.tags.ITUNESADVISORY ?? null,
+                    })),
+                    tracks.findIndex((t) => t.path === tr.path)
+                  )
+                }
               >
                 {selectMode && (
                   <td className="td pr-0" onClick={(e) => e.stopPropagation()}>
@@ -1034,15 +1525,26 @@ export default function AlbumPage() {
                       stackOnPhone
                       trailing={
                         <>
+                          <span className="shrink-0" onClick={(e) => e.stopPropagation()}>
+                            {/* No phone class here: FavHeart's own box already
+                                carries `tap-hit`, so its 26 px square is a
+                                44 px tap target below `md`. The stars keep the
+                                app's star geometry (see StarRating); their strip
+                                is 70 px wide as it is. */}
+                            <FavHeart kind="track" id={tr.path} mbid={tr.tags.MUSICBRAINZ_TRACKID} iconClass="h-3.5 w-3.5" title={undefined} revealOnHover />
+                          </span>
                           {/* The "…": what this ONE file can be asked to do —
                               tagging, its scripts (lyrics among them), credits
-                              and the stored readout. Hover-revealed: a row's
-                              actions are not worth permanent space. `tap-hit`
-                              keeps it a 44 px target on a phone, where the row
-                              is the whole surface and this button is 24 px
-                              across. */}
+                              and the stored readout. Hover-revealed like the
+                              heart beside it: a row's actions are not worth
+                              permanent space. `tap-hit` for the same reason the
+                              heart has it: the row is the phone's whole surface
+                              and this button is 24 px across. */}
                           <span className="row-hover shrink-0" onClick={(e) => e.stopPropagation()}>
                             <TrackActionsMenu path={tr.path} releaseMbid={tr.tags.MUSICBRAINZ_ALBUMID} buttonClass="!p-1 text-zinc-500 hover:text-white tap-hit" />
+                          </span>
+                          <span className="shrink-0" onClick={(e) => e.stopPropagation()}>
+                            <StarRating size="sm" webReadout="slot" value={ratingOf(ratings, tr.path)} onChange={(v) => setRating(tr.path, v)} pending={pending(tr.path)} {...webStarProps(trackWebRating(tr.tags))} />
                           </span>
                         </>
                       }
@@ -1057,15 +1559,16 @@ export default function AlbumPage() {
                            in `title` (the rule a clip lives by here); `md` and
                            up wrap as before. */
                         className="hover:text-accent-soft break-words min-w-0 max-md:line-clamp-2"
-                        title={tr.tags.TITLE ?? tr.file}
+                        title={`${tr.tags.TITLE ?? tr.file} · Click to play · Ctrl-click to open track page`}
+                        onClick={(e) => entityLinkClick(e, () => navigate(trackRef(tr)))}
                       >
                         {tr.tags.TITLE ?? tr.file}
                       </Link>
                       {/* The marks that describe the FILE, directly beside the
                           name they belong to — the EXPLICIT/CLEAN badge first,
                           because it is the one a reader looks for by the title
-                          (the row's actions are in the fixed slot on the
-                          right; see TrackTitleCell). */}
+                          (the rating and the row's actions are in the fixed
+                          slot on the right; see TrackTitleCell). */}
                       <AdvisoryMark value={tr.tags.ITUNESADVISORY} />
                       <LockedChip path={tr.path} />
                       {!!tr.issues?.length && (
@@ -1081,9 +1584,26 @@ export default function AlbumPage() {
                         </button>
                       )}
                       <GradeBadge pass={verdictTrack(tr)} size="sm" />
+                      <CachedMark path={tr.path} />
                       {(tr.is_video || isVideoFile(tr.file)) && (
-                        <FileVideo className="h-3.5 w-3.5 text-zinc-500 shrink-0" />
+                        <button
+                          className="text-zinc-500 hover:text-white shrink-0"
+                          title="Watch music video"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setVideoOpen(tr.path);
+                          }}
+                        >
+                          <FileVideo className="h-3.5 w-3.5" />
+                        </button>
                       )}
+                      {/* The per-row film flyout is GONE: downloading this
+                          track's music video lives in the row's own "…" menu
+                          (TrackActionsMenu → Files → "Download music video"),
+                          so the title cell keeps only what DESCRIBES the file
+                          and one actions menu. The album header's film button
+                          (the whole release's missing videos) and the video
+                          overlay's own button while a video plays both stay. */}
                     </TrackTitleCell>
                   </td>
                 )}
@@ -1151,6 +1671,20 @@ export default function AlbumPage() {
         />
       )}
 
+      {/* TWO shelves side by side, each saying where its rows came from: what
+          the LOCAL scorer ranks closest to this album (this library's own
+          tags), and what the online providers suggest for it. The online shelf
+          is its own request, so the page is usable before it lands. */}
+      <div className="grid gap-4 lg:grid-cols-2 items-start">
+        <MoreLikeThis kind="album" id={decoded} />
+        <OnlineRecommendations
+          kind="albums"
+          seedKind="album"
+          seedMbid={data.meta?.MUSICBRAINZ_RELEASEGROUPID ?? data.meta?.MUSICBRAINZ_ALBUMID ?? ""}
+          seedName={albumTitle}
+          seedArtist={albumArtist}
+        />
+      </div>
       </div>
 
     </>

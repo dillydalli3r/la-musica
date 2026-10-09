@@ -19,7 +19,7 @@ from .subproc import run_tool
 from .paths import (
     VALID_EXTENSIONS, ALL_IMAGE_EXTS, LOSSLESS_IMAGE_EXTS, CONVERTIBLE_EXTENSIONS,
     JPEG_QUALITY_MARKER, PNG_OPTIMIZATION_LEVEL, LIB_AUDIO_EXTS,
-    tools_dir,
+    library_root, tools_dir,
 )
 from .stats import (
     new_stats, _make_pbar, _pbar_skip, _pbar_update, _diff_bytes,
@@ -28,6 +28,50 @@ from .stats import (
 )
 from .tools import detect_all_tools, _version_meets
 from .ui import log, fmt_size, print_header, c, Color
+
+def _artist_image_stems():
+    """The app's artist-image stems.
+
+    mlo.artistdata owns what counts as an artist image (ARTIST_IMAGE_STEMS);
+    asking it here keeps this pass from becoming a second list that can drift
+    from the one has_image() reads.
+    """
+    try:
+        from .artistdata import ARTIST_IMAGE_STEMS
+        return tuple(ARTIST_IMAGE_STEMS)
+    except Exception:
+        return ("artist",)
+
+
+def _artist_image_guard(music_folder):
+    """A predicate: True when an image is artist artwork, never a cover.
+
+    Artist artwork lives directly in an artist folder — ``<library>/Artists/
+    <Artist>/artist.jpg``, the one place has_image() looks. The cover-rename
+    map ranks the single best image of every folder and renames it to
+    cover.*, so an artist folder's only image won that ranking and became
+    ``cover.jpg``: the artist page and the artist-image grade then reported
+    the image as missing, with the file renamed out from under them. The
+    app's own stems cover the name; the FOLDER rule covers an artist image
+    the library holds in another container (``artist.webp``), which script 19
+    converts rather than renames.
+    """
+    stems = _artist_image_stems()
+    root = library_root(music_folder)
+    root_key = os.path.normcase(os.path.normpath(root)) if root else None
+
+    def _is_artist_image(path):
+        if os.path.splitext(os.path.basename(path))[0].lower() in stems:
+            return True
+        if not root_key:
+            return False
+        folder = os.path.normcase(os.path.normpath(os.path.dirname(path)))
+        # The library root itself, or one level under it (an artist folder).
+        if folder == root_key:
+            return True
+        return os.path.normcase(os.path.normpath(os.path.dirname(folder))) == root_key
+
+    return _is_artist_image
 
 
 def _exif_transposed(img):
@@ -2498,10 +2542,14 @@ def run_process_images(config):
     # name; every other image keeps its own basename. Otherwise front/back/
     # booklet scans would all write to the same cover.* file and clobber
     # each other (losing every image but the last).
+    # Artist artwork is never a folder's cover: see _artist_image_guard.
+    _is_artist_image = _artist_image_guard(config.get("music_folder"))
     cover_map = {}
     if rename_to_cover:
         groups = {}
         for f in files:
+            if _is_artist_image(f):
+                continue
             groups.setdefault(os.path.dirname(f), []).append(f)
         for folder, group in groups.items():
             cover_map[folder] = max(group, key=_cover_rank)
@@ -2811,11 +2859,14 @@ def run_process_images(config):
             # lose the per-track mapping. Its stem matching a track's means
             # it is never a candidate, so a folder holding only sidecars
             # (the common single-track release) keeps every one of them.
+            # Artist artwork in an artist folder is not a candidate either:
+            # renaming it to cover.* is what made has_image() report the
+            # artist image as missing.
             track_stems = {os.path.splitext(n)[0].lower() for n in names
                            if n.lower().endswith(LIB_AUDIO_EXTS)}
             group = [f for f in group
                      if os.path.splitext(os.path.basename(f))[0].lower()
-                     not in track_stems]
+                     not in track_stems and not _is_artist_image(f)]
             if not group:
                 continue
 

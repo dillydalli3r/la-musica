@@ -1,7 +1,7 @@
 """ONE process-wide ``httpx.Client`` for the app's provider calls.
 
-Every provider call in :mod:`server.integrations`, :mod:`server.discovery`
-and :mod:`server.artcache` used to build its
+Every provider call in :mod:`server.integrations`, :mod:`server.discovery`,
+:mod:`server.streaming_playlists` and :mod:`server.artcache` used to build its
 own client — either explicitly, or implicitly through the module-level
 ``httpx.get``/``httpx.post`` helpers, which construct a client and close it
 again per call. Constructing one is not free: it builds an ``ssl.SSLContext``

@@ -38,22 +38,25 @@ const VIEWPORTS = [
 
 /* Every route the shell can reach WITHOUT any data in it, plus (below) the ones
  * a phone user reaches from a list. The tail of this list used to be missing —
- * `/equalizer`, `/checks`, `/in-progress`, and every entity page
- * (`/artist/:path`, `/album/:path`, `/track/:path`) — and a blind spot there
- * is exactly where a page ships a row that never folds: nothing overflows,
- * nothing scrolls sideways and no word is crushed, so a geometry sweep that
- * never opened the route could not have seen it. */
+ * `/equalizer`, `/charts`, `/recommended`, `/discover`, `/checks`,
+ * `/in-progress`, and every entity page (`/artist/:path`, `/album/:path`,
+ * `/track/:path`, `/playlist/:id`) — and that blind spot is exactly where the
+ * playlist hero shipped a row that never folded: 224 px of mosaic beside the
+ * title at 390 px, with nothing overflowing, nothing scrolling sideways and no
+ * word crushed, so a geometry sweep that never opened the route could not have
+ * seen it. */
 const ROUTES = [
-  "/", "/library", "/browse", "/genres", "/trash", "/import", "/export",
-  "/optimize", "/grading", "/dependencies", "/settings", "/setup",
-  "/equalizer", "/checks", "/in-progress",
+  "/", "/library", "/genres", "/favorites/tracks", "/downloads", "/trash",
+  "/playlists", "/import", "/export", "/optimize", "/grading",
+  "/dependencies", "/settings", "/donations", "/setup", "/equalizer", "/charts",
+  "/recommended", "/discover", "/checks", "/in-progress",
 ];
 
 /* The entity routes only exist against a library that HAS the row, so they are
  * discovered from the running server instead of hard-coded: one artist, one
- * album and one track is all it takes, and a server with no library contributes
- * none of them. `hero` marks the routes whose page header is the shared
- * `.hero-flat` block — the fold section below measures those. */
+ * album, one track and one playlist is all it takes, and a server with no
+ * library contributes none of them. `hero` marks the routes whose page header
+ * is the shared `.hero-flat` block — the fold section below measures those. */
 async function entityRoutes() {
   const out = [];
   const get = async (path) => {
@@ -74,6 +77,11 @@ async function entityRoutes() {
     if (album) out.push({ route: `/album/${encodeURIComponent(album.path)}`, hero: true });
     if (track) out.push({ route: `/track/${encodeURIComponent(track.path)}`, hero: false });
   } catch { /* no library on this server: the static routes are all there is */ }
+  try {
+    const body = await get("/api/playlists");
+    const first = (Array.isArray(body) ? body : body.playlists ?? [])[0];
+    if (first?.id != null) out.push({ route: `/playlist/${first.id}`, hero: true });
+  } catch { /* no playlists yet */ }
   return out;
 }
 
@@ -131,15 +139,31 @@ const settleBox = async (el) => {
  * its class list, whichever identifies it; `h` is the measured painted height
  * (px) at 390 wide. */
 const SMALL_AT_PHONE = {
+  "/artist": [
+    { match: "look for one or upload your own", h: 16,
+      why: "prose action inside the 'No artist image yet — …' sentence: a 44px box would re-flow the paragraph it is a word of" },
+    { match: "fetch one", h: 16,
+      why: "prose action inside the description sentence (same paragraph as 'write your own')" },
+    { match: "write your own", h: 16,
+      why: "prose action inside the description sentence" },
+  ],
   "/album": [
     { match: "inline-flex items-center gap-1 cursor-pointer", h: 20,
       why: "SortHeader's table-head button: a 44px box would overlap the neighbouring column's sort target in the fixed table" },
     { match: "!p-1 text-zinc-500 hover:text-white", h: 20,
       why: "a track row's own actions button: rows are ~30px tall, so an expanded target would overlap the rows above and below" },
+    { match: "Rate ", h: 20,
+      why: "the rating strip's half-star zones (two per star, one for a half and one for a whole): expanded targets would overlap each other and make a half-tap ambiguous" },
     { match: "text-[9px] text-red-400/70", h: 14,
       why: "a tag-issue badge in a table cell: the badges sit a few px apart, so an expanded target would steal its neighbour's taps" },
+    { match: "fetch one", h: 16,
+      why: "prose action inside the description sentence" },
+    { match: "write your own", h: 16,
+      why: "prose action inside the description sentence" },
   ],
   "/track": [
+    { match: "Seek to", h: 16,
+      why: "a lyrics line's seek glyph, one per line: a 44px box per glyph would triple the height of a 100-line sheet" },
     { match: "Add line after", h: 14,
       why: "lyrics line glyph, flush against the remove glyph beside it (overlapping targets would mis-tap)" },
     { match: "Remove line", h: 14,
@@ -156,18 +180,18 @@ function smallAllowedFor(route) {
 
 /* ONE PAGE'S HERO, measured in the page — the fold, not the overflow.
  *
- * The album and artist heroes are the same two-part block: a cover and the
- * identity beside it, which folds to a column below `sm`. A hero without that
- * fold — `flex items-start gap-5` around a fixed `h-56 w-56` mosaic — is
- * invisible to every other rule here: at 390 px nothing overflows, nothing
- * scrolls sideways and no word is crushed; the identity block is simply
- * squeezed to ~90 px beside a 224 px tile. So the assertion is the fold itself:
- * stacked at 390 (cover above the identity, the identity at the page's own left
- * edge and width) and side by side at 1440.
+ * The album, artist and playlist heroes are the same two-part block: a cover
+ * and the identity beside it, which folds to a column below `sm`. The playlist
+ * hero shipped WITHOUT that fold — `flex items-start gap-5` around a fixed
+ * `h-56 w-56` mosaic — and nothing else here could see it: at 390 px nothing
+ * overflowed, nothing scrolled sideways and no word was crushed; the identity
+ * block was simply squeezed to ~90 px beside a 224 px tile. So the assertion is
+ * the fold itself: stacked at 390 (cover above the identity, the identity at
+ * the page's own left edge and width) and side by side at 1440.
  *
  * The row is found structurally — the hero's first div child that holds the two
  * halves — so it survives class renames, which is the point: this measures the
- * SHAPE the pages share, not one page's spelling of it. */
+ * SHAPE the three pages share, not one page's spelling of it. */
 const FOLD_MEASURE = `(() => {
   const hero = document.querySelector(".hero-flat");
   if (!hero) return { found: false };
@@ -191,16 +215,16 @@ const FOLD_MEASURE = `(() => {
  * keeps the centred panel above it. Both forms have to fit, and the desktop
  * one has to stay the desktop one.
  * Two dialogs, reachable without any library data: the shortcut sheet (the `?`
- * binding, on every route) and the equalizer's "Import APO" form — a header, a
- * field and a two-button footer, which is the shape every other dialog in the
- * app shares. */
+ * binding, on every route) and Browse's "Save as smart playlist" form — a
+ * header, a field and a two-button footer, which is the shape every other
+ * dialog in the app shares. */
 const DIALOGS = [
   { name: "shortcuts dialog", route: "/", hint: "?", open: (page) => page.keyboard.press("?") },
   {
     name: "form dialog",
-    route: "/equalizer",
-    hint: "Import APO",
-    open: (page) => page.locator('.btn:has-text("Import APO")').first().click(),
+    route: "/browse",
+    hint: "Save as smart playlist",
+    open: (page) => page.locator('.btn:has-text("Save as smart playlist")').first().click(),
   },
 ];
 
@@ -286,8 +310,8 @@ const MEASURE = `(() => {
      * sampled point by point outwards from the centre, not at one edge. The
      * difference matters: a neighbour that the layout wraps over the edge of an
      * expanded target covers ONE point and the control still answers for the
-     * ~40px around its centre (measured on the album page, where two small
-     * controls sit close together in one row), while a hit area that is mostly
+     * ~40px around its centre (measured on the album page, where the rating
+     * row sits 20px under the grade dot), while a hit area that is mostly
      * stolen measures small and is reported. An ANCESTOR is deliberately not
      * counted as answering: a tap that lands on the parent's background does
      * not reach the control, and counting it would hand every tiny control in a
@@ -553,7 +577,8 @@ const MEASURE = `(() => {
 
     // The hero fold (see FOLD_MEASURE), at the two widths that decide it: a
     // phone stacks the cover above the identity, a desktop puts them side by
-    // side. Every hero route must answer both the same way.
+    // side. Every hero route must answer both the same way — the album and
+    // artist heroes are the idiom the playlist hero had to be brought onto.
     if (vp.width === 390 || vp.width === 1440) {
       for (const e of entities.filter((x) => x.hero)) {
         const label = `${vp.name} ${e.route} hero`;
@@ -581,8 +606,8 @@ const MEASURE = `(() => {
               Math.abs(m.cover.top - m.body.top) <= 6,
               `cover.top ${m.cover.top}, identity.top ${m.body.top}`);
             /* No tile-SIZE assertion here on purpose: the artist hero keeps its
-             * 160px tile at every width (the album hero grows to 224 from `sm`
-             * up), and the shape under test is the FOLD — the tile
+             * 160px tile at every width (the album and playlist heroes grow to
+             * 224 from `sm` up), and the shape under test is the FOLD — the tile
              * being *smaller* than a phone tile is the regression worth naming,
              * and that is checked on the phone pass above. */
             const phone = phoneCoverWidth[e.route];

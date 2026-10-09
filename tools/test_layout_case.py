@@ -14,11 +14,9 @@ pins the three things that are easy to get wrong:
     name that is not actually correct),
   * the scan alone moves nothing.
 
-The second half covers the apply phase (script 20,
-`mlo.layout.run_optimize_layout`, driving the engine helpers the removed panel
-routes also reached — `mlo.layout.apply_fixes`, `mlo.layout.empty_artist`,
-`mlo.paths.trash_path`): the canonical spelling is restored on an artist
-folder, an album folder and a file; audio loose in an artist folder is moved into the album
+The second half covers the apply phase (`POST /api/library/layout/apply`,
+script 20): the canonical spelling is restored on an artist folder, an album
+folder and a file; audio loose in an artist folder is moved into the album
 folder its own tags name; an album-less artist folder goes to the Trash with
 its origin recorded; `layout_apply: false` leaves everything alone; and a run
 with targets touches only the target's subtree.
@@ -163,6 +161,21 @@ album("Artists/Files/My Album", tags("Files", "My Album"),
 with open(os.path.join(MF, "Artists", "Good", "Good Album", "notes.txt"), "wb") as f:
     f.write(b"junk")                                                  # stray_file
 
+# A NUMBERED COPY of the album's description beside the canonical one — the
+# duplicate the owner found three of in their own library ("description (2).txt").
+# The app's writers put the description in the staging folder AND the album
+# folder an import prepared, and the organizer's leftover sweep used to carry
+# the second copy in under a " (2)" name; the scan used to SKIP it (the report
+# said issues: []), so nothing could ever remove it. It is its own row now, with
+# a trash fix — the canonical file is what every reader opens, so the copy is
+# dead weight.
+DUP_ALBUM = os.path.join(MF, "Artists", "Dup", "Dup Album")
+album("Artists/Dup/Dup Album", tags("Dup", "Dup Album"))
+with open(os.path.join(DUP_ALBUM, "description.txt"), "w", encoding="utf-8") as f:
+    f.write("the album's own description\n")
+with open(os.path.join(DUP_ALBUM, "description (2).txt"), "w", encoding="utf-8") as f:
+    f.write("the album's own description\n")
+
 # The two rows the apply must NEVER touch: a foreign folder in the music root
 # that holds audio (nothing can say where its contents belong, so it is
 # reported and left) and a hidden folder inside Artists/ (a tool's marker — a
@@ -288,6 +301,21 @@ ok("wrong_case" not in {i["kind"] for i in issues
                         if i["path"] in ("Artists/Good/Good Album", "Artists/Caps/Empty")},
    "the untouched issue kinds did not gain rows of their own")
 
+print("== a duplicate description is its own row, and removable ==")
+sc = [i for i in issues if i["kind"] == "sidecar_copy"]
+ok(res["counts"].get("sidecar_copy") == 1
+   and [i["path"] for i in sc] == ["Artists/Dup/Dup Album/description (2).txt"],
+   f"the numbered copy beside the canonical description is reported "
+   f"({[i['path'] for i in sc]})")
+ok(bool(sc[0]["fix"]) and sc[0]["fix"].get("action") == "trash",
+   f"…with a trash fix — the canonical file is what every reader opens, so the "
+   f"copy can be removed ({sc[0]['fix']})")
+ok("beside" in sc[0]["detail"] and "description (2).txt" in sc[0]["detail"]
+   and "description.txt" in sc[0]["detail"]
+   and "duplicate" in sc[0]["hint"].lower(),
+   f"…and the row names the file it duplicates ({sc[0]['detail']} / "
+   f"{sc[0]['hint']})")
+
 print("== empty artist (an artist folder with no album) ==")
 ea = [i for i in issues if i["kind"] == "empty_artist"]
 ok(res["counts"].get("empty_artist") == 1
@@ -314,20 +342,15 @@ g = grade_artist(SOLO, {})
 ok([i["code"] for i in g["issues"]] == ["ARTIST_EMPTY"] and g["pass"] is False,
    f"grade_artist fails it with ARTIST_EMPTY ({g['issues']})")
 g2 = grade_artist(os.path.join(MF, "Artists", "Good"), {})
-ok("ARTIST_EMPTY" not in [i["code"] for i in g2["issues"]] and g2["checks"] == 0,
-   f"and an artist that holds an album is not failed for the folder — no "
-   f"album-level checks run on it ({g2['checks']} checks, {[i['code'] for i in g2['issues']]})")
+ok("ARTIST_EMPTY" not in [i["code"] for i in g2["issues"]] and g2["checks"] == 2,
+   f"and an artist that holds an album is graded on its own artefacts, not "
+   f"failed for the folder ({g2['checks']} checks, {[i['code'] for i in g2['issues']]})")
 
 print("== removing an empty artist goes through the Trash ==")
-# The panel's route is gone; the engine helpers it called are the ones script
-# 20's apply reaches too. `empty_artist` is the guard (it re-derives the
-# finding instead of trusting the caller) and `mlo.paths.trash_path` is the
-# removal — a move into the app's Trash, never a delete.
-from mlo import layout as layoutmod  # noqa: E402
 BIN = os.path.join(MF, ".mlo", "trash")
-ok(layoutmod.empty_artist(SOLO),
-   "the engine's own guard agrees the folder is an empty artist")
-dest = pathmod.trash_path(SOLO, MF)
+r = _client.post("/api/library/layout/remove-empty-artist", json={"path": SOLO})
+ok(r.status_code == 200, f"the route accepts it ({r.status_code}: {r.text[:160]})")
+dest = str(r.json().get("trash") or "")
 ok(not os.path.exists(SOLO), "the artist folder is gone from Artists/")
 ok(os.path.isdir(dest)
    and os.path.normcase(dest).startswith(os.path.normcase(BIN)),
@@ -344,12 +367,13 @@ ok(str(entries.get(os.path.basename(dest), {}).get("origin", "")).replace("\\", 
    == SOLO.replace("\\", "/"),
    f"its origin is recorded, so the Trash page can put it back ({manifest})")
 
-# The guards: the finding is re-derived from the folder, not taken on trust.
+# The guards: the route re-derives the finding instead of trusting the panel.
 for path, what in ((os.path.join(MF, "Artists", "Good"), "an artist with an album"),
                    (os.path.join(MF, "Artists", "Loose"), "a folder holding audio"),
                    (MF, "the music folder itself")):
-    ok(not layoutmod.empty_artist(path),
-       f"{what} is refused, not moved")
+    r2 = _client.post("/api/library/layout/remove-empty-artist", json={"path": path})
+    ok(r2.status_code == 400,
+       f"{what} is refused, not moved ({r2.status_code}: {r2.text[:120]})")
 ok(os.path.isdir(os.path.join(MF, "Artists", "Good"))
    and os.path.isdir(os.path.join(MF, "Artists", "Loose")),
    "and both are still on disk")
@@ -384,10 +408,9 @@ with open(os.path.join(NOBODY, "artist.jpg"), "wb") as f:
     f.write(b"x")
 
 print("== apply fixes ==")
-# Script 20's apply half, driven the way the runner drives it (it scans and
-# settles in one pass): apply_fixes returns the report with one row per
-# outcome, which is what the panel used to render.
-res = layoutmod.apply_fixes({"music_folder": MF, "naming_script": SCRIPT})
+r = _client.post("/api/library/layout/apply")
+ok(r.status_code == 200, f"the apply route accepts it ({r.status_code}: {r.text[:160]})")
+res = r.json()
 fixes = {f["path"]: f for f in res.get("fixes", [])}
 
 ok(stored(os.path.join(MF, "Artists"), "Lower")
@@ -408,8 +431,8 @@ ok(not os.path.exists(NOBODY),
 
 # The counts, and the rows: what is settled leaves `issues`, what may not move
 # stays — with its reason.
-ok(res.get("fixed") == 7 and res.get("fix_failed") == 0,
-   f"seven fixes, none failed (got fixed={res.get('fixed')} failed={res.get('fix_failed')})")
+ok(res.get("fixed") == 8 and res.get("fix_failed") == 0,
+   f"eight fixes, none failed (got fixed={res.get('fixed')} failed={res.get('fix_failed')})")
 ok(res.get("skipped") == 2
    and sorted(res["counts"]) == ["hidden_folder", "unexpected_folder"],
    f"the two rows nothing may act on are still reported — the foreign folder "
@@ -434,6 +457,16 @@ stray_dest = binned("notes.txt")
 ok(not os.path.exists(stray), "the stray file is gone from the album")
 ok(stray_dest and open(stray_dest, "rb").read() == b"junk",
    f"…and it is in the Trash, byte for byte ({stray_dest})")
+# The duplicate description: the copy goes, the canonical stays — removing the
+# wrong one would leave the album with no description at all.
+dup = os.path.join(MF, "Artists", "Dup", "Dup Album", "description (2).txt")
+dup_dest = binned("description (2).txt")
+ok(not os.path.exists(dup),
+   "the duplicate description is gone from the album")
+ok(os.path.isfile(os.path.join(MF, "Artists", "Dup", "Dup Album", "description.txt")),
+   "…and the canonical description.txt the app reads is untouched")
+ok(dup_dest and open(dup_dest, "r", encoding="utf-8").read().startswith("the album's own"),
+   f"…while the copy is in the Trash, byte for byte ({dup_dest})")
 empty_dest = binned("Empty")
 ok(not os.path.exists(os.path.join(MF, "Artists", "Caps", "Empty")),
    "the empty album folder is gone from Artists/")
@@ -464,12 +497,9 @@ ok("no longer" in fixes.get("Artists/Loose/1-01 Song.flac", {}).get("action", ""
    or "Loose Album" in fixes.get("Artists/Loose/1-01 Song.flac", {}).get("action", ""),
    "…and the row is about the file, not an internal path")
 
-# The removal goes to the app's Trash, with its origin recorded — never a
-# delete. The run above settled this album-less artist folder, so it is already
-# gone and the engine's guard no longer offers it as removable.
-ok(not os.path.exists(NOBODY) and not layoutmod.empty_artist(NOBODY),
-   "the album-less artist folder the run removed is gone, and is not offered "
-   "for removal a second time")
+# The removal goes to the app's Trash, with its origin recorded — never a delete.
+r = _client.post("/api/library/layout/remove-empty-artist", json={"path": NOBODY})
+ok(r.status_code == 404, f"a folder that is already gone is a 404, not a crash ({r.status_code})")
 bin_dir = os.path.join(MF, ".mlo", "trash")
 landed = [os.path.join(bin_dir, n, entry)
           for n in os.listdir(bin_dir)
@@ -485,6 +515,7 @@ ok(str(entries.get("Nobody", {}).get("origin", "")).replace("\\", "/")
    "…and the bin records where it came from, so the Trash page can restore it")
 
 print("== layout_apply off: report only ==")
+from mlo import layout as layoutmod  # noqa: E402
 
 # Two more wrong-case album folders, for this half and the target half below:
 # nothing has touched them yet, so a report-only run and a scoped run each have

@@ -1,4 +1,4 @@
-"""The 21 library scripts, in one place every caller shares.
+"""The 23 library scripts, in one place every caller shares.
 
 Extracted from ``server/main.py``'s ``RUNNERS`` table so the import pipeline
 (:mod:`server.imports`) and the bulk queue run exactly
@@ -20,7 +20,7 @@ import traceback
 
 from mlo import (
     run_audit_library, run_auto_tagging, run_format_cues, run_format_lyrics,
-    run_grade_library, run_optimize_flacs,
+    run_grade_library, run_optimize_artist_images, run_optimize_flacs,
     run_process_images, run_optimize_layout,
 )
 from mlo import stats as mlo_stats
@@ -205,6 +205,10 @@ RUNNERS: dict[int, tuple[str, "callable"]] = {
     # TRANSLITERATION-*/TRANSLATION-* tags (and sidecars). No AI configured =
     # one log line, no failure.
     17: ("Lyrics transliterate (AI)", _optional("mlo.lyrics_xlit", "run_lyrics_xlit")),
+    # 19 re-fits the artist images already in the library to the configured
+    # aspect/size (mlo.artistdata's own runner — the same policy the fetch and
+    # the grading check use).
+    19: ("Optimize artist images", run_optimize_artist_images),
     # 20 reports the shape of the music folder and stores that report under
     # <music>/.mlo/data, which is what the Library page warns from; it can
     # also apply what it finds (rename wrong-case names, gather loose audio)
@@ -235,6 +239,13 @@ RUNNERS: dict[int, tuple[str, "callable"]] = {
     # re-encode (3) or a whole-library format pass (10). It only DELETES (never
     # writes a value), and a file with nothing excess is not written at all.
     23: ("Optimize tags", _optional("mlo.taghygiene", "run_tag_hygiene")),
+    # 24 fills the four web-rating tags (mlo.web_ratings) from the configured
+    # public sources: the album's score on every track, and each track's own.
+    # Album-scoped, one provider chain per album, and it only ever FILLS — a
+    # value the file already holds is left alone unless `force_web_ratings` is
+    # set (the "24 · Web ratings re-fetch" Force switch, or the config key by
+    # hand). Its feature switch is `web_ratings_enabled`.
+    24: ("Web ratings", _optional("mlo.web_ratings", "run_web_ratings")),
 }
 
 # Scripts the Run All order deliberately does NOT carry. Every other script
@@ -288,6 +299,9 @@ _FORCE_KEYS = {
     # report the script used to be, so the wizard's `{}` and a saved force
     # selection (neither names this key) both leave the library alone.
     20: ("layout_apply",),
+    # 24 re-fetches the web-rating tags for tracks that already carry them
+    # (otherwise an existing value is left alone).
+    24: ("force_web_ratings",),
 }
 _FORCE_ALIASES = {
     "lyrics": "force_lyrics",
@@ -303,6 +317,7 @@ _FORCE_ALIASES = {
     "mood": "force_mood",
     "xlit": "force_xlit",
     "layout": "layout_apply",
+    "web_ratings": "force_web_ratings",
 }
 # Scripts whose feature has its own on/off switch: with it off the runner is a
 # no-op at best and a crash at worst, so a chain skips them instead. A tuple
@@ -331,6 +346,12 @@ _DISABLED = {
     # in this app is "excess" — the grade's excess check stands down with it
     # too — so a chain would be running a pass with no subject.
     23: "strip_unknown_tags",
+    # 24 writes the web-rating tags and the same key is the family's master
+    # switch in `should_write_audio_tag` (mlo.config): with `web_ratings_enabled`
+    # off, the runner is a no-op at best, so a chain skips it instead — and the
+    # writer would refuse the same tags anyway, which is what "off means off in
+    # both halves" means.
+    24: "web_ratings_enabled",
 }
 
 

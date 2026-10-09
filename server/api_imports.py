@@ -422,6 +422,7 @@ class SettleRequest(BaseModel):
     # The release the wizard confirmed, when it has one: its own store URLs are
     # the one piece of evidence `stamp_album_source` may turn into a SOURCE.
     release: Optional[dict] = None
+    metadata: bool = True       # run the import's own description step too
     staged: bool = False        # the wizard's album folder, wherever it put it
 
 
@@ -438,13 +439,15 @@ class SourceRequest(BaseModel):
 
 @router.post("/api/import/settle")
 def import_settle(req: SettleRequest):
-    """Settle a digital release's SOURCE and unusable lyrics.
+    """Settle a digital release's SOURCE, unusable lyrics and description.
 
     What the wizard's Finish step calls before it runs the ticked scripts, so a
     release imported by hand ends in the state an unattended import leaves:
     SOURCE written when the release or the acquisition states it (else
-    reported as still to be asked, the wizard's Match step) and the untimed
-    lyrics this install refuses removed and counted.
+    reported as still to be asked, the wizard's Match step), the untimed lyrics
+    this install refuses removed and counted, and the album description fetched
+    through the import's OWN metadata step (`run_metadata_step` — the same
+    machinery the album page's fetch and every other import path use).
 
     Every half reports its own state; nothing here is silent, and nothing is
     invented: a SOURCE no evidence states comes back ``asked`` with the
@@ -460,7 +463,7 @@ def import_settle(req: SettleRequest):
         chain = [int(s) for s in req.scripts]
     return imports.settle_digital_import(
         req.path, cfg, chain=chain, value=req.source,
-        release=req.release)
+        release=req.release, metadata=req.metadata)
 
 
 @router.post("/api/import/source")

@@ -1,7 +1,7 @@
 /** Shared display formatters: audio tech readouts, dates, durations, counts.
  *
- * Imported across cards, tables and progress surfaces (see
- * AlbumCard, LibraryPage, ProgressBar). */
+ * Imported across cards, tables, player, and progress surfaces (see
+ * AlbumCard, LibraryPage, PlayerBar, ProgressBar). */
 
 /** Shared compact audio-format readout: "FLAC 16/44.1 · 1022 kbps" —
  * codec with its bit depth/sample rate first, bitrate last. */
@@ -63,6 +63,18 @@ export function fmtBitrate(bps?: number | null): string {
   return `${Math.round(bps / 1000)} kbps`;
 }
 
+/** Ultra-condensed depth/rate readout for beside the title: "16/44.1".
+ * Video files fall back to their resolution — the one figure that
+ * identifies them. */
+export function fmtPair(t?: TechInfo | null): string {
+  if (!t) return "";
+  if (t.width && t.height) return `${t.width}×${t.height}`;
+  if (t.bits_per_sample && t.sample_rate)
+    return `${Math.round(t.bits_per_sample)}/${(t.sample_rate / 1000).toFixed(1).replace(/\.0$/, "")}`;
+  if (t.bits_per_sample) return `${Math.round(t.bits_per_sample)} bit`;
+  if (t.sample_rate) return `${(t.sample_rate / 1000).toFixed(1).replace(/\.0$/, "")} kHz`;
+  return "";
+}
 /** Full tech readout: codec + depth/rate pair, bitrate last ("FLAC 16/44.1 · 904 kbps"). */
 export function fmtTech(t?: TechInfo | null): string {
   if (!t) return "";
@@ -135,7 +147,7 @@ export function albumTech(
 }
 
 /** Grid cover sizes (small / medium / large) → grid-template min column,
- *  shared by the library and artist album grids. */
+ * shared by the library and favourites album grids. */
 export const GRID_SIZE_MIN: Record<"s" | "m" | "l", number> = { s: 126, m: 164, l: 214 };
 
 /** The year shown on cards/cells: the ORIGINAL release year when tagged
@@ -183,7 +195,7 @@ export function fmtCount(n: number | null | undefined): string {
  *  "2 Releases". "Releases" is the owner's word for what the library counts —
  *  the albums of an artist that are in it, a pending one included — and the
  *  Library's Artists column has spelled it that way since it was added (see
- *  ARTIST_COLS). It lives here so the artist page and the Library
+ *  ARTIST_COLS). It lives here so the shelf, the artist page and Favorites
  *  cannot disagree about the plural, which is the one part of the sentence a
  *  caller is likely to get wrong by hand. */
 export function releaseCount(n: number | null | undefined): string {

@@ -188,6 +188,7 @@ def _entry_stamp(path) -> str:
 #             submit script alone, not by the per-album import chain.
 _STATE_STORES = (
     ("mlo.audit", "_evidence_path", "keys"),
+    ("mlo.artistdata", "_provenance_path", "keys"),
     ("mlo.accurip", "_identity_path", "keys"),
     ("mlo.acoustid", "submissions_file", "whole"),
 )

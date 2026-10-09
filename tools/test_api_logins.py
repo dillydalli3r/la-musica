@@ -393,6 +393,9 @@ cap.route("GET", "/2.0/", LASTFM_REFUSAL)
 st, detail = sh._probe_genre("lastfm", LASTFM_CFG)
 check("lastfm: the genre probe no longer reads as 'no Last.fm tags'",
       st == "fail" and "Invalid API key" in detail, f"{st}: {detail}")
+check("lastfm: the Discover probe says the same thing",
+      "Invalid API key" in sh._probe_discover("lastfm", LASTFM_CFG)[1],
+      sh._probe_discover("lastfm", LASTFM_CFG)[1])
 
 
 # --------------------------------------------------------------------------- #

@@ -3,7 +3,7 @@
 Builds the artist -> album -> track tree from `mlo.grader` output and
 enriches every track with sortable metadata (audio tech info + tags),
 so the frontend can sort/filter by grade, audit, genre, year, advisory,
-instrumental, MBIDs, duration, bitrate, sample rate, etc.
+instrumental, MBIDs, RYM links, duration, bitrate, sample rate, etc.
 """
 import os
 import re
@@ -13,20 +13,11 @@ from mlo.stats import _find_albums, worker_count, WALK_FILES
 from mlo.grader import (_empty_folder_result, _find_empty_folders, _grade_album,
                         grade_artist, printed_pct)
 from mlo.audio import AudioFile
+from mlo.artistdata import has_image, strip_mbid_suffix
 from mlo.paths import (expected_tracks_state, LIB_VIDEO_EXTS,
                        load_expected_tracks, load_pending,
                        load_track_covers, _album_file, SIDECAR_COVER_EXTS)
 from server import tagcache
-
-# Artist folders are named "Slowdive [a16371b9-…]" (and `short_folder_names`
-# truncates the id), so a lookup by the artist's NAME has to strip that suffix.
-_MBID_SUFFIX_RE = re.compile(r"\s*[\[(][0-9a-f][0-9a-f-]{6,34}[0-9a-f][\])]\s*$", re.I)
-
-
-def _strip_mbid_suffix(name):
-    """*name* without the trailing MusicBrainz id in brackets."""
-    return _MBID_SUFFIX_RE.sub("", str(name or "")).strip()
-
 
 # Tags surfaced per track for sorting/filtering on the frontend.
 TRACK_TAGS = [
@@ -37,6 +28,7 @@ TRACK_TAGS = [
     "MUSICBRAINZ_ARTISTID", "MUSICBRAINZ_TRACKID",
     "MUSICBRAINZ_RELEASEGROUPID", "MUSICBRAINZ_RELEASETRACKID",
     "MUSICBRAINZ_WORKID",
+    "RATEYOURMUSIC_ALBUM", "RATEYOURMUSIC_TRACK", "RATEYOURMUSIC_ARTIST",
     "ALBUMARTISTSORT", "ORIGINALDATE", "RELEASETYPE", "RELEASESTATUS",
     "RELEASECOUNTRY", "CATALOGNUMBER", "LABEL", "BARCODE", "SCRIPT",
     # MusicBrainz's other-language names (mlo.autotag writes them), read here
@@ -49,16 +41,26 @@ TRACK_TAGS = [
     # it) and the two album-level ones, read on every track so `_album_meta`
     # can lift them for the album row and its artist caption.
     "TITLEDISAMBIGUATION", "ALBUMDISAMBIGUATION", "ARTISTDISAMBIGUATION",
+    # The podcast identity (mlo.naming's DERIVED type): the SERIES MusicBrainz
+    # links an episode's release group to, and the episode number it states.
+    # Read here so the Podcasts shelf, the series page and the Podcasts
+    # preset answer a scan without asking MusicBrainz once.
+    "PODCASTSERIES", "PODCASTSERIESMBID", "PODCASTEPISODE",
     "TRACKTOTAL", "DISCTOTAL",
     "COMPOSER", "COPYRIGHT", "ISRC", "LYRICIST", "REMIXER",
     "DYNAMIC RANGE",
     # MOOD/ENERGY (script 8 or 16) ride along so the track page and the
     # `tag:MOOD` / `tag:ENERGY` columns show the pair without a second read.
     "MOOD", "ENERGY",
+    # RATING is the user's own star rating (half-stars, `server/ratings.py`) and
     # BPM/INITIALKEY are script 12's analysis values: the library browser's
-    # query engine filters on both, so they have to reach the payload the
-    # browser filters — two more cached tag reads per track, no extra decode.
-    "BPM", "INITIALKEY",
+    # query engine filters on all three, so they have to reach the payload the
+    # browser filters — three more cached tag reads per track, no extra decode.
+    "RATING", "BPM", "INITIALKEY",
+    # The public web rating pair (mlo.web_ratings, script 24): the track's own
+    # score and the album-wide one that rides on every track, so a track row
+    # and an album header can show "what the web thinks" without a second read.
+    "WEBRATING", "WEBRATING_SOURCE", "ALBUMWEBRATING",
     # read on every track so _album_meta can lift the album-level value
     "ALBUM DYNAMIC RANGE",
 ]
@@ -66,10 +68,10 @@ TRACK_TAGS = [
 # Tags read from the first track to represent album-level metadata.
 ALBUM_LEVEL_TAGS = [
     "ALBUM", "ALBUMARTIST", "ARTIST", "DATE", "ORIGINALDATE", "ORIGINALYEAR",
-    "ITUNESADVISORY",
+    "ITUNESADVISORY", "ALBUMITUNESADVISORY",
     "MUSICBRAINZ_ALBUMID", "MUSICBRAINZ_ALBUMARTISTID",
     "MUSICBRAINZ_RELEASEGROUPID",
-    "MEDIA", "CATALOGNUMBER", "LABEL", "BARCODE",
+    "RATEYOURMUSIC_ALBUM", "MEDIA", "CATALOGNUMBER", "LABEL", "BARCODE",
     "RELEASETYPE", "RELEASESTATUS", "RELEASECOUNTRY", "SCRIPT",
     # Album-level alias facts: one release states one album name and one
     # credited artist, so the first readable track speaks for the album (the
@@ -79,7 +81,15 @@ ALBUM_LEVEL_TAGS = [
     # the same way: the release group's ("The Blue Album") rides beside the
     # album name and the credited artist's ("UK rock band") beside the artist.
     "ALBUMDISAMBIGUATION", "ARTISTDISAMBIGUATION",
+    # Album-level like every other release fact: one episode folder states one
+    # series (the tag is written to every file of it, and the first readable
+    # track is what an album-level value is read from).
+    "PODCASTSERIES", "PODCASTSERIESMBID", "PODCASTEPISODE",
     "ALBUM DYNAMIC RANGE",
+    # Album-level like every other release fact, and read from the first
+    # readable track exactly the same way: the web rating written to every
+    # file of the release, with the sources behind it.
+    "ALBUMWEBRATING", "ALBUMWEBRATING_SOURCE",
 ]
 
 TECH_ATTRS = ("length", "bitrate", "sample_rate", "bits_per_sample", "channels")
@@ -265,6 +275,32 @@ def _album_meta(album_dir, tracks):
     return meta
 
 
+def podcast_info(meta):
+    """The podcast block an album row carries, or None.
+
+    An episode is a release group MusicBrainz links `part of` a series of type
+    Podcast; the app records that on the files (mlo.autotag writes
+    PODCASTSERIES / PODCASTSERIESMBID / PODCASTEPISODE), so a scan reads it off
+    the album's own tags and never asks MusicBrainz again — and a rescan, a
+    moved folder or a fresh install sees the same fact.
+
+    `series` is the name a reader sees (with MusicBrainz's disambiguation when
+    it stated one, which is what keeps two same-named shows apart), and
+    `episode` is MusicBrainz's own episode number or None when it states none.
+    None (not an empty block) for everything that is not an episode — which is
+    every music album, so no surface has to test the fields one by one.
+    """
+    meta = meta or {}
+    series = str(meta.get("PODCASTSERIES") or "").strip()
+    if not series:
+        return None
+    return {
+        "series": series,
+        "series_mbid": str(meta.get("PODCASTSERIESMBID") or "").strip() or None,
+        "episode": _parse_num(meta.get("PODCASTEPISODE")),
+    }
+
+
 def _aggregate_albums(albums_data):
     """Artist-level aggregates from a list of album payloads."""
     total_checks = sum(a.get("total_checks", 0) for a in albums_data)
@@ -292,21 +328,58 @@ def _aggregate_albums(albums_data):
     }
 
 
-def pending_album_payload(folder, cfg):
+def _album_artwork(album_dir, light=False):
+    """Stored description metadata for an album folder.
+
+    `light` (the library payload, which covers every album in one response)
+    only answers "does a description exist?" — cheaply, from the file's size,
+    without reading the text or touching the shared provenance map. The album
+    page asks for the full payload instead.
+    """
+    if light:
+        try:
+            from mlo import artistdata
+            path = artistdata.description_path(album_dir)
+            present = bool(os.path.isfile(path) and os.path.getsize(path) > 0)
+        except Exception:
+            present = False
+        return {"description": bool(present), "description_text": None,
+                "description_source": None, "description_url": None}
+    try:
+        from mlo import artistdata
+        present = artistdata.has_description(album_dir)
+        text = (artistdata.read_description(album_dir) or "") if present else ""
+        provenance = artistdata.read_provenance(album_dir)
+    except Exception:
+        present, text, provenance = False, "", {}
+    return {
+        "description": bool(present),
+        "description_text": (text.strip() or None) if present else None,
+        "description_source": (provenance.get("description_source")
+                               or provenance.get("source")) if present else None,
+        "description_url": provenance.get("description_source_url") if present else None,
+    }
+
+
+def pending_album_payload(folder, cfg, light=False):
     """The ALBUM PAGE's payload for a framework album, or None when *folder*
     is not one (`server.pending_albums`: the folder "Add to library" created
     before any audio exists).
 
     The same row the library tree lists (`_pending_album_row`) — the release's
     own tracklist, every entry missing, the placeholder cover, the marker's
-    identity. A folder the app created on purpose is never a 404 on a page that
-    was linked to it.
+    identity — enriched the way `build_album` enriches a real album: the
+    artwork the add pre-fetched (the description's text unless `light`). A
+    folder the app created on purpose is never a 404 on a page that was linked
+    to it.
     """
     if not load_pending(folder):
         return None
     from mlo.paths import library_root
     root = library_root(str(cfg.get("music_folder") or ""))
-    return _pending_album_row(folder, root)
+    row = _pending_album_row(folder, root)
+    row["artwork"] = _album_artwork(folder, light=light)
+    return row
 
 
 def build_album(album_dir, cfg, light=False, cfg_key=None):
@@ -340,10 +413,11 @@ def _build_album(album_dir, cfg, light=False):
         # exists (identity, pre-fetched artwork, the release tracklist)
         # instead of "not found". Any other audio-less folder
         # keeps answering None.
-        return pending_album_payload(album_dir, cfg)
+        return pending_album_payload(album_dir, cfg, light=light)
     if "error" in res:
         res["path"] = album_dir.replace("\\", "/")
         res["tracks"] = []
+        res["artwork"] = _album_artwork(album_dir, light=True)
         return res
     res["path"] = res["path"].replace("\\", "/")
     # One folder listing + one manifest read for the album's tracks.
@@ -365,6 +439,11 @@ def _build_album(album_dir, cfg, light=False):
                                 or "").strip() or None
     res["artist_disambiguation"] = str(res["meta"].get("ARTISTDISAMBIGUATION")
                                        or "").strip() or None
+    # The DERIVED podcast identity of this album, read from its own tags (see
+    # podcast_info) — the field the Home shelf, the series page, the Podcasts
+    # preset and the Artist page's Podcast bucket all read. None for anything
+    # that is not an episode.
+    res["podcast"] = podcast_info(res["meta"])
     _add_expected_tracks(res, album_dir)
     # Every row carries the flag, so no reader has to treat "absent" as a case
     # of its own. A folder whose audio HAS arrived is a normal album: the
@@ -374,6 +453,7 @@ def _build_album(album_dir, cfg, light=False):
     # framework row rendering as a playable album with a play button over
     # nothing, which is exactly what the owner saw on screen.
     res["pending"] = not res.get("tracks")
+    res["artwork"] = _album_artwork(album_dir, light=light)
     tc = res.get("total_checks", 0)
     # Printed, so it obeys the one rule (mlo.grader.printed_pct): a Fail badge
     # can never read "100% of checks passed".
@@ -510,9 +590,11 @@ def _pending_album_row(folder, root):
                            if row["cover_file"] else "")
     row["album_artist"] = str(info.get("artist") or "")
     meta = {t: None for t in ALBUM_LEVEL_TAGS}
-    # The page content the ADD pre-fetched (`server.imports.prefetch_album`):
-    # it is on the marker because a framework album has no tags to carry it
-    # yet, and the album's page shows it from the moment the album is added.
+    # The links and the page content the ADD pre-fetched (`server.imports
+    # .prefetch_album`): they are on the marker because a framework album has
+    # no tags to carry them yet, and the album's page shows them from the
+    # moment the album is added.
+    links = info.get("links") or {}
     meta.update({
         "ALBUM": info.get("title") or None,
         "ALBUMARTIST": info.get("artist") or None,
@@ -521,6 +603,8 @@ def _pending_album_row(folder, root):
         "MUSICBRAINZ_ALBUMID": info.get("release_id") or None,
         "MUSICBRAINZ_RELEASEGROUPID": info.get("release_group_id") or None,
         "RELEASETYPE": info.get("release_type") or None,
+        "RATEYOURMUSIC_ALBUM": links.get("album") or None,
+        "RATEYOURMUSIC_ARTIST": links.get("artist") or None,
     })
     # THE RELEASE'S OWN FACTS, while it is still arriving (the owner's ask:
     # an album being imported must not read as a blank cell). The pressing's
@@ -545,15 +629,19 @@ def _pending_album_row(folder, root):
         row["media"] = identity["MEDIA"]
     row["meta"] = meta
     for key, val in (("ALBUM", info.get("title")), ("ALBUMARTIST", info.get("artist")),
-                     ("ARTIST", info.get("artist")), ("DATE", info.get("year"))):
+                     ("ARTIST", info.get("artist")), ("DATE", info.get("year")),
+                     ("RATEYOURMUSIC_ALBUM", links.get("album")),
+                     ("RATEYOURMUSIC_ARTIST", links.get("artist"))):
         if key in row["album_values"]:
             row["album_values"][key] = str(val or "").strip()
     # The release's own tracklist, with nothing on disk matching it: every
     # entry is missing, which is exactly what the album page should show.
     _add_expected_tracks(row, folder)
+    row["artwork"] = _album_artwork(folder, light=True)
     # What the ADD already fetched for this folder (see `server.imports
-    # .prefetch_album`): the cover candidates are listed, so a reader can see
-    # the page content exists before a byte of audio does.
+    # .prefetch_album`): the artist image and the descriptions are listed with
+    # the paths they were written to, so a reader can see the page content
+    # exists before a byte of audio does.
     row["prefetched"] = info.get("prefetched") or None
     return row
 
@@ -613,10 +701,10 @@ def build_albums_map(album_dirs, cfg, light=False, cfg_key=None):
     Grading is mostly file I/O + image decode (Pillow releases the GIL), so a
     small thread pool cuts scan time roughly by the worker count. Errors become
     {"path": ..., "error": ...} placeholders so one bad folder never hides the
-    rest of the library. `light` is passed through to `build_album` (and on to
-    `tagindex`, which keys its cached rows by it), and `cfg_key` is the
-    caller's precomputed `tagindex.config_key(cfg)` when a whole build already
-    has one.
+    rest of the library. `light` is passed through to `build_album` (the
+    library payload only needs to know whether a description exists, not its
+    text), and `cfg_key` is the caller's precomputed `tagindex.config_key(cfg)`
+    when a whole build already has one.
 
     A MAP, not a list, because the library build asks for every album in the
     library at once and then assembles per artist: calling a list builder once
@@ -673,7 +761,7 @@ def _artist_display_name(artist_dir, albums_data):
     IDENTITY (paths, lookups), not a caption."""
     from_tags = next((str(a.get("album_artist") or "").strip()
                       for a in albums_data if a.get("album_artist")), "")
-    base = from_tags or _strip_mbid_suffix(os.path.basename(artist_dir))
+    base = from_tags or strip_mbid_suffix(os.path.basename(artist_dir))
     alias = next((str((a.get("meta") or {}).get("ARTISTALIAS") or "").strip()
                   for a in albums_data
                   if str((a.get("meta") or {}).get("ARTISTALIAS") or "").strip()),
@@ -840,14 +928,21 @@ def _library_builder(folder, cfg):
                                for d in empty_rows.get(artist_dir, []))
             albums_data.sort(key=lambda a: str(a.get("path", "")).lower())
             agg = _aggregate_albums(albums_data)
-            # The artist's OWN grade (`grade_artist`) — the same verdict
-            # `/api/artist` serves for the artist page, computed here so the
-            # Artists view can put the identical dot beside the name the artist
-            # page draws it beside. Two separate rules cannot drift apart,
-            # which is the whole point: a list that graded an artist
-            # differently from its own page is a lie whichever one is wrong. An
-            # unreadable folder keeps the row (the scan just listed it) and
-            # reports no verdict.
+            try:
+                artist_image = has_image(artist_dir)
+            except Exception:
+                # A folder this cannot read holds no picture the app can serve,
+                # and a row that draws its initial is the honest rendering of
+                # that — not a broken-image glyph from a URL that would 404.
+                artist_image = False
+            # The artist's OWN grade (image + description, `grade_artist`) — the
+            # same verdict `/api/artist` serves for the artist page, computed
+            # here so the Artists view and Home's shelf can put the identical
+            # dot beside the name the artist page draws it beside. Two separate
+            # rules cannot drift apart, which is the whole point: a list that
+            # graded an artist differently from its own page is a lie whichever
+            # one is wrong. An unreadable folder keeps the row (the scan just
+            # listed it) and reports no verdict.
             try:
                 artist_grade = grade_artist(artist_dir, cfg)
             except Exception as e:
@@ -863,6 +958,11 @@ def _library_builder(folder, cfg):
                 "disambiguation": _artist_disambiguation(albums_data),
                 "albums": albums_data,
                 "aggregate": agg,
+                # Whether `GET /api/artist/image` would answer for this folder:
+                # a listing, not a walk, and the same question Home's shelf asks
+                # (`mlo.artistdata.has_image`), so the Artists view draws an
+                # artist's own picture and every other row an initial.
+                "has_image": artist_image,
                 # Artist-level grading: only the checks that apply to an artist
                 # folder (`mlo.grader.grade_artist`). `pass` is the dot.
                 "grade": artist_grade,

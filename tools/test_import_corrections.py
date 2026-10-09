@@ -263,7 +263,7 @@ for fam in import_policy.FAMILIES:
            f"{row['id']} names a manual entry point that exists", row["service"])
 
 others = list(import_policy.OTHER_STEPS)
-ok(all(row.get("family") is None for row in others) and len(others) >= 1,
+ok(all(row.get("family") is None for row in others) and len(others) >= 4,
    f"the steps no family owns are listed too ({len(others)})")
 for row in others:
     ok(PATHS.get(row["route"]) is not None,

@@ -1,14 +1,18 @@
 import type { EqBand } from "../api";
 
-/** The APO → biquad mapping and the response maths the Equalizer editor draws
- *  its curve from — the maths runs the browser's own
- *  `BiquadFilterNode.getFrequencyResponse` over nodes built from these types
- *  (components/EqCurve.tsx).
+/** The WebAudio graph the PLAYER applies an Equalizer APO profile with, and the
+ *  response maths the editor draws from.
+ *
+ *  It lives beside lib/analyser.ts because it hangs off the same graph: the
+ *  analyser module owns one AudioContext per page and one
+ *  source → ReplayGain gain → analyser → speakers chain per media element, and
+ *  an installed EQ is spliced in between the gain and the analyser, so what the
+ *  visualizer reads is what you hear.
  *
  *  APO → biquad mapping, and the two places it is honestly not the same as an
  *  export (mlo.eq renders the ffmpeg chain):
  *
- *  | APO | ffmpeg (export)   | WebAudio (editor)   |
+ *  | APO | ffmpeg (export)   | WebAudio (playback) |
  *  |-----|-------------------|---------------------|
  *  | PK  | equalizer t=q     | peaking             |
  *  | LS/HSC shelf | bass/treble t=q:w=Q | lowshelf/highshelf |
@@ -18,7 +22,7 @@ import type { EqBand } from "../api";
  *  A peaking band, a pass and a notch are the same filter on both sides. A
  *  SHELF is not quite: APO's custom slope (LSC/HSC) reaches ffmpeg as a Q,
  *  while a WebAudio shelf is fixed-slope and ignores Q — so a shelf's width is
- *  the one number the drawn curve and the export disagree on.
+ *  the one number a listener may hear differently in the app than in an export.
  *  Everything else about the curve (which bands, at what frequency, with what
  *  gain) is identical, and it is the SHAPE the profile is about. */
 const BIQUAD: Record<string, BiquadFilterType> = {
@@ -66,12 +70,21 @@ const Q_MAX = 30;
  *  (mlo.eq's notes); here it is clamped, because the node and the editor's own
  *  boxes are bounded. */
 
+export type EqChain = {
+  /** Where the signal enters (the preamp gain, or the first band without one). */
+  head: AudioNode;
+  /** Where it leaves. */
+  tail: AudioNode;
+  /** Everything built, for disconnecting on the next install. */
+  nodes: AudioNode[];
+};
+
 function clamp(value: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, Number.isFinite(value) ? value : lo));
 }
 
 /** `type` as an APO type, upper-cased; "" when the profile carries one this
- *  graph has no filter for (a corrupt row must not throw). */
+ *  graph has no filter for (a corrupt row must not throw mid-playback). */
 export function eqType(type: unknown): string {
   const key = String(type ?? "").trim().toUpperCase();
   return BIQUAD[key] ? key : "";
@@ -92,6 +105,49 @@ function configure(node: BiquadFilterNode, band: EqBand, type: string) {
   // the node's own state the profile's state if it is ever read back.
   node.Q.value = clamp(Number(band.q) || 0.707, Q_MIN, Q_MAX);
   node.gain.value = SHAPE_ONLY.has(type) ? 0 : clamp(Number(band.gain), -EQ_GAIN_LIMIT, EQ_GAIN_LIMIT);
+}
+
+/** The sentence a profile that parsed WITH errors is refused with, in the same
+ *  words the export fails a track with (mlo.eq's `apply_refusal`) and the same
+ *  ones the editor's banner shows (`pages/EqualizerPage.tsx`): a band that
+ *  could not be read means the bands that did are not the curve the file wrote,
+ *  so the player must not install them either. "" when the profile may play.
+ *  `PlayerBar` is where the row's own profile is installed, so it is the caller
+ *  that refuses one of these instead of handing its bands to `applyEq`. */
+export function eqApplyRefusal(profile: { errors?: string[] } | null | undefined): string {
+  const first = (profile?.errors ?? [])[0];
+  return first ? `this profile cannot be applied: ${first}` : "";
+}
+
+/** Build the chain for one profile: preamp first (a boosted curve that is not
+ *  pulled down first clips), then every active band in the profile's own
+ *  order. `null` when the profile changes nothing — a no-op profile must not
+ *  add nodes to the graph. */
+export function buildEqChain(ctx: BaseAudioContext, filters: EqBand[], preampDb: number): EqChain | null {
+  const preamp = clamp(Number(preampDb) || 0, -EQ_PREAMP_LIMIT, EQ_PREAMP_LIMIT);
+  const bands = (filters ?? []).filter(eqBandActive);
+  if (!preamp && !bands.length) return null;
+  const nodes: AudioNode[] = [];
+  let head: AudioNode | null = null;
+  let tail: AudioNode | null = null;
+  const push = (node: AudioNode) => {
+    if (!head) head = node;
+    if (tail) tail.connect(node);
+    tail = node;
+    nodes.push(node);
+  };
+  if (preamp) {
+    const gain = ctx.createGain();
+    gain.gain.value = Math.pow(10, preamp / 20);
+    push(gain);
+  }
+  for (const band of bands) {
+    const type = eqType(band.type);
+    const node = ctx.createBiquadFilter();
+    configure(node, band, type);
+    push(node);
+  }
+  return head && tail ? { head, tail, nodes } : null;
 }
 
 /** The chain's magnitude response in dB at each frequency — the curve the

@@ -11,7 +11,7 @@ Sources of truth (change these and this document is wrong until it is updated):
 | Check ids, labels, defaults | `server/tags_registry.py` `CHECK_LABELS` (labels) + `mlo/config.py` `DEFAULT_CONFIG` (the keys and their defaults); `web/src/pages/GradingPage.tsx` `GROUPS` + `CHECK_DESC` |
 | What each check asserts | `mlo/grader.py` (`_grade_album`, `grade_artist`, `run_grade_library`) |
 | The presets | `web/src/pages/GradingPage.tsx` `applyPreset` |
-| Script ids, titles, order | `mlo/scripts.py` `SCRIPTS`, `server/script_runners.py` `RUNNERS`, `mlo/config.py` `DEFAULT_RUN_ALL_ORDER`, `server/imports.py` `DEFAULT_CHAIN` |
+| Script ids, titles, order | `mlo/cli.py` `SCRIPTS`, `server/script_runners.py` `RUNNERS`, `mlo/config.py` `DEFAULT_RUN_ALL_ORDER`, `server/imports.py` `DEFAULT_CHAIN` |
 | Tag families and writers | `mlo/audio.py` `TAG_MAP`, `server/tags_registry.py` `TAG_FAMILY` / `TAG_WRITER` |
 | Advisory ratings | `mlo/advisory.py` (the ladder and the AI rubric) |
 | Audit evidence | `mlo/audit.py`, `mlo/discs.py` |
@@ -57,11 +57,27 @@ Grade script (4) over an album and reading the report.
   anywhere beneath it (including one that holds only a `cover.*`, `.cue`, `.log`,
   `.lrc` or `.accurip`) is reported as `EMPTY_FOLDER` with one failed check, so
   an album whose audio is gone cannot hide from the counts.
-- **R7 — artist folders have their own grade.** `grade_artist()` fails an
-  artist folder that holds NO album folder at all (`ARTIST_EMPTY`): nothing of
-  theirs is here, so it cannot pass as one. An artist that DOES hold an album
-  reports 100 % and `pass: true` (nothing graded is nothing failed). An absent
-  artist folder is `ARTIST_FOLDER_MISSING`.
+- **R7 — artist folders have their own grade.** `grade_artist()` evaluates
+  `grade_check_artist_image` and `grade_check_artist_description`, and fails an
+  artist folder that holds NO album folder at all (`ARTIST_EMPTY`): a folder
+  carrying only the artist's own image and description is not an artist in this
+  library — nothing of theirs is here — so it cannot pass as one. With both
+  checks switched off an artist that DOES hold an album reports 100 % and
+  `pass: true` (nothing graded is nothing failed). An absent artist folder is
+  `ARTIST_FOLDER_MISSING`.
+- **R7a — the artist image is judged on its decoded pixels**, never on its name
+  or suffix: Pillow reads the stored file, and every issue names the numbers it
+  judged. OVERSIZED fails (`image_policy()`'s ceiling: `artist_image_target_size`,
+  else the 2000 px `DEFAULT_MAX_SIDE`); a ratio further than 2 %
+  (`ASPECT_TOLERANCE`) from `artist_image_aspect` fails, naming both ratios and
+  the delta; a file that does not decode fails as `ARTIST_IMAGE_CORRUPT`; a
+  decodable image in a container the library does not read fails as
+  `ARTIST_IMAGE_FORMAT`; and a file larger than the size `save_image` recorded
+  writing it fails as `ARTIST_IMAGE_UPSCALED` (its detail is interpolated).
+  **Undersized is accepted** — it lands in the result's `notes` with the shortfall
+  and never fails, because nothing in the pipeline upscales and failing it would
+  fail the folder permanently. Script 19 (`Optimize artist images`) is the pass
+  that clears every one of these.
 
 ### Issue codes
 
@@ -75,22 +91,23 @@ An issue is `{code, label, where, reason}` for album-level and artist problems
 | `TITLE`, `ARTIST`, `ALBUM`, `ALBUMARTIST`, `DATE`, `TRACKNUMBER`, `DISCNUMBER`, `GENRE`, `MOOD`, `ENERGY`, `ITUNESADVISORY`, `INSTRUMENTAL`, `DYNAMIC RANGE`, `REPLAYGAIN_*`, `INITIALKEY`, `BPM`, `MEDIA`, `SOURCE`, `ENCODER_*`, `ACOUSTID_ID`, `ACOUSTID_FINGERPRINT`, `LOG_GRADE` | the tag (or its presence check) failed; the tag's own name is the code |
 | `MOOD_MISSING`, `ENERGY_MISSING`, `GENRE_MISSING` | the per-tag presence checks (`TAG_PRESENCE_CHECKS`) |
 | `GENRE_COUNT`, `GENRE_ORDER`, `GENRE_VOCAB`, `GENRE_CASE` | genre count, arrangement, vocabulary, and the spelling every writer produces (`metal` → `Metal`) |
-| `TAGS`, `COMMENT`, `LINK` | excess tags: a tag name outside the vocabulary (`TAGS`), a `COMMENT` carrying a value, a tag value naming an external link (`LINK` — a bare MusicBrainz id/UUID is not a link) |
+| `TAGS` | excess tags |
 | `PATH`, `PATH_CASE` | naming-script mismatch / case-only mismatch |
 | `LYRICS` | lyrics missing, wrongly formatted, or present on an instrumental |
 | `XLIT_MISSING`, `XLIT_UNNEEDED` | a needed transform is absent / an unneeded one is stored |
-| `MB_LINK` | a required identity link is missing |
+| `MB_LINK`, `RYM_LINK` | a required identity link is missing |
 | `COVER` | cover missing or failing the size/square rules |
 | `CRC`, `CRC_MISMATCH` | a track is not covered by its disc's `.log` CRC / its CRC does not match |
 | `CD_FORMAT` | a CD track is not 16-bit/44.1 kHz FLAC |
 | `LOG_CHECKSUM` | the rip log's EAC SHA256 does not verify |
 | `AUDIT` | the audit tag is missing or not REAL (with `grade_check_audit` on) |
 | `EMPTY_FOLDER`, `EXPECTED_TRACKS_MISSING`, `EXPECTED_TRACKS_INCOMPLETE` | folder/release-level failures (`INCOMPLETE`: the album holds part of its recorded tracklist) |
-| `ARTIST_FOLDER_MISSING`, `ARTIST_EMPTY` | artist-folder failures. `ARTIST_EMPTY` is an artist folder holding NO album folder at all — the artist is not in the library, so the folder is not a graded artist |
+| `ARTIST_IMAGE_MISSING`, `ARTIST_IMAGE_CORRUPT`, `ARTIST_IMAGE_FORMAT`, `ARTIST_IMAGE_OVERSIZED`, `ARTIST_IMAGE_ASPECT`, `ARTIST_IMAGE_UPSCALED`, `ARTIST_DESCRIPTION_MISSING`, `ARTIST_FOLDER_MISSING`, `ARTIST_EMPTY` | artist-folder failures (script 19 clears the image ones). `ARTIST_EMPTY` is an artist folder holding NO album folder — only the artist's own image/description: the artist is not in the library, so the folder is not a graded artist. Script 20 reports it and the Optimization page can remove it to the Trash |
+| `ARTIST_IMAGE_UNDERSIZED` | informational note on an artist image below `artist_image_target_size` — reported, never failing |
 
 ---
 
-## 2. The 21 optimization scripts
+## 2. The 23 optimization scripts
 
 Ids, titles and the shipped order are `mlo/scripts.py:SCRIPTS` and
 `mlo/config.py:DEFAULT_RUN_ALL_ORDER`; the runners are
@@ -98,9 +115,9 @@ Ids, titles and the shipped order are `mlo/scripts.py:SCRIPTS` and
 chain both call).
 
 **R8 — Run All runs `run_all_order`**, shipped as
-`[11, 3, 14, 15, 2, 1, 13, 17, 8, 5, 6, 7, 9, 12, 16, 10, 23, 20, 21, 4]`:
-everything that moves a file first, everything that reads it last. A
-saved order is honoured as saved (ids outside 1–23 are dropped; legacy 8/9-id
+`[11, 3, 14, 15, 2, 1, 13, 17, 8, 24, 5, 19, 6, 7, 9, 12, 16, 10, 23, 20,
+21, 4]`: everything that moves a file first, everything that reads it last. A
+saved order is honoured as saved (ids outside 1–24 are dropped; legacy 8/9-id
 orders are migrated).
 **R9 — the import chain is DERIVED from the run order, minus a declared
 exception.** `import_scripts` replaces it outright; an empty list means the
@@ -155,7 +172,7 @@ publishes, including the ones that write nothing until they do.
 | 5 | Process images | Resize/crop covers to `cover_target_size`, per-format targets, JPEG/PNG/JXL optimization, `cover.*` rename | image files in place | re-encodes in place | no |
 | 6 | Audit library | AudioAuditor detectors (spectral/DSP) + CD `.log` CRC verification, log scoring | `AUDIT`, `LOG_GRADE`, `LOG_CRC`, `INTEGRITY` | no | no |
 | 7 | DR & ReplayGain | in-process loudness-war DR (`mlo/dr.py`) + `rsgain` ReplayGain 2.0 | `DYNAMIC RANGE`, `ALBUM DYNAMIC RANGE`, the four `REPLAYGAIN_*` | no | no |
-| 8 | Auto tagging | `ITUNESADVISORY`, `INSTRUMENTAL`, `MOOD`, `ENERGY`, `GENRE`, plus empty MusicBrainz identity/date completion | those tags | no | optional (advisory/genre providers) |
+| 8 | Auto tagging | `ITUNESADVISORY`, `ALBUMITUNESADVISORY`, `INSTRUMENTAL`, `MOOD`, `ENERGY`, `GENRE`, plus empty MusicBrainz identity/date completion | those tags | no | optional (advisory/genre providers) |
 | 9 | AccurateRip | CUETools `.accurip` generation and verification; an existing file is regenerated only when a track's **audio** changed (each track's FLAC audio-md5, recorded per `.accurip` — a tag write no longer looks like a re-rip), and a PARTIAL album's file is left alone (R248) | writes `CD-N.accurip` | no | **yes** (AccurateRip DB) |
 | 10 | Format all | Final canonical pass: `.accurip`/`.cue`/`.lrc`/tag trim, the canonical tag-value spelling (`mlo/tagtext.py`) + embedded-cover policy | tags, sidecars, embedded art | **yes** (strips tags outside the allowlist) | no |
 | 11 | Remux videos (MKV) | Any video container → MKV, video copied bit-exact when possible, audio to FLAC, chapters kept | video files | **yes** when `video_remove_original` (ON) | no |
@@ -165,6 +182,7 @@ publishes, including the ones that write nothing until they do.
 | 15 | Release tracklist | Writes `.mlo_expected.json` from the release's own tracklist | adds a manifest file | no | **yes** (MusicBrainz) |
 | 16 | Mood & Energy | The mood classifier alone | `MOOD`, `ENERGY` | no | no |
 | 17 | Lyrics transliterate (AI) | Romanization/translation tags and sidecars, re-synced at `lrc_sync_level`; the per-track work runs through the worker pool (one track's chunk requests used to be paid one after another) | `TRANSLITERATION-*`, `TRANSLATION-*`, sidecars | no | **yes** (configured AI endpoint) |
+| 19 | Optimize artist images | Re-fits `Artists/<Artist>/artist.*` to `artist_image_aspect` / `artist_image_target_size`, re-encodes as `artist.jpg`/`artist.png` | the artist image in place (only when it has to move) | re-encodes in place; never deletes | no |
 | 20 | Optimize library layout | The music folder's shape against `<music>/Artists/<Artist>/<Album>/…`: audio at the root or in an artist folder, stray files, unexpected folders, empty albums, `wrong_case` rows. With `layout_apply` (ON) it SETTLES what the folder itself proves — a wrong-case name is renamed, audio outside an album folder is moved into the one its tags name, and what is excess goes to the Trash (a stray file, a folder inside an album that is neither a disc folder nor holds audio, an album folder with no audio, a foreign root folder holding no audio, an album-less artist folder, the `.mlo_*` leftovers) — and reports every other row with the reason it stayed, re-derived at the move (R185). Writes ONE report describing the whole library (plus a `fixes` list) to `<music>/.mlo/data/`, which the Library page warns from; scoped to `targets` when a run names them, and library-wide when it does not (R9) | one report file + the renamed/moved/removed paths | `layout_apply` (removals go to the Trash) | no |
 | 21 | Fix AcoustID pairs | Completes (or CREATES) a track's `ACOUSTID_ID`/`ACOUSTID_FINGERPRINT` pair — the failures `Missing ACOUSTID_ID and ACOUSTID_FINGERPRINT` and `Missing ACOUSTID_ID` / `Missing ACOUSTID_FINGERPRINT` (all `(run Fix AcoustID pairs)`). The recording the pair must name is a question the FILE answers itself (its own `ACOUSTID_ID`, its `MUSICBRAINZ_TRACKID`, or the recording MBID this app's naming script wrote into the file name), and the fingerprint is taken from the audio locally by fpcalc — so a CD rip AcoustID has never seen, or a run with no usable key, is repairable with no request at all. The service is asked only for a half pair whose file names no recording anywhere; a file carrying no AcoustID tag and naming no recording is skipped, never written from a guess | `ACOUSTID_ID`, `ACOUSTID_FINGERPRINT` | no | only for a half pair that names no recording |
 | 22 | Submit fingerprints (AcoustID) | Gives AcoustID the fingerprint and the MusicBrainz recording id a file already states (`mlo.acoustid.submit_files`): the recording is read the way script 21 reads it, the fingerprint is taken locally, the service is asked what it already links (`pair_known`) and what this app already handed over (`load_submissions`), and only what is genuinely new goes in ONE batched `v2/submit` — each track reported ACCEPTED, ALREADY_KNOWN, REJECTED or skipped with a named cause. **Not in the shipped order** (`OPT_IN_SCRIPTS`): a submission is a public, outward-facing write, so it runs only when someone asks — a details menu, `POST /api/import/acoustid/submit`, the wizard's AcoustID step, or a `run_all_order` the user put it in themselves | nothing locally | no | **yes** (AcoustID database) |
@@ -195,7 +213,7 @@ album's junk tags are cleared without a lossless re-encode (3) or a
 whole-library format pass (10), which is why the excess and alias failures now
 name it FIRST in their own instruction ("run Optimize tags (script 23) on the
 album, or …", `mlo/grader.py`). Every library item's flyout therefore offers it
-— the registry-generated menus an album, a track row and an artist
+— the registry-generated menus an album, a track row, an artist and a playlist
 mount (`web/src/lib/scriptMenu.ts` over `GET /api/script-menu`), the library
 page's selection dropdown, AND the album page's hand-written "All album
 actions" flyout, which lists a curated subset of scripts and is the one place
@@ -206,26 +224,6 @@ else, and drops the tag cache of exactly the folders it rewrote
 (`server.tagcache.invalidate_album`,
 never `invalidate_all` — the scoped drop `/api/run` and an import already make
 for the folders a run names).
-
-**R358 — a stored tag VALUE naming an external link is excess.** The app never
-keeps a URL in an audio tag: `mlo.grader.tag_value_excess_reason` answers
-`"link"` for any value matching `_URL_RE`, the excess-tag grade fails the track
-with its own issue code **`LINK`**, and the strip passes DELETE the tag — Format
-all (10), Optimize FLACs (3) and Optimize tags (23) all read the one predicate
-(`mlo.grader.tag_value_excess` via `mlo.format_all.excess_tags`), so a strip can
-never leave a value the grade flags, nor delete one it requires. A bare
-MusicBrainz id is an IDENTITY, not a link: a UUID does not match `_URL_RE`, so
-`MUSICBRAINZ_ALBUMID` and friends stay fine and the identity-link requirement
-(`grade_check_mb_links`, `MB_LINK`) still demands one — nothing writes a URL
-into a tag, so the grade never requires a URL. This is the general rule the
-former RateYourMusic link tags fell under: the app no longer writes
-`RATEYOURMUSIC_ALBUM` / `RATEYOURMUSIC_TRACK` / `RATEYOURMUSIC_ARTIST` (their
-names left the tag vocabulary, `mlo.audio.TAG_MAP`, so any such tag is now
-excess by NAME too), and `grade_check_rym_links` / `RYM_LINK` are gone with
-them. The RateYourMusic **scraper** survives for what it is good at — genres,
-the cookie (`rym_cookie`), the archive fallback and the link RESOLVER
-(`server.integrations.rym_links`, used by the Sources probe) — none of which
-writes a tag.
 
 **R243 — Fix AcoustID pairs (21) completes OR creates the pair from the file
 itself, and only asks the service for a half pair that names no recording.**
@@ -258,7 +256,9 @@ is what makes the script look at a file it has already processed:
 `force_lyrics` (1), `force_cue` (2), `force_reencode_flac` (3), `force_reencode_images`
 (5), `force_audit` (6), `force_dr_replaygain` (7), `force_auto_tag` (8),
 `force_accurip` (9), `force_audiometa` (12), `force_mood` (16), `force_xlit` (17),
-`force_tracklist` (15). Grade (4) needs none — it re-reads.
+`force_tracklist` (15), `force_web_ratings` (24). Grade (4) needs none — it re-reads.
+Script 24 is fill-only, so its flag is what re-fetches a rating a file already
+carries (R362).
 Fetch lyrics (13) has NO flag since v4.4.0: a run fills what is missing and
 never replaces stored words, so there is no "redo" for it to force (R330) —
 replacing one track's lyrics is the manual route's job.
@@ -370,14 +370,14 @@ and the signature is what makes "install it for me" safe to offer. The version i
 compares is the SHELL's own, because a server it happens to talk to may be a
 different install at a different version whose number says nothing about the app
 on this machine. A browser client is served by whichever server it connects to
-and that image updates itself (R80), so it is not offered this — the notice it
-gets is a link, not an installer.
+(that image updates itself, R80) and a phone updates from whatever shipped it, so
+neither is offered this — the notice they get is a link, not an installer.
 
 ---
 
 ## 3. Grading checks
 
-67 keys exist; **every one of them ships ON**, checks and file categories
+71 keys exist; **every one of them ships ON**, checks and file categories
 alike. A fresh install grades strictly without anyone pressing a preset: the
 two that used to ship off (`grade_check_audit`, `grade_include_other`) are
 named in `mlo/config.py::STRICT_DEFAULT_KEYS` so the change is visible rather
@@ -391,7 +391,7 @@ group still renders (section *Other checks*).
 | --- | --- | --- | --- |
 | `grade_check_unreadable` | Unreadable files | ON | every audio file opens and decodes (`UNREADABLE`) |
 | `grade_check_missing_tags` | Required tags | ON | every `PER_TRACK_TAGS` entry is present and non-empty: `TITLE`, `ARTIST`, `ALBUM`, `ALBUMARTIST`, `DATE`, `TRACKNUMBER`, `DISCNUMBER` (only when the album really has several discs), `GENRE`, `MOOD`, `ENERGY`, `ITUNESADVISORY`, `DYNAMIC RANGE`, `INSTRUMENTAL` (ReplayGain is graded by its own opt-in check) |
-| `grade_check_album_tags` | Album-level tags | ON | `ALBUM DYNAMIC RANGE` is present |
+| `grade_check_album_tags` | Album-level tags | ON | `ALBUMITUNESADVISORY` and `ALBUM DYNAMIC RANGE` are present |
 | `grade_check_mood` | Mood tag present | ON | `MOOD` exists (`MOOD_MISSING`) |
 | `grade_check_energy` | Energy tag present | ON | `ENERGY` (0-100) exists (`ENERGY_MISSING`) |
 | `grade_check_genre` | Genre tag present | ON | `GENRE` exists (`GENRE_MISSING`) |
@@ -415,6 +415,7 @@ group still renders (section *Other checks*).
 | `grade_check_extra_images` | Stray images | ON | no image that is neither `cover.*` nor a per-track sidecar |
 | `grade_check_empty_folders` | Empty folders | ON | no audio-less folder (`EMPTY_FOLDER`) |
 | `grade_check_expected_tracks` | Whole release present | ON | an album carrying a MusicBrainz release id has a non-empty `.mlo_expected.json` (`EXPECTED_TRACKS_MISSING`), **and** every row of a manifest the album does carry is on disk (`EXPECTED_TRACKS_INCOMPLETE` — 14 of a CD's 15 tracks fails) |
+| `grade_check_album_description` | Album description stored | ON | `<album>/description.txt` exists and is non-blank |
 | `grade_check_raw_video` | Raw videos | ON | no un-remuxed video container (`.vob`/`.avi`/`.wmv`/`.ts`…) |
 | `grade_check_lossless_source` | Lossless sources | ON | no uncompressed lossless source (`.wav`/`.aif`/`.aiff`/`.ape`/`.wv`/`.shn`/`.tta`) is left in the library. The check **stands down** (adds no check at all) when the conversion pass would never touch one: the target is itself one of those containers (`library_codec` = `wav`/`aiff`) or nothing is converted (`library_codec`/`library_codec_optimize` = `keep`). The issue names the target: *"… (script 3 converts them to FLAC)"* |
 | `grade_check_disc_naming` | Disc rip-sheet naming | ON | a CD's `.log`/`.cue`/`.accurip` follow `discs_rename_pattern` (`CD-{n}`) |
@@ -422,6 +423,13 @@ group still renders (section *Other checks*).
 | `grade_check_cd_cue` | CD — .cue present | ON | every CD disc has a `.cue` |
 | `grade_check_cd_format` | CD — lossless format | ON | a CD track is 16-bit/44.1 kHz (`CD_FORMAT`; FLAC is what the shipped target produces). A file that **is** the configured *lossy* target is exempt and not counted — the CD-DA stream is gone once the album was deliberately converted, and Opus resamples to 48 kHz by design |
 | `grade_check_crc` | CRC checksums | ON | every track is covered by a per-track CRC in its **own disc's** `.log` (`CRC`) and that CRC equals the decoded PCM's CRC-32 (`CRC_MISMATCH`); lossy or undecodable files are judged on coverage alone |
+
+### Artist
+
+| Check id | Label | Default | Asserts |
+| --- | --- | --- | --- |
+| `grade_check_artist_image` | Artist image stored | ON | the artist folder holds `artist.jpg`/`artist.png` within `artist_image_aspect` (±2 %) and under the size ceiling, in the library's format and decodable — see R7a (`ARTIST_IMAGE_MISSING` / `_CORRUPT` / `_FORMAT` / `_OVERSIZED` / `_ASPECT` / `_UPSCALED`; `ARTIST_IMAGE_UNDERSIZED` is a note) |
+| `grade_check_artist_description` | Artist description stored | ON | the artist folder holds a non-blank `description.txt` (`ARTIST_DESCRIPTION_MISSING`) |
 
 ### Auditing
 
@@ -438,6 +446,7 @@ group still renders (section *Other checks*).
 | Check id | Label | Default | Asserts |
 | --- | --- | --- | --- |
 | `grade_check_mb_links` | MusicBrainz release link | ON | `MUSICBRAINZ_ALBUMID` (or a release-group id) is tagged (`MB_LINK`) |
+| `grade_check_rym_links` | RateYourMusic release link | ON | `RATEYOURMUSIC_ALBUM` is tagged (`RYM_LINK`) |
 | `grade_check_cover` | Cover art | ON | the album has a cover (`cover.jpg`/`jpeg`/`png`/`jxl`) meeting the size rules (`COVER`) |
 | `grade_check_cover_crop` | Cover aspect ratio (squareness) | ON | `|w/h − 1| ≤ cover_crop_threshold` (an aspect test, not crop detection) |
 | `grade_check_sidecar_cover` | Per-track sidecar covers | ON | per-track covers meet the same rules |
@@ -457,6 +466,7 @@ group still renders (section *Other checks*).
 | `grade_check_xlit_translation` | Translation — needed, never extra | ON | same, against the reader's language (`lyrics_translation_langs`, first entry) |
 | `grade_include_music` | Audio tracks | ON | the audio files themselves participate in grading |
 | `grade_include_cover` | Cover art | ON | `cover.*` images participate |
+| `grade_include_description` | Album description | ON | `description.txt` is the app's own file category, not a stray file |
 | `grade_include_cue` / `grade_include_log` / `grade_include_lrc` / `grade_include_accurip` | CUE sheets / Log files / LRC lyrics / AccurateRip files | ON | those sidecars participate |
 | `grade_include_video` | Remuxed videos | ON | MKV/MP4 music videos participate |
 | `grade_include_other` | Other files | ON | unclassified files (`.txt`, `.pdf`, `.m3u`, …) participate |
@@ -544,7 +554,7 @@ graded, taggable track rather than an invisible one.
 The three presets are one-click starting points on the Grading page; they edit
 the local config copy and only take effect on **Save** (`POST /api/config`).
 **R18 — the SHIPPED defaults ARE Strict**: every `grade_check_*` and every
-`grade_include_*` key ships `true` (67 of 67), so a fresh install grades
+`grade_include_*` key ships `true` (70 of 70), so a fresh install grades
 strictly with nobody pressing anything. The two that used to ship off —
 `grade_check_audit` and `grade_include_other` — are named in
 `mlo/config.py::STRICT_DEFAULT_KEYS`, so the change is a readable fact rather
@@ -554,13 +564,15 @@ already has, and pressing it on an edited config restores it.
 **R19 — Balanced** is the pre-strict set: the defaults with `grade_check_audit`
 and `grade_include_other` off — the one-click way back to the old behaviour for
 a collection nobody has audited.
-**R20 — Relaxed** loads the defaults and then switches these 15 keys **off**:
+**R20 — Relaxed** loads the defaults and then switches these 18 keys **off**:
 `grade_check_tag_spaces`, `grade_check_tag_case`, `grade_check_lyrics_spaces`,
 `grade_check_cue_spaces`, `grade_check_cover_crop`, `grade_check_lyrics_zero`,
 `grade_check_tag_blank_lines`, `grade_check_lyrics_blank_lines`,
 `grade_check_cue_blank_lines`, `grade_check_filename_case`,
-`grade_check_ext_case`, `grade_check_excess_tags`, `grade_check_alias_excess`,
-`grade_check_mb_links`, `grade_check_replaygain`.
+`grade_check_ext_case`, `grade_check_excess_tags`, `grade_check_mb_links`,
+`grade_check_rym_links`, `grade_check_replaygain`,
+`grade_check_album_description`, `grade_check_artist_image`,
+`grade_check_artist_description`.
 
 ---
 
@@ -678,6 +690,7 @@ The default writer of everything else is *Beets tagging (14) · import*.
 | `GENRE` | identity | Auto tagging (8) · genre import · Format all (10) trims | `grade_check_genre`, `_genre_count`, `_genre_order`, `_genre_vocab` |
 | `MEDIA`, `SOURCE` | release | Format lyrics (1) · media/source normalization | `grade_check_media`, `grade_check_source` |
 | `ITUNESADVISORY` | identity | Auto tagging (8) · advisory fetch | `grade_check_missing_tags` |
+| `ALBUMITUNESADVISORY` | release | Auto tagging (8) · advisory fetch | `grade_check_album_tags` |
 | `INSTRUMENTAL` | identity | Auto tagging (8) · instrumental fetch | `grade_check_missing_tags`, `grade_check_instrumental` |
 | `MOOD`, `ENERGY` | audio | Auto tagging (8) · Mood & Energy (16) | `grade_check_mood`, `grade_check_energy` |
 | `BPM`, `INITIALKEY` | audio | Key & BPM (12) | `grade_check_key_bpm` |
@@ -692,7 +705,7 @@ The default writer of everything else is *Beets tagging (14) · import*.
 | `TRANSLITERATION`, `TRANSLATION` | lyrics | Lyrics transliterate (AI) (17) | `grade_check_xlit_transliteration`, `_xlit_translation`, `_lyrics_lang_tags` |
 | `ACOUSTID_ID`, `ACOUSTID_FINGERPRINT` | provenance | the import wizard's AcoustID apply (fingerprint match) — the PAIR in one save, verified by re-read — and Fix AcoustID pairs (21), which every import chain runs over the album it just imported: it completes a half pair, and creates the pair for a file that names its recording but carries none (the id from the file, the fingerprint local) | `grade_check_acoustid` ; the pair is REQUIRED on every audio track (`grade_check_acoustid`), and BOTH spellings a tagger writes are read — this app's `ACOUSTID_ID` and beets/mediafile's `Acoustid Id` / `Acoustid Fingerprint`, the spelling its chroma plugin writes and this app's own import runs |
 | `ENCODER_PROGRAM`, `ENCODER_QUALITY`, `ENCODER_VERSION` | provenance | Optimize FLACs (3) | `grade_check_encoder` |
-| `MUSICBRAINZ_*`, `RELEASETYPE`, `CATALOGNUMBER`, `LABEL`, `BARCODE`, `ISRC`, `WORK`, `MOVEMENT`, … | release | Beets tagging (14) · import · MusicBrainz writes | `grade_check_album_tags`, `grade_check_mb_links`, `grade_check_naming` |
+| `MUSICBRAINZ_*`, `RATEYOURMUSIC_*`, `RELEASETYPE`, `CATALOGNUMBER`, `LABEL`, `BARCODE`, `ISRC`, `WORK`, `MOVEMENT`, … | release | Beets tagging (14) · import · MusicBrainz writes | `grade_check_album_tags`, `grade_check_mb_links`, `grade_check_rym_links`, `grade_check_naming` |
 | `PERFORMER`, `PRODUCER`, `ENGINEER`, `MIXER`, `ARRANGER`, `DJMIXER`, `CONDUCTOR`, `WRITER`, `DIRECTOR`, `COMPOSERSORT`, `MUSICBRAINZ_COMPOSERID` | release | Beets tagging (14, `beets_credits`) · Auto tagging (8) — the release's own artist/recording/work relations, fetched in ONE request per album | `grade_check_excess_tags` (allowlisted, never foreign) |
 | `ASIN`, `LANGUAGE`, `DISCSUBTITLE`, `LICENSE`, `ENCODEDBY` | release | Beets tagging (14) · Auto tagging (8) | `grade_check_excess_tags` |
 
@@ -733,9 +746,12 @@ the container's tag system (packaging, per-catalogue-entry labels, annotations)
 is not invented under an ad-hoc key: it stays out, and the writer says which
 fields it could not place.
 
-The advisory tag answers to **one switch**, `advisory_auto_fetch` (the
-provider fetch — the import step, the wizard and the *Fetch / refresh advisory
-rating* action).
+The two advisory tags answer to **different switches**, because different things
+write them: `ITUNESADVISORY` to `advisory_auto_fetch` (the provider fetch — the
+import step, the wizard and the *Fetch / refresh advisory rating* action) and
+`ALBUMITUNESADVISORY` to script 8's *Auto Album Advisory* derivation
+(`mlo/config.py::_TAG_WRITE_SWITCH`). The advisory fetch derives the album tag
+too, with script 8's own rule, so a manual fetch never leaves it stale.
 
 A fetch reports its provenance per track, and never invents one: per source the
 STRONGEST answer wins (every ISRC the file or MusicBrainz states is asked, so a
@@ -751,7 +767,7 @@ asks for a re-rate (`force`).
 that is the only caller that does — because nothing was pressed there, while
 EVERY action a user presses sends `force: true` (the tag menu's *Fetch / refresh
 advisory rating*, the wizard's *Auto-import advisory for all tracks*, the
-track page's *Check advisory + instrumental*, all
+metadata review's and the track page's *Check advisory + instrumental*, all
 through `checkTrackValues`). So each surface a user presses offers exactly ONE
 advisory action, and none of them is fill-only. Even a forced re-rate rewrites
 only with evidence: the invented `advisory_fallback` never overwrites a stored
@@ -837,6 +853,24 @@ rating.
   the alias table) folds case, so `Shoegaze` and `shoegaze` are the same genre
   to everything that judges the value; the case rule is about the value the
   file stores, not about which genre it is.
+- **R41b — every label and reason the UI renders reads as a sentence, and a
+  genre name inside one uses the app's OWN spelling of it.** A reason line on a
+  Discover row, a recommendation row or an album card starts with a capital
+  letter (`Genre: …`, `Sounds like …`, `More from …`, `More release groups by …`,
+  `Similar to …`, `Chart #1 …`, `Most listened this month (… )`, `Same genre:`,
+  `Same family:`, `Same mood:`, `Same artist:`, `Energy 45 near 60`,
+  `Both 2007`), and the genre a line names is rendered through
+  `mlo.genres.display_name` — the same Title Case the stored tag and the
+  Discover genre list use (`server.discover._genre_display`, which leaves a
+  provider's compound label such as `Rap/Hip Hop` as published), so a line can
+  never read `Genre: alternative rock` beside a list that says `Alternative
+  Rock`. What is SENT as a search or seed parameter keeps its own spelling, and
+  machine-facing strings (query keys, JSON field names, log lines) are not
+  touched: this is about the words a person reads. `server.recommend._reasons`
+  and `server.discover`'s reason builders are the two places they are written;
+  the `basis` chip that says what a shelf was seeded from follows the same rule
+  (`Library genres: Shoegaze, Dream Pop · Top artists: …`).
+
 - **R92 — genres fall back LEVEL BY LEVEL, and the level that answered is never
   hidden.** MusicBrainz states a genre at four levels — the recording (per
   track), the release, the release group and the artist — and the app asks all
@@ -870,7 +904,8 @@ rating.
 - **R42** — the ReplayGain family is complete or absent: a file carrying any of
   `REPLAYGAIN_TRACK_GAIN`, `REPLAYGAIN_TRACK_PEAK`, `REPLAYGAIN_ALBUM_GAIN`,
   `REPLAYGAIN_ALBUM_PEAK` must carry all four; a file with none is never graded
-  for them (`grade_check_replaygain`, ON).
+  for them (`grade_check_replaygain`, ON; `replaygain_analyze_missing` lets the
+  player measure on the fly instead).
 - **R43** — script 7 writes the album gain/peak and the track gain/peak for FLAC
   and MP4 alike, using the ReplayGain 2.0 reference of **−18 LUFS**;
   `replaygain_skip_existing` (ON) skips an album only when ALL FOUR tags are
@@ -900,6 +935,46 @@ rating.
   typically rendered `DR<n>`); they are graded through the required-tag sweep and
   the album-tag check, never on video files.
 
+- **R219 — the equalizer applies to PLAYBACK, and it is the same profile
+  store an export uses.** `playback_eq_profile` (one config key, "" = off — the
+  curve is what the library sounds like, the same reason `replaygain_mode` is
+  one key) names a built-in preset or an imported profile from
+  `mlo.eq`/`<music>/.mlo/data/eq`, and the player installs it on its own
+  WebAudio graph: `lib/eqNodes.buildEqChain` renders the profile's preamp as one
+  GainNode followed by one BiquadFilterNode per active band, spliced between the
+  ReplayGain gain and the analyser (`lib/analyser.applyEq`), so the meters and
+  the ambience read the equalized signal and an element attached later (the
+  gapless pair's other half, a video popout) inherits the same curve. The
+  mapping is APO's own — PK → peaking, LS/HS/LSC/HSC → shelves, LP/HP/BP/NO →
+  the matching pass/notch — so a band's frequency, gain and order are identical
+  in the app and in an export; a SHELF's width is the one honest difference
+  (APO's custom slope reaches ffmpeg as a Q, while a WebAudio shelf is
+  fixed-slope), and it is stated in the page rather than hidden. The BOUNDS are
+  shared as well: a band's Fc/gain/Q and the profile's preamp are clamped to
+  the same numbers on both sides — fc 20 Hz–20 kHz, gain ±20 dB, Q 0.1–30,
+  preamp ±24 dB (`lib/eqNodes`' `EQ_FC_MIN`/`EQ_FC_MAX`/`EQ_GAIN_LIMIT`/
+  `EQ_PREAMP_LIMIT`, and `mlo.eq`'s `FC_MIN_HZ`…`PREAMP_LIMIT_DB` the export
+  chain clamps with) — so a file asking for more cannot sound wider or louder
+  in the app than in an exported copy; the file's own value stays in the
+  profile and the import reports that it is clamped. A profile the export
+  would REFUSE is not played either: one whose parse carried an error installs
+  nothing, because the bands that did parse are not the curve the file wrote
+  (R72). The editor (`pages/EqualizerPage.tsx`, sidebar → MAINTAIN) lists the
+  presets and the
+  stored profiles, imports APO/Peace text or a dropped file, draws the response
+  from the browser's own `getFrequencyResponse` (never a second implementation
+  of the filter maths), gives every band a DRAGGABLE handle plus typeable Fc /
+  Gain / Q boxes (clamped, committed on Enter or blur, the VolumePct pattern;
+  Escape puts the stored value back and the blur it fires is not a commit)
+  and a per-band on/off, and previews edits LIVE through the player's own chain
+  — nothing is stored until Save, which writes the profile back as APO text
+  through the one import endpoint (`POST /api/export/eq/import`), replacing a
+  profile of the same name. A profile that cannot be built leaves plain
+  playback alone even mid-install: `installEq`'s tear-down is undone when the
+  build throws, because the element's audio reaches the speakers through that
+  graph alone and a gain node left connected to nothing is silence. `tools/test_export_audio.py` keeps covering the
+  parser, the store and the export chain the page shares.
+
 - **R220 — AutoEq is a SEARCH, and an import is the profile store's own
   file.** `GET /api/eq/autoeq/search?q=` answers from the AutoEq project's own
   index (`results/INDEX.md`, ~6 300 measurements, cached beside the profiles for
@@ -911,7 +986,7 @@ rating.
   no rate limit) is in the path, and the fetched text goes through the SAME
   parser and store as a pasted profile (`mlo.eq.autoeq_import` →
   `import_profile`), which is what makes an imported correction editable,
-  exportable and applicable to an export like any other. An id that is not a
+  exportable and applicable to playback like any other. An id that is not a
   plain results-relative path is refused with a 400 (`_autoeq_dir`), and a
   failed refresh still answers from the cache with the reason in `error` instead
   of emptying the list. The import hands the page the row the server stored
@@ -952,6 +1027,174 @@ rating.
 - **R52** — credits are not lyrics: the contributor block some providers return
   as the first line is dropped (becoming a blank line), and an instrumental is
   never given lyrics.
+- **R52a — both lyric surfaces carry the same size control.** `−`, a typeable
+  percentage and `+`, in 5 % steps between **85 %** and **160 %** (100 % is the
+  surface's own base size) — one shared control (`web/src/components/LyricZoom.tsx`)
+  so the sidebar and the fullscreen player cannot drift. A typed value is
+  clamped to the bounds and rounded to a whole percent, never snapped to a step,
+  and each surface keeps its OWN value (`mlo.lyrzoom.sidebar.v1` for the
+  sidebar, `mlo.np.lyrzoom.v2` for the player): resizing one must not
+  re-lay-out the other.
+- **R52b — the lyrics pane is the reader's, and its control lives in the
+  player's own control row.** The fullscreen pane is shown and hidden by ONE
+  toggle — the microphone, beside the queue / visualizer / options buttons
+  (`web/src/components/NowPlayingView.tsx`) — never by a control drawn over the
+  album art. The sidebar pane keeps the same concept: the player bar's
+  microphone button, same icon, same pressed state
+  (`web/src/components/PlayerBar.tsx`). The toggle is drawn only while the
+  current track carries lyrics this install SHOWS — timed, or untimed and
+  accepted, never an instrumental and never a refused plain text (R267): a
+  control that cannot do anything is hidden, not rendered inert, and the choice
+  is remembered per device
+  (`mlo.np.lyrics`, like the other display picks). Show and hide are seamless:
+  the pane stays MOUNTED and only its box animates (the app's 300 ms base
+  motion step, as the player's other transitions use), so the reader's scroll
+  position, the zoom and the active-line emphasis survive the toggle, the cover
+  glides back to the middle of the row instead of jumping, and nothing is ever
+  painted on top of the artwork. Pinned by
+  `tools/check_fullscreen_player.cjs`.
+- **R52c — the fullscreen player paints NO panel on the artwork, and its INK
+  ANSWERS to the cover.** The lyrics pane, the metadata block (title / format
+  line / album / artist), the transport and the top bar draw no background, no
+  border, no backdrop blur and no halo of their own — a tinted rounded rectangle
+  under the title and a gradient pane behind the lyrics read as grey boxes
+  pasted over the cover, which is what they were reported as. Two mechanisms
+  replaced them, and there is no third:
+  * **the ink polarity** (`npInk`, `NowPlayingView.tsx`): the cover's own
+    average colour (the server's `tagcache.cover_color`, the value every
+    ambience layer is painted from) decides ONE of two tables — the light one
+    (white / zinc-100 / zinc-300, `.np-shade`) for a cover at or below
+    `NP_INK_FLIP` (0.42 relative luminance), the dark one (zinc-950 / 900 / 800,
+    `.np-shade-light`) above it — and the choice covers every lyric surface,
+    the metadata tiers, the karaoke syllables, the transport glyphs and the
+    time readouts. A single ink cannot be AA on a field that spans rgb(96) to
+    rgb(255) within one screen (a white cover's bloom core), which is why the
+    polarity is decided at all; the glyph shadow flips with it, and that shadow
+    is ALL halo — four low-alpha stops, the tightest 0.42 — never a tight
+    near-opaque core: the 0.92/3px core of the first fix merged between
+    glyphs into a slab of uniform dark pixels under the line on a BRIGHT
+    field (a red cover reads bright to the eye while its average luminance
+    sits under the flip, so the light table was picked), which is what was
+    reported. Legibility is carried by the ink's own contrast and by the
+    field's treatment above; the shadow only has to stop a glyph dissolving
+    into a busy mid-tone;
+  * **nothing behind a dark cover, a cover-tinted wash in the band above it, a
+    cover-tinted lift above the flip**: at or below `NP_FIELD_AS_IS` (0.20
+    relative luminance) the ambience is dark enough for the white table on
+    every patch the text covers, so **no scrim is drawn at all** — the
+    background is the artwork's own ambience. Above the flip the field is
+    lifted by a full-bleed gradient built from the cover's own colour mixed
+    toward white (never a grey), with no edge, rounding or blur — a scrim, not
+    a panel. The band BETWEEN the two keeps the white table and DROPS the field
+    instead: the same full-bleed mechanism, the cover's colour mixed toward
+    near-black at 0.62. That band is the case the owner reported twice — a
+    cover is a mixture (The Bends is a bright face on a dark frame), and the
+    average the flip judges it by sits well below the field its ambience
+    paints, because the orbs and the bloom are screen-blended and ADD light on
+    top of it (0.24 average, 0.45 field, measured). White ink read 2.55–3.49:1
+    there with four tiers under 3:1 — "the text mixes into the background" —
+    and 6.98–15.02:1 on the same cover after the wash, across all 17 tiers the
+    player draws (the top bar's queue line and `Up next` label, the title, the
+    format line, the album and artist lines, the transport glyphs, the time
+    readouts, the volume box and the lyric lines).
+  * **the chrome follows the chosen table, never a fixed grey**: the top bar's
+    icons and queue line, the transport glyphs, the seek readouts and
+    `VolumePct` take their colour from the ink (`text-current` inside an
+    `ink.chromeText` surface), so they move with the polarity. `VolumePct` draws
+    on two surfaces — the fullscreen chrome and the player bar — and the fixed
+    `zinc-500`/`zinc-600` it used to pin suited only the dark one (the volume
+    box read 1.64:1 on a mid cover: invisible). Over a music video the top bar
+    keeps light greys, because the picture is the field there and the ink's
+    polarity says nothing about it. **The two hairline separators are chrome
+    too** (`ink.divider`, the transport row's and the seek row's): a fixed
+    `bg-white/15` reads 1.19:1 on a white cover and 1.02:1 on the mid-grey one
+    — the separators the owner reported as fading into the background while
+    the icons either side of them had already flipped — so the dark table keeps
+    that white and the light table draws the same weight in near-black
+    (`rgba(9,9,11,0.60)`, >= 3:1 on every field the light table produces). The
+    video path is the exception the top bar already has: those rows sit on the
+    player's own black gradient, so both separators keep the white hairline.
+    **A LIT toggle on those rows takes the same care**: the like heart's
+    favourite state and the open add-to-playlist button light with `--accent`,
+    which is the app's ONE "on" colour — but the shipped accent is white, so on
+    a bright cover the LIT state was the invisible one (~1.1:1, the owner's
+    "the like / playlist button should stay the same colour even when
+    clicked"). `litInk` (`NowPlayingView.tsx`) keeps the accent whenever it can
+    be seen on the chosen table and falls back to that table's full ink
+    (`litFallback`) when it cannot, so a custom dark accent still lights the
+    glyph over a bright cover. `FavHeart` gained one `likedClass` override for
+    it; every other heart in the app still lights `text-accent`.
+  * **the sliders take the table too, and the lyric chips with them**: the ink
+    table (`LyricInk`, `NowPlayingView.tsx`) carries four more fields for the
+    seek and volume sliders — `seekTrack`, `seekFill`, `seekThumb`, `seekRing` —
+    which the audio chrome hands to CSS as `--seek-track`, `--seek-fill`,
+    `--seek-thumb` and `--seek-ring` (`--seek-pct`, written by `ScrubSeek` and
+    the volume control, is the position the runnable track fills to);
+    `input[type="range"].seek-fat` in `index.css` draws its runnable track from
+    those — the `--seek-*` defaults are declared on `:root` rather than on the
+    input itself (a custom property on the input would win over the value the
+    player inherits) and hold the old zinc/accent values, so the docked player
+    bar and the equalizer are unchanged while the fullscreen pane's sliders
+    follow the cover. The top bar's icons
+    use ONE pair of class strings (`barOn`/`barOff` = `ink.chromeOn`/
+    `ink.chromeOff`) instead of a colour each, and the lyrics zoom/offset chips
+    take their geometry from the shared `LyricZoom`/`LyricOffset` strings
+    (`LYRIC_STEP_BTN`, `LYRIC_VALUE_BOX`, `LYRIC_VALUE_UNIT`), so the `− 100% +`
+    and `− 0.0s +` pairs cannot drift apart (R240). `tools/check_np_metadata_contrast.cjs`
+    is the measurement — it samples the rendered pixels rather than a CSS
+    variable, and asserts each ink tier's ratio against the field it actually
+    sits on for a dark, a mid-grey, a bright-grey and a white cover, now
+    covering the sliders, both icon families and both lyric chips per polarity
+    (147/147 on the final build) — and `tools/check_fullscreen_player.cjs`
+    asserts the structural half (no layer but the ambience and the chosen scrim
+    paints over the art; 85/85).
+  * **the frequency strip takes the same table**: `<Visualizer>`'s
+    `ink` prop is the ink polarity (`ink.viz`), and it draws its bars in
+    the table's own tones — near-black over a bright cover, near-white
+    over a dark one — because a strip drawn with the app's accent
+    (white) is a white strip on a white field: the same "text that blends
+    into the background" the lyrics had. Left unset (the docked lyrics
+    sidebar, whose surface IS the app's dark panel) the accent is right.
+  The floating MENUS are the deliberate exception and keep their frosted veil
+  (`np-veil` + `np-veil-dark` + `np-veil-panel`: the options popover, the queue
+  drawer) — a menu is a menu, and its panel is how it reads as one. R56c's
+  keyboard `:focus-visible` rings are untouched.
+  The lift's strength has a FLOOR (0.46), and the floor is the point: what the
+  dark table has to clear is the DIMMEST patch the text covers — the metadata
+  block at the bottom, where the vignette bites — which is dark whatever the
+  cover's average is. A curve starting at zero at the flip left exactly that
+  band unreadable (measured: a `#b4b4b4` cover put the block's field at
+  rgb(80), 2.5:1 for near-black ink); with the floor it reads 4.69:1.
+  Measured, not eyeballed: `tools/check_np_metadata_contrast.cjs` samples the
+  field the text actually sits on for FOUR covers (dark, mid-grey, a
+  bright-grey one just above the flip, and white), asserts every metadata tier
+  ≥ 4.5:1 and the title ≥ 3:1 on each — the boundary cover is the tightest at
+  4.69:1 — asserts the ink FLIPPED with each cover, and asserts the block
+  paints nothing of its own.
+  `tools/check_fullscreen_player.cjs` asserts the structural half: no layer but
+  the ambience and the chosen scrim paints over the art, and the metadata
+  block's own computed style has no background, blur, shadow or border.
+- **R52d — the lyric offset is a control on both lyric surfaces, and it is
+  saved into the track's lyrics.** `−`, the pending shift in seconds, `+`, and a
+  Save that appears once there is something to save (`LyricOffset.tsx`, shared
+  by the fullscreen pane's options menu and the right-docked sidebar's header —
+  one control, like `LyricZoom`, so the two surfaces cannot drift). The step is
+  a tenth of a second and the pending range is ±10 s. While it is being dialled
+  in the shift is LOCAL: the surfaces parse their lyrics with it
+  (`parseLrc(text, shiftMs)` / `parsePlayerLrc(text, shiftMs)`), so the
+  highlight follows the buttons with no round trip and no half-written file;
+  Save posts it as a DELTA (`POST /api/lyrics/offset`, `{path, delta_ms}`) and
+  renders the text the server stored. The write follows where the lyrics already
+  live — the `.lrc` beside the track and/or its `LYRICS` tag, never a migration
+  between the two (that is `lyrics_format`'s job, script 1) — gated by the same
+  per-filetype LYRICS switch the format pass uses. What moves is the SYNC:
+  every `[mm:ss.xx]` and every Enhanced `<mm:ss.xx>` stamp in the text, at the
+  precision the file itself carries; a line with NO timestamp is returned
+  untouched (plain text has no sync to move, and inventing one would turn an
+  unsynced file into a wrong one), and a stamp that would land before the
+  file's start clamps at zero instead of going negative. A pending shift belongs
+  to the track it was dialled against and is dropped when the track changes
+  (never carried onto the next one, and never written from a stale surface).
 - **R162 — a lyrics search that finds NOTHING settles the track as
   INSTRUMENTAL.** An import fetches lyrics by itself (script 13 is in the
   configured chain, R89/R160), and the search is allowed to come back empty:
@@ -985,6 +1228,101 @@ rating.
   lyrics found by any provider): N track(s)", and the run's stats carry
   `instrumental_count`) so "skipped: 12" cannot read as "twelve tracks nobody
   looked at".
+
+- **R52e — the fullscreen player opens IN THE WINDOW, and the browser's own
+  fullscreen is a separate, opt-in button.** Clicking the album art in the
+  now-playing bar (and the bar's own fullscreen glyph, and the app-wide `F`)
+  mounts the viewer, which is `fixed inset-0` and covers the app by itself — it
+  does NOT call `requestFullscreen`. Taking the whole screen is a distinct
+  control, rendered in the viewer's top bar (`Maximize2`/`Minimize2`, beside the
+  visualizer and lyrics toggles) and remembered in its own state; the
+  `fullscreenchange` listener still treats a browser-driven exit (Esc being
+  swallowed by the browser is the common case) as "the user is done", but a
+  transition this pane asked for — `fsOwn` — leaves the viewer up. What this
+  fixes: entering the player seized the whole screen, which is not what "open
+  the player" means, and an embedded host can refuse the request anyway.
+
+- **R52f — the meters follow the SOUND, not the last attach.** Every media
+  element carries its own WebAudio graph (`lib/analyser`), and the gapless
+  `<audio>` pair means two of them exist with only one playing: the analyser the
+  visualizer and the ambience read is therefore chosen from a registry of
+  attached elements by "which one is actually playing" (falling back to the last
+  attach), because reading the idle half returns an all-zero spectrum and both
+  meters fell back to their synthetic animation while real audio played. The
+  same read resumes a context the browser suspended or WebKit "interrupted"
+  (tab backgrounded, a phone call) before it returns — a suspended context reads
+  as zeros too — and a WebAudio failure is retried after a cooldown instead of
+  latching the meters off for the session. An element that has left the document
+  is skipped, so a video popout unmounted mid-track cannot answer for the app.
+
+- **R52g — the lyric pane reads as a live surface: a nudge parks the follow for
+  a little over a second, its edges dissolve, and its own controls ride on the
+  words.** Five behaviours, one shared pane (`web/src/lib/lyrScroll.ts`,
+  `LyricsSidebar.tsx`, `NowPlayingView.tsx` — the sidebar, the fullscreen
+  player and the editor preview take their scrolling from the same module, so
+  they cannot drift apart):
+  * **The hold is `HOLD_MS` = 1 200 ms, not 6 000.** A wheel or a touch calls
+    `takeOver()`, which stops the glider and parks the follow until
+    `Date.now() + HOLD_MS`; a timer `HOLD_MS + 50` later re-kicks the pane while
+    the element is playing, so the sung line is picked back up in place rather
+    than waiting for the next line change — the hold suppresses the line-change
+    step too. The 6 s this started as made the pane look BROKEN: a reader who
+    nudged the wheel and then waited watched the song's line change three times
+    while the pane sat still. A wheel's momentum is a few hundred milliseconds
+    and a finger drag re-arms the hold on every event, so a second and a bit
+    never fights a gesture in progress and the pane is alive the moment the
+    reader stops.
+  * **The pane's top and bottom edges dissolve (`.lyr-fade`, `index.css`).**
+    Both scrollers carry it: a mask (`mask-image` and `-webkit-mask-image`)
+    that is transparent at 0, opaque at 26 px, opaque at `calc(100% - 26px)`
+    and transparent at 100 % — a line the pane's own box cuts through its
+    middle is the one place a reading surface looks broken rather than alive.
+    A MASK and not an overlay: nothing is painted, so R52c still holds and the
+    reading surface has no panel, tint or gradient of its own. The first and
+    last lines are never affected, because `LYRICS_PAD_TOP` / `LYRICS_PAD_BOTTOM`
+    hold them a third of the pane away from either edge.
+  * **The two lyric controls sit ON the words, quietly.** The fullscreen pane's
+    footer row carries `LyricZoom` and `LyricOffset` themselves, not only the
+    options popover's copies — nudging the sync or fitting the size to the room
+    used to mean leaving the words to go and find them. The row is rendered
+    only while the pane is OPEN (`paneOpen &&`: collapsed, there is nothing on
+    screen to size or to shift), in the ink's own tone (`ink.chromeText`) at
+    `opacity-60` (`40` while the lyrics are stale, `100` on hover /
+    `focus-within`), with no background and no border of its own (R52c). Both
+    controls take `text-current` plus an opacity instead of a hardcoded grey —
+    `text-zinc-500` / `text-white` are gone from them — because ONE control is
+    rendered on three surfaces: the sidebar's header, the options popover, and
+    the artwork itself, where a fixed zinc glyph is R52c's grey-on-grey failure.
+  * **A lyric line is not a tooltip.** `title="Click to seek"` is gone from
+    both surfaces; the line still seeks on click (`renderLine`'s `onClick` →
+    `p.onSeek(l.time)` and `centerLine(i)`), so the only thing lost is a hover
+    bubble drawn over the words.
+  * **The star row takes the ink too.** `StarRating`'s two colours are
+    parameters now (`emptyClass`, `fillClass`; the app's own defaults are
+    unchanged, `text-zinc-600` and `fill-current text-accent`), and the
+    fullscreen row passes `text-current opacity-45` / `fill-current`: this row
+    sits straight on the artwork, where a zinc-600 outline and an accent fill
+    both blend into a bright cover. The outline keeps a little air, the filled
+    halves take the ink at full strength — the polarity of R52c applied to a
+    control.
+
+- **R266 — a lyric pane follows the SOUND, not the decoder.** Every element the
+  app plays is routed through the WebAudio graph (`createMediaElementSource` →
+  the ReplayGain gain → the analyser → the speakers; `web/src/lib/analyser.ts`),
+  and that graph has a real output delay: the element's `currentTime` says where
+  the decoder is, while the buffer the speakers are playing was handed to the
+  device `baseLatency + outputLatency` ago. A pane driven straight off
+  `currentTime` is therefore ahead of what the listener hears — "audio in
+  general is de-synced from what the app displays for synced lyrics" — so the
+  one clock the panes read (`PlayerBar`'s `getAudioTime`, the prop both
+  `LyricsSidebar` and the fullscreen player take) subtracts
+  `audibleLatencySec(element)`: `baseLatency + outputLatency` of the context the
+  element is attached to, ZERO for an element with no graph (a direct element
+  has no context of its own to be late in, and guessing a latency is worse than
+  none) and capped at 0.5 s so a nonsense reading can never throw a pane a verse
+  off. The per-track offset control is unchanged: the reader's own fine
+  adjustment on top, written into the track's lyrics when saved.
+
 ### 7.5 Covers
 
 - **R53** — the canonical cover names are `cover.jpg`, `cover.jpeg`,
@@ -1092,14 +1430,17 @@ rating.
   so a search that could not ask the group says so.
 - **R56c — a cover is never framed by a decorative border in the UI.** No
   border, ring or outline is drawn around a cover wherever it appears — the
-  album grid, the library and list rows, the album
+  album grid, the library and list rows, the fullscreen player, the album
   header, the cover pickers, the menus. Covers keep their rounding, their
   placeholder background and their elevation shadow (`shadow-lg` /
   `shadow-2xl` are a drop shadow, not a frame). Two things are deliberately NOT
   that frame: the keyboard-only `:focus-visible` ring on whatever a keyboard
   user focuses (`web/src/index.css`, kept — without it there is nothing to see
   where they are), and a picker's own selection highlight, which must be
-  transparent at rest so nothing is drawn until it is earned.
+  transparent at rest so nothing is drawn until it is earned. Pinned by
+  `tools/check_fullscreen_player.cjs` (the computed border/ring/outline of the
+  player's art and of an album-grid card, plus the focus ring on the card's
+  cover link).
 - **R56d — a cover WRITE stores the image at the URL it was given, or nothing.**
   `POST /api/cover/fromurl` and the import chain's cover step fetch exactly the
   picked/chosen URL (`server.main._cover_url_bytes(..., substitute=False)` over
@@ -1179,15 +1520,17 @@ rating.
   `<music>/.mlo/data/cover_thumbs` keyed by the cover file's path + size + mtime,
   and a cache hit reads the thumb and never the master. The URL a cover WRITE
   reports carries the new bytes immediately (the write invalidates its own
-  entry), so a replaced cover is never a stale hit. Measured on a grid tile
+  entry), so a replaced cover is never a stale hit. Measured on the play path
   (74 px slot, 1400 px master, emulated 20 Mbit/s link): 3.13 MB and two
   requests, artwork at ~1230 ms → 12 KB, one request, artwork at ~98 ms — the
-  same paint budget as the tile's own metadata — and a second view moves no
-  bytes over the wire.
+  same paint budget as the track's own metadata — and a repeat play moves no
+  bytes over the wire. The fullscreen pane's picture and its ambient blur share
+  ONE sized request, and the next sequential track's cover is preloaded with the
+  gapless preload (R300). The offline cache still resolves a warmed plain master
+  for a sized URL, so a downloaded album's art opens with the server down.
   Pinned by `tools/test_cover_preview.py` (drawn width, its crop, its bytes and
-  the invalidation). `tools/measure_cover.cjs` is the measurement harness the
-  numbers came from.
-
+  the invalidation). `tools/measure_cover.cjs` / `measure_pane.cjs` /
+  `measure_preload.cjs` are the measurement harnesses the numbers came from.
 ### 7.6 Tag value spelling and spacing
 
 - **R57** — a tag VALUE is written in the one canonical form its family has:
@@ -1284,7 +1627,7 @@ and records which stage answered (`source`).
 
 - **R61 — the providers are a source, and the merge rule is `1 > 0 > 2`.**
   `server/integrations.py::resolve_advisory_route` asks Deezer/Spotify (ISRC),
-  Apple and Discogs, and `merge_advisory` settles what they said: a
+  Apple, Discogs and YouTube, and `merge_advisory` settles what they said: a
   stated 1 beats everything, then a stated 0, then a clean edition's 2.
 - **R61a — every ISRC is asked, by every ISRC source — the instrumental lookup
   included.** `server/integrations.py::_isrc_codes` is the ONE reader of "the
@@ -1449,7 +1792,9 @@ table and the auto-update worker cannot disagree.
   pip writes the package first and its console script, with the "not on PATH"
   warning, last, so a run that fell over on the script — a bind mount that
   refuses chmod, a killed pip — left a complete, importable package this app
-  never runs the script of, and calling that a failure also DELETED it. A run
+  never runs the script of, and calling that a failure also DELETED it
+  ("Also dependency installs work, but yt-dlp succeeds with an 'error'" — the
+  owner's report, on the Docker image, where yt-dlp IS this pip path). A run
   that landed nothing still fails loudly with pip's own last line as the
   reason, which is what covers a genuine pip failure, an unreachable release
   and an unwritable tools folder: all three leave nothing to find. Pruning the
@@ -1486,7 +1831,7 @@ table and the auto-update worker cannot disagree.
   list runs; the uninstall hook then removes the backend tree recursively,
   which also clears files an earlier build left under names this one does not
   use. The install's own state — `config.json`, `shell.json`, `mlo-server.log`,
-  `server/data` (auth.db, the beets library) and
+  `server/data` (auth.db, playlists.db, the beets library) and
   `.dependencies` — lives BESIDE that tree and survives the uninstall, because
   `backend_launcher._redirect_engine_home` redirects `mlo.paths`
   (`SCRIPT_DIR`, `CONFIG_FILE`, `DEPS_DIR`, `LEGACY_DATA_DIR`) before the engine
@@ -1504,8 +1849,9 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   zip.** `export_target` is `zip` (the client downloads one archive) or `server`
   (a folder the machine running this app can see, chosen with the drive picker).
   The zip target stages the export under `<music>/.mlo/data/export_zip/<id>/`,
-  packs it with whatever the run wrote (the manifest when `export_manifest`
-  is), answers
+  packs it with whatever the run wrote (the `.m3u8` playlists only when
+  `playlists` is on — OFF by default, see R75 — and the manifest when
+  `export_manifest` is), answers
   `zip: {id, name, bytes, files, url}` and serves it from
   `GET /api/export/zip/{id}` with `Content-Disposition: attachment`; one archive
   is kept at a time and a new export replaces it. `prune` is meaningless for a
@@ -1517,8 +1863,8 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   selection covers a whole album — that is what keeps the album's internal
   balance — and the track gain otherwise, rides the gain in the SAME encode
   (`volume=<gain>dB`), and strips `REPLAYGAIN_*` from the output, because a
-  device reading those tags would otherwise correct the gain twice. A track
-  that would clip after the gain is reported, never silently distorted.
+  player would otherwise apply the gain twice. A track that would clip after the
+  gain is reported, never silently distorted.
 - **R72 — an equalizer profile is the user's own file, and its losses are
   named.** `export_eq_profile` selects a built-in preset or a profile imported
   from **Equalizer APO / Peace EQ** text (`mlo/eq.py`): `Preamp:`, `Filter N:
@@ -1540,8 +1886,8 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   this app does not model, so a conditional band is NOT applied and the block
   is named with the count of lines it cost. A BAND line that
   cannot be read is an ERROR naming its attribute or its line, and a profile
-  carrying one is REFUSED WHOLE on every path — the import and the export
-  (`mlo.eq.apply_refusal`, one sentence, the words the editor's banner
+  carrying one is REFUSED WHOLE on every path — the import, the export AND the
+  player (`mlo.eq.apply_refusal`, one sentence, the words the editor's banner
   shows) — because a profile missing the band that failed to parse is not
   the curve the user asked for. Profiles live in
   `<music>/.mlo/data/eq/` with a sanitized id and a 64 KiB cap.
@@ -1557,14 +1903,15 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   re-exporting with a different curve re-encodes instead of being skipped as
   identical to the previous run.
 - **R75 — an export carries AUDIO; everything it leaves behind is reported.**
-  An album export writes no `.accurip`, `.log`, `.cue`, `.txt` or `.jpg`
-  file: the cover travels EMBEDDED in each exported file
+  An album export writes no `.accurip`, `.log`, `.cue`, `.txt`, `.jpg` or
+  `.m3u8` file: the cover travels EMBEDDED in each exported file
   (`embed_covers`, ON) and the rip's evidence stays in the library where the
   audit, the grading and the log's own checksum read it. WHICH families do
   travel is the user's file selection (R187); untouched, it is the tracks alone.
-  One switch keeps the old behaviour available and it is OFF by default —
-  `export_sidecars` (mirror `cover.*`/`.lrc`/`.cue`/`.log` — R187's
-  `LEGACY_SIDECAR_FAMILIES`) — and the run
+  Two switches keep the old behaviour available and both are OFF by default —
+  `export_sidecars` (mirror `cover.*`/`description.txt`/artist image/`.lrc`/
+  `.cue`/`.log` — R187's `LEGACY_SIDECAR_FAMILIES`) and
+  `export_playlists` (the per-album `.m3u8` plus `all.m3u8`) — and the run
   result reports what did not travel in `excluded` (one row per file: album,
   name, `kind` — the file FAMILY of R187, one of `FILE_FAMILIES`' own keys — and
   the reason), with `excluded_counts`, `excluded_total` and the sentence
@@ -1573,6 +1920,10 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   anticipated and a stray subfolder are all classified and counted. The
   `export_manifest` key (OFF) still writes `checksums.sha256` listing every
   written file, so a copied library can be proven intact at the other end.
+  **A PLAYLIST export is not an album export**: `server.playlists.export_m3u8`
+  still writes `.m3u8` (the Playlists page's *Download .m3u8*), and
+  `sidecars`/`playlists` ON still write the album's own files for a device that
+  wants them.
 - **R100 — every filename the app writes obeys ONE rule, and it is
   `mlo.naming.sanitize_segment`.** A character a filesystem refuses —
   `< > : " / \ | ? *`, an ASCII control character (0x01–0x1F; NUL is left alone
@@ -1648,13 +1999,13 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   IS: the destination (`target`, `dest`, `subfolder`), `codec`, `quality`,
   `structure` and `structure_script`, the cover options (`embed_covers`,
   `embed_cover_jpeg_quality`, `embed_cover_resolution`), `id3v2`/`id3v1`,
-  `replaygain_mode`, `clean_tags`, `sidecars`, `manifest`,
+  `replaygain_mode`, `clean_tags`, `playlists`, `sidecars`, `manifest`,
   `verify`, `prune`, `workers`, how lyrics travel (`lyrics`), the equalizer
   profile **by id** (`eq_profile`)
   — so a load points at the profile itself rather than at a copy of its curve —
   and `source_kind`, the Export page's source tab, stored verbatim for
   whichever surface has tabs. What it deliberately does NOT hold: the
-  selection (which albums/artists/tracks are ticked) — data,
+  selection (which playlist, which albums/artists/tracks are ticked) — data,
   not configuration, because a config carrying paths would export something
   else after the library moved — and the page's filter box, which is a view
   aid. Its keys are whitelisted from the exporter's own tables
@@ -1737,7 +2088,7 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   when the mode writes lyrics as a file, the lyrics tags are DROPPED from the
   exported file (`_LYRICS_TAGS`) — on the transcode path through the tag write
   and on a byte copy through an explicit strip — because a file carrying both
-  is a viewer showing a second, stale copy. In the audit, a source `.lrc` whose
+  is a player showing a second, stale copy. In the audit, a source `.lrc` whose
   track IS in the selection is output when the mode writes `.lrc`, and is
   reported as `lyrics` (the one non-audio kind the run itself can account for)
   when it is not; the `.lrc` of a track outside the selection is always
@@ -1747,13 +2098,14 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
 - **R187 — WHAT an export copies is a file selection, family by family.**
   `copy_files` (per run) / `export_copy_files` (saved default) is a list of the
   keys of `server/exporter.py`'s `FILE_FAMILIES` — `audio` (the tracks
-  themselves), `cover` (the album's `cover.*`), `lyrics`
-  (`.lrc`), `cue` (`.cue`), `log` (`.log`/`.accurip`),
+  themselves), `cover` (the album's `cover.*` and the artist image), `lyrics`
+  (`.lrc`), `cue` (`.cue`), `log` (`.log`/`.accurip`), `description`
+  (`description.txt`, numbered copies included — `mlo.paths.album_sidecar_of`),
   `checksum` (`.md5`/`.sfv`/`.ffp`/`.torrent`), `text` (`.txt`/`.nfo`/`.url`/
-  `.pdf`) and `other` (a non-audio file this app classifies as none of those) —
-  and it is the ONE thing that
+  `.pdf`), `playlist` (`.m3u`/`.m3u8`/`.pls`/`.wpl`) and `other` (a non-audio
+  file this app classifies as none of those) — and it is the ONE thing that
   decides what a run writes. One classifier (`_extra_kind`, over the extension
-  table `_EXTRA_REASONS`, plus the cover names it knows by
+  table `_EXTRA_REASONS`, plus the cover names and the artist image it knows by
   NAME) and one predicate (`export_tracks._travels`) serve the menu, the copy
   pass (`_copy_siblings`) and the `excluded` report alike, so a file a run
   copies is never reported as left behind and a file it leaves is never copied:
@@ -1784,10 +2136,75 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   promises. `sidecars` is the switch this replaced and is still honoured (per
   run, and as a saved default through `mlo/config.py`'s `export_sidecars`),
   resolving to `LEGACY_SIDECAR_FAMILIES` (audio + cover + lyrics + cue + log +
-  accurip) through the same code path: a caller that sends nothing new — or
+  description) through the same code path: a caller that sends nothing new — or
   only that boolean — gets the behaviour it had, with one honest widening,
   since the files the audit already classifies as those families now travel
-  with them.
+  with them (an `Artist.jpg` sitting INSIDE an album folder, and a numbered
+  `description (2).txt`).
+
+### 7.10 YouTube and cookies
+
+- **R76 — the app's yt-dlp calls honour ONE cookie setting.**
+  `youtube_cookies_mode` is `none`, `file` (the jar at
+  `<music>/.mlo/data/cookies.txt`, saved by pasting or dropping a Netscape
+  `cookies.txt` in Settings → Videos) or `browser` (`youtube_cookies_browser`,
+  e.g. `chrome`). The setting reaches BOTH yt-dlp paths (its Python API and the
+  vendored binary) at all three call sites — the search, the video download and
+  the YouTube-captions fetch — because an age-gated video is exactly the kind
+  that needs a signed-in jar for any of them. The jar is validated as a Netscape
+  cookie file on write, capped at 512 KiB, and reported back with its cookie
+  count and domains.
+- **R81 — the RateYourMusic credential can be imported from a cookies.txt.**
+  RYM has no API: `rym_cookie` is the user's own signed-in session cookie, and
+  RYM's `session` cookie is HttpOnly — no script and no "copy the Cookie header"
+  from devtools can ever see it, so a browser extension's Netscape `cookies.txt`
+  export is the only way most users can hand it over at all. Settings →
+  Discovery therefore takes the file (pasted or dropped) as well as the manual
+  header paste: `POST /api/rym/cookies` parses it with the SAME parser the
+  yt-dlp jar uses (`server/cookies.py`'s parser — one file-or-junk
+  rule for both), keeps ONLY the cookies whose host is `rateyourmusic.com` or a
+  subdomain of it (the export carries every site the profile holds), and writes
+  the survivors into `rym_cookie` in file order, as the exact
+  `name=value; name=value` string the manual box accepts, through the app's own
+  config writer — so `_rym_cookie`/`_rym_cookiejar` pick it up unchanged, the
+  box and the import cannot disagree, and a restart keeps it. `rym_cookie`
+  remains the ONE place the credential lives (no second file, no second config
+  key). A file with no `rateyourmusic.com` cookie stores NOTHING and says why
+  (a signed-out tab's export must not cost a working session); junk and an
+  oversize body are refused before any write; and no route — `GET
+  /api/rym/cookies` included — ever returns, logs or shows a cookie VALUE: the
+  panel is told the cookie NAMES, the count, whether `session` is among them
+  (without it RYM answers as a guest) and warnings as sentences.
+- **R242 — every cookie login is one jar model, importable from a Netscape
+  `cookies.txt` and annotatable per cookie.** The file format, its strictness,
+  the atomic write and the per-cookie notes live in ONE module
+  (`server/cookies.py`) — the yt-dlp jar (`server/api_youtube.py`) and the
+  RateYourMusic `Cookie` header (`server/api_rym.py`) are the only two
+  cookie-bearing credentials the app has (a token or an API key is not a
+  cookie and gets no import), and both read the same file with the same rules,
+  so a jar one of them accepts cannot be junk the other refuses. An import is
+  narrowed to the hosts that credential is actually SENT to — `youtube.com`,
+  `googlevideo.com`, `google.com` and `googleapis.com` for the jar (yt-dlp is
+  sent nothing else), `rateyourmusic.com` for RYM — because a browser
+  extension's export is the whole profile; the cookie lines that stay are kept
+  byte for byte, and the number left out comes back as `filtered`. A file with
+  no cookie for that credential stores NOTHING and is refused (the jar) or says
+  why (RYM) in the provider's terms, rather than replacing a working credential
+  with one that cannot sign in. Every cookie can carry a COMMENT: it is keyed
+  by the cookie's identity (domain, path, name) in the `cookie_notes` config
+  value (one JSON object per source; a hidden key — no Settings row offers it)
+  and mirrored into a jar-backed credential's FILE as a `# mlo-comment:` line
+  directly above its cookie, which every Netscape reader skips (yt-dlp reads
+  the file unchanged) — so a note survives a re-import that re-orders the file,
+  cannot move to a same-named cookie on another domain, and never edits,
+  re-orders or drops a cookie (a jar written with notes parses to the identical
+  cookie set). `GET /api/cookies/{source}` is the panel's one per-cookie view
+  for both credentials (domain, path, name, expiry, `expires_at`, `expired`,
+  comment — never a cookie VALUE) and `POST /api/cookies/{source}/comments`
+  writes one note (an empty one clears it; a cookie the source does not hold is
+  a 404). One React panel (`web/src/components/CookieJarPanel.tsx`) draws it
+  wherever a cookie credential is offered — Settings → Sources, the setup
+  wizard's Keys step, Settings → Videos and Settings → Discovery.
 
 ### 7.11 MusicBrainz browsing
 
@@ -1803,7 +2220,7 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   "Art Pop · britpop"), the release-group page and the recording page — pass
   their names through `_display_genres` → `mlo.genres.display_name`, the same
   function the tag writers, the grader's `grade_check_tag_case` and
-  the entity chip rows already use. Nothing else moves: a release's
+  `server.discover`'s list already use. Nothing else moves: a release's
   per-TRACK genre rows and the cascade's `per_track`/`per_source` lists keep
   MusicBrainz's spelling (`tools/test_genres.py` pins the source order and the
   mixed spelling of that merge), identity is untouched — every comparison
@@ -2012,10 +2429,10 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   `mlo/videodisc.py`, which knows the grammar and nothing else — the parts of a
   title set are `VTS_nn_1.VOB`, `VTS_nn_2.VOB`, … and the part index starts at
   1, because `VTS_nn_0.VOB` is the set's MENU and is never the feature. A
-  Blu-ray's titles are NOT its file names: the `.mpls` says which clips
+  Blu-ray's titles are NOT its file names: the `.mpls` playlist says which clips
   form which title and in what order, each play item carrying the clip's own in
-  and out time, and a `.mpls` that cannot be parsed is refused rather than
-  guessed at — including when only SOME of a disc's `.mpls` files parse, because a
+  and out time, and a playlist that cannot be parsed is refused rather than
+  guessed at — including when only SOME of a disc's playlists parse, because a
   title the disc states and this code cannot read may be the feature. An `.iso`
   is recognized only to say so: nothing in this app reads inside a disc image
   (a Blu-ray one is usually AACS-encrypted), so it is asked about, never
@@ -2026,9 +2443,9 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   not a coin toss.** Durations come from the structure itself where it states
   them (a Blu-ray's play items) and from one `ffprobe` per part for a DVD, so a
   disc is picked without decoding a frame. The app refuses, and asks, when: the
-  structure is an `.iso`; a `.mpls` or a part cannot be read; a usable title has
+  structure is an `.iso`; a playlist or a part cannot be read; a usable title has
   no measurable duration; the runner-up is within `max(30 s, 5%)` of the longest
-  (both durations are named in the question); or a Blu-ray `.mpls` replays a
+  (both durations are named in the question); or a Blu-ray playlist replays a
   clip twice or plays only PART of one (the concat demuxer could not reproduce
   that title, so the app asks instead of shipping something else). A refusal
   touches nothing on disk. The question is stored as one row per album — the
@@ -2189,8 +2606,9 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   (`notifications.SILENT_KINDS`): `/ws/events` hands it to `onAppEvent` (which
   drops the library-derived queries in `App`) but never to the tray and never to
   an OS notification — a tag write must not fill the panel. Credentials,
-  config, dependencies, export and EQ are excluded: they invalidate their own
-  client queries and must not cost a library refetch per click. A rebuild that STARTED
+  config, dependencies, export/EQ and the per-user stores (ratings, favourites,
+  likes, playlists, plays) are excluded: they invalidate their own client
+  queries and must not cost a library refetch per click. A rebuild that STARTED
   before a change must not END on the pre-write rows either: two generation
   counters (`tagcache._lib_write_gen` / `_lib_drop_gen`) let
   `_refresh_library` tell, so a WRITE landing mid-build keeps the tree dirty
@@ -2234,10 +2652,10 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   script 20's apply filing a loose track into its album — leaves the album's
   non-audio files behind unless something carries them, and the ones that matter
   are the files the pipeline itself just wrote: the cover the autonomous step
-  fetched BEFORE the chain ran and the expected-tracklist manifest (script 15).
-  Measured on the real import:
+  fetched BEFORE the chain ran, the description beside it (`run_metadata_step`)
+  and the expected-tracklist manifest (script 15). Measured on the real import:
   the album landed in its canonical folder holding only the FLACs while
-  `cover.jpg`/`.mlo_expected.json` stayed in the staging
+  `cover.jpg`/`description.txt`/`.mlo_expected.json` stayed in the staging
   folder, the grade reported COVER on an album the import had just fetched
   artwork for, and the import was parked for a person (R160's one failure mode).
   One rule, one implementation: `mlo.layout.carry_album_files` moves every
@@ -2383,11 +2801,12 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   every step it can and then reports what is left; it never stops to ask. What
   it decides on its own, each through the family's own writer (the same entry
   point the manual option in `mlo.import_policy.FAMILIES` calls, so the two can
-  never drift apart): the MusicBrainz **links**
-  (`imports._stamp_release`), the **cover** (`cover_candidates`
+  never drift apart): the MusicBrainz/RateYourMusic **links**
+  (`imports._stamp_release`/`stamp_rym_links`), the **cover** (`cover_candidates`
   → `mlo.cover_choice`, R163), the **genres** (`_stamp_release`), the
   **lyrics** — and, when the chain finds none, the **instrumental** mark that
-  settles them (R162) — the **advisory** (`fetch_advisories`) and the
+  settles them (R162) — the **advisory** (`fetch_advisories`), the **artist
+  image and the two descriptions** (`run_metadata_step`) and the
   **INSTRUMENTAL** tag itself (`fetch_instrumentals`). The chain then runs the
   configured scripts (R89), and `_report_gaps` reports what none of that could
   supply.
@@ -2413,7 +2832,7 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   a sweep touches it like any other album.
   `import_autonomy.chain_scope` is the one rule, and it is asked by the one
   seam every chain passes (`server.script_runners.run_chain`): a run that
-  PICKS its own albums — the library-wide sweep (Run All, a chain with no
+  DISCOVERS its own albums — the library-wide sweep (Run All, a chain with no
   targets) — is narrowed to the albums that are not parked, and the run logs
   which ones it left alone ("`N album(s) are waiting on you — left untouched by
   this run: …`"); a run that names its albums is not filtered, whoever started
@@ -2493,7 +2912,8 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   measured on a bare-id add (`{"mbid": <release id>, "kind": "release"}`,
   scratch scope, real network) the reply took **13.4 s** wall clock, of which
   10.0–13.1 s was `prefetch_content`'s provider work in the request path —
-  `cover_search` 3.4–8.5 s, the MusicBrainz metadata step 3.0–5.3 s — for content only an OPENED album page
+  `cover_search` 3.4–8.5 s, the RateYourMusic link lookup 2.7 s, the
+  MusicBrainz metadata step 3.0–5.3 s — for content only an OPENED album page
   reads, while the album row, its manifest and its cover were already
   on disk. The same add answers in **1.3 s** with that content fetched behind
   the reply, and the remainder is the two MusicBrainz lookups that DO name the
@@ -2560,22 +2980,36 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   exception: the AccurateRip leg. A pressing the database has never seen reads
   exactly like a disc with no `.accurip` at all and no code path can tell the
   two apart, so failing the album for it failed the rip for what the network
-  does not know. It is reported in the grade's `notes` channel and rendered as
-  "Not checked", never under "Failed checks" — the state is stated, the album is
+  does not know. It is reported in the grade's `notes` channel (the same one the
+  artist image checks use: inform without failing) and rendered as "Not
+  checked", never under "Failed checks" — the state is stated, the album is
   judged on what could be measured, and the stored verdict is still never
   guessed.
 
+- **R182 — the app's own sidecars are a FAMILY, and a numbered copy is one of
+  them.** `mlo.artistdata.write_description` replaces `description.txt`
+  atomically, so the app never writes "description (2).txt" — a copy arrives
+  from outside (a file manager, a sync client, an older build). It is still the
+  album's description: `paths.album_sidecar_of` recognises the family,
+  `artistdata.description_path` reads a copy (the canonical name wins when both
+  are there), and the layout scan reports `sidecar_copy` with a rename fix to
+  the canonical name instead of calling the app's own file dead weight. Two
+  descriptions side by side stay the reader's to sort out — the app does not
+  guess which text is the right one.
+
 - **R183 — the import pipeline runs the steps that CAN overlap side by side,
-  and one track at a time where the provider's interval is the wall.** The
+  and one track at a time where the provider's interval is the wall.** The six
   steps between the press and the first script are not one kind of work: links,
-  genres, advisory and instrumentals write TAGS on the audio files, while cover
-  art writes FILES — the review record it shares with the cover review screen,
-  and the art the album folder keeps. The file step is therefore started on one
-  worker right after the genre step (which settles the identity its lookup
-  reads, `album_identity`) and joined before the chain, which is the first thing
-  that needs it on disk (script 5 processes the images, the grade wants the
-  cover). It announces itself with its own phase line ("Fetching cover art…"),
-  and the phase list `tools/test_import_pipeline.py` checks is that list.
+  genres, advisory and instrumentals write TAGS on the audio files, while
+  metadata (artist image, descriptions) and cover art write FILES — the review
+  record they share, and the art the album folder keeps. The file pair is
+  therefore started on one worker right after the genre step (which settles the
+  identity its lookup reads, `album_identity`) and joined before the chain,
+  which is the first thing that needs it on disk (script 5 processes the
+  images, the grade wants the cover). One worker for both, in their own order,
+  because they stage into ONE review record. The pair announces itself with ONE
+  phase line ("Fetching metadata and cover art…"), and the phase list
+  `tools/test_import_pipeline.py` checks is that list.
   **The per-track passes are NOT all fanned out, and that is measured.** They
   were, on the shape the per-file writers use (`drop_arrived_values`,
   `_stamp_release`): one worker per file, distinct files sharing nothing. For
@@ -2590,7 +3024,7 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   not the pattern: fan out when the provider's spacing is shorter than the work
   between calls, never when it is the wall.
   `_apple_json` keeps the spacing under its lock and takes the REQUEST outside
-  it (the shape the provider throttle always had): held across the call, one
+  it (the shape `discovery._throttle` always had): held across the call, one
   slow answer stalled every other Apple caller behind it, and the interval
   became a ceiling for the client instead of a gap between requests.
 - **R184 — an import writes each file ONCE per pass, and a tag write never
@@ -2630,19 +3064,38 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   refused with the list of what it does take, rather than having its UUID read
   as a release.
 
-- **R154 — an import does not reuse the add's fetched page content, and the
-  cover candidates are the reason.** The add path resolves the album's page
-  content before the audio exists (`imports.prefetch_album`, R140); the staged
-  cover record is a PICK SCREEN — any surface may restage it, `staged_metadata`
-  finds it by folder name or by MB id as well as by path, and it carries no
-  proof of which search, for which album, produced it — so ranking it would
-  mean writing an image the policy chose from ANOTHER search's rows instead of
-  the best of what exists for the album being imported. That is the one thing
-  both cover modes share (`test_covers` pins it: with `cover_review` off, the
-  same fresh candidate set is ranked and its winner written), so
-  `run_cover_step` still ranks a fresh set and the import pays that search. A
-  saved lookup is only ever reused where it is attributable to THIS album by
-  identity; the add's page content is not, so it is fetched fresh.
+- **R154 — an import USES what the add already fetched, where the add's record
+  is an IDENTITY.** The add path resolves the album's page content before the
+  audio exists (`imports.prefetch_album`, R140) and the import then asked the
+  providers for the same answers a second time. Measured on one album through the
+  real chain with the real network (`.pi/import_reuse.py`, one process per side,
+  the pre-change sequence reproduced by stubbing the reuse seams off): the ADD
+  paid **1** `integrations.rym_links` and the IMPORT paid **1** of it AGAIN —
+  18.5 s of add, 73.9 s of import — for a RateYourMusic link the framework marker
+  already recorded. So `imports._marker_links` hands `stamp_rym_links` the links
+  the add resolved (the TAGS are still written — only the lookup is skipped, and
+  only for a link the marker really carries for THIS album: it must be a
+  framework marker, the release group the album's own tags state — when they
+  state one — must be the group the marker was created with, and the switch
+  `rym_links_auto` is checked here too, so "off" still writes no auto-resolved
+  link). The same rule covers the metadata step: with `metadata_review` on, the
+  add staged the artist/description candidates for exactly this artist and album,
+  and `imports._staged_metadata_held` lets `run_metadata_step` keep that record
+  rather than fetch the same candidates again — it only skips when the entry's
+  own artist and album ARE this album's, and the review screen the user already
+  has is then the answer this step would produce.
+
+  The COVER candidates are deliberately NOT reused, and that is the rule and not
+  an omission: the staged cover record is a PICK SCREEN — any surface may restage
+  it, `staged_metadata` finds it by folder name or by MB id as well as by path,
+  and it carries no proof of which search, for which album, produced it — so
+  ranking it would mean writing an image the policy chose from ANOTHER search's
+  rows instead of the best of what exists for the album being imported. That is
+  the one thing both cover modes share (`test_covers` pins it: with
+  `cover_review` off, the same fresh candidate set is ranked and its winner
+  written), so `run_cover_step` still ranks a fresh set and the import pays that
+  search. What each step saves is bounded by that: a saved lookup must be
+  attributable to THIS album by identity, or it is not reused.
 
 - **R155 — one grade per import, and the invalidation is scoped to the album.**
   The import's own report and the chain's own Grade step were asking the grader
@@ -2785,7 +3238,7 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   * **medium → `MEDIA`, country → `RELEASECOUNTRY`** are *release* facts, and
     `server.imports._stamp_release_identity` writes them (plus the rest of the
     album-level identity MusicBrainz states: `LABEL`, `CATALOGNUMBER`,
-    `BARCODE`, `RELEASESTATUS`, `ASIN`, `SCRIPT`, `LICENSE`,
+    `BARCODE`, `RELEASESTATUS`, `ASIN`, `SCRIPT`, `LICENSE`, the podcast series,
     each disc's `DISCSUBTITLE`) during `finish_album`, before the chain runs, so
     script 1's MEDIA/SOURCE normalization and the digital settle see the
     release's own medium rather than a guess. The writer is
@@ -2832,6 +3285,126 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
     measured format) and `tools/test_add_to_library.py` (the pending tile's
     readout).
 
+### 7.15 Notifications and the player's own immediacy
+
+- **R90 — every import announces itself, and the switches are yours.**
+  `server/imports.finish_album` is the single call every import path makes (the
+  wizard's finish, the downloads panel, the sequential import queue and the bulk
+  queue), and it emits two events through `server.events`: `import_started` on the
+  way in and `import_done` where every path ends (`_report_gaps`), carrying the
+  chain's own one-line summary (`chain_summary`). Both are switchable
+  (`notify_import_start` / `notify_import_done`, Settings → Notifications, ON by
+  default), like `notify_download_done`, `notify_import_ready` and the add-time
+  `album_pending`; a kind with no key in
+  `events._notify_configured` is unconditional by design (an outcome the user
+  Notifications go to the persisted tray for every kind,
+  and an OS notification for the kinds in `notifications.ts`'s `OS_KINDS`.
+  The tray ALSO carries the grade findings the Home and Library strips write
+  out — the one case where a warning is DERIVED from a payload rather than
+  announced — and it renders them as ONE live panel: the very strip
+  (`GradeWarning` in notice mode) mounted inside the bell, reading the shared
+  `[gradesSummary]` query, so it is always current, STAYS while anything fails
+  (clearing only when the library is fixed) and is not a dismissible row —
+  it is a state, not an event. An older build logged one row PER finding
+  (`ingestDerived`, kind `grade_warning`); those rows are dropped on load
+  (`lib/notifications.ts`'s `load`) because the panel would only be doubled by
+  them. Deliberately outside `OS_KINDS`/`PUSH_KINDS`: a datapoint re-read from
+  a page must never pop a banner on a phone. Pinned by
+  `tools/test_notifications.cjs`.
+- **R91 — selecting a track silences the outgoing one at once.** The player's
+  load effect (`web/src/components/PlayerBar.tsx`) pauses the ACTIVE element the
+  moment the index changes, before the new source is fetched and decoded — a
+  switch used to leave the old track playing until the new one was ready, which
+  reads as "nothing happened". Skipped when a gapless swap already started the
+  next track on the other element, where pausing would cut the song that just
+  began.
+- **R91a — the player carries the same track-details entry as a library row.**
+  A listener who wants a track's stored readout and credits should not have to
+  go and find it in a table: the player bar's own ⓘ (`PlayerBar.tsx`) and the
+  fullscreen player's options menu both open `DetailsDialog` — the same modal
+  the library row's info button opens, from the same `["album", dir]` payload
+  (so the bar makes no request until the entry is pressed, and the two surfaces
+  can never show different data). Rendered from inside the fullscreen player
+  rather than through it: the Modal layer is `z-[60]` against the player's
+  `z-50`, which is what lets a dialog sit over the fullscreen view.
+
+- **R221 — a title that does not fit DRIFTS, on both surfaces.** The player
+  bar's marquee is its own component now — `web/src/components/ScrollingText.tsx`,
+  out of the inline copy that used to live in `PlayerBar.tsx` — so the bar and
+  the fullscreen player share ONE mechanism, and with it the `title-marquee`
+  keyframe and its `--title-shift` variable in `index.css`. It MEASURES rather
+  than guesses: a `ResizeObserver` watches the wrapper AND the text, so a
+  web-font swap, a badge appearing beside the title and a window resize all
+  re-measure, and `shift` stays `0` for anything that fits — a short title must
+  not wobble. The drift distance is the overflow plus 6 px of visible padding,
+  the period is `Math.max(5, Math.min(24, shift / 12))` seconds, and
+  `prefers-reduced-motion` still kills the animation. Both of the fullscreen
+  player's long lines use it: its TITLE (which used to `truncate`, cutting a
+  track name mid-word — the reported case) and its album·artist row.
+- **R222 — the fullscreen block names one fact pair per row.** The text block
+  in `NowPlayingView.tsx` draws the title row (h-8, title plus the advisory
+  mark and the codec readout), then `Album · Artist` on ONE h-5 row, then the
+  star row (h-7) — where the album and the artist used to stack as two rows
+  that read as two unrelated lines (reported). The pair is joined with " · "
+  and the whole pair rides the row's own `title`. Every row keeps its fixed
+  height and is always rendered, so the block still cannot jump on
+  next / previous.
+- **R223 — the player bar's grid may not let a flank overlap its centre.** The
+  desktop grid in `PlayerBar.tsx` is
+  `grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]`, not `1fr_auto_1fr`: a bare
+  `1fr` track still carries an `auto` MINIMUM, so neither flank could shrink
+  below its own content and, at high browser zoom or a narrow window, the left
+  cluster ran over the centred seek row — the reported overlapping "up next" /
+  duration readouts. `minmax(0,1fr)` lets a flank truncate instead, which is
+  what the title's own marquee (R221) and the flank's `min-w-0` already assume.
+- **R224 — the frequency strip's resize check is its BACKING STORE.**
+  `Visualizer.tsx` sizes the canvas from its box and
+  `dpr = Math.min(2, window.devicePixelRatio || 1)`, and compares
+  `Math.round(w × dpr)` / `Math.round(h × dpr)` against `canvas.width` /
+  `canvas.height`. The old test compared the CSS width alone (`lastW`), so a
+  HEIGHT change (the strip's own box, a zoomed pane) or a devicePixelRatio
+  change (the window dragged to another monitor, a browser zoom step) left the
+  previous bitmap in place and the browser stretched it into the new box — the
+  reported "two offset rows of bars". Comparing what the canvas actually holds
+  catches all three, and a resized frame is repainted rather than skipped as an
+  idle frame.
+- **R225 — a slider's dot and its ring are one shape, so neither animates
+  into place.** `index.css`'s `input[type="range"]::-webkit-slider-thumb` draws
+  the outer ring as a `box-shadow` ON the thumb and no longer transitions
+  `transform`: the ring is drawn from the thumb's own transform, while the
+  thumb's POSITION follows the pointer natively and never animates, so a
+  `transition: transform .1s` under a hover `scale(1.25)` (`.seek-fat`:
+  `1.15`) showed the dot jumping per pixel and the ring scaling after it — the
+  reported "the dot and the outer ring move at different times", worst during a
+  drag, where hover flickers and the scale is mid-transition for most of the
+  gesture. Hover changes instantly now, in the same rule, and
+  `::-moz-range-thumb` carries the same ring.
+
+- **R249 — the fullscreen pane puts the arrow away after ~3 s of stillness,
+  and only when nothing is waiting for it.** `web/src/components/NowPlayingView.tsx`
+  keeps ONE piece of state for this (`idleCursor`, one `cursor-none` class on
+  the player's root) and one effect with its own listeners and its own clock —
+  `IDLE_CURSOR_MS = 3000`, a separate decision from the video chrome's own
+  timer, which owns the CONTROLS while this one owns the arrow. The arrow comes
+  back on `pointermove`, `pointerdown`, `keydown`, `wheel` — scrolling a long
+  lyric while the pointer rests still is not idleness — and is withheld only
+  while nothing on screen needs it: a **held button** is a gesture, not
+  idleness (a scrub can be dragged right off the seek row, and a hidden cursor
+  mid-drag is the bug), an **open surface** keeps it (the queue, options,
+  playlist and details states the pane owns, plus anything matched by
+  `OPEN_OVER_PANE` — `[aria-modal="true"], [role="menu"], dialog[open]` — looked
+  up in the DOM at hide time, because a keystroke can open the shortcut sheet),
+  and the pane's own **controls opt back out in CSS** (`cursor-auto` on the top
+  bar, the transport row, the seek row and the phone bottom row), so the arrow
+  is there over anything clickable without a second hover listener. A **coarse
+  pointer never arms the timer at all** (`FINE_POINTER` =
+  `(hover: hover) and (pointer: fine)`: a finger has no arrow), and a
+  `touchstart` only ever disarms, so nothing here can fight a finger-scroll or
+  leave the pane hiding the cursor. Over a music video the pane hands the arrow
+  to the video chrome's own timer instead. Pinned by
+  `tools/check_fullscreen_player.cjs` (its idle-cursor and coarse-pointer
+  checks; 85/85 on the final build).
+
 ### 7.16 The library page: the five views, the columns and the filters
 
 - **R103 — the library offers five views, and each one draws rows.** Grid
@@ -2850,17 +3423,26 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   title's advisory/grade/cached badges) WRAPS those marks onto a second line
   when the column is too narrow, instead of shrinking the name to a one-pixel
   column that renders one character per line. The Tracks view shipped that
-  failure: its title cell held the name AND its marks in 220 px
+  failure: its title cell held the name, its marks AND the star rating in 220 px
   against ~200 px of controls, so the name lost and the view read as empty
-  200 px-tall rows. The title floor is 280 px, and a regression is caught by
+  200 px-tall rows. The rating therefore has a COLUMN of its own
+  (`TRACK_RATING_COL`), the title floor is 280 px, and a regression is caught by
   measuring the rendered table — `tools/check_library_tables.cjs` asserts, for
   every view, that no text-bearing link is under 40 px, no row is over 120 px
   tall, every header label fits its column and every column holds its widest
   value.
-- **R105 — the library filters on the advisory.** The toolbar's Filter menu
-  carries the presets (Failing, CD rips, Digital,
-  Instrumental, Music videos, No lyrics) plus one FACET, with the count of
+- **R105 — the library filters on the user's own ratings and on the advisory.**
+  The toolbar's Filter menu carries the presets (Failing, CD rips, Digital,
+  Instrumental, Music videos, No lyrics) plus two FACETS, each with the count of
   the rows it would leave:
+  * **Star rating** — Any / Rated / Unrated, over the user's own stars and
+    nothing else. A track counts as rated when its own file has a rating; an
+    album only when the verdict on the ALBUM itself is in (its folder rating)
+    AND every track in it carries one of its own — a half-rated album is not
+    finished, and the "Unrated" list is where it belongs (the reported "only
+    one track counted"); an artist when any of its albums is. Nothing here is
+    an average, and the rule is printed in the menu itself (`RATED_NOTE`)
+    rather than left to a tooltip.
   * **Advisory** — Any / Explicit / Clean. Explicit means `ITUNESADVISORY` 1 (the
     badge the tables draw); Clean means everything that does not flag explicit:
     2 (the clean EDITION) and 0/absent (nothing marked it explicit). An album
@@ -2873,8 +3455,8 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   echo the current selection's size. The old `Explicit` PRESET is gone: two
   controls for one condition is how they end up disagreeing.
 
-- **R106 — a page names an artist the way every other page does.** The library
-  payload carries each artist row's folder
+- **R106 — a page names an artist the way every other page does, and shows the
+  picture it has.** The library payload carries each artist row's folder
   `name` AND its `display_name` (`server/library.py`: the artist's own
   ALBUMARTIST tag when the albums state one, else the folder basename with its
   MusicBrainz disambiguator stripped — `strip_mbid_suffix`). Everything that
@@ -2882,7 +3464,13 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   Artists table, and the album rows' fallback when a file carries no
   ALBUMARTIST (a folder is named `Radiohead [<mbid>]`, and the raw basename was
   what these surfaces used to show). The folder identity stays `name`/`path`,
-  so links keep pointing at the same rows.
+  so links and ratings keep pointing at the same rows. Home's shelf draws the
+  artist's OWN image (`/api/artist/image`, the endpoint the artist page uses)
+  when the artist has one — the payload carries `has_image` so a folder without
+  a picture is never probed, and a URL that fails anyway falls back to the
+  representative album cover and then to the placeholder. Home also carries the
+  **Your ratings** shelf: the user's rated releases, highest first, in
+  half-stars — the same unit the API and `lib/ratings.ts` speak.
 
 - **R218 — a details menu fits the window, and every action it lists is
   reachable.** The clamping is the `Popover` primitive's own, for EVERY panel,
@@ -2890,9 +3478,9 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   leaves — vertically `maxHeight: calc(100dvh - top - max(8px,
   env(safe-area-inset-bottom), var(--mlo-inset-bottom)))`, or the room ABOVE the
   trigger for `placement="top"`, so a top-placed panel is never bounded by the
-  space below it (`100dvh` so the visible height is not counted twice) — and now
-  horizontally as well, because a left-aligned panel used to run off a narrow
-  window (the Force flyout landed at left 216 + width 240). In-place mode is
+  space below it (`100dvh` so a phone's URL bar is not counted twice) — and now
+  horizontally as well, because a left-aligned panel used to run off a 390 px
+  screen (the Force flyout landed at left 216 + width 240). In-place mode is
   bounded by the same recipe in CSS (`.popover-panel`: `max-height:
   calc(100dvh - 1rem)`, `overflow-y: auto`, `overscroll-behavior: contain`), and
   a panel that would still leave the window is re-rendered in the
@@ -2908,9 +3496,10 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   app's own thin scrollbar (`index.css`, no `scrollbar-hide` anywhere) and
   `overscroll-contain`, so the tracklist behind them does not move with the
   wheel. A ROW's menu and an
-  album's readout both carry the file action the pages' headers have —
-  **Export…** (the pages' own `ExportDialog`)
-  — because "export this" must not mean opening another page first.
+  album's readout both carry the two file actions the pages' headers have —
+  **Download for offline playback** (the ONE implementation, `lib/offline.ts`,
+  shared with `DownloadButton`) and **Export…** (the pages' own `ExportDialog`)
+  — because "download / export this" must not mean opening another page first.
   `tools/check_menus.cjs` walks the sidebar and the cover menu's geometry (its
   `sheet`, `pagemenu`, `flyout` and `lyrics` groups), and
   `tools/check_responsive.cjs` measures the panels at 390/834/1440.
@@ -2925,12 +3514,11 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   all of them are off), and its force flags (the SHORT keys
   `/api/run` accepts, from `_FORCE_KEYS` + `_FORCE_ALIASES`). What the menu may offer is DERIVED, not typed into it: `applies_to`
   follows the script's own work unit — a FILE-scoped script (1, 3, 6, 11, 12,
-  13, 16, 17, 21, 22, 23) applies from every kind of selection, a
-  FOLDER-scoped one (2, 4, 5, 7, 8, 9, 10, 14, 15, 20) only where a folder is
-  in hand, which is album, artist and library (`KINDS` =
-  album/track/artist/library, `_FOLDER_KINDS` the three). So an album's menu
-  offers **21** entries and a track row selection offers the **11** file-scoped
-  ones, computed
+  13, 16, 17, 21, 22) applies from every kind of selection, a FOLDER-scoped one
+  (2, 4, 5, 7, 8, 9, 10, 14, 15, 19, 20) only where a folder is in hand, which
+  is album, artist and library (`KINDS` = album/track/artist/playlist/library,
+  `_FOLDER_KINDS` the three). So an album's menu offers **21** entries and a
+  track row or playlist selection offers the **10** file-scoped ones, computed
   from the table rather than counted by hand — and the section is headed by a **Run all N scripts** entry (N is
   `ids.length`, so the label and the request cannot drift): the chain's own
   order scoped to the entity, posted as ONE `POST /api/run` over the menu's own
@@ -2983,8 +3571,8 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   writes). A key may never lose its only editor to a shorter wizard.
 - **R107a — setup is one surface, and it never wears the library.** The wizard
   renders BARE: while `first_run_done` is false, and when it is re-run from
-  Settings, `/setup` is rendered OUTSIDE the shell — no sidebar, top bar
-  or live event socket — and while the config query is still
+  Settings, `/setup` is rendered OUTSIDE the shell — no sidebar, top bar,
+  player bar or live event socket — and while the config query is still
   pending the app holds a setup frame instead of painting the shell first (the
   shell used to mount on the first frame and be torn down for the wizard a
   beat later, which is library UI flashing through first run). The pre-shell
@@ -3006,9 +3594,9 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   issue codes), and that ONE fact is published where a person actually meets
   it:
   - **the tray and the OS popup** — `import_needs_data` is in
-    `OS_KINDS` (`web/src/lib/notifications.ts`), so the desktop shell
+    `OS_KINDS` (`web/src/lib/notifications.ts`), so the desktop/mobile shell
     raises a system notification and the bell's panel keeps the entry;
-  - **the event frame** — the same outcome on `/ws/events`, with `link`,
+  - **the push** — the same frame on `/ws/events`, with `link`,
     `album_path`, `reason` and the missing `families`; its `action: "manual"`,
     `action_link` opens the import wizard at that album's first missing step
     (`/import?album=…&step=…&missing=…`) — an item to press, not a line of
@@ -3024,14 +3612,78 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   had already landed), and *Enter manually* landed on
   `/import?album=…&step=Links&missing=links,cover,genres,lyrics`.
 
+### 7.19 Downloads: what a copy holds, and which copy plays
+
+- **R171 — a downloaded copy is the file's OWN codec unless the user says
+  otherwise.** Downloading caches a track on the device (the Downloads page, the
+  Download button, the player bar's own control) so it plays with the server
+  away. `download_codec` ships as **`copy`**: the cached bytes ARE the library
+  file's — same codec, same bits, nothing re-encoded — so a track is never
+  downloaded in a format it is not already in, and the setting exists only for
+  the device that has no room for the library's own format. Any other value is a
+  target from `mlo.containers.CODECS` (the same list `library_codec` takes,
+  minus `keep`, because `copy` IS "never re-encode" — offering both would be two
+  names for one state), and `download_bitrate` is that target's rate exactly as
+  `library_codec_bitrate` is the library pass's: kbps for the CBR targets
+  (mp3/aac/opus — the flag is ffmpeg's own `<n>k`), libvorbis' 0-10 quality
+  scale for ogg, **0 = the codec's own shipped default**, clamped per codec by
+  `mlo.containers.codec_args` and never reaching a lossless target. The
+  rendition is the DOWNLOAD's: `/api/stream?download=1` serves it
+  (`server/api_media.download_rendition`), the library file is never touched,
+  streaming an un-downloaded or un-preferred track always serves the library's
+  own bytes, and `POST /api/media/bulk` — which frames each file's size up front
+  and so cannot carry a re-encode — refuses with **409** and says which key is
+  responsible; the client's queue then drops to one request per track
+  (`lib/mediaCache.downloadTracks`).
+- **R172 — which copy PLAYS is `playback_source`, and it ships as streaming.**
+  `stream` (the shipped default) asks the server for the library file even when
+  a copy is downloaded; `downloaded` plays what is cached. ONE resolver decides
+  it (`web/src/lib/mediaCache.playbackSource`) and every player surface goes
+  through it — the audible `<audio>`, its gapless preload, both lyric previews
+  and the video popout — so the setting cannot be honored in one place and
+  ignored in another. Two things outrank it: the server being unreachable
+  (`isOffline()`, the API answering from its own cache) makes the copy the only
+  thing that can play, so it is played whatever the setting says; and a video's
+  live transcode (`?transcode=1`) is a DIFFERENT rendition, so a copy — which
+  holds the direct stream's bytes — stands in for it only offline. A stream URL
+  a copy exists for carries `nocache=1`: the service worker's media branch is
+  cache-first on the element's own URL, so without that marker "prefer
+  streaming" would play the very bytes it is asking to avoid (the server ignores
+  the parameter, and nothing is ever stored under it).
+- **R173 — cached playback works in every client, and the cache is keyed by the
+  TRACK, not by the session.** The download is stored under the URL the player
+  asks for (`playbackUrl`), which is what makes the service worker's
+  `cache.match` hit on ordinary playback in a browser; a shell has no service
+  worker at all (Tauri skips the registration), and there the same lookup hands
+  the bytes back as a `blob:` URL — the ONE way a downloaded track plays with
+  the server away, and the reason `playbackSource` exists rather than each
+  element building its own URL. That key holds NO session token
+  (`mediaCache.cacheKey`): a shell's media URLs carry `?token=…` because a
+  webview cannot send the cookie, and the token is re-issued at every sign-in,
+  so a token-bearing key would stop naming its own bytes the moment the user
+  signs in again — a downloaded album reading as undownloaded with every byte
+  still in the cache. Stripping is textual, never a URL re-serialization:
+  `URLSearchParams` would rewrite a space as `+` where `streamUrl` wrote `%20`,
+  and the key would then miss the very request the service worker matches. The
+  artwork warmed beside the audio is keyed the same way.
+- **R174 — the rip-log bar is 100, and it is the same number in both
+  places it is asked.** `grade_log_score_threshold`
+  (the LOG_GRADE check) and `audit_log_score_threshold` (the AUDIT verdict's
+  log-score leg) all ship **100** — a Logchecker-perfect log, by default, and
+  `mlo/discs.score_disc_log` is what scores it (Logchecker's own
+  `Checksum: checksum_invalid` is a hard refusal, never a low score). A folder
+  already on disk (a staging import) is graded after the fact, never refused —
+  the grader's own wording says what it found. Lowering either threshold is
+  a settings change, never a default.
+
 ### 7.20 The library layout: what it tolerates, and what the optimize pass removes
 
 The canonical library is `<music>/Artists/<Artist>/<Album>/<files>`, and the
 layout module's job is to say where a library is not that — then, for what the
-folder itself proves, to settle it. ONE scan answers every surface (script 20
-and the stored report the Library page warns from, read through
-`GET /api/library/layout` and `GET /api/library/layout/report`), so their
-numbers cannot disagree, and ONE apply does the work (script 20's own run).
+folder itself proves, to settle it. ONE scan answers every surface (script 20,
+`GET /api/library/layout` for the Optimization panel, and the stored report the
+Library page warns from), so their numbers cannot disagree, and ONE apply does
+the work (`POST /api/library/layout/apply`, or script 20's own run).
 
 - **R185 — the optimize pass removes excess to the Trash, and re-derives every
   removal at the move.** The scan reports; the apply settles what the folder
@@ -3087,6 +3739,218 @@ different answers.
   bundled tools: a `libjpeg.so` version symlink is a link; a toolchain unpacked
   onto a network mount that went away is unreadable.
 
+### 7.22 The phone player: one scroller, a real play state, the favourite's home
+
+The fullscreen player is ONE component on every client, so "the phone" is a set
+of decisions inside it rather than a second player: below `lg` the cover, titles
+and controls collapse into a header WHILE THE LYRICS PANE IS UP, and that pane
+takes the rest of the screen; with no pane to fill — no lyrics, an instrumental,
+refused plain lyrics, or the reader's own switch — the phone draws the full
+composition instead (R267). Above `lg` the pane sits beside the artwork.
+
+- **R188 — the element is the truth about what is playing.** `playing` is
+  written by the media element's OWN `play`/`pause` events, not only by the
+  app's buttons, and the lock screen's `playbackState` follows the same value.
+  The bug this settles (owner-reported on iOS): the OS suspends a backgrounded
+  webview, the audio stops, and the bar goes on drawing Pause — "the song is
+  still 'playing'". A pause the app did not ask for — an interruption, a
+  headset button, a decode error, the OS freezing the page — is therefore
+  reflected at once, and on the way back in from a lock screen
+  (`visibilitychange`, `pageshow`) the store is reconciled against the element
+  instead of trusted.
+- **R189 — on a phone the lyrics own the screen.** With the lyrics pane open at
+  phone widths there is exactly ONE scrolling surface, and it is the pane: the
+  cover drops to a thumbnail, the header stops scrolling, and the pane fills the
+  height that is left. Nested scrollers, a literal `100vh` cap and a scrolling
+  body behind a scrolling pane are what made the view read as broken. In a
+  viewport too short for the header (a phone in landscape) the body scrolls
+  instead, so nothing is clipped away.
+- **R190 — the favourite has exactly ONE home, on the main control line.** It
+  is one control in the fullscreen player's transport row, at every width — the
+  row that already carries shuffle, previous, play, next, repeat, the speed
+  button and add-to-playlist, with the divider separating the transport from
+  those track actions (R267). Below `lg` it used to be drawn alone in a row
+  pinned to the bottom-left of the player, outside the scrolling body; the
+  owner went looking for the favourite and asked *"where is the like button?"*,
+  which is what a control in a row of its own at the far corner of a phone
+  screen earns. Never two buttons for one flag, at any width. It is the app's
+  own favourite, a heart: a STAR in this app means a rating, which is a
+  different store (`lib/ratings`).
+
+- **R258 — the lyrics pane has ONE owner at every width, and on a phone it is
+  the reader's own switch.** `web/src/components/NowPlayingView.tsx` keeps one
+  piece of state (`showLyrics`, default on, persisted as `mlo.np.lyrics` — the
+  display picks' own store) and ONE derivation both layouts read:
+  `paneOpen = drawable && showLyrics`, where `drawable` comes from the same
+  `npLyricsMode` call that decides everything else about the pane (R267). It used
+  to branch on the width (`mdUp ? showLyrics : !compactMode`), which gave the
+  phone a second, HIDDEN owner of the same pane: the persistent pick was ignored
+  below `md`, so a phone that asked for lyrics got the compact header instead,
+  and the offset and zoom controls the pane carries never mounted there at all
+  (the owner's report) — the same button meant "show the lyrics" on one side of
+  `md` and "unfold the whole block" on the other. Now ONE press, ONE thing, at
+  every width: it writes the pick and the pane follows in both layouts, a phone's
+  pane renders with the zoom and offset controls at its own bottom edge, and the
+  button itself is drawn only where it can act — where the track really has words
+  this install shows, and nowhere else (R267), the desktop rule the phone used to
+  be the exception to. `tools/check_fullscreen_player.cjs` measures it at 390×844
+  and 566×1040.
+
+- **R267 — the pane is drawn where the track can fill it, and a phone without
+  lyrics gets the full composition.** The player's whole layout decision is one
+  exported function, `npLyricsMode` (`web/src/components/NowPlayingView.tsx`),
+  asked of the lyrics ON SCREEN (deliberately the stale ones while the next
+  track's payload is in flight, so next/previous never reflows) together with
+  that track's own `INSTRUMENTAL` and the user's `lyrics_allow_plain`. It answers
+  one of five states: `synced` (timed text), `plain` (untimed text this install
+  accepts), `plain-refused` (untimed text while `lyrics_allow_plain` — off by
+  default — says untimed lyrics are not acceptable: the app's FAILING state, not
+  a reading state, and the player answers it SILENTLY by offering no pane and no
+  toggle. It used to wear the red-crossed `Badges.LyricsKindChip` beside the
+  title; the owner rejected that — lyrics formatting is not one of the facts the
+  fullscreen title row states (R261 carries the rule and the marks' homes), so
+  the state lives on in the layout decision alone: `drawable` is false for it,
+  and nothing on the player says "Plain"), `instrumental`
+  (`INSTRUMENTAL=1`: stored lyrics, if any, stay hidden) and `none`. The pane may
+  be drawn — and the toggle may be OFFERED — only for the two states with words
+  this install shows (`drawable`: `synced` | `plain`), so no state of that
+  control promises a pane the track cannot fill, and a config that has not
+  arrived yet (`allowPlain === undefined`) never claims a refusal. The phone's
+  compact header row is the LYRICS composition and nothing else
+  (`compactHeader = !mdUp && paneOpen`): while the words are up it is what the
+  phone spends its cover and metadata rows on, and with no pane — no lyrics, an
+  instrumental, refused plain lyrics, or the reader's own OFF press — the phone
+  draws the FULL composition instead (cover, title, album · artist, transport,
+  progress, visualizer, centred by the left column's own auto margins so that a
+  viewport shorter than the composition scrolls from its own top rather than
+  hiding the cover above the scrollport). Before this the header row was the
+  phone's layout whatever the track held, so a lyric-less track drew a bare strip
+  on a whole screen — the owner's "it doesn't change with no lyrics and looks
+  awful". The transport row is ONE line at EVERY width and never wraps: its
+  gaps and hit boxes tighten below `sm` (`gap-1` / `p-1.5` / `p-2` against
+  `sm:gap-2.5` / `sm:p-2` / `sm:p-2.5`, the speed button's floor `min-w-[38px]`
+  against `sm:min-w-[46px]`) so shuffle, previous, play, next, repeat, speed,
+  the divider, the FAVOURITE (R190 — it is on this line, not in a row of its
+  own at the bottom-left) and add-to-playlist all fit inside a 360 px phone
+  with room to spare; with `flex-wrap` the last of them — add-to-playlist — was
+  pushed onto a line of its own at 390 px and read as a stray icon under the
+  transport (the owner's "the playlist button seems placed weirdly").
+  `tools/check_fullscreen_player.cjs` measures that: every visible child of the
+  row shares one `top`, and the heart is reachable ON it, at each phone size
+  and in both pane states. Desktop is untouched: at `md` and up
+  `compactHeader` is never true, the row keeps its `sm:` spacing, and the pane
+  is the same right-hand column it always was. The decision table is
+  pinned by `tools/check_lyrics_kind.mjs` (five states × the reader's pick × both
+  widths, plus the refused-plain and instrumental cases) and the live DOM by
+  `tools/check_fullscreen_player.cjs` at 390×844 and 566×1040.
+
+- **R251 — the OS's own star is the app's favourite, and the shell writes
+  nothing itself.** iOS draws the Now Playing module (Control Center, the lock
+  screen, CarPlay, the Watch's now-playing app) from whatever owns the audio
+  session, and the star in it IS MediaPlayer's
+  `MPRemoteCommandCenter.likeCommand` — the webview's Media Session API covers
+  play/pause/previous/next/seek and nothing else, so this one glyph cannot come
+  from the web. `desktop/src-tauri/src/ios_like.rs` is that piece, compiled for
+  **iOS only** (`lib.rs` declares it behind `#[cfg(target_os = "ios")]`;
+  Android drives its media notification from the Media Session alone, and the
+  Tauri command is registered on every target with an empty body off iOS so the
+  UI can call it unconditionally). The wiring, in the order it happens:
+  `register` enables `likeCommand` (pressable BEFORE anything is known about the
+  track, or the first press — liking an unliked track — has nothing to hit),
+  pins `active` NO, pins `dislikeCommand` inactive (this app has no dislike
+  state to store) and attaches ONE handler; the `enabled` bit is re-asserted on
+  every state push and again whenever the app becomes active again (`refresh`,
+  called by the audio-session module on the transitions that rebuild the
+  system's now-playing furniture), because that same bit is also written by the
+  system's now-playing plumbing — a star a state push cannot turn back on is a
+  star that vanishes mid-album; the handler emits the
+  `mlo-ios-like` event and answers success, writing no like itself. The web
+  bridge `web/src/lib/iosFavs.ts` (mounted by the player bar) listens for it and
+  calls the app's ONE like writer — `useFav` / `api.likeToggle`, the same
+  optimistic update, invalidation and query keys every heart in the UI uses, so
+  all of them flip together — and then pushes the answer back through
+  `set_now_playing_liked`, which sets `MPFeedbackCommand.active` (MediaPlayer's
+  own "the user already likes this item": a FILLED star) whenever the current
+  track or its liked state changes. Outside the Tauri shell the module is inert
+  (`IN_TAURI` gates both wires), and every failure inside it (no such event, no
+  such command in an older shell) is swallowed — a favourite must never break
+  playback. The star belongs to the OS's module, not to the app: it is on
+  screen only while this webview owns a now-playing session, and
+  `MPNowPlayingInfoCenter` is left untouched because the Media Session metadata
+  is what the OS already reads. The shell side is documented in
+  `desktop/README.md` ("The Now Playing star on iOS").
+
+- **R265 — a playback session is what "keeps playing" means, and the Now
+  Playing card comes with it.** iOS plays a webview's audio through whatever
+  `AVAudioSession` category the app has configured, and the default
+  (`soloAmbient`) is incidental-UI sound: muted the moment the app stops being
+  the frontmost app, and by the ringer switch. `UIBackgroundModes: [audio]` in
+  `Info.plist` is the app's *permission* to play in the background — the category
+  is what makes it true, which is why that key alone left the owner's 4.0.0
+  report standing ("audio is muted when app is unfocused").
+  `desktop/src-tauri/src/ios_audio.rs` sets `AVAudioSessionCategoryPlayback`
+  (the framework's own exported constant, not a copied string) with the default
+  mode and NO options — this app mixes with nothing — and then manages the
+  session's LIFECYCLE rather than activating it once at launch: `configure` only
+  sets the category at setup, while the session is INACTIVE (the one moment a
+  category change costs nothing — see R268 for what re-applying it mid-playback
+  cost), the web player drives `set_playback_active` through
+  `web/src/lib/iosAudio.ts` so that playback activates the session (Apple's own
+  guidance is to activate when playback BEGINS, "to ensure that you won't
+  prematurely interrupt any other background audio"), and the OS notifications
+  re-assert it where iOS takes a backgrounded app's session away: going to the
+  background and becoming active again, an interruption ending with
+  `ShouldResume` (without that option the session belongs to whatever took it,
+  and the next press of play is what takes it back), and the media server
+  restarting — the one runtime path that also re-takes the CATEGORY, because
+  the audio server is gone and nothing is playing into the session when it
+  arrives. R265 shipped in 4.0.2-4.0.3 with a per-play category write and a
+  `NotifyOthersOnDeactivation` hand-back on every stop; R268 is that decision
+  reversed, with the owner's report as the evidence. AVFAudio is linked explicitly because the dynamic class lookup
+  finds nothing until it is loaded. It is also R251's prerequisite: the Now
+  Playing module draws a card only for an app whose session is a playback
+  session, so with no category there was no card for the star to be drawn on —
+  "the like button still isn't on ios" and the muted audio were ONE bug, settled
+  in one place. A session that will not take the category, or will not activate,
+  is logged and never fatal (the same rule as the star), and the module is
+  compiled for iOS alone (`#[cfg(target_os = "ios")]`; Android plays through its
+  own audio path and the desktop targets have no `AVAudioSession`).
+
+- **R265a — a backgrounded webview is not suspended for being invisible.** The
+  category and `UIBackgroundModes: [audio]` are the app's own half of the
+  promise; the web content process that decodes the audio is WebKit's, and
+  WebKit stops a page it can no longer justify keeping alive. The owner's 4.0.2
+  report — "audio still stops playing from the app when it tabs out… if I pause
+  / play again the audio works, then doesn't work after entering and exiting the
+  app again" — is that suspension: the session was activated at launch and lost
+  again on the next backgrounding, and a fresh `play()` in the foreground was
+  what started the clock (and re-armed WebKit) again. The window therefore
+  carries `"backgroundThrottling": "disabled"` in
+  `desktop/src-tauri/tauri.conf.json`, which wry maps onto WebKit's
+  `WKPreferences.inactiveSchedulingPolicy = .none` (public API, iOS 17+ /
+  macOS 14+): long-running audio in a backgrounded hybrid app is the case that
+  setting exists for, so the page keeps running while the app is not in front —
+  a music player's audio must also survive a hidden window on the desktop.
+  Older systems keep WebKit's default, which is why this is stated as what the
+  app configures, not as a claim about the OS. The owner's next report showed
+  this was necessary and not sufficient — the page surviving is one half, and
+  the app process producing audio of its own is the other (R288).
+
+### 7.23 The export archive, and the offline shell that must not become it
+
+- **R191 — a download is a navigation, and the service worker must not treat it
+  as the app's shell.** `<a download href="/api/export/zip/<id>">` reaches the
+  worker with `mode: "navigate"`, and the navigation branch used to take it: it
+  fetched the archive, stored it under the SHELL's own URL, and — when that store
+  failed, which a large archive being aborted does — answered the download with
+  the cached document. The owner's report was exact: "a 2.6 KB invalid .zip",
+  which is this app's `index.html` (2,689 bytes) saved under the archive's name,
+  with the offline shell left holding a zip. Only a real app route may take that
+  branch (`destination === "document"`, and nothing under `/api/`), and the shell
+  cache is versioned so an install that was already poisoned drops it on the next
+  activation. `tools/check_export_zip.cjs` measures both halves: the bytes the
+  browser really saves, and that no cache holds an archive as a document.
+
 ### 7.24 What the client calls things
 
 - **R192 — an album's dynamic range is ADR, everywhere it is an album's.** The
@@ -3099,10 +3963,29 @@ different answers.
   is the bar's rightmost item: it names the signed-in user (the server's own
   default scope is named as such, never blank), lists every user the server
   reports, and switching runs the same sign-in the login screen does — token
-  kept, then a reload, because every cached query and the event
+  kept, then a reload, because every cached query, the player and the event
   socket are keyed on being signed in. A server with no users says so and points
   at Settings → Security rather than showing an empty list. Signing out is
   available from the same panel.
+
+### 7.26 The cover's play control, and the cascade behind it
+
+- **R195 — the play control is IN the overlay, at every width, and clear of the
+  badges.** A cover's play button shares ONE flow column with the badges: the
+  ADR row, the button band, then the chips grouped at the bottom — and the column
+  clips its own last chip rather than letting anything cover the control. The bug
+  this settles (owner's phone screenshot): `.tap-hit`'s `position: relative` was
+  an UNLAYERED rule inside the phone media query, so it beat Tailwind's
+  `absolute` on the same element — at 390px the button left the overlay entirely
+  and landed below its own cover in normal flow (measured: button top 734 against
+  a cover box ending at 698), dragging the bottom-anchored chip column down with
+  it and putting a two-line country chip over the control. Two rules follow: the
+  hit-area position declarations live in `@layer components`, so a positioning
+  UTILITY on the same element wins (the rule is about the tap target, not about
+  where the element sits), and no overlay places its control with an absolute
+  offset. A cover too small for both — the S size, 147px, with a wrapped country
+  list — keeps the button whole and clips the chip that does not fit, never the
+  other way round.
 
 ### 7.28 The import arrives complete: the name, the cover, and when the notice may speak
 
@@ -3169,20 +4052,56 @@ different answers.
   notification seam is asserted to observe), because the notice is what a user
   reads as "done": it may not speak one step early.
 
+### 7.29 Push reaches a client that is not open
+
+- **R203 — push is a real transport, and it may never take the event bus down
+  with it.** The server signs with VAPID (RFC 8292, ES256) and encrypts each
+  message with RFC 8291 `aes128gcm`; the key pair is generated once and kept in a
+  file beside the state (`webpush.json`), **never in the config** — `GET
+  /api/config` hands the whole config to every signed-in session, so a private
+  key stored there is a credential any client could read. Subscriptions live
+  beside `sessions`/`users`, keyed by their endpoint (re-subscribing updates the
+  row instead of double-sending), and carry the kinds that device asked for. A
+  404 or 410 from the push service deletes the row; anything else leaves it. The
+  emit path only QUEUES — no database, no socket, no blocking — and the sender
+  never raises: an exploding device leaves the event published, because a
+  notification must not fail the import that earned it. Measured: the RFC's own
+  Appendix A vector reproduces byte for byte, and the fan-out is asserted to POST
+  a payload that decrypts with the device's private key.
+- **R204 — a client is told the truth about its own platform.** The switch is
+  rendered only where push can actually work (secure context, `PushManager`, a
+  registered service worker); everywhere else the panel shows the sentence for
+  that platform instead of a control that would fail — the desktop shell
+  notifies only while it runs (no service worker there), iPhone and iPad need
+  la musica on the Home Screen (iOS 16.4+), and a plain-http page has no push at
+  all. A server that cannot sign (no `cryptography`) says so and answers the
+  subscribe with 503 rather than half-working.
+- **R205 — a subscription belongs to the identity that made it.** Subscribing
+  carries the signed-in user, and the row follows whichever user last signed in
+  on that browser; signing out or replacing a device's session drops it
+  (`revoke_all`, `delete_user`, and the client's own `onAuthLost`), a client can
+  only unsubscribe its own endpoint, and the server prunes by itself. A device
+  must not keep being woken for an account that left it.
+
 ### 7.30 The script chain's wall clock: what is shared, and what is measured
 
 - **R216 — the notification a client missed is STILL THERE when it comes
   back, and a kind's reach is the same on every client.** `?since=` replays from
-  two stores: the in-memory ring (`_MAX_EVENTS` 100, the live-event ring) and a
+  two stores: the in-memory ring (`_MAX_EVENTS` 100, R90's channel) and a
   durable log beside the app state (`server/events.py::_log_append`, newest
   `_LOG_KEEP` = 400 frames, atomically rewritten past `_LOG_MAX_BYTES`),
-  because a client that is closed for a day — and a desktop shell in
-  particular — otherwise hears nothing about the import that finished
+  because a client that is closed for a day — and a desktop or mobile shell in
+  particular, which no push service can reach at all (R204's own "notifies only
+  while it runs") — otherwise hears nothing about the import that finished
   overnight. `recent()` merges both, dedupes on `seq` and returns the newest
   `limit`; a client that has never seen an event still asks "from now"
   (`eventsUrl` sends `Date.now()/1000`), so a fresh install is not greeted with
-  a hundred notices for things that happened before it existed.
-  `tools/test_notifications.py` asserts the frame
+  a hundred notices for things that happened before it existed. In the same
+  change `OS_KINDS` and `PUSH_KINDS` (`web/src/lib/notifications.ts`) became ONE
+  set: an outcome worth interrupting an open app for is worth waking a closed
+  one for, and the kinds that were asymmetric are the ones that proved it —
+  `import_done` (pushed, never popped), `watch.new_release` and
+  `storage_pruned` (neither). `tools/test_notifications.py` asserts the frame
   survives the memory ring, that a client which already saw it is not sent it
   twice, and that the log keeps exactly the newest `_LOG_KEEP` frames. The append and the compaction it may trigger share the module lock: the rewrite is a read-modify-write of the whole file, so a frame appended between its read and its `os.replace` would be rewritten away — silently, and only under concurrent emitters.
 
@@ -3260,7 +4179,7 @@ different answers.
     container mutagen cannot read still falls back to the probe. The import's
     convert step measured 0.413 s → 0.302 s in the same pair.
 
-### 7.34 The Browse sheet reads the payload's names, not the disk's spellings
+### 7.34 The Browse sheet reads the payload's names and the store's ratings
 
 - **R227 — the sheet's columns are the app's own facts, never the disk's
   spellings, and its first request sorts by what the toolbar shows.**
@@ -3270,16 +4189,35 @@ different answers.
   `[Album] 1994-11-29 … {GB - CD …} [Parlophone] [<mbid>]` where the rest of the
   app shows *Radiohead* and *The Bends* (R106). The payload's
   `album_artist || display_name` and its `ALBUM` tag now lead, with the stamps
-  kept as the fallback for a row the payload does not carry. The sort had the
-  same shape of bug: the request fell back to `library.path` while
-  `/api/library/fields` was still in flight, so the first page came back in
-  file order under a header that read
+  kept as the fallback for a row the payload does not carry. The Rating column
+  read `tr.rating` — a key the engine never stamps — and fell through to the
+  file's Picard `RATING` tag, which is 0-100: a file rated 5 stars in the app
+  printed `100` in a column headed 0-5, and an app-only rating printed `—`. It
+  now reads `GET /api/ratings` through `lib/ratings.ratingOf`, the same store
+  and helper every other row uses. The sort had the same shape of bug: the
+  request fell back to `library.path` while `/api/library/fields` was still in
+  flight, so the first page came back in file order under a header that read
   *Artist*; the fallback is now the option the `<select>` actually paints
   (`GROUPS[0].id`, the "Artist" grouping key). Verified in the browser against
-  a decorated-folder fixture: the cells read `Radiohead` / `Amnesiac`,
+  a decorated-folder fixture: the cells read `Radiohead` / `Amnesiac` / `4.5`,
   and the captured `POST /api/library/query` bodies show
   `{"sort":{"key":"artist"}}` before the catalogue lands and
   `{"sort":{"key":"artist.name"}}` after it — never `library.path`.
+
+### 7.35 The volume readout is sized in characters, not pixels
+
+- **R228 — the percentage box fits its own digits at any font, DPI or text-size
+  setting.** `VolumePct` sized its input `w-7` (28 px) with `px-1`; three digits
+  in the shipped mono font are 27 px of content in a 26 px content box, so
+  "100" was clipped by the input's own edge — the owner's screenshot, and worse
+  wherever the system mono is wider or the browser's default text size is
+  larger. The box is `calc(3ch + 0.5rem + 2px)`: 3ch IS the three digits the
+  value is capped at (0-100), `0.5rem` is `px-1`'s own padding (rem, not a fixed
+  pixel count — padding scales with the root font and a fixed allowance did
+  not), and 2px is the border. Measured in the fullscreen player at a 16/20/24
+  px root: `scrollWidth == clientWidth` (no clipping) at all three, where the
+  pixel box clipped at every one of them. The bar's volume line uses the same
+  component, so both surfaces are fixed once.
 
 ### 7.36 A rip log that carries a checksum has to be checked, and shown
 
@@ -3366,9 +4304,10 @@ different answers.
   such sentence, in fact: the row prints the first (`reason`) and its tooltip
   names them all beside the tag codes (`reasons`), because an album can fail
   several album-wide checks at once and the one a reader went looking for was
-  not always the first on the list. An album-wide sentence the strip once
-  buried is the case that asked for it: with another album-wide sentence ahead
-  of it the strip named everything else and never that. Three
+  not always the first on the list. "Album description missing — fetch one on
+  the album page" is the case that asked for it: the library has to say when a
+  description does not exist, and with another album-wide sentence ahead of it
+  the strip named everything else and never that. Three
   albums are never findings: a PENDING framework album (nothing was graded
   because its audio has not arrived), an album with `total_checks` 0 (which
   passes by the grader's own rule, `0 == 0`), and **an album a live job holds**
@@ -3399,7 +4338,7 @@ different answers.
   `["gradesSummary"]` is in `invalidateLibrary`'s list — a run that graded,
   tagged or imported just changed the very checks the strip reports. **The
   Refresh buttons are held to the same rule**: they re-walk the music folder
-  SERVER-side (`?refresh=1` drops the library and home caches),
+  SERVER-side (`?refresh=1` drops the library, home and recommendation caches),
   so the reads derived from that walk are re-asked with it — the page's own
   payload AND `["gradesSummary"]`, whose 5-minute staleTime otherwise left the
   strip quoting the counts from before the press (the owner's "even after
@@ -3421,10 +4360,11 @@ different answers.
   `mlo.fetchdeps.auto_update_enabled` promises (its own fallback matches
   `mlo.config`'s default, so a config written before the key existed does not
   read as "off" while the page shows it ticked). And the Keys surfaces name the
-  programs behind the sources: RateYourMusic's row points at the
-  **Netscape-format `cookies.txt`** import for `rym_cookie` (a browser
-  extension's export, imported into the app's own jar), whose help text names
-  the Netscape file as well as the
+  programs behind the sources: **yt-dlp** with what it does for the app and that
+  its cookies are a **Netscape-format `cookies.txt`** (a browser extension's
+  export, imported into the app's own jar on Settings → Videos), and
+  RateYourMusic's row points at the same kind of import for `rym_cookie`
+  (Settings → Discovery), whose help text names the Netscape file as well as the
   devtools header. One limitation, stated: while the first-run wizard is up,
   `/settings` is not routable (App.tsx's first-run gate), so the wizard's Keys
   step NAMES both imports and the clickable jump appears once setup is finished.
@@ -3439,8 +4379,9 @@ different answers.
   and hint, its own `_EXTRA_REASONS` entry, its own checkbox in both surfaces
   (the panel renders the table, so the family appears without a UI change), and
   `LEGACY_SIDECAR_FAMILIES` gains it so a caller still sending the old
-  `sidecars` boolean copies exactly the files it always did. One toggle per file
-  family: audio, cover, lyrics, cue, log, accurip, checksum, text and other.
+  `sidecars` boolean copies exactly the files it always did. Eleven families,
+  one toggle each: audio, cover, lyrics, cue, log, accurip, description,
+  checksum, text, playlist, other.
 - **R235 — a running export can be stopped, and it keeps what it wrote.**
   `POST /api/export/cancel` asks the in-flight run to stop (answering
   `cancelled: false` when nothing was running, rather than pretending). The
@@ -3448,7 +4389,7 @@ different answers.
   never mid-file; everything already written STAYS (an export is a copy
   service — deleting finished files because the user stopped the run would
   destroy what they may still want), and the finishing passes are skipped,
-  because a manifest, an album ReplayGain pass and `prune` all
+  because a manifest, a playlist, an album ReplayGain pass and `prune` all
   describe a COMPLETE export. The result carries `cancelled: true` and the
   route answers `ok: false`. The flag is cleared at the start of every run, so
   a press between two exports cannot arm the next one. Pinned by
@@ -3481,17 +4422,23 @@ different answers.
   step's own ticks carry its job when one is held (`server/beetscfg.py`
   publishes through `job_locks` rather than calling the relay raw), so the
   Beets page's import ends its bar like every other job.
-- **R238 — a duplicate sidecar is dropped, not copied twice.** A sidecar the
-  app writes can land in two places — the pre-organize staging folder and the
-  album folder an "Add to library" prepared — and the organizer's leftover
-  sweep used to carry the second copy in under a ` (2)` name. Now the sweep
-  DROPS a source file whose bytes are identical to the file already at the
-  destination (`filecmp.cmp(..., shallow=False)`), so the library never holds
-  two copies of one sidecar; a genuinely different file still takes the ` (2)`
-  name rather than overwriting it. The canonical file is never the one moved:
-  it is what every reader opens.
-- **R239 — a column preference cannot gut a table, and an artist row wears
-  a face.** The Library's Albums / Artists / Tracks views draw every data cell
+- **R238 — a duplicate sidecar is reported, removable, and no longer made.**
+  The app itself wrote `description (2).txt`: the import chain wrote
+  `description.txt` into the pre-organize staging folder while
+  `pending_albums.prefetch_content` had already written it into the album folder
+  an "Add to library" prepared, and the organizer's leftover sweep carried the
+  second copy in under a ` (2)` name (three of the owner's six albums held one).
+  Now: the sweep DROPS a source file whose bytes are identical to the file
+  already at the destination (`filecmp.cmp(..., shallow=False)`; a genuinely
+  different file still takes the ` (2)` name rather than overwriting), the
+  layout scan reports a numbered copy that sits beside its canonical as its own
+  `sidecar_copy` row with a **trash** fix (`_may_trash` gained the matching arm —
+  before it, the row the scan reported could never be acted on, because
+  everything sidecar-shaped is refused), the Optimization panel draws that kind,
+  and the Library page's layout warning counts it like any other finding. The
+  canonical file is never the one moved: it is what every reader opens.
+- **R239 — a column preference cannot gut a table, and an artist row wears a
+  face.** The Library's Albums / Artists / Tracks views draw every data cell
   behind a visible-column id list persisted per view in `localStorage`
   (`useColumnPrefs`), and that list is **versioned with the ids**: a list under
   the previous key is MIGRATED — the ids it still carries are kept, and every
@@ -3500,22 +4447,248 @@ different answers.
   unversioned key that kept only the ids it recognised drew the owner an Albums
   view with its chevron and no album names, a Tracks view with its row numbers,
   and a Columns menu in which nothing looked wrong.) The Artists view draws
-  `ArtistAvatar` per row — a representative album cover; the app stores no
-  artist pictures — and its count column is labelled
+  `ArtistAvatar` per row — `GET /api/artist/image` when the payload's
+  `has_image` says the folder holds a picture (`mlo.artistdata.has_image`, the
+  same helper Home's shelf asks, so no request is made that would 404), a
+  representative album cover otherwise — and its count column is labelled
   **Releases** (the artist's albums in this library, pending ones included).
+- **R240 — the player's metadata is a door, and it marquees.** The title,
+  artist and album in the now-playing bar and in the fullscreen player link to
+  the track, artist and album pages (`trackRef` / `artistRef` / `albumRef`,
+  resolved from the library payload the client already holds; a row whose album
+  or artist is not in the library keeps plain text rather than a route that
+  cannot resolve). A plain click opens the page and does not also fire the
+  surrounding block's own handler (the bar's metadata block opens the fullscreen
+  view). Text that does not fit scrolls — the artist and album through the same
+  `ScrollingText` the title uses, never a second marquee. The lyric offset and
+  zoom steps (`LyricZoom`, `LyricOffset`) and the lyrics editor's speed step are
+  one square box per step (`h-7 w-7 inline-flex items-center justify-center`)
+  with the glyph centred by flex, never by its own metrics, and both sides of a
+  pair take the same box: a padded text `+` sits wherever its font puts it, which
+  is what made the pair read lopsided beside the value it steps. The two lyric
+  chips are ONE layout, shared through `LYRIC_STEP_BTN`, `LYRIC_VALUE_BOX` and
+  `LYRIC_VALUE_UNIT`: the same boxes, the same gaps, the same value box (40 px,
+  `h-5`), and the value CENTRED in it — right-packed, the number hugged the `+`
+  and left 27 px of air beside the `−` against 12 px on the other side (issue
+  #56: "these buttons should be more centered, all − / + text should line up
+  well"). The offset chip's Save/Discard pair also lives in a slot whose width
+  is there in EVERY state (the buttons are `invisible` until the offset is
+  dirty): rendered only once dirty, they widened the chip by 58 px the instant
+  the first step landed, which slid the fullscreen player's `justify-end` footer
+  that far left and put the reader's next press — aimed at the `+` they had just
+  used — on Save, a write into the track's own lyrics. Both halves are measured
+  in `tools/check_np_metadata_contrast.cjs` (the value's ink centre against the
+  midpoint of the two glyphs, the slot's width in both states, and a real press
+  on the `+` that must leave every box in the strip where it was).
+
+### 7.39 A music video is fetched from YouTube
+
+- **R241 — a music video is fetched from YouTube by artist and title, and the
+  answer names why when it cannot be.** `POST /api/videos/download-youtube`
+  takes `{artist, title, duration?, path?}`: `youtube.best_candidate` picks one
+  upload (the duration window the caller states, and the lyric/cover/tribute
+  filtering — the app's ONE candidate rule), and `youtube.download` fetches it.
+  `path` is the album folder to drop it into (or a track path whose folder is
+  used), else the file lands in the app's downloads dir for review; `duration`
+  is the expected length in seconds, which the search uses to reject
+  live/tribute/cover uploads. A candidate that downloads answers `{ok: true,
+  file, candidate, container, height, abr}`. When it cannot — `youtube_enabled`
+  off, yt-dlp missing, no acceptable candidate, or a download it could not
+  deliver — the request answers `{ok: false, candidate: null, error}` naming
+  THAT reason, and the two switches' own words are kept for it so the error
+  never reports "not on YouTube" about a lookup the app was never allowed (or
+  able) to make.
+
+### 7.40 A playlist that comes from a streaming service
+
+- **R254 — one route reads a playlist from Deezer, Spotify, YouTube Music or
+  Apple Music, MATCHES it against the library first, and writes the app's own
+  playlist second.** `POST /api/playlists/import/streaming`
+  (`server/api_streaming.py`, the fetching/matching/writing in
+  `server/streaming_playlists.py`) takes `{url, name?, service?, parent_albums?,
+  dry_run?}` and answers `{ok, report, playlist, created, dry_run}` — the
+  REPORT first, so a caller never has to infer what happened from a playlist.
+  Four services and exactly how each is read, with no provider framework:
+  Deezer's public Web API (no key; it states each track's ISRC, the strongest
+  identity the library holds, and paginates on `tracks.next`, each page checked
+  against itself so a `next` pointing back cannot loop), Spotify's Web API with
+  the client-credentials token this app already gets for its other Spotify uses
+  (a public playlist needs the app's own `spotify_client_id`/`_secret` and
+  nothing else; with either unset the error says which setting), YouTube Music
+  through the app's OWN yt-dlp probe (one flat request, no per-entry page), and
+  Apple Music — which has no public playlist API without a developer token — by
+  reading the public page's embedded `<script id="serialized-server-data">`
+  JSON, an error naming the status/type/size when Apple's page changes. The URL
+  decides the service (`service_of`: host plus the playlist path/query each one
+  uses), a `service` that contradicts the URL is refused with the sentence
+  saying which link to paste, a wrong-KIND link (a track, an album) gets its own
+  sentence rather than being read as a playlist, and everything else raises
+  `StreamingError` → a 400/502 carrying the service's own words.
+  **Matching** is the app's existing identity help and never a second fuzzy
+  matcher: the MusicBrainz id (`server.mbresolve`), the library payload's own
+  ISRC, then `integrations._norm_compare`/`title_matches` on the names — and
+  every row reports whether it matched and WHY not, with duplicates counted.
+  **Writing** creates a manual playlist from the matched paths in the service's
+  order, deduplicated, and records where it came from: `origin` (the service)
+  and `origin_url` (the playlist URL) are two columns the playlists table gains
+  in place (`server/playlists.py`'s migration DDL). Three config keys govern the
+  queueing, each overridable for one import by `parent_albums`:
+  * `playlist_import_parent_albums` (**false**) — off, the import is
+    informational and nothing is queued. On, every imported track whose album
+    the library does not already hold queues its PARENT ALBUM, one add per
+    album, through the existing add-by-name path `server.api_add.library_add`
+    (MusicBrainz match, then the framework album that path creates) — albums,
+    never tracks.
+  * `playlist_import_unmatched` (`skip` | **`skip`**… the shipped default is
+    `skip`) — `wish` was a second mode that queued each unmatched TRACK by name,
+    but there is no wish queue to put them on any more, so a config saved as
+    `wish` behaves as `skip`: the unmatched tracks are REPORTED instead
+    (`_report_unmatched_tracks`), skipping one whose album the parent-album pass
+    just queued (two reports for one missing song is one too many) and
+    deduplicating on title+artist.
+  * `playlist_import_create_empty` (**true**) — an import that matched nothing
+    still creates the playlist, with no tracks and a note saying so; off, it
+    writes nothing and the report's note is "No track matched, and a playlist is
+    not created empty here (Settings → Streaming playlist import) — nothing was
+    written."
+  `dry_run` is the same fetch, the same match and NO write at all — no
+  playlist, no queue — which is what the dialog's **Check** button asks for
+  (`web/src/pages/PlaylistsPage.tsx`, *Import from a streaming service*).
+  Settings → Streaming playlist import is where the three keys live. Pinned by
+  `tools/test_streaming_playlists.py`.
+
+### 7.41 A podcast is a series, and the library says so
+
+- **R255 — the app records the podcast a file belongs to, derives the release
+  type `Podcast` from it, and never grades an episode against music rules.**
+  MusicBrainz models a podcast as a **SERIES** of type `Podcast`
+  (`server.integrations.PODCAST_SERIES_TYPE` / `PODCAST_SERIES_TYPE_ID`,
+  `ef6f7b93-868a-43a9-b59c-a73b62c2c51e`) whose episode release groups are
+  linked `part of` it — and the episode group's own primary type is `Broadcast`
+  (`PODCAST_EPISODE_PRIMARY_TYPE`), because there IS no Podcast release-group
+  type. `podcast_series_of` reads that relation (the type-id first, with the
+  label as a fallback, because a relabel cannot make the app stop seeing
+  podcasts), and the import's payload carries it as a `podcast` block. From
+  there:
+  * **the tags**: `mlo.autotag` writes `PODCASTSERIES`, `PODCASTSERIESMBID` and
+    `PODCASTEPISODE` (container spellings in `mlo/audio.py`) from
+    MusicBrainz's own series name, series id and episode number — the identity
+    travels with the files, so a rescan, a moved folder or a fresh install sees
+    the same fact with no MusicBrainz request. `mlo.tagtext.RELEASE_TYPE_VALUES`
+    also carries `Podcast` as the app's own **DERIVED** type
+    (`mlo.naming.DERIVED_RELEASE_TYPES`, `_DERIVED_TYPE_CAPS`), which is what
+    the naming script and a hand-set `RELEASETYPE` compare against;
+    it is never sent to MusicBrainz as a query, because `primarytype:"podcast"`
+    matches nothing by construction.
+  * **the payload**: `server.library.podcast_info` reads the tags off the
+    album's own files into the album row's `podcast` block — `{series,
+    series_mbid, episode}` with the series name as a reader sees it (including
+    MusicBrainz's disambiguation when it stated one, which is what keeps two
+    same-named shows apart) — and answers `None`, not an empty block, for
+    everything that is not an episode. Every surface below is a read of that
+    block: no page asks MusicBrainz again.
+  * **Home** draws a Podcasts shelf (`PodcastShelf`), ONE card per series
+    carrying its newest episode, and draws NOTHING when the library holds no
+    podcast. A series row links to its own page (`/podcast/<series>`,
+    `server.recommendations.podcast_series_payload` via `GET
+    /api/podcasts?series=…`, which 404s for a series the library holds no
+    episode of, the same rule the album and artist pages follow).
+  * **the Library** carries a `Podcasts` preset beside the other filter
+    presets, matching a track by its `PODCASTSERIES` tag and an album by its
+    `podcast` block, and the **artist page** gives `Podcast` its own bucket
+    ahead of `Other`.
+  * **grading** does not punish an episode for not being an album:
+    `mlo.grader._podcast_effective_cfg` switches the MUSIC-only checks off for
+    that folder — `grade_check_lyrics`, `grade_check_rym_links`,
+    `grade_check_album_description`, `grade_check_genre`, `_genre_count`,
+    `_genre_order`, `_genre_vocab` — decided by ONE read of the folder's first
+    audio file's `PODCASTSERIES` tag. A folder without the tag (every music
+    album, and anything whose podcast identity nobody derived) is graded by the
+    config UNCHANGED, so the rule cannot weaken one existing check for a music
+    release, and the CD-rip expectations need nothing here because every one of
+    them is already gated on the CD medium (`mlo.tagtext.is_cd_media`: `CD`, and
+    the `HDCD` variant that is the same disc).
+  Pinned by `tools/test_podcast.py`.
+
+### 7.42 The accent colour is the device's, and a dialog on a phone is a sheet
+
+- **R256 — one accent hue, chosen from presets or typed, stored per device, and
+  derived — never guessed — into the three values the shell paints.**
+  `web/src/lib/accent.ts` is the whole feature: 15 `ACCENT_PRESETS` walked
+  around the wheel (red → rose) and ending on the black & white theme the app
+  ships with, plus a CUSTOM colour — a native picker and a text field that are
+  two views of one value, taking `#rgb` or `#rrggbb` with or without the `#`
+  (`parseHexColor`/`normalizeHex`; anything else resolves to the default theme
+  rather than painting the app something nobody asked for). The choice is
+  `localStorage["mlo.accent"]` — a preset id or the canonical `#rrggbb` — so it
+  is the DEVICE's, like the other display picks. Three values come out of every
+  pick and all three are load-bearing: the accent itself, its `soft` twin (same
+  hue and saturation, lightness lifted into the band that reads as secondary
+  text on the app's near-black surface, `softFor` in HSL — "same colour,
+  lighter" is one coordinate there and a per-channel mix is not), and `fg`, the
+  ink drawn ON the accent, chosen as the better of white and black by WCAG
+  contrast (`inkFor` measures both and takes the higher ratio — a hardcoded
+  `text-black` is invisible on every dark preset). `applyAccentVars` is the ONE
+  writer: it paints `--accent` / `--accent-soft` / `--accent-fg` on `<html>` as
+  `"r g b"` triplets and announces the change once, and the canvas consumers
+  subscribe rather than caching (`EqCurve`, `Visualizer`), so a new accent
+  repaints them live instead of leaving the old hue until a reload. The seven
+  presets that shipped BEFORE the picker resolve to the exact triplets the app
+  carried then — pinned, not derived, in `tools/fixtures/accent.json`'s
+  `pre_picker` — so nobody's existing theme moves. Settings → Appearance
+  carries the swatches and the custom entry. Pinned by `tools/check_accent.mjs`.
+
+- **R257 — every dialog is ONE component with two forms, and on a phone it is a
+  bottom sheet that respects the screen it touches.**
+  `web/src/components/Modal.tsx` is the one shell every modal already used — 27
+  `<Modal>` call sites, and nothing else in the app renders a dialog overlay
+  (the one hand-rolled video overlay on the track page was migrated onto it) —
+  with the furniture a modal owes a reader (backdrop + Escape close,
+  `role="dialog"`/`aria-modal`, focus moved in and restored to the opener, Tab
+  trapped, the shared entry animation), and it now has two forms from the same
+  panel: from `sm` (640 px — Tailwind's own line, the width below which the
+  installed clients run) up it is the centred panel every desktop call site was
+  laid out for, and below it the same panel becomes a sheet — full device width,
+  anchored to the bottom edge, rounded only at the top (`0.75rem 0.75rem 0 0`,
+  the panel's own `rounded-xl` corner) and entering with its own `sheet-up`
+  keyframe instead of the pop. Only geometry lives in the CSS recipe
+  (`.modal-overlay` / `.modal-sheet` in `web/src/index.css`), so a caller's own
+  `max-w-*` still caps the desktop panel while the phone gets a full-width
+  sheet. Three things make it fit the actual screen rather than the nominal one:
+  the sheet is never taller than what is VISIBLE (`max-height: min(92dvh,
+  calc(var(--mlo-vv-h, 100dvh) - 0.5rem), calc(100dvh -
+  max(env(safe-area-inset-top, 0px), var(--mlo-inset-top, 0px)) - 0.75rem))`),
+  the on-screen keyboard is measured from the visualViewport and applied as
+  `padding-bottom: var(--mlo-vv-lift, 0px)` on the overlay (the viewport meta
+  resizes the VISUAL viewport, not the layout one; the hook fires past
+  `innerHeight - vv.height - vv.offsetTop > 150 px`, which is a keyboard and not
+  iOS's URL bar, and writes "0px" when nothing is lifted), and the safe-area
+  insets are the SHEET's own padding — `max(env(safe-area-inset-*),
+  var(--mlo-inset-*))` on left/right/bottom — because the overlay is `fixed` and
+  the panel is the thing touching the screen edge; without them the close cross
+  and the confirm row sit under the home indicator. The header and footer stay
+  pinned around a scrolling body, so the confirm row is never behind a keyboard.
+  The same pass gave the lyrics pane its own `.safe-lyrics` insets (top
+  `3rem` + inset, bottom `5.75rem` + inset) and every Popover panel
+  `.popover-panel` (R218). Pinned by `tools/check_responsive.cjs`'s DIALOGS
+  sweep — it opens the shortcut sheet and the Browse save dialog at 390, 834 and
+  1440 and asserts the panel is inside the window, every control is on screen
+  and nothing scrolls sideways, plus the sheet form below 640 and the centred
+  panel above it (196/196 on the final build), and by `tools/check_menus.cjs`'s
+  phone-drawer walk.
 
 ### 7.43 The Import tab takes archives, folders and single files
 
 - **R259 — an archive imports like the folder it contains, and unpacking it is treated as the untrusted input it is.** A dropped or picked archive (`.zip`, `.tar`, `.tar.gz`/`.tgz`, `.tar.bz2`/`.tbz2`, `.tar.xz`/`.txz`, `.7z`, `.rar` — `mlo.archives.ARCHIVE_FORMATS`, mirrored by the wizard's `accept=`) is unpacked into a staging folder and then goes through the *existing* album detection, partial marking and sidecar rules: a rip in a zip and the same rip as a folder produce the same album folder and the same `.mlo_expected.json`, so a `.cue`/`.log`/`.accurip` inside an archive is used exactly as one on disk. Extraction refuses, **before writing anything**, a member with an absolute path, a `..` segment, a drive/UNC prefix, a symlink/hardlink, a device, a fifo or an unknown type, and the refusal names the member; a format with no available extractor (`.7z`/`.rar` without 7-Zip) is refused in those words rather than silently skipped. A nested archive is not unpacked and does not become an import file. The wizard states what it took in (albums, tracks, refusals) before the user commits.
-- **R260 — a drop takes files, nested folders and archives, and a single file is a first-class pick.** The picker and the drop path accept one file, several files, a folder (walked recursively), an archive, or a mix of them in one gesture; in the desktop shell an OS drop that yields a server-side path resolves through the scan path, and a client with no access to the server's filesystem says so instead of doing nothing. One audio file imported on its own lands by the rule in R247 — in the album that rip is, or as its own album when it genuinely is one.
+- **R260 — a drop takes files, nested folders and archives, and a single file is a first-class pick.** The picker and the drop path accept one file, several files, a folder (walked recursively), an archive, or a mix of them in one gesture; in the desktop shell an OS drop that yields a server-side path resolves through the scan path, and a client that cannot read the server's filesystem (a phone) says so instead of doing nothing. One audio file imported on its own lands by the rule in R247 — in the album that rip is, or as its own album when it genuinely is one.
 
 ### 7.44 The library says which kind the lyrics are
 
-- **R261 — `lyrics_kind` is `synced`, `plain` or absent, and it is the stored truth.** The library payload (and `GET /api/album/scan-tracks`, and the query field `library.lyrics_kind`) carries the kind, derived from what the file actually holds (`mlo.lyrics.stored_lyrics_kind` over the embedded lyrics and the `.lrc` — one source with timestamps makes it `synced`; no source makes it absent, and `lyrics_present` is exactly "the kind exists"). Every lyrics surface names the kind (Synced / Plain) instead of only "has lyrics". A **plain** lyric is a failing state — the red ✗ with the reason naming the setting — exactly while `lyrics_allow_plain` is off (the shipped default), neutral while it is on, and a setting that cannot be read never claims a failure. A missing lyric is its own state, not "plain". The mark appears where the surface is about ONE track — its page, its details row, its lyrics views and the import wizard's Lyrics step — and **never on a list of tracks** (an album's tracklist, the library's rows): there it was clutter from the day it shipped. The marks keep their homes on the track's own surfaces. Plain lyrics stay READABLE and editable where they land: the track page's lyrics pane opens its RAW editor for untimed words (`LyricsViewer` sets `rawMode` whenever the incoming text parses to no lines — the host hands the stored text straight in, so without that branch a plain track showed "No lyrics yet…" with its words right there, un-syncable), and the Raw/Lines toggle never wipes a plain text (`serializeLrc([])` is "", so the textarea is only re-seeded when there are lines to seed it with).
+- **R261 — `lyrics_kind` is `synced`, `plain` or absent, and it is the stored truth.** The library payload (and `GET /api/album/scan-tracks`, and the query field `library.lyrics_kind`) carries the kind, derived from what the file actually holds (`mlo.lyrics.stored_lyrics_kind` over the embedded lyrics and the `.lrc` — one source with timestamps makes it `synced`; no source makes it absent, and `lyrics_present` is exactly "the kind exists"). Every lyrics surface names the kind (Synced / Plain) instead of only "has lyrics". A **plain** lyric is a failing state — the red ✗ with the reason naming the setting — exactly while `lyrics_allow_plain` is off (the shipped default), neutral while it is on, and a setting that cannot be read never claims a failure. A missing lyric is its own state, not "plain". The mark appears where the surface is about ONE track — its page, its details row, its lyrics views and the import wizard's Lyrics step — and **never on a list of tracks** (an album's tracklist, the library's rows): there it was clutter from the day it shipped. And **never on the fullscreen player's title row**: the player wears no lyrics-kind mark at all — the owner's report ("doesn't say any extra text like 'X Plain' next to the title") — so `plain-refused` keeps its only effect there, which is that no pane and no toggle are offered (R267); the marks keep their homes on the track's own surfaces. Plain lyrics stay READABLE and editable where they land: the track page's lyrics pane opens its RAW editor for untimed words (`LyricsViewer` sets `rawMode` whenever the incoming text parses to no lines — the host hands the stored text straight in, so without that branch a plain track showed "No lyrics yet…" with its words right there, un-syncable), and the Raw/Lines toggle never wipes a plain text (`serializeLrc([])` is "", so the textarea is only re-seeded when there are lines to seed it with).
 
 ### 7.45 A digital-media import settles what the grader would otherwise report
 
-- **R262 — SOURCE and the lyrics format are settled by the import, which asks only for what it cannot know.** For a release whose medium is Digital Media: `SOURCE` is written from the release's own store URLs (the `purchase for download` / `download for free` / `streaming` relations, `mlo/digital_source.py`), else **asked** through the import-policy family `source` (the wizard's Match step, `POST /api/import/source`, the unattended prompt) with `digital_media_source_value` as the suggested answer — and written fill-only, never over a stated value, and only where `should_write_audio_tag` allows. The lyrics formatter (script 1, `mlo.lyrics._process_lyrics_for_audio`) runs as part of the import, so "Lyrics not optimally formatted" cannot survive it; a lyric that arrives untimed (with `lyrics_allow_plain` off) or that the app's own grade still rejects after the formatter is removed together with its `.lrc` sidecar and derived translations, **with the count reported**, and only when the chain's fetch step will replace it (never when script 13 is not in the chain, never when the user keeps the lyrics family, never when `lyrics_allow_plain` is on). 
+- **R262 — SOURCE, the lyrics format and the album description are settled by the import, which asks only for what it cannot know.** For a release whose medium is Digital Media: `SOURCE` is written from the release's own store URLs (the `purchase for download` / `download for free` / `streaming` relations, `mlo/digital_source.py`), else **asked** through the import-policy family `source` (the wizard's Match step, `POST /api/import/source`, the unattended prompt) with `digital_media_source_value` as the suggested answer — and written fill-only, never over a stated value, and only where `should_write_audio_tag` allows. The lyrics formatter (script 1, `mlo.lyrics._process_lyrics_for_audio`) runs as part of the import, so "Lyrics not optimally formatted" cannot survive it; a lyric that arrives untimed (with `lyrics_allow_plain` off) or that the app's own grade still rejects after the formatter is removed together with its `.lrc` sidecar and derived translations, **with the count reported**, and only when the chain's fetch step will replace it (never when script 13 is not in the chain, never when the user keeps the lyrics family, never when `lyrics_allow_plain` is on). The album description is fetched by the import's own metadata step (the same machinery the album page uses), and when nothing is found or reachable the import says so and points at the album page rather than implying success.
 
 ### 7.46 AcoustID submission is opt-in and follows the service's own rules
 
@@ -3523,15 +4696,341 @@ different answers.
 
 ### 7.47 A verdict is only drawn from a payload that loaded, and a whole-library action asks first
 
-- **R264 — states do not lie.** A page's verdict is computed only from a payload that actually loaded: loading and failure are their own states, a failure says so (with the way to retry) and never accuses the user's data. An action that rewrites or moves the whole library (**Apply fixes** → the layout script) confirms first, naming what it will do and how many rows it covers, and only the confirm reaches the endpoint. A hero folds its own layout at a narrow width, and a table column is laid out to hold its own header and the widest value it actually renders — where a value genuinely cannot fit, the cell clips with the whole value in its `title`, checked by `tools/check_library_tables.cjs`.
+- **R264 — states do not lie.** A page's verdict is computed only from a payload that actually loaded: loading and failure are their own states, a failure says so (with the way to retry) and never accuses the user's data — the offline-downloads page's "your cache is orphaned" and its **Clear all** are reachable only when the comparison is real. An action that rewrites or moves the whole library (**Apply fixes** → the layout script) confirms first, naming what it will do and how many rows it covers, and only the confirm reaches the endpoint. A hero that has a phone layout folds at that width (the playlist page now folds like the album and artist pages), and a table column is laid out to hold its own header and the widest value it actually renders — where a value genuinely cannot fit, the cell clips with the whole value in its `title`, checked by `tools/check_library_tables.cjs`.
+
+### 7.48 The phone's playback, the app's width, and the vocabularies in between
+
+- **R268 — an active session is not re-configured, and never handed back.** The
+  4.0.3 lifecycle (R265) re-applied the category and deactivated the session on
+  every stop. Both halves stop a webview's playback: `setCategory:mode:options:`
+  on a session that is already ACTIVE is Apple's documented "may interrupt audio
+  playback", and the app is always in that state when the call arrives — the web
+  player writes `playing` the moment a row is pressed, before the element has
+  started — while a deactivate that lands in the same second as a start (a track
+  change, a refused load, the OS pausing the element) hands the session back
+  mid-startup. The owner's report names the symptom exactly: "pressing play on
+  tracks just makes them pause immediately". The rule is now one sentence: the
+  category is taken once, at setup, while the session is inactive, and the
+  session is activated when playback begins and NEVER handed back while the app
+  lives. Activating an already-active session is a no-op, so a start can no
+  longer interrupt a start, and the OS ends the session when the app does. The
+  cost is stated rather than hidden: another player this app interrupted does
+  not resume by itself the moment the user pauses la musica.
+
+- **R269 — cleartext media needs the blanket ATS key, and the LAN needs a
+  reason.** `NSAllowsArbitraryLoadsInWebContent` covers what the web content
+  PROCESS fetches; the bytes of an `<audio>`/`<video>` element are loaded by
+  WebKit's media stack, which reads `NSAllowsArbitraryLoadsForMedia`. The
+  blanket key is NOT a substitute: on iOS 10+ any scoped key present makes iOS
+  ignore `NSAllowsArbitraryLoads` outright (Apple's own note on the key), so a
+  build carrying the blanket key alone passes a plist check and then refuses
+  every plain-http track with no error the page can see. All three are set in
+  `desktop/src-tauri/Info.plist`, and `NSLocalNetworkUsageDescription` gives
+  iOS 14+ something to show when it asks for local-network access — without it
+  the permission cannot be requested at all, so a LAN server is unreachable
+  while a VPN address still works (the worst shape of bug to diagnose from a
+  report). `tools/check_ios_ipa.py` and the mobile CI job both read all three
+  back out of the built app/IPA, because a plist that stopped merging would
+  take every one of them down with no other symptom.
+
+- **R270 — a lock-screen star press is remembered until the app answers.** The
+  star exists for the lock screen, which is exactly where a parked webview
+  drops a Tauri event on the floor: the shell answers the OS with "handled" and
+  the like never happens. `desktop/src-tauri/src/ios_like.rs` remembers the
+  press and re-sends it the next time the app is active (`refresh`, called by
+  the session module), and forgets it the moment the web pushes a state of its
+  own through `set_now_playing_liked` — so the press lands once, and only when
+  nothing answered it. Nothing there changes when BOTH copies of the event
+  arrive: the press carries a number and the page drops a re-delivery it has
+  already handled, so a parked webview that queued the event cannot toggle the
+  star twice when it wakes.
+
+- **R271 — the WebAudio graph owns the volume, and a gesture unlocks it.**
+  `HTMLMediaElement.volume` is read-only on iOS: assigning it is dropped without
+  an error, so a slider that only wrote that property did nothing at all on a
+  phone. Every element the player routes into the graph carries a volume stage
+  of its own (`source → volume → replaygain → [eq] → analyser → destination`)
+  and `applyVolume` writes the level there, pinning `el.volume` to unity so the
+  two stages never multiply; an element with no graph keeps the plain property.
+  The context itself is armed for the platform's two ways of parking it: the
+  first pointer/key gesture anywhere in the app resumes it (iOS starts a context
+  created outside a gesture suspended, and a track routed into a suspended graph
+  is a track playing silently), and a state change resumes it — while the page
+  is on screen, and ALSO while it is hidden if one of the app's own elements is
+  still playing, because a backgrounded app whose graph iOS parks mid-track is
+  the owner's *"audio just cuts out after tabbing out of the app"* and the old
+  visibility-only rule refused to undo exactly that. The app coming back
+  re-asks as well.
+
+- **R288 — the app process has to be producing audio itself.** iOS's audio
+  background mode is a grant to the APP, and what the runtime keeps alive is a
+  process that IS playing something. This app's audio is decoded by WebKit's web
+  content process (R265a keeps that page running), while the shell's own process
+  configures a playback session and then renders silence into it — so at the one
+  moment iOS asks "is this app playing?", the only answer this process can give
+  is no, and a backgrounded app with no playback of its own is suspended like
+  any other. The music stops with it, and so does the star: a suspended app runs
+  no remote-command handler, which is why the owner's 4.1.0 report read as two
+  bugs — *"audio just cuts out after tabbing out of the app"* and an OS star that
+  behaved as if nothing were wired to it (R251). While the web player says it is
+  PLAYING and the app is in the BACKGROUND, `desktop/src-tauri/src/ios_audio.rs`
+  therefore renders half a second of generated 16-bit DITHER (`keepalive_wav` —
+  ±1 LSB of a deterministic generator, about −90 dBFS, measured) through a
+  looping `AVAudioPlayer` at unity volume, on that same playback session.
+  Inaudible under any master, and deliberately NOT digital silence: a stream of
+  zeros is the one signal a platform can discount as "no audio", which would
+  leave this process exactly as suspendable as it was before the buffer existed
+  (the 4.1.1 build shipped zeros, and the owner's next report was that the audio
+  still stops). It starts at `DidEnterBackground` and when playback starts while
+  already backgrounded (the lock-screen play button has no app-state
+  notification to ride on), and stops the moment either half of the condition
+  goes away: nothing renders in the foreground, and the cost is bounded to the
+  time the app is out of sight AND the user is listening. The player is a
+  resource, not a fact: an interruption
+  (`AVAudioSessionInterruptionTypeBegan`) or a media-services reset tears the
+  session's players down, so both RELEASE the looping player rather than
+  leaving a dead handle behind — a stale one made the keep-alive a permanent
+  no-op after the first phone call — and it is rendered again at the next
+  transition that wants it. The star's `enabled`
+  bit is re-asserted on playback start in the same breath, because that is the
+  moment WebKit publishes its own remote-command set from the web content
+  process (`RemoteCommandListenerCocoa::updateSupportedCommands` →
+  `MRMediaRemoteSetSupportedCommands`, transport commands only). What the
+  keep-alive deliberately is NOT: a now-playing writer — `MPNowPlayingInfoCenter`
+  is still untouched, and the webview's Media Session remains the only source of
+  what the lock screen shows. `tools/check_ios_ipa.py` requires the
+  `AVAudioPlayer` class name in the shipped binary, because a module that
+  silently stopped being compiled into the iOS build is exactly the failure this
+  rule cannot see from a test suite.
+
+- **R289 — the shell's iOS audio state is readable from inside the app.** Every
+  claim `ios_audio.rs` makes is one of a handful of facts — the session's
+  category as the framework's own getter reports it, whether the app believes it
+  is in the background, whether the web player says it is playing, whether a
+  keep-alive is actually rendering, and why it is not when that is the answer —
+  and none of them is observable from a development box. They are therefore
+  published: the `ios_audio_state` Tauri command (registered on every target,
+  empty off iOS, like the star's and the session's) returns them as a flat
+  key/value list, and Settings → Downloads & playback → *Playback diagnostics*
+  draws them beside the web player's own event black box — the element's
+  `play`/`pause`/`error`/`stalled` events with the visibility state and
+  readyState at that moment, every Media Session action the OS sent, seeks with
+  their source, and the AudioContext's state transitions
+  (`web/src/lib/pbDiag.ts`) plus the rows the keep-alive's own state needed:
+  `session_category_taken`, `session_activate_last`,
+  `keep_alive_platform_stops` (the interruption and media-services-reset
+  teardowns above), `app_heartbeat`, and the star's three-way state —
+  `now_playing_like_active`, `now_playing_like_web_state` and
+  `now_playing_like_press_pending`. Two heartbeats sit beside those rows, because
+  "which process froze" is the question the reports cannot answer from the
+  outside: the page's own 1 s tick (a gap of 3 s or more is a frozen or
+  suspended web content process) and the shell's (`app_process_worst_gap_s` — a
+  multi-second gap there is iOS having suspended the APP while the webview's
+  process survived). The owner's iOS reports ("audio stops", "the
+  controls don't work") cost a release each while they were unobservable; the
+  rule is that the state behind them is a screen the owner can read back, not a
+  question they have to answer from memory.
+
+- **R295 — a pause nobody asked for, arriving while the page is hidden, is the
+  PLATFORM stopping the track: it is named, and it is recovered.** iOS stopping
+  the webview's playback in the background is the owner's oldest open report
+  ("audio stops playing after app is unfocused"), and from inside the page it has
+  exactly one signature: a `pause` on the element that no app path caused —
+  nothing in the web layer pauses on visibility, so every deliberate pause in
+  `PlayerBar.tsx` goes through `pauseApp`, and that is what "asked" means.
+  `handlePause` arms `osStopped` with the element, its track and the element's
+  own state when the event arrives while the document is hidden and the app did
+  not ask (`asked === false`), and writes an `os-stop` row to the playback report
+  (R289) carrying readyState, currentTime, ended, networkState and the app's
+  last reason; `recover()` — called from the same `visibilitychange`/`pageshow`
+  reconcile that already existed — restarts that element ONCE when the reader
+  comes back, if the queue is still on that track and the platform has not
+  already restarted it itself, and reports the outcome as `os-resume`
+  (including a refusal). Every deliberate pause CLEARS the marker, so a pause
+  the reader pressed — the transport, the sleep timer, the queue's end, a track
+  change, or the lock screen's own pause — can never be undone by returning to
+  the app. Measured in `tools/check_os_stop_resume.cjs` (21/21 after, 9/18
+  against the pre-change sources): the stop resumes where it stopped with
+  exactly one extra `play()`, nothing happens when nothing stopped, a
+  reader's pause and a lock-screen pause both survive, and a track the platform
+  already restarted is not played at twice.
+
+- **R296 — what the OS draws for this app is a set the app DECLARES, and the
+  bits it draws from are re-asserted after the platform's own write.** The
+  lock-screen card is drawn from `MPRemoteCommandCenter` on iOS and the
+  webview's Media Session everywhere: the star is `likeCommand`, the
+  ⟲10 / 10⟳ pair is `skipForward`/`skipBackward`, a track step is
+  `nexttrack`/`previoustrack`. Three consequences, each measured rather than
+  assumed. (1) The web player REGISTERS the two skip actions
+  (`seekbackward`/`seekforward` in `PlayerBar.tsx`, ±10 s, honouring the
+  platform's own `seekOffset`), so the card carries ⟲10 / 10⟳ and pressing one
+  seeks that track — through 4.1.11 they were declared unsupported, which is
+  where the owner's card got WebKit's own pair while showing this app's
+  metadata (issue #55) — and it publishes
+  `navigator.mediaSession.setPositionState` (duration, position, rate) so the
+  lock-screen scrubber has a timeline instead of inferring one. (2)
+  `ios_like.rs` asserts `likeCommand.enabled` at
+  the transition AND again half a second later (`assert_again_soon`), because
+  the same bit is written by WebKit's own media-session plumbing a few
+  milliseconds after the web event that caused it — and the re-assert replays
+  the web's OWN last pushed state, `active` as well as `enabled`, because the
+  fill is lost exactly where the command set is rebuilt — a star a state push cannot
+  turn back on is a star that vanishes mid-album, one layer under R288. (3) Both
+  are readable rather than arguable: `ios_like::command_state_rows` adds
+  `now_playing_like_enabled` and the two `now_playing_skip_*_enabled` bits to
+  R289's readout (what the system currently has, so "there is no star button"
+  can be answered with the bit), and `tools/check_os_stop_resume.cjs` asserts
+  the declared action set in the page. Which glyphs the OS finally paints on a
+  device is Apple's — the set that produces them is what this app controls, and
+  it is now named, asserted and reported.
+
+- **R272 — the playing state follows the ELEMENT, both ways.** `pause` already
+  cleared the player's state; `play` now sets it, for the track the queue is
+  actually on. Without the other half, a track change — which pauses the
+  outgoing element on the way in — could leave the bar (and the iOS session
+  bridge, which reads the same state) claiming "paused" about a track that was
+  playing. A REFUSED `play()` and a stream that fails to load are reported
+  instead of swallowed (`play().catch(() => {})` was every call site, which is
+  how "it just pauses" arrived with no reason attached), and the
+  visibility/focus reconcile only clears an element that is really paused
+  mid-track (`readyState > 1`), so a slow start is not declared dead.
+
+- **R273 — the ambience follows the beat, and the grain is the dither.** The
+  background's music-driven value is two numbers now: `--amb` (the smoothed
+  level, over a 12 dB window) and `--amb-pulse` (what each tick has that a
+  ~1.5 s follower has not caught up to — the analyser's own smoothing means a
+  kick's remainder is the gap to a SLOW average, not to a fast one). The pulse
+  lands on the colour-field layer with its own ~0.1 s transition, so a hit
+  reads as light moving through the field instead of one layer fading. The
+  faint horizontal lines the owner saw were 8-bit banding in a stack of huge
+  soft gradients, and the existing `overlay` grain could not fix them (50 % grey
+  leaves black black): the same turbulence tile is drawn twice, `overlay` at
+  160 px and `screen` at 131 px, which dithers both ends of the field and
+  cannot beat into a pattern of its own.
+
+- **R274 — a page uses the window it is given.** Every page shell caps at
+  1600 px (`max-w-[1600px]`), the width Browse and Export already used: the old
+  1152 px reading cap stranded ~400 px of a 1568 px window, which is the
+  owner's "UI doesn't cover most of the screen". Caps that are not page shells
+  (labels, inputs, dialogs) keep their own widths, and the phone layouts are
+  unaffected — the cap only ever binds above ~1600 px.
+
+- **R275 — an artist's discography opens on Album, EP, Single.** The types a
+  listener means by "the discography" come first, then everything else
+  (most-populated first, then by label). `byReleaseGroupType` —
+  `web/src/lib/artistReleaseGroups.ts` since R298 — is the ONE derivation behind
+  the type filter, the sections under it and the "Add or download by release
+  type" panel, so a row and a filter row cannot disagree about what leads; a
+  compound label is ranked by its PRIMARY type ("Album + Live" sorts with the
+  albums). It used to be the order MusicBrainz happened to serve, which made an
+  artist with 49 live albums and 10 studio ones open on "Album + Live" — a
+  discography that reads as live records.
+
+- **R276 — genres are stored lower-case and PRINTED as a reader writes them.**
+  The library's filter buckets (`GENRE_FAMILIES`), the tag vocabulary and the
+  `genre:"…"` query are lower-case by convention — MusicBrainz, the providers
+  and the tags all disagree about case, and the app's own matching is
+  case-insensitive — so the display is a separate step: `titleCaseGenre`
+  (`web/src/lib/fmt.ts`) is what a chip prints ("progressive rock" →
+  "Progressive Rock", "r&b" → "R&B"), and never what a query sends. The same
+  pass fixes the FAMILY the app derives, which is the part that has to be right
+  before any of it is worth printing: the keyword rule carried "wave" as an
+  electronic word, so `parent_of("new wave")` answered "electronic" for a
+  pop/rock movement — the owner's track read "Electronic; New Wave". New wave is
+  rock, no wave is experimental and new romantic is pop, spelled out in
+  `mlo/genre_vocab.py` and pinned by `tools/test_genre_vocab.py`; the
+  synth-driven waves (synthwave, vaporwave, dark wave, chillwave, coldwave,
+  minimal wave) stay electronic, and the genre called "wave" is electronic too.
+
+- **R277 — Home keeps itself current.** The Home payload is a dashboard over a
+  library that changes while the reader is looking at it (a run, an import), and the only way to see that was to press Refresh or navigate
+  away and back: the query now refetches on a 60 s interval with a matching
+  `staleTime`, and the direction it polls is what makes that cheap — a plain
+  poll reads the server's CACHED payload, and the `force` flag (the Refresh
+  button) is the only thing that asks for a rebuild. `refetchIntervalInBackground`
+  stays at its default (false): a hidden tab stops asking, and react-query's own
+  refetch on focus covers the moment the reader comes back.
+
+- **R278 — the media routes answer CORS for any origin, and only they do.**
+  A phone's `<audio>` is fetched with `crossorigin="anonymous"` (the
+  visualizer, the equalizer and ReplayGain read that stream through a WebAudio
+  graph, which a tainted element would silently zero out), so the response must
+  carry `Access-Control-Allow-Origin` for whatever origin the MEDIA loader
+  states — and that origin is WebKit's business, not something this server can
+  enumerate: the page's own origin in a shell, or nothing at all (`Origin:
+  null`) when the bytes are pulled by the media process. When it does not match
+  the allow-list, the load is refused and the element errors: the app is
+  completely reachable, every API call works, and pressing play does nothing.
+  `server/main.py` therefore adds `Access-Control-Allow-Origin: *` on
+  `/api/stream` and `/api/videos/stream` when the CORS middleware has not
+  already stated one — read-only routes authenticated by the session TOKEN in
+  the URL, and `*` (rather than echoing the caller) means no browser can pair
+  that response with credentials. Both facts that make it safe are asserted in
+  `tools/test_auth.py`'s media block and exercised against a live server.
+
+- **R298 — an artist's discography is four foldable sections, and its type
+  filter is a menu that searches.** R275 put Album, EP and Single first, but
+  every compound type still drew its own chip and its own block, so an artist
+  with a broadcast, a DJ-mix, a demo and two compilations carried a chip row
+  that wrapped to several lines at a phone width above a page of blocks nobody
+  scrolls. The types still lead exactly as R275 says, and the derivation now
+  lives in `web/src/lib/artistReleaseGroups.ts` — pure, DOM-free, so the rank,
+  the sections, the fold and the label filter are decisions a test calls
+  directly; `MBArtistPage` imports it and decides nothing itself. It draws FOUR
+  sections: Album, EP and Single, each holding its own compound types, then one
+  `More` bucket holding every other type ordered by how many release groups it
+  holds. Every section header folds its rows away at a press, **Album, EP and
+  Single start OPEN and the bucket starts FOLDED** (the long tail is one line
+  until it is asked for — unless the discography has no leaders at all, where
+  the bucket IS the discography and opens like any other section, since a fold
+  over the whole page would hide every row behind a press nothing explains), and
+  a type the reader NAMED in the filter opens its
+  own section, so a search can never land on folded rows. The chip row is
+  replaced by one menu: its trigger says what is on screen and how many rows
+  that is, its box filters the type LABELS ("live" reaches "Album + Live", and
+  so does "album+live" — spacing and case aside), and it offers only labels the
+  sections draw, so a filter can never name a type the discography does not
+  hold. The "Add or download by release type" panel reads the same derivation —
+  one row per compound type, in the same order, under its section's own line —
+  so a row can never offer a type a section will not draw. Pinned by
+  `tools/check_release_choice.mjs`, which asserts the section order, the
+  bucket's count order, the two folded defaults, the "a compound pick is that
+  one type" rule and the label filter over one discography fixture — and then
+  renders the page ITSELF and reads the markup: the four headers in that order,
+  Album/EP/Single open, the `More` header folded with none of its rows drawn,
+  and its types still one press away in the add panel.
+
+### 7.50 Two shelves carry one number
+
+- **R291 — the two recommendation shelves on a page carry the SAME number, and
+  both print it (issue #54).** An album page drew 9 "Recommended (Local)"
+  covers beside 12 "Recommended (Online)" suggestions and a track page drew 20
+  local rows beside those same 12 — same headings, same chrome, two lists of the
+  same thing, and the reader counts them, so the pair read as a fault in
+  whichever shelf came back shorter. One number now: `mlo`'s scorer has a
+  single `DEFAULT_LIMIT = 12` for either target (the separate 20-row track
+  default is gone) and `web/src/components/RecommendShelf.tsx` exports
+  `SHELF_LIMIT = 12`, which the local shelf sends in its request, the online
+  shelf uses, and the standalone Recommended page uses (it carried its own
+  `LIMIT = 20` under the same title). A page may still pass its own `limit` —
+  this is a default, not a ceiling. BOTH shelves print the count they got, in
+  one slot and one shape, so "9 local albums beside 12 online suggestions" reads
+  as a small library rather than as a shelf hiding three rows. Proven by
+  `tools/test_recommendations.py`'s wide-library case (30 records sharing one
+  genre, mood, energy and era: both targets come back with exactly the default,
+  an explicit `limit=20` still gets 20, and it fails against the pre-change
+  module with `AssertionError: 20` on the track shelf) and by
+  `tools/check_library_az.mjs`, which keeps the request body the page sent
+  (`limit: 12`) and reads the printed count off the shelf's heading line.
 
 ### 7.51 An album title wears the advisory its FILES state
 
 - **R293 — the boxed E/C mark is read from the strongest statement in the
   album, and the grid cards draw it too.** `AdvisoryMark` (the boxed letter
-  beside a title) was drawn on the album page but NOT on `AlbumCard` — the
-  surface a reader scans a library by — and the value the page gave it came from
-  the album-level tag alone, which lags the tracks inside it. Measured on the owner's library:
+  beside a title) was drawn on the album page, the player bar, the now-playing
+  pane and the favourites rows, but NOT on `AlbumCard` — the surface a reader
+  scans a library by — and the value the page gave it came from the album-level
+  tag alone, which lags the tracks inside it. Measured on the owner's library:
   Evil Empire carries `ITUNESADVISORY 0` on the album while TEN OF ITS ELEVEN
   tracks state 1, and Hail to the Thief carries 0 with three of fourteen at 1,
   so covers for plainly explicit records said nothing. `albumAdvisory`
@@ -3548,6 +5047,151 @@ different answers.
 
 ---
 
+### 7.53 The player remembers where you were, and gives a jump back
+
+- **R299 — a reload restores the queue, the track and the second, and a
+  restored start is not a play.** `web/src/store.ts` keeps
+  `mlo.player.state.v1` (`{queue, index, path, time}`) in `localStorage`,
+  hydrated as the store is created — every row validated, the index clamped, a
+  `time` dropped when its `path` is not the row's — so a stale entry cannot
+  point at a track the queue no longer holds. The position is written on a
+  coalesced timer and on `pagehide`, never per `timeupdate`; the mount effect
+  seeks from the element's own metadata and does NOT start playback. What
+  counts as a play is unchanged (`PLAY_START_SECONDS`), so resuming adds none
+  and pressing the row from the start still adds one.
+  `tools/check_player_state.cjs` asserts the whole path. Importing store.ts has
+  NO side effects — no timer, no listener, no `window` at module scope; the
+  shell calls `startPlayerPersistence()` once — because a module-scope timer
+  keeps node's event loop alive and hangs every SSR harness that imports the
+  tree (the regression the 4.2 branch found).
+
+- **R300 — gapless is a setting, and off means off.** `gapless_playback`
+  (default ON) is the gate on both halves: the idle element's preload of the
+  next sequential track, and the hand-over in `handleEnded` that plays it
+  without a load step. Off, the preload never arms and every track takes the
+  normal load path. Shuffle and any non-sequential hop were never gapless and
+  still are not.
+
+- **R301 — Ctrl+Z / Cmd+Z undoes the last jump.** Every user-initiated seek of
+  ≥2 s (the seek bar, the ±10 s commands, a media-session skip, a lyric-line
+  jump) pushes `{track, from, to}` on a bounded stack (5); the shortcut seeks
+  the SAME track back to `from`, once per entry, and drops an entry whose track
+  is no longer playing rather than seeking it into the wrong song. It never
+  changes the queue, never fires from a text field's own undo, and has no
+  button: it is named in the app's keyboard help. Micro-seeks (a drag's own
+  steps) never enter the stack.
+
+- **R302 — what the OS draws now moves with the app's own transport.**
+  `seekbackward`/`seekforward` are REGISTERED (±10 s, honouring the platform's
+  `seekOffset`), so the lock screen's ⟲10 / 10⟳ seek this app's track instead
+  of WebKit's default interval behind it (R296(1) is superseded), and
+  `navigator.mediaSession.setPositionState` publishes duration, position and
+  rate so the OS scrubber has a timeline to draw. `tools/check_os_stop_resume.cjs`
+  reads the declared set back and presses a skip to assert the seek.
+
+### 7.54 The now-playing surfaces: what is drawn, and what must not move
+
+- **R303 — the year is on both surfaces, and no element resizes another.** The
+  player bar and the fullscreen pane both print the track's ORIGINAL release
+  year (`ORIGINALDATE`, `DATE` as the fallback — `originalYear` in
+  `web/src/lib/fmt.ts`), on the album line where a remaster still shows the
+  work's year. The ReplayGain readout, the UP NEXT value and the tech readout
+  hold reserved space (`tabular-nums`, fixed/grid tracks) so a long or short
+  value changes nothing around it, and the star rating sits AFTER the
+  bitrate/format readout, not before it.
+
+- **R304 — long text drifts, and a jump does not.** Artist/album/title on the
+  player surfaces auto-scroll through the existing `ScrollingText` component
+  instead of truncating to nothing. A clock-driven lyric retarget glides; a
+  READER-made jump (a clicked line, the offset buttons, a zoom change, a
+  re-sync after a seek) snaps in the same frame — the scroller must not replay
+  the transition from the line the reader skipped past
+  (`web/src/lib/lyrScroll.ts`, `tools/check_lyrscroll.cjs` asserts both).
+
+- **R305 — the lyrics pane is a pane, and the corner is where its controls
+  live.** The zoom and offset controls sit in the lyrics pane's own corner
+  (top-right, revealed on a fine pointer, always tappable on a touch screen) on
+  both surfaces, with their popover copies kept as the discoverable path. The
+  docked sidebar takes the app's chrome into account: it starts below the top
+  bar and never covers the run/progress row (`--mlo-chrome-bottom`, published by
+  the shell).
+
+- **R306 — the visualizer's columns land on whole device pixels.** The
+  background bars are laid out in device pixels over a backing store rounded to
+  whole columns and rows (`web/src/lib/vizBars.ts`), and each frame covers the
+  whole canvas, so no stale edge column survives a frame — the "lines coming in
+  from the edges" of the owner's report.
+
+- **R344 — the now-playing metadata block is ONE record, committed in ONE
+  paint.** The bar's title, its two sub-lines (the year included) and the art
+  beside them, and the fullscreen player's block and compact header alike, are
+  drawn from the record `web/src/lib/nowPlaying.ts` commits — the SAME object
+  feeds the title, the marks that ride that row, the sub-lines, the links, the
+  rating and the cover URL, so no piece can land on a frame of its own (the
+  owner's "title, then artist, then album, then the cover image"). A record is
+  ready when the track's own tags payload has answered (the title/artist/album
+  fallbacks and the year that rides the album line, the tech readout and the
+  marks): every STRING it feeds is then final, and the words land together.
+  Until then the block keeps painting the record it last committed (the
+  stale-hold the lyrics pane and the tech readout already use), and a surface
+  with no record yet draws its rows EMPTY rather than a filename stem, a folder
+  name, a "—" or a disc the real values then replace; `NOW_PLAYING_WAIT_MS`
+  caps the wait, so a source that STALLS (a tags read that is retrying) ends in
+  the previous behaviour rather than in a permanently empty block.
+
+  The ART is deliberately NOT part of that gate, and this is the one rule that
+  changed: the block used to hold its words until the cover's address was known
+  AND the image was decoded, which meant a slow cover held the title back with
+  it. The owner's ask is the other way round — "all data shows at the same
+  [time] … other info can load before the cover is updated" — so the words land
+  the moment they are final and the cover arrives after them (the committed
+  record is LIVE, so a late album payload or a late image updates the block in
+  place). What keeps that from being a pop in practice is the WARM: the queue's
+  own data is read ahead (`lib/queueWarm`) — the tags of the track playing and
+  of the next `QUEUE_WARM_AHEAD` (3) rows, the album payload that names the
+  cover, and the cover's colour the fullscreen ambience is painted from — so an
+  ordinary handover has everything in the cache and commits complete, and the
+  case the change removes is the one where the picture is LATE. The bar's
+  sub-lines read the per-track tags exactly as the pane's already did, which is
+  what makes one record complete for a queue row the library does not list (a
+  playlist or .m3u8 entry, a previewed download). Pinned by
+  `tools/check_player_state.cjs` §11 (its sampler counts the DISTINCT strings a
+  committed block went through — one is a one-paint commit — requires the art
+  to land at all and never to be drawn before the record that names it, and
+  requires a committed record never to be observed dropping back to a blank
+  block) and §12 (the warm: the tags of the playing track and the rows ahead
+  are read before their turn, and a press on Next requests NOTHING for the
+  track it lands on — no tags, no album payload, no colour).
+
+- **R346 — the bar's controls share only the room each of them can hold, and
+  the seek bar answers while a menu is open.** The player bar's grid is three
+  columns (`grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]`) whose cells contain
+  `shrink-0` controls, and a column that cannot shrink spills BOTH ways instead
+  of overflowing one — measured at 1024 px: the Download button (x 966..998)
+  painted exactly over the Lyrics button (x 963..995) and won the hit test, so
+  the Lyrics control was dead, while the same row spilled left over the seek
+  row. Two things keep that from recurring: the full grid is used from `lg` only
+  (below it the bar has its own phone-shaped row, which carries the same
+  transport, the like and the way into the fullscreen player), and the
+  readouts inside the right flank are gated on the FLANK's own width
+  (`[container-type:inline-size]` + `@container`), never the window's — the
+  sidebar takes 192 px out of the bar, so one window width hands the flank two
+  different shares (collapsing the sidebar brings a readout back on its own).
+  A sweep of every visible control's rects at 768/834/900/1024/1180/1280/1440/
+  1600/1920 px, with the sidebar open and collapsed, must find no two of them
+  intersecting and nothing past the bar's right edge. The second half is the
+  same class of dead control: the bar's flyouts (queue, sleep timer, playlist)
+  render a full-viewport click catcher so a press elsewhere closes them
+  (`components/Popover.tsx`), and that catcher sits INSIDE the bar's grid — it
+  swallowed presses on the seek bar underneath, which is why a seek while the
+  queue pane was open did nothing (`tools/check_player_state.cjs` §10 opens that
+  pane before it scrubs, and the track then never reached its preload window).
+  The scrub is the one bar control that answers while a menu is open — reaching
+  for the playhead means moving the track, not dismissing a pane — so the seek
+  input sits above the catcher and below the menu itself; dismissal is
+  unchanged (an outside click still closes the menu, and the shield still
+  covers the viewport).
+
 ### 7.55 The import queue: one chain, one row, and a notice only when it ends
 
 - **R307 — one chain per album.** An album the pipeline is already on (a
@@ -3563,8 +5207,8 @@ different answers.
   below both. A video RELEASE (a concert film) still ranks as what it is.
 
 - **R309 — a notice means the work ended.** The end of a WHOLE import is the
-  only frame that raises an OS popup
-  (`web/src/lib/notifications.ts`'s OS kind list): one album of a bulk run
+  only frame that reaches a closed device
+  (`web/src/lib/notifications.ts`'s OS/push kind lists): one album of a bulk run
   and a chain still running stay in the app. Every one of them names the album —
   artist, album, year — never a folder name or a path with UUIDs in it.
 
@@ -3586,27 +5230,61 @@ different answers.
   `albums_importing` and the banner prints that clause instead of silently
   losing a row (the owner's Ænima, reported "falls short" mid-import).
 
-### 7.57 The tables fit their data
+### 7.57 The tables fit their data, and the shell fits the phone
 
 - **R313 — a table's floor is its columns, and a title never collapses.**
-  Album tracklists carry per-column pixel floors (`web/src/lib/columns.tsx`,
+  Album/playlist tracklists carry per-column pixel floors (`web/src/lib/columns.tsx`,
   `AlbumRow`, `TrackTitleCell`) so the wrapped cell cannot squeeze the title to
   0 px; below `md` the album page's table scrolls as a whole instead of wrapping
   each cell, and unnamed/oversized columns fold rather than crush their
   neighbours. The album row's name column is `w-32 md:w-[220px]` for the same
   reason. `tools/check_library_tables.cjs` holds the floor.
 
+- **R314 — the shell survives 320 px.** The top bar's search collapses while
+  its icons keep their box, the phone drawer is `w-60 max-w-[85vw]` with
+  wrapping labels, a query-builder condition stacks below `sm`, and a progress
+  row degrades to a label + bar on a phone (`web/src/components/ProgressBar.tsx`)
+  instead of overflowing the player's chrome.
+
 - **R370 — a layer that fills the WINDOW leaves the shell's own title bar
   alone.** The desktop shell is undecorated and draws its bar in the app's
   normal flow (`web/src/components/TitleBar.tsx`), so everything laid out
   INSIDE the shell starts below it — but a `fixed inset-0` surface anchors to
   the window, and one that starts at `top: 0` paints its own top row behind the
-  window controls. That is where the music-video layer came out on Windows.
-  The bar publishes its one height as `--mlo-titlebar-h` on `:root` while it is
-  mounted (`TITLEBAR_H`, `index.css`), and every such surface carries `.shell-top`
-  (`top: var(--mlo-titlebar-h, 0px)`); the docked lyrics view's own floor adds
-  the same term. The variable is 0 in a browser — the host draws the chrome
-  there — so that client lays out pixel-identically.
+  window controls. That is where the fullscreen player's exit button and queue
+  readout came out on Windows (owner report: "fullscreen button controls at the
+  top of the screen are overlapped by the tobbar"), and the music-video layer
+  under it and the phone's nav drawer came out with it. The bar publishes its
+  one height as `--mlo-titlebar-h` on `:root` while it is mounted
+  (`TITLEBAR_H`, `index.css`), and every such surface carries `.shell-top`
+  (`top: var(--mlo-titlebar-h, 0px)`); the docked lyrics pane's own safe-area
+  floor adds the same term. The variable is 0 in a browser and on a phone —
+  the host draws the chrome there — so those clients lay out pixel-identically,
+  and the device insets keep their own job. `tools/check_fullscreen_player.cjs`
+  sets the variable the way the shell does (the `--mlo-inset-*` test hook, same
+  idea) and measures the player: its root starts at the bar's height, its
+  height is the viewport less that, and its own top row is on screen and
+  hit-testable.
+
+- **R373 — a long description carries its own way out, pinned while it is being
+  read.** A stored description collapses to a preview and expands on demand
+  (`web/src/components/Description.tsx` — the SAME component renders the
+  album's blurb and the artist's biography), and the only control it had was
+  the "Show less" AFTER the text: a full Wikipedia blurb is many screens long,
+  so putting it away meant travelling to the end of it (the owner's ask: "make
+  descriptions easier to close when they're very long … add another close
+  button for descriptions in album + artist pages"). Expanded, a second control
+  now sits at the TOP of the block and is `sticky top-12` — the app's own line
+  for "pinned under the top bar" (`PageHeader`), the offset the main column's
+  `pt-12` reserves — so the way out is in view from the first line to the last.
+  Its row is `pointer-events-none` with the button's own `pointer-events-auto`,
+  so the words passing under it stay selectable and clickable, and the control
+  at the END of the text stays: the same action at both ends. Pinned by
+  `tools/check_description.cjs`, which expands a real description of this
+  library, scrolls into its middle and measures that the top control is still
+  on screen and still hit-testable, that a point just under it still reaches
+  the page rather than the row, and that both controls collapse the block (the
+  body shrinks back to its preview).
 
 ### 7.58 The pipeline's wall clock is measured, and what was measured
 
@@ -3655,7 +5333,7 @@ different answers.
   identity — `TITLE - ARTIST` as well as `ARTIST - TITLE`, read from the file's
   real tags, case/dash/spacing-insensitive (`_is_identity_line`,
   `_norm_identity`). `[offset:…]` is the one header that is an INSTRUCTION a
-  client applies, so it survives formatting; it is still a header for the
+  player applies, so it survives formatting; it is still a header for the
   presence question, so `has_lyrics_text` (`LRC_META_RE`) counts a file that
   holds only an offset or only `[id:…]` as having no lyrics. Both predicates
   live in `mlo/lyrics.py` and are asked by the writer (`_process_lyrics_for_audio`
@@ -3665,7 +5343,7 @@ different answers.
   rule. This is the existing `grade_check_lyrics_format` check (its
   idempotency comparison: re-running the formatter must change nothing), with
   the existing `grade_check_lyrics` presence check reading the corrected
-  `has_lyrics_text`; **no new check key is introduced, so the count stays 67**.
+  `has_lyrics_text`; **no new check key is introduced, so the count stays 70**.
   `tools/test_lyrics_fix.py` holds the case: a file carrying
   `[id:$00000000]`, an `[ar:]`-style header and a matching `TITLE - ARTIST`
   line formats to the timed lines only and grades as one failed check, the
@@ -3843,31 +5521,58 @@ different answers.
   album page header — names the same release the same way.
 - **R322 — an artist's own verdict is a dot beside the name, and its hero fades
   rather than cuts.** `mlo.grader.grade_artist` is what the artist's checks are
-  (that the folder holds an album at all), the library payload now carries that verdict
-  per artist row (`server/library.py`), and every place an artist's NAME is
+  (its image and its description), the library payload now carries that verdict
+  per artist row (`server/library.py`, passed through to Home's shelf by
+  `server/recommendations._top_artists`), and every place an artist's NAME is
   drawn — the artist page's title, the library's Artists view, Home's artist
-  shelf — draws `web/src/components/ArtistName.tsx`'s mark for that
+  shelf, Favorites — draws `web/src/components/ArtistName.tsx`'s mark for that
   verdict: the green dot when it passes, and the amber warning when it FAILS,
-  instead of a chip spelling the check out (the artist page has room and
-  still writes it out). A failure drawing NOTHING was the owner's complaint —
-  "make sure the library displays some sort of warning / grade error" — because a
-  list that stayed silent made a failing artist look like one
-  nobody had graded; the warning's tooltip names the failing check the way the
+  instead of chips spelling the two checks out (the artist page has room and
+  still writes them out). A failure drawing NOTHING was the owner's complaint —
+  "make sure the library displays some sort of warning / grade error … if artist
+  images don't exist and … artist / album descriptions don't exist" — because a
+  list that stayed silent made an artist whose image never arrived look like one
+  nobody had graded; the warning's tooltip names the failing checks the way the
   page's chips do (`label — reason`), and an artist the payload never graded
   still draws neither mark ("not looked at" is not "failed"). The hero's blurred
   cover backdrop carries the `.hero-ink` mask (a radial gradient ending
-  transparent, the same idiom the app's other hero surfaces use), so it fades out instead
+  transparent, the same idiom the player's surfaces use), so it fades out instead
   of ending on a hard edge. Pinned by `tools/check_library_az.mjs` (the dot for a
   passing artist, the warning mark — with the missing check in its tooltip — for
-  a failing one on every surface, the two chips gone, the counts kept, and
+  a failing one on all four surfaces, the two chips gone, the counts kept, and
   the blur layer's box and computed mask measured).
 
-- **R376 — an artist card is condensed, its face is a SQUARE, and its count
+- **R375 — an import FETCHES what the artist and album folders are missing, and
+  never overwrites what is stored.** `imports.run_metadata_step` runs on every
+  import path (`metadata_auto_fetch` / `metadata_review` are its own switches,
+  R183), and what it writes is `imports.apply_metadata`: the artist image when
+  the artist folder holds none (`artist_image_enabled`), the artist's biography
+  (`artist_description_enabled`) and the album's blurb
+  (`album_description_enabled`), each looked up by the identity the import just
+  settled. The writers FILL, they do not replace — an existing
+  `description.txt` (a hand-written one above all) is left exactly as it is, and
+  a second run reports that it wrote nothing — and a feature switched off writes
+  nothing at all, so "the app fetched something I did not allow" cannot happen.
+  The owner's ask ("make sure all this stuff is also fetched / optimized with
+  scripts during importing") is this step, not a script a reader has to
+  remember: script 19 only re-fits an image that is already there, which is what
+  its own check's reason says. The chained layout pass (script 20,
+  `layout_apply`, default ON) is the other half — it settles the folder
+  structure inside the same run, after the tagger has moved the album where the
+  naming script wants it and before the grade reads it
+  (`tools/test_import_pipeline.py` pins that order, and
+  `tools/test_layout_case.py` pins what an apply may do, Trash included).
+  Pinned by `tools/test_import_pipeline.py`'s metadata case: an album with no
+  image and no descriptions ends the step with all three written (a real
+  1200×1200 JPEG through `artistdata.save_image`), an edited description
+  survives a second run untouched, and the three switches off write nothing.
+
+- **R376 — an artist card is condensed, its image is a SQUARE, and its count
   is in RELEASES.** The owner's screenshot of Home's "Top artists" shelf: an
   80 px CIRCLE, a name and a count in a 2/3/4/6 grid, which filled a screen
   with six artists. The shelf is now the same information at half the box —
   `grid-cols-3 sm:4 md:6 xl:8`, `gap-2`, a `p-1.5` card, a 64 px tile and
-  smaller text (a card measures 113 px tall) — and the tile is a
+  smaller text (a card measures 113 px tall) — and the artist image is a
   SQUARE (`rounded-lg`), the geometry the artist page's own hero tile and every
   album card already draw: the circle was the only round image in the library,
   and the owner asked for "more rectangular like how album covers are". The
@@ -3875,9 +5580,9 @@ different answers.
   name, so an artist looks like itself everywhere. The count reads
   **"N Release(s)"**: `releaseCount` in `web/src/lib/fmt.ts` is the ONE
   pluralizer, so the shelf caption, the artist page's subtitle ("1 Release · 0
-  tracks") and its section heading (`RELEASES`) cannot disagree about it — the
-  Library's own Artists column has used "Releases" since it was added
-  (`ARTIST_COLS`).
+  tracks") and its section heading (`RELEASES`) cannot disagree about it, and
+  Favorites' artist table follows ("Releases" is the word the Library's own
+  Artists column has used since it was added — `ARTIST_COLS`).
   `tools/check_responsive.cjs` holds the geometry; hunting it also found the
   check's own word-width probe broken — `getComputedStyle().font` is EMPTY for
   a font it cannot represent as a shorthand, and the probe then measured a
@@ -3906,7 +5611,8 @@ different answers.
   order, a whole-file JSON map) or computed AFTER the pool has finished (album
   gain, album DR, a grade). A lane never increments a `stats` counter: two
   lanes' `+=` lose updates, which is why the remux counters moved to the booking
-  loop. A script that cannot meet that stays serial and says why.
+  loop and `mlo.artistdata`'s provenance merge is serialised behind one lock. A
+  script that cannot meet that stays serial and says why.
   What the shipped scripts do (all widths from the setting, all ceilings stated):
 
   | # | script | pooled unit | width |
@@ -3928,10 +5634,10 @@ different answers.
   | 15 | Release tracklist | — one rate-limited MusicBrainz request per album | serial |
   | 16 | Mood & Energy | track (tag scan, then librosa analysis) | ceiling 8, `bound_numeric_threads` |
   | 17 | Lyrics transliterate (AI) | file (own tags/sidecar) | ceiling 8 |
+  | 19 | Optimize artist images | artist folder (its own `artist.jpg`) | ceiling 8 |
   | 20 | Optimize library layout | plan lane (scan), per artist | ceiling 16; the apply pass is serial (rename → move → trash rebases the paths the next row names) |
   | 21 | Fix AcoustID pairs | file (`fpcalc` + lookup + its own tags) | ceiling 8 |
   | 22 | Submit fingerprints | file (`fpcalc`), the dedupe/batch stays in order | ceiling 8 |
-  | 23 | Optimize tags | file (excess tags read and stripped per file) | ceiling 16 |
 
   Deliberately serial INSIDE a pooled script: `mlo/cue.py`'s album rename
   pre-pass (renaming a `.cue` changes the path the other cues are keyed by),
@@ -3946,8 +5652,83 @@ different answers.
   (`tools/test_remux.py` accounting, `tools/test_dynamic_range.py` album DR,
   `tools/test_script_optimizations.py`, `tools/test_config_ui_parity.py`).
 
-### 7.67 An instrumental has no lyrics verdict
+### 7.65 The queue keeps playing, and the batch that keeps it going is ordinary
 
+- **R324 — infinite playback extends the queue the listener can see, and every
+  way it could is bounded.** `infinite_playback` (`mlo/config.py`, shipped
+  **off**, one Settings row in `Downloads & playback`, and the switch the QUEUE
+  itself carries: the player bar's queue popover is a checkbox and the
+  fullscreen player's queue drawer is an `∞` chip, both writing the same key
+  through the same config POST, so a listener who wonders whether the queue
+  keeps going finds the answer where the queue is rather than in Settings —
+  neither surface is drawn at all while the server does not ship the key, so an
+  install on an older server cannot write a setting it would drop) makes the
+  player ask the local scorer for the batch that continues a queue which is
+  running out, and
+  append it — `web/src/lib/recommend.ts`'s `fetchQueueRecommend`/
+  `QUEUE_BATCH`/`QUEUE_RUNWAY`, called from `PlayerBar`'s own effect while
+  fewer than `QUEUE_RUNWAY` rows are still UP NEXT (the two are the same five:
+  one batch always restores the runway). The queue is therefore topped up
+  while there is still music to cover, and its count never jumps in the same
+  breath as a press — the owner's report was exactly that jump (at 31/32,
+  pressing next showed 32/37; with the runway the count reads 31/36 and then
+  32/37). Five properties make that safe, and each one
+  is the reason the feature is not a "radio mode":
+  (a) the switch is the whole feature — off, the app is byte-for-byte the app it
+  was, which `tools/check_player_state.cjs` §10 proves by watching that not one
+  request for a batch is made and that the queue ends exactly as before;
+  (b) the rows are ORDINARY queue rows in the store (`queueAdd(rows, "end")`),
+  so the queue pane, its count, drag-reorder and remove treat them like any
+  other row, and reordering one really moves it in the store's own record;
+  (c) the seed is the queue's own set and nothing else — the same paths are the
+  exclusion set, so no track already queued is ever added twice, and the batch
+  is a handful (`server/recommend.py`'s `QUEUE_DEFAULT_LIMIT`/`QUEUE_MAX_LIMIT`,
+  clamped server-side whatever a caller asks: the route is `GET`/`POST
+  /api/recommend/queue`, `recommend_for_queue`);
+  (d) the scoring is LOCAL (`server/recommend.py` over the library's own tags) —
+  no provider is consulted, so it works offline and cannot hang the music, and
+  a missing answer is an empty list that simply ends the queue; **and every ask
+  says what it did**: the outcome lands in the player's own diagnostics
+  (`note("queue-extend", {seeds, offered, added, runway})`, read back in
+  Settings → Playback diagnostics, with `why: "repeat-one"` for the one
+  by-design no-op and the error text when the route refuses), the rows that
+  were added are visible
+  in the queue pane as ordinary rows, and the two outcomes a reader cannot tell
+  apart from a broken switch SAY so — an answer with nothing new to add and a
+  failed request are a toast, because "the switch does nothing" was exactly this
+  silence (a queue with nothing similar left to add, a request the server
+  answered with nothing the queue did not already hold, or a route that
+  refused);
+  (e) the append happens while rows are still up next — before the queue runs
+  out, and so before the gapless preload arms for the end's successor — so the
+  hand-over into the added set is the
+  same one an album advance gets (the idle decoder holds the first added row);
+  Repeat one appends nothing (that row's successor is itself), and shuffle is
+  not exempt — a shuffled queue's added rows are still the seeds' similar set.
+  Pinned by `tools/test_recommendations.py` (seeds, exclusions, a duplicate seed
+  list, the bounded batch, the two verbs, the web's batch number) and
+  `tools/check_player_state.cjs` §10 (the gained rows, the runway, the pane, the
+  reorder, the preload, the hand-over, and the off/Repeat-one cases).
+
+### 7.67 A press on a lyric line carries the reader, and an instrumental has no lyrics verdict
+
+- **R326 — a press on a lyric line MOVES the pane there, and the emphasis lands
+  with the press.** Pressing a line seeks to it, and the pane was made to SNAP
+  for exactly that move — it teleported, and the emphasis followed a frame
+  later, which the owner reported as "it kinda teleports to it … for like one
+  frame it shows the previous line then cuts to the next one very quickly and
+  looks jarring". The two halves are now separate and each answers the report:
+  the pane is CARRIED (`centerLine(i, "glide")`, the one reader-made move whose
+  choice a glide is), while every other reader move — a scrub on the bar, an
+  offset step, a zoom change — still lands in the same frame (`lyricMove`,
+  `jump`); and the surfaces seed the 60 fps clock (`setSmoothTime(l.time)`) so
+  the clicked line is the emphasised one in the press's own commit rather than
+  the next one. The seek the press causes is recognised as the press
+  (`PRESS_SEEK_MS`) and does not re-snap the pane through `markJump`. Pinned by
+  `tools/check_lyric_press.cjs`, which fails on the teleport (the biggest
+  single-frame step is the whole move) and measures the emphasis frame and the
+  closest approach to the anchor lane; the module-level halves stay in
+  `tools/check_lyrscroll.cjs`.
 - **R327 — the album and track pages are the app's page width, and a column
   floor is a MEASURED value.** Every page in the app is
   `mx-auto max-w-[1600px]`; AlbumPage and TrackPage were the two without it, so
@@ -3967,7 +5748,7 @@ different answers.
   wrapper has left after every other cell, and a one-line row keeps a one-line
   row's height.
 - **R328 — an instrumental track carries no lyrics verdict, anywhere.** The app
-  hides an instrumental's stored words (the instrumental state wins over the
+  hides an instrumental's stored words (`npLyricsMode`: the state wins over the
   text), so no surface may grade them: a stored PLAIN text on a track tagged
   `INSTRUMENTAL=1` was reported with the full failing vocabulary — the red
   cross and the sentence "this track should hold a synced version" — on the
@@ -3975,8 +5756,12 @@ different answers.
   demand no instrumental can satisfy ("it shouldn't say 'x plain' for
   instrumental tracks", reported). Both surfaces now say what the app does
   instead ("Instrumental", "instrumental — stored lyrics stay hidden"), and the
-  derivation lives once (`Badges.isInstrumental`) for the sidebar, the page and
-  the readout. The lyrics-kind chip keeps its
+  derivation lives once (`Badges.isInstrumental`) for the player, the sidebar,
+  the page and the readout. Two guards come with it: the player's refused-plain
+  mark waits for the track's OWN payload (`!staleLyrics`, the gate
+  `hasLyrics` already used), so a track change cannot wear the previous
+  track's lyrics state — an instrumental reached by next / previous wore the
+  red mark for the length of the fetch; and the lyrics-kind chip keeps its
   meaning everywhere else (a plain text in the EDITOR, and a staged file during
   an import, are statements about that text, which is what those surfaces are
   for).
@@ -4048,6 +5833,30 @@ different answers.
   already correct" instead of N rewrites. The cost this removes is real on a
   large library: every tag write on a padding-less FLAC is a full re-encode of
   the file it was only going to trim.
+
+- **R332 — the ambience draws no straight lines the grain cannot dither.** Two
+  layers of the fullscreen background were drawing them, and neither is banding
+  of a soft gradient — which is what R273's grain covers — so the grain could
+  not remove either (measured on the shipped tree, Chromium 1440×900 at DPR 1,
+  white cover, every CSS clock paused): `.amb-sweep` is a CONIC gradient, whose
+  isophotes are straight rays from its own centre, and its 8-bit value ramp
+  turns that into a fan of 1-level ribs (one every 4–13 px along a circle
+  around the frame centre) plus an angle SINGULARITY in the middle that is the
+  hardest edge anywhere in the stack — 21.9 levels, where every other layer
+  measures ≤ 2.1; the fan is geometry, so a 30 px blur (past the rib pitch at
+  every radius the frame shows) is what removes it, and the band it belongs to
+  keeps its shape (angular span 41 → 39 levels at R=300). `.amb-cover`'s own
+  edges FADE, because `blur-3xl` samples nothing past the element's box, and
+  that ~64 px ramp quantized into a ladder of straight 1-level ribs parallel to
+  every frame edge (21 jumps over the first 160 px of the left edge — 1440 px
+  long lines meeting in the corners); the breathing scale meant to hide it only
+  covers 43 px of the ramp, so the layer is laid out past the frame instead
+  (`inset: -6rem`), which measures 0 jumps. `.amb-vignette` — the first
+  suspicion, since it is painted above the grain — is NOT one of these: alone
+  on all three cover polarities it steps by 0.0 levels, and neither is the bar
+  strip (at rest its ink sits inside its own baseline rows and grid columns).
+  `tools/check_viz_corners.cjs` asserts all four, from the pixels: 10/10 with
+  the fix, 5 FAIL without it.
 
 ### 7.69 Pages draw the same in every engine, and a page load does not re-read the library
 
@@ -4345,6 +6154,7 @@ different answers.
   tidy) and `tools/test_mb_search.py` (the tag fallback, and empty rows as a
   200).
 
+
 ### 7.73 Loading is near-instant: a bounded list, a small shell, and bytes the server already made
 
 - **R348 — the Library page draws a WINDOW, and grows it as the reader goes.**
@@ -4372,12 +6182,16 @@ different answers.
 - **R349 — a cover is fetched at the size it is drawn.** Grid cards ask for a
   bucket (`GRID_COVER_W`: S 160, M 320, L 640 — the user's grid size, the stored
   `mlo.gridSize` when the caller has no size control), album table rows ask for
-  160, and Home's shelves follow their own grid size; the server answers from
-  its disk thumbnail cache with
+  160, Home's shelves and the Downloads grid follow their own grid size, and
+  the server answers from its disk thumbnail cache with
   `Cache-Control: private, max-age=300` (`artcache.THUMB_SIZES`). Before this,
   a card asked for the 1200-3000 px master under `no-cache` and revalidated it
-  on every visit. Nothing upscales: heroes and lightboxes still ask for the
-  full-size cover.
+  on every visit. Nothing upscales: heroes, lightboxes and the fullscreen pane
+  still ask for the full-size cover. The offline-artwork probe is gated too: a
+  `CoverImg` opens Cache Storage only when that album's artwork is known
+  downloaded (`useCachedArtwork`, off the shared `['cachedPaths']` snapshot) or
+  the client is actually offline, so a cold grid no longer runs one cache
+  transaction per image.
 - **R350 — an album card's artist name opens the artist page.** The caption's
   artist line is a link (`albumArtistRef`: `/artist/mb:<MUSICBRAINZ_ALBUMARTISTID>`
   when the album carries one, else the containing folder — the same
@@ -4385,12 +6199,18 @@ different answers.
   every surface that draws the shared album card. The status dot, the text and
   the year stay where they were, and the title keeps its own album link.
 - **R351 — the shell is small, and everything else arrives on first use.** The
-  entry chunk carries the shell only (React, the router, the query client);
-  the docked lyrics sidebar and every page are `lazy()` chunks, and the five
+  entry chunk carries the shell only (React, the router, the query client, the
+  player bar's own controls); the fullscreen player (`NowPlayingView`), the
+  docked lyrics sidebar and every page are `lazy()` chunks, the fullscreen
+  toggle preloads its chunk on hover/focus/pointer-down, and the five
   non-English locale bundles are their own chunks — `i18n` re-exports nothing
   eagerly, and a locale whose chunk has not landed yet falls back to English
   for the frame or two it takes, then re-renders in the reader's language
   (measured: the entry chunk 696.7 KiB → 486.4 KiB, 190.8 → 149.4 KiB gzip).
+  The service worker precaches exactly the SHELL (the document, its static
+  import closure, the CSS, the font, the icons — 14 URLs), and every lazy route
+  chunk is cached on first use by the existing cache-first static path, instead
+  of activation downloading all ~2.2 MB of chunks a reader may never open.
 - **R352 — the server loads the engine on demand, and one script table serves
   every menu.** `mlo/__init__.py` re-exports the engine's entry points LAZILY
   (PEP 562 `__getattr__`), so `from mlo import __version__` — which the server
@@ -4402,7 +6222,7 @@ different answers.
   whole API — no longer pulls `mlo.cli`, which imported every script module for
   a dict of strings; `mlo.cli` re-exports the table for the terminal. The
   server's own route surface is split into `server/api_*.py` routers by
-  surface (cover, trash, WebSockets, MusicBrainz/LRCLIB/RYM,
+  surface (cover, trash, push, WebSockets, MusicBrainz/LRCLIB/RYM, playlists,
   export, run-scripts) over a shared `server/api_common.py`, so `main.py` is
   the app wiring and the routes that have no home of their own rather than one
   file per everything; the route table is verified byte-identical across the
@@ -4443,9 +6263,9 @@ different answers.
   ingest is mounted ONCE in the app shell (`GradeTraySync`), not in the two
   pages that draw the strip: a finding is in the tray whether or not the
   reader ever opens Home or the Library, which is what "regardless of whether
-  it just happened" means. It stays OUT of `OS_KINDS` — it is a
+  it just happened" means. It stays OUT of `OS_KINDS`/`PUSH_KINDS` — it is a
   datapoint re-read from a payload, not an outcome the server announced, so it
-  must never pop a banner.
+  must never pop a banner on a phone.
 - **R355 — a run scoped to one album is named by the album's IDENTITY, never
   by the folder.** `script_runners._scope_album` answers with
   `imports.album_identity_label` (artist — album (year), off the album's own
@@ -4477,21 +6297,118 @@ different answers.
   request was reported as "refused without a Cloudflare challenge" and the 403
   branch never used the detector at all (caught live: a 27-pair signed-in
   cookie, 403 + `<title>Just a moment...</title>`).
+- **R358 — a web rating is a SECOND opinion, kept apart from your own.** Script
+  24 (`mlo.web_ratings.run_web_ratings`) fetches the public score for an ALBUM
+  and for each TRACK and writes them to four tags on the same 0–100 Picard
+  scale as `RATING` (which stays yours): `WEBRATING` + `WEBRATING_SOURCE` per
+  track, `ALBUMWEBRATING` + `ALBUMWEBRATING_SOURCE` for the album — the album
+  value written to every track of the folder, the app's established way to
+  carry an album-level fact (`ALBUMITUNESADVISORY`), with the _SOURCE tag a
+  "; "-joined list in the order the sources were asked. The two are separate
+  facts and neither is invented from the other: a track whose recording has no
+  rating keeps no `WEBRATING` even when the album has one. Every source is
+  normalised to 0–100 (MusicBrainz and Discogs are 1–5 and ×20; Album of the
+  Year is already 0–100) and the aggregate is a weighted mean over the sources
+  that ANSWERED, weighted by each source's own vote count — so 49,000 ratings
+  outvote sixteen — rounded half-up. Nothing is folded in that a source did not
+  state, and a miss writes nothing at all: absence is not a zero. Writing is
+  FILL-ONLY (an existing value survives every run unless `force_web_ratings` is
+  set by hand), the four tags are registered everywhere a tag must be declared
+  (`mlo.audio.TAG_MAP`, the allow-list and tag family in `mlo/config.py`,
+  `server/tags_registry.py`, `server/library.py`), and the whole family is
+  gated by `web_ratings_enabled` (`SCRIPT_GATES[24]` and the write-gate family
+  switch both read it, so an install with it off neither asks nor writes).
+- **R358a — RateYourMusic leads the shipped sources, and MusicBrainz stays on
+  as the fast, credential-free floor.** `web_ratings_sources` ships
+  `["rateyourmusic", "musicbrainz", "albumoftheyear", "discogs"]`. RYM leads
+  because it is the widest public verdict the app can read — one score from tens
+  of thousands of ratings — and its ALBUM rating rides the SAME page fetch its
+  genres already make (one request, one cache entry, one refusal latch); the
+  list's order is also the order the names appear in `WEBRATING_SOURCE`. RYM,
+  Album of the Year and Discogs are all ARCHIVE-backed when their live pages
+  refuse (RYM's live page needs a `cf_clearance` matching the configured
+  `rym_user_agent`), so an album costs seconds rather than milliseconds — cached
+  30 days, misses included, so it is a first-run cost per album rather than a
+  per-run one. Dropping MusicBrainz is a real choice with a real consequence: it
+  is the only source that needs no credential and no archive leg and the only
+  one whose track answer costs a single throttled request with no slug guess, so
+  it is the fast floor under every other answer. Discogs needs `discogs_token`
+  and skips cleanly without one.
+- **R358b — every source is asked at the level it actually rates.** Verified
+  against the sources themselves, not assumed:
+  - **MusicBrainz** — a RELEASE GROUP for the album and a RECORDING for each
+    track, with the recording's WORK behind it (`inc=ratings`; confirmed live:
+    OK Computer's group 4.55 from 89 votes, Airbag 3.85 from 25, Paranoid
+    Android 4.35 from 31, and the works behind them rated or empty).
+  - **RateYourMusic** — the release page for the album (schema.org
+    `ratingValue`/`ratingCount`, e.g. OK Computer 4.23 from 66,965) AND a SONG
+    page for each track: `rateyourmusic.com/song/<artist-slug>/<title-slug>/`
+    states its own aggregate (Paranoid Android 4.67 from 17,654 — verified in a
+    2026 capture). The release page does NOT publish per-track community
+    averages: its `track_rating` markup is the personal rating control and
+    per-reviewer scores. The song walk tries the bare title slug and, if
+    needed, one `-1` spelling; only the newest archive capture is tried per
+    spelling. A page is believed only when its own title and artist match the
+    asked track — a mismatch is a miss, never a guess. Measured end-to-end
+    with all four sources on a two-track OK Computer scratch album: **48.5 s**;
+    Paranoid Android was answered by RYM + MusicBrainz, Airbag fell back to
+    MusicBrainz. That first pass included archive misses; each miss is cached
+    for 30 days, so it is not paid on the next run.
+  - **Discogs** — the RELEASE only: `community.rating` (In Rainbows 4.72 from
+    3,812, read off the live API). Its tracklist carries no rating field at all.
+  - Consequence for the star field: a TRACK can now be rated by **two** sources
+    (MusicBrainz and RateYourMusic) and its `WEBRATING_SOURCE` reads e.g.
+    `RateYourMusic; MusicBrainz`; the album's score still comes from every
+    source that answered.
+- **R359 — the star field says which rating it is drawing.** `StarRating`
+  renders the web value in its own tone only while the reader has rated
+  nothing there, and reduces it to a readout beside the user's stars once
+  they have — the user's own rating always wins the field, and a web value is
+  never drawn as if it were theirs. The album's value and a track's value are
+  labelled as what they are (a track row never draws the album's), the sources
+  ride the control's `title`, and a track with no web rating draws nothing —
+  an empty star is not a zero. **The two tones are two shades of one ink, not
+  two colours** (the owner's report: the sky-blue web stars were
+  "disorienting" beside their own): the user's stars are the app's ink at full
+  strength (`text-zinc-100`), the web reading is grey (`zinc-400` fill,
+  `zinc-700` outline, `zinc-400` readout), and the fullscreen player overrides
+  all three with the cover's own ink and its opacity — the same rule the
+  lyrics and the chrome follow — so the surface inverts with the artwork
+  without this control knowing what it is drawn on. **Once the user has rated,
+  the surface prints THEIR number and no web wording**: "4.2 album web" beside
+  their four stars was the owner's complaint — the four stars and the number
+  they gave is the readout, and the web figure, its sources and whose it is
+  stay on the hover. While unrated, the web readout is the number itself and
+  reads "4.2 Album Web" (title case, every locale: "Web" is a proper noun).
+  **The readout sits in a box that does not resize** where the control is part
+  of a COLUMN: `webReadout="slot"` (the album tracklist's trailing slot, the
+  Library's album and track rows, the export preview) reserves the width of the
+  widest string the control can print — measured from the control's own
+  localized template, so "4.4 Album Web", "4.4 album Web" and "4.4 アルバム
+  Web" each get their own correct box — and the words are drawn inside it. The
+  owner's report: rating a track swapped "3.9 Web" for the shorter "5" and the
+  row's stars jumped right, so every row of the column had its stars at a
+  different x. Inline surfaces keep the natural-width readout (`webReadout`
+  "text", the default): there the same change moves nothing a reader can
+  compare. Which control got what is pinned by `tools/check_rating_alignment.mjs`
+  (four row shapes measured in a real browser, plus the inline control's own
+  width as the control case).
 - **R360 — MusicBrainz genres are read at the level the entity is entitled
   to.** Album-level genres come from the RELEASE GROUP (the album is the group,
   not the pressing), and a track's come from its recording, with the WORK's
   genres merged behind it — the work is the "release group" a track does not
-  have. The recording is never dropped in the work's favour: measured, works
-  carry no genres at all for a mainstream album, so a work-first-without-fallback
-  reading would have LOST data the app already had. Album-of-the-Year is available as a genre
+  have, and it is the same tiering R358a applies to ratings. The recording is
+  never dropped in the work's favour: measured, works carry no genres at all
+  for a mainstream album, so a work-first-without-fallback reading would have
+  LOST data the app already had. Album-of-the-Year is available as a genre
   source on the same archive-only footing and is selected by adding
-  `albumoftheyear` to `genre_sources` (it is not in the shipped list, because an
-  archive-backed source costs seconds rather than milliseconds per album).
+  `albumoftheyear` to `genre_sources` (it is not in the shipped list, for the
+  cost reason in R358a).
 
 - **R361 — the Library's batch bar runs the import pipeline, and MANY batches
   run at once.** With albums, artists or tracks selected, the selection toolbar
   offers **Import** beside Organize: it starts the same pipeline a fresh arrival
-  goes through — the pre-chain lookups (release identity, links,
+  goes through — the pre-chain lookups (release identity, links, metadata and
   cover art, genres, advisories, instrumentals) and then the configured script
   chain (`server.imports.bulk_import` → `finish_album`) — as a JOB, so the page
   never waits for minutes of work; the running albums are the ones the
@@ -4551,7 +6468,11 @@ different answers.
   `mlo.force.sel`), it never writes the saved Settings, and with Force OFF the
   run omits the dict so the saved switches apply — exactly the rule R11 already
   states for every import path. The report under the button says "(forced)", and
-  the completion toast says so too. Pinned by `tools/test_script_menus.py`.
+  the completion toast says so too. Script 24 (Web ratings) joins the force
+  table with the alias `web_ratings` → `force_web_ratings`
+  (`server/script_runners.py`, `web/src/lib/force.ts`, `SettingsPage`'s master
+  list): the pass stays fill-only, and its switch is what re-fetches a rating a
+  file already carries. Pinned by `tools/test_script_menus.py`.
 
 - **R363 — a tool that cannot REACH a file is not a verdict about its audio.**
   On Windows the CRT the bundled tools link against stops at
@@ -4570,17 +6491,23 @@ different answers.
   `tools/test_flac_md5.py`'s long-path section pins all four answers.
 
 - **R364 — waits on different hosts overlap, and no lane claims the machine.**
-  Waiting on one provider must not block another provider's ask: the RYM and
-  Wayback waits have their own 1 req/s locks, so a slow answer on one host does
-  not stall a request to another. One album is one lane and its calls share that
-  lane's slice of the shared budget — the policy
-  `mlo.accurip.run_generate_accurip` documents for its transport — so a Run All
-  over N albums cannot multiply the requests in flight; a single-album run is
-  one lane and gets the whole width. Script 9's per-lane
+  Script 24's album answer and its tracks' answers ride ONE bounded pool: the
+  per-host request COUNT is unchanged (still one ask per source per entity) and
+  so is the configured source ORDER — answers are parsed and aggregated in
+  `provider_order`, and the writes visit the rows in sorted-name order, so a
+  thread-pool completion order never reaches a tag. What changes is only the
+  waiting: a track's RYM/Wayback wait no longer blocks the next track's
+  MusicBrainz ask, because those two hosts have separate 1 req/s locks. One
+  album is one lane and its tracks share that lane's slice of the shared budget
+  — the policy `mlo.accurip.run_generate_accurip` documents for its transport —
+  so a Run All over N albums cannot multiply the requests in flight; a
+  single-album run is one lane and gets the whole width. Script 9's per-lane
   ffmpeg WAV transport likewise takes `tool_threads(config, lanes)` — the
   per-lane share `mlo.flac`, `mlo.remux` and `mlo.images` already use — instead
   of every lane's ffmpeg claiming every core. Pinned by
-  `tools/test_accurip_roundtrip.py` (the transport argv).
+  `tools/test_web_ratings.py` (the same injected answers written byte-identically
+  with and without the overlap) and `tools/test_accurip_roundtrip.py` (the
+  transport argv).
 
 - **R365 — an encoder's thread count is the lane's share, not the machine's.**
   Every external tool that can thread itself takes `mlo.stats.tool_threads`
@@ -4604,6 +6531,17 @@ different answers.
   the provider order, the retries and every answer are unchanged. Pinned by
   `tools/test_script_optimizations.py` and `tools/test_lyrics_providers.py`
   (different hosts start together, the same host stays 0.4 s apart).
+
+- **R367 — a fill-only pass does not fetch what it cannot write.** Script 24
+  asks the network only while the answer could be written: a row that already
+  carries `WEBRATING` gets no track ask, and the album answer is fetched only
+  while some row still lacks `ALBUMWEBRATING` — `_existing` is the test, the
+  writer's own, so a fetch skip can never disagree with the write skip and lose
+  a value. `force_web_ratings` bypasses both, exactly as it bypasses the
+  writes. A re-run over an already-rated album therefore costs zero requests
+  (and its stats read like any run no source answered). Pinned by
+  `tools/test_web_ratings.py` (zero fetches on the second run, fetches again
+  when forced).
 
 - **R368 — a probe reads what it needs, not the whole album.** Three passes
   stopped paying for work whose answer was already in hand: beets' pre-import
@@ -4634,27 +6572,102 @@ different answers.
   report's "Empty folders" finding behind. Pinned by
   `tools/test_import_pipeline.py`.
 
+### 7.74 The lyrics pane arrives, and its emphasis is a state
+
+- **R371 — the pane ARRIVES on the line instead of creeping up on it.** The
+  shared glider's ease (`web/src/lib/lyrScroll.ts`) was purely exponential, and
+  an exponential's tail is sub-pixel: measured on a 12 px step at 60 Hz, the
+  last ~8 frames of the move covered 1.4 → 0.08 px each (over 130 ms of drift
+  after the pane had visibly arrived) — the owner's "auto-scroll goes to the
+  line, but a little after that you can still see the line move a couple pixels
+  slowly. I don't want that". The ease now runs only while it is the faster of
+  the two, and a landing speed floor (`LAND_PX` = 1.4 px per 60 Hz frame)
+  carries the rest to the target. The handover is continuous by construction —
+  the ease's own step equals the floor exactly when the remaining distance is
+  `LAND_PX / EASE` (~8.75 px) — so nothing kinks, and the retarget rule (a line
+  change mid-glide re-aims instead of restarting) is untouched. Pinned by
+  `tools/check_lyrscroll.cjs`: a 12 px step must land, and every moving frame
+  of it but the arrival itself must cover at least a pixel (the old loop
+  failed that with 20 frames and a dozen of them under a pixel).
+- **R372 — a lyric line's emphasis is a STATE, and the pane filters nothing.**
+  A synced line the clock has left reads dimmed (`LINE_QUIET`,
+  `web/src/components/NowPlayingView.tsx`) and the line arriving takes the
+  active ink and the full size in the frame it becomes active. Two things were
+  still painting per frame while the pane scrolled, and both are gone:
+
+  the half being LEFT used to ease its opacity and `filter` over 300 ms — a
+  `filter` that animates under a scroller re-rasterises the line at every new
+  scroll position and every step of the blur; and the emphasis eased its
+  `color` over 500 ms, which is not compositable and so re-rasterises the text
+  every frame too. Either one can be drawn a scroll-step behind for a single
+  frame, which is the owner's "the previous lyric line flickers very briefly
+  when scrolling into the next one" — reported a second time after the blur's
+  own transition had already been dropped, so the crate went with it rather
+  than the animation: no `filter` is left anywhere inside the scroller, the
+  quiet row carries no transition at all, and the line's own block transitions
+  `transform` ONLY (a composited scale, resampled by the compositor, which
+  cannot lag a scroll the way a fresh text raster can). The emphasis keeps its
+  three carriers — the dim ink, the dim opacity and the size — and only the
+  size travels. Pinned by `tools/check_fullscreen_player.cjs`, read off the
+  live pane: an inactive row computes `filter: none` at 0.9 opacity, no
+  element inside the scroller carries a filter, the row has no transition
+  duration, and the block under it transitions `transform` and not `color`.
+
+### 7.75 The favourites and the playlist manage their own items
+
+- **R377 — every favourites/playlist list has the app's select mode, and an
+  entry the library cannot resolve still loads.** The batch idiom is the one
+  the Library, Home, the artist page and the trash already share (a Select
+  toggle, a `SelectAllButton`, per-row checkboxes, a batch bar); the Favorites
+  page — all four tabs — and the playlist page's track list gained it, because
+  taking twenty tiles off a favourites list one heart at a time is not a way to
+  manage anything. The batch write is the store's own: `unfavoriteMany`
+  (`web/src/lib/favs.ts`: one `likeToggle`/`favoriteToggle` per ticked key and
+  ONE invalidation of the two query keys at the end, so the list does not
+  re-render between ticks) and `api.playlistRemove(pid, picked)` — the route
+  always took a list, only the UI was one track at a time.
+
+  The second half is the same page's other defect: a favourite the LIBRARY
+  cannot resolve (its folder was moved, renamed, or holds no audio, so no album
+  row exists) was dropped from the Favorites page's rows by `.filter(Boolean)`
+  — invisible, and therefore impossible to remove from the one page whose job
+  is managing them, while Home's own favorites shelf was drawing the same
+  entry as an `owned: false` card. Every tab now renders it: the album tab as
+  that same `owned: false` card (identity only — no grade, no play button, no
+  link the library cannot answer), the artist and playlist tabs as a row that
+  names the folder/`Playlist #id` it was favourited under and says "not in the
+  library", each carrying the heart that takes it off. A playlist's own entries
+  behave the same way, and always did for a track whose FILE is gone (the row
+  draws its file name with empty metadata) — that is what lets a playlist
+  built elsewhere, or one whose files moved, be opened, read and cleaned up
+  instead of erroring.
+
 ### 7.76 The library-layout report keeps itself up to date
 
-- **R378 — the library-layout report keeps itself up to date, and every action
-  that moves a folder asks for a fresh scan.** The report a page draws is a
-  scan's output (`mlo.layout.scan_library`, the walk script 20 runs) and what
-  the Library page's own layout warning reads is the STORED copy — so a folder
-  the app (or the reader) had already changed kept being reported until somebody
-  pressed Rescan (owner report: "I need to manually use this section under
-  rescan for the library to update. It should be done automatically"). Now:
-  `web/src/lib/layoutScan.ts`'s `rescanLayout` is called by every action that
-  changes the tree — an album to the Trash (`AlbumPage.removeAlbum`,
-  `LibraryPage.removeAlbums`), a restore from the Trash (`TrashPage`) — and it
-  republishes the query the Library's warning reads. The scan is the READ-ONLY
-  half of the layout route, so nothing behind a mutation can settle a reader's
-  files by surprise — the fixing half is script 20's own `layout_apply` — and a
-  scan that cannot run leaves the stored report standing, silently. Pinned by
-  `tools/check_layout.cjs`: a folder deleted on disk behind the app's back (the
-  owner's actual case) is gone from the report the Library page warns from when
-  the page is reopened.
+- **R378 — the layout panel SCANS when it opens, and every action that moves a
+  folder asks for a fresh scan.** The report the panel draws is a scan's output
+  (`mlo.layout.scan_library`, the walk script 20 runs) and what both it and the
+  Library page's own layout warning read is the STORED copy — so the panel used
+  to paint the last scan's answer and wait for the reader to press Rescan, and
+  a folder the app (or the reader) had already changed kept being reported until
+  they did (owner report: "I need to manually use this section under rescan for
+  the library to update. It should be done automatically"). Now: the panel
+  paints the stored report first (so it arrives with an answer instead of a
+  spinner) and then runs a scan of its own, and `web/src/lib/layoutScan.ts`'s
+  `rescanLayout` is called by every action that changes the tree — an album to
+  the Trash (`AlbumPage.removeAlbum`, `LibraryPage.removeAlbums`), a restore
+  from the Trash (`TrashPage`), an applied fix or an album-less artist folder
+  removed (the panel's own actions, which also republish the query the Library's
+  warning reads). The scan is the READ-ONLY half of the layout route, so nothing
+  behind a mutation can settle a reader's files by surprise — the fixing half
+  stays behind Apply fixes and script 20's own `layout_apply` — and a scan that
+  cannot run leaves the stored report standing, silently. Pinned by
+  `tools/check_layout.cjs`: opening the panel moves the stored report's
+  `scanned_at` with no Rescan press, and a folder deleted on disk behind the
+  app's back (the owner's actual case) is gone from both the report and the
+  panel when the page is reopened.
 
-## 8. Runbook
+## 8. Recommended runbook
 
 Nothing here is a substitute for the app's own Dependencies page: run it first
 and install what the platform supports.
@@ -4682,8 +6695,8 @@ and install what the platform supports.
    designed to be the whole job: 11 moves video containers first, 3 re-encodes
    lossless sources, 14 tags and organizes, 15 writes the tracklist manifest,
    2/1 canonicalize sidecars, 13 fetch lyrics, 17 adds
-   transforms, 8 writes mood/energy/genre/advisory, 5 normalizes images, 6 audits,
-   7 measures DR/ReplayGain, 9 writes
+   transforms, 8 writes mood/energy/genre/advisory, 5 normalizes images, 19
+   re-fits the artist image, 6 audits, 7 measures DR/ReplayGain, 9 writes
    `.accurip`, 12 writes key/BPM, 16
    is the standalone mood pass, 10 is the final canonical pass, 20 puts the
    library's shape right, 21 completes (or creates) the AcoustID pair and 4
@@ -4697,7 +6710,7 @@ and install what the platform supports.
    a script revisits work it has done.
    **A run has one scope, and it is the same for every script in it**: a
    library-wide run (the Optimize page's *Run All*, the CLI) makes every script
-   sweep the whole library for itself, and a targeted run (a selection, the
+   discover the whole library for itself, and a targeted run (a selection, the
    wizard's *Run ticked scripts*) makes every script work only on those
    targets. A script must never be handed an empty target list and left to
    report "nothing to do" — a run that changed nothing must be able to say why
@@ -4705,7 +6718,8 @@ and install what the platform supports.
 
 Safe to re-run at any time: **4** (read-only) and **20** (idempotent — a library
 already in the canonical shape has nothing left to fix), 2, 1, 5, 6, 7, 8,
-9, 10, 12, 13, 15, 16, 17, 21 (it acts only on a file holding half a pair).
+9, 10, 12, 13, 15, 16, 17, 19 (it never upscales and leaves a conforming image
+byte for byte alone), 21 (it acts only on a file holding half a pair).
 Re-running 3/11 only replaces files whose conversion/remux has not happened yet,
 unless their force flags are set. **Needs a human decision**:
 
@@ -4718,8 +6732,8 @@ unless their force flags are set. **Needs a human decision**:
   container after a verified remux.
 - `video_reencode_incompatible` (default **off**) — lossily re-encoding an
   incompatible video replaces the only copy, so it is opt-in.
-- `embed_covers` (default off) and `strip_unknown_tags` (on) — the last stages
-  of a write.
+- `embed_covers` (default off), `strip_unknown_tags` (on) and
+  `metadata_review` (off) — the last stages candidates instead of writing them.
 - `grade_check_audit` (ON — `STRICT_DEFAULT_KEYS`) and `audit_cd_require_both` /
   `audit_verify_*` decide how much audit machinery runs; on a Docker or Linux
   server the AccurateRip, audit and logchecker paths run through the image's own
@@ -4737,7 +6751,7 @@ checks see or how they judge it.
 | Key | Default | Effect on grading |
 | --- | --- | --- |
 | `grade_check_*` (59 keys) | all ON | switch one check on/off — every one ships on, including `grade_check_audit` (`mlo/config.py::STRICT_DEFAULT_KEYS`) |
-| `grade_include_music`, `grade_include_cover`, `grade_include_cue`, `grade_include_log`, `grade_include_lrc`, `grade_include_accurip`, `grade_include_video` | ON | a file category participates; off means its files are also "disallowed" for `grade_check_disallowed` |
+| `grade_include_music`, `grade_include_cover`, `grade_include_description`, `grade_include_cue`, `grade_include_log`, `grade_include_lrc`, `grade_include_accurip`, `grade_include_video` | ON | a file category participates; off means its files are also "disallowed" for `grade_check_disallowed` |
 | `grade_include_other` | ON | unclassified files participate |
 | `grade_log_score_threshold` | 100 | minimum `LOG_GRADE` for `grade_check_log_grade` (0 disables the threshold) |
 | `grade_verbose` | ON | per-track detail in the Grade report |
@@ -4747,6 +6761,8 @@ checks see or how they judge it.
 | `cover_enforce_size` / `cover_enforce_square` | ON | whether the cover's size/squareness is enforced at all |
 | `cover_resize_enabled` / `cover_force_exact_size` | ON | whether the cover is expected to be the target size exactly |
 | `cover_target_size`, `cover_jpeg_target_size`, `cover_png_target_size`, `cover_jxl_target_size` | 1200 / 0 / 0 / 0 | expected cover dimensions (0 = the global target) |
+| `artist_image_aspect` / `artist_image_crop` | `1:1` / ON | the artist image's configured shape and whether it is enforced at all (off, or `cover_crop_enabled` off, means no aspect is graded; script 19 crops to the same value) |
+| `artist_image_target_size` | 0 | the artist image's size ceiling (0 = the provider's native size, bounded by the 2000 px `mlo.artistdata.DEFAULT_MAX_SIDE`); only OVERSIZED fails, undersized is a note |
 | `reencode_images` | ON | whether cover encoder tags are graded |
 | `encoder_tags` | per-format map | which `ENCODER_*` markers `grade_check_encoder` requires and the skip checks compare (`ENCODER_QUALITY` — the LEVEL — on; `ENCODER_VERSION` and `ENCODER_PROGRAM` off, per format; see R329) |
 | `strip_unknown_tags` | ON | whether `grade_check_excess_tags` reports junk tags |
@@ -4792,14 +6808,18 @@ Two keys deliberately do **not** change a verdict on their own:
 `grade_check_accuraterip` (AUDIT-only, R5) and `show_sidecar_files` —
 deliberately NOT in the table above: it only makes the viewer list a file's
 sidecar siblings (`cue`/`log`/`lrc`/`.accurip`) and compute their grades, and it
-adds no check. The release-choice and locale keys are not grade keys
+adds no check. The release-choice, YouTube and locale keys are not grade keys
 either — they choose
 which file a verdict is later computed on, never the verdict itself:
 `prefer_disc_streams` and the other release-choice keys (R84/R85, including
-`auto_import_medium_order` — R246), and `locale` (R87).
+`auto_import_medium_order` — R246), `youtube_*`
+(R76), and `locale` (R87).
 
-A key that writes outside the grade is not in the table for the same reason:
-`cookie_notes` is a
+Three keys that write outside the grade are not in the table for the same
+reason: `playlist_import_parent_albums`, `playlist_import_unmatched` and
+`playlist_import_create_empty` (R254) decide what a streaming-playlist import
+QUEUES and creates — the matched files exist in the library by construction, so
+they cannot change what those files score — and `cookie_notes` (R242) is a
 hidden key, written by the cookie routes and never by the settings form (no
 Settings row offers it).
 
@@ -4807,7 +6827,7 @@ Settings row offers it).
 
 ## 10. Honest limits of this spec
 
-- The check **count** is 67 today; the registry derives it from
+- The check **count** is 70 today; the registry derives it from
   `DEFAULT_CONFIG`, so a new check appears on the Grading page the day it exists
   even if this document has not caught up. The registry raises when a claim here
   points at a key the config does not hold.
@@ -4820,6 +6840,28 @@ Settings row offers it).
   argv. When it cannot bridge, the tool sees a path it cannot open and reports
   *it* — so a step that "found nothing" or "could not decode" on a long-path
   library is a bridge failure, not an empty library.
+- **Background playback is a platform declaration, and only iOS's is asserted in
+  CI.** `UIBackgroundModes: audio` is what lets iOS keep playing once the app
+  leaves the foreground, and the mobile workflow now reads that key (and the ATS
+  web-content exemption) out of the built `.app`'s Info.plist, so a merge that
+  stopped happening cannot ship unnoticed. Android has no equivalent switch: a
+  WebView keeps playing while the process lives, and the OS may reclaim a
+  backgrounded app. The app declares no foreground playback service, so "keeps
+  playing with the screen off" is not a promise Android makes here — what the
+  app controls on every platform is that its own state is honest about what the
+  element is doing (R188), and that is enforced in the client.
+- **Push is Web Push, and only Web Push.** The server signs with VAPID and
+  encrypts per RFC 8291 (R203), and the browser, the installed PWA and the
+  desktop shell's own window all receive it — but nothing here speaks APNs or
+  FCM, so the **Tauri iOS and Android apps cannot be woken while they are
+  closed**: on those, push requires la musica added to the Home Screen as a PWA
+  (iOS 16.4+), and the panel says exactly that rather than offering a switch
+  (R204). A native bridge is a separate piece of work, not a setting. Delivery
+  through a real push service is what *Send a test notification* is for: the
+  suites stub the service's HTTP layer (the payload is decrypted with the
+  device's own private key, and RFC 8291's Appendix A vector is reproduced byte
+  for byte), which is everything short of dialling Mozilla's or Apple's endpoint
+  from a test run.
 - **The storage walk counts DIRENT NAMES, not blocks.** A hard link made by
   hand inside the library is a second real file to `os.scandir`, so the card
   counts it twice; a symlink or junction is not followed at all, and is
@@ -4841,11 +6883,23 @@ Settings row offers it).
   what asks again. Nothing re-checks a dismissed gap on its own, so an album
   short of a cover stays short of it until you import it again or fill the
   family in; the grading line it earns stays visible on the album page.
+- **The player's equalizer is the BROWSER's biquads, not Equalizer APO's own
+  engine** (R219): a peaking band, a pass and a notch are rendered the way an
+  export's ffmpeg chain renders them, so the frequencies, the gains and the band
+  order agree between the app and an exported copy — but a SHELF's width does
+  not (APO's custom slope reaches ffmpeg as a Q, and a WebAudio shelf is
+  fixed-slope), and any line the parser reports as unsupported (`Include:`,
+  `Convolution:`, an `AP`/`IIR` filter, an unknown construct) is reported and
+  NOT applied, in playback exactly as in an export — including the bands inside
+  an `If:`/`ElseIf:` block, which this app does not evaluate and therefore does
+  not apply, and the two sides clamp a band's Fc/gain/Q and the preamp to the
+  same bounds, so nothing about a band's level or width differs between them.
 - **A notification a client missed survives a restart, but not for ever**
   (R216): the durable log keeps the newest 400 frames, so a device that was
   away longer than that (or that is reopened after a long absence) sees the most
   recent notices and not the whole history — the tray keeps its own newest 50
-  anyway.
+  anyway, and push (R203) is the transport for waking a device while it is
+  closed.
 - **A stored language is sticky until someone edits it** (R167). The `LANGUAGE`
   tag is what the transforms are decided from, so a wrong value there (the
   model's answer for one track of a mixed album, MusicBrainz's own

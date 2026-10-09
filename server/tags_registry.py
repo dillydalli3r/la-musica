@@ -60,6 +60,10 @@ FAMILIES = (
     ("audio", "Audio"),
     ("lyrics", "Lyrics"),
     ("provenance", "Provenance"),
+    # What the LISTENER said, not what the app measured or concluded: a rating
+    # is an opinion, and grouping it with any measurement would imply it can be
+    # graded, recomputed or overwritten by a pass. Nothing does.
+    ("opinion", "Your opinion"),
 )
 
 TAG_FAMILY = {
@@ -102,7 +106,7 @@ TAG_FAMILY = {
     "ASIN": "release", "LANGUAGE": "release", "DISCSUBTITLE": "release",
     "LABEL": "release", "TRACKTOTAL": "release", "DISCTOTAL": "release",
     "ISRC": "release", "LICENSE": "release", "MEDIA": "release",
-    "SOURCE": "release",
+    "SOURCE": "release", "ALBUMITUNESADVISORY": "release",
     "MUSICBRAINZ_ALBUMID": "release",
     "MUSICBRAINZ_ALBUMARTISTID": "release",
     "MUSICBRAINZ_ARTISTID": "release",
@@ -111,6 +115,8 @@ TAG_FAMILY = {
     "MUSICBRAINZ_RELEASEGROUPID": "release",
     "MUSICBRAINZ_RELEASETRACKID": "release",
     "MUSICBRAINZ_WORKID": "release",
+    "RATEYOURMUSIC_ALBUM": "release", "RATEYOURMUSIC_TRACK": "release",
+    "RATEYOURMUSIC_ARTIST": "release",
     # What the analysis passes measured on the audio itself.
     "MOOD": "audio", "ENERGY": "audio", "BPM": "audio", "INITIALKEY": "audio",
     "DYNAMIC RANGE": "audio", "ALBUM DYNAMIC RANGE": "audio",
@@ -127,6 +133,20 @@ TAG_FAMILY = {
     "LOG_CRC": "provenance", "LOG_GRADE": "provenance",
     "ENCODER_PROGRAM": "provenance", "ENCODER_QUALITY": "provenance",
     "ENCODER_VERSION": "provenance", "ENCODEDBY": "provenance",
+    # The listener's own stars — see FAMILIES above.
+    "RATING": "opinion",
+    # The PUBLIC score for the track and its album (mlo.web_ratings, script
+    # 24), grouped with the listener's stars because it is the same kind of
+    # fact: a rating nobody grades, nobody recomputes and no pass overwrites
+    # (the writer fills only). It is NOT the listener's own opinion, which is
+    # why its label says "web" — but a separate family would put a second
+    # rating group in the (registry-driven) tag editor for one tag pair, and
+    # the family's own rule is what makes the grouping right: a rating is an
+    # opinion, and nothing here grades it.
+    "WEBRATING": "opinion",
+    "WEBRATING_SOURCE": "opinion",
+    "ALBUMWEBRATING": "opinion",
+    "ALBUMWEBRATING_SOURCE": "opinion",
 }
 
 # A tag added to TAG_MAP without a family above lands here instead of in a
@@ -230,6 +250,7 @@ TAG_INFO = {
     "LICENSE": ("License", "Licence the release is published under."),
     "MEDIA": ("Media", "Medium of the release (CD, vinyl, digital media…) — decides which CD checks apply."),
     "SOURCE": ("Source", "Where this rip came from; required when MEDIA is digital media."),
+    "ALBUMITUNESADVISORY": ("Album advisory", "The strictest per-track advisory, repeated on every track of the album."),
     "MUSICBRAINZ_ALBUMID": ("MusicBrainz release", "The release's MusicBrainz id — what the import, the cover search and the album page resolve."),
     "MUSICBRAINZ_ALBUMARTISTID": ("MB album artist id", "MusicBrainz artist id of the album artist."),
     "MUSICBRAINZ_ARTISTID": ("MB track artist id", "MusicBrainz artist id of the track artist."),
@@ -238,6 +259,9 @@ TAG_INFO = {
     "MUSICBRAINZ_RELEASEGROUPID": ("MB release group id", "The release group the album belongs to."),
     "MUSICBRAINZ_RELEASETRACKID": ("MB release track id", "This track's own position id on this release."),
     "MUSICBRAINZ_WORKID": ("MB work id", "MusicBrainz work id the classical tags sit beside."),
+    "RATEYOURMUSIC_ALBUM": ("RYM album link", "RateYourMusic release page URL."),
+    "RATEYOURMUSIC_TRACK": ("RYM track link", "RateYourMusic track page URL."),
+    "RATEYOURMUSIC_ARTIST": ("RYM artist link", "RateYourMusic artist page URL."),
     "MOOD": ("Mood", "The mood word the classifier derived from the track's own audio."),
     "ENERGY": ("Energy", "0-100 arousal the MOOD verdict was scored from."),
     "BPM": ("BPM", "Tempo in beats per minute."),
@@ -271,6 +295,25 @@ TAG_INFO = {
     "ENCODEDBY": ("Encoded by", "The byline the encoder itself wrote into the file (ID3 TENC, "
                                 "the MP4 \u00a9too atom, the ENCODEDBY comment) — what made "
                                 "the file, not this app's conversion markers."),
+    "RATING": ("Rating", "Your own stars — 0-5 with halves — stored in the file as Picard's RATING, "
+                          "0-100 (one half-star = 10). An opinion, so nothing grades it; the app keeps "
+                          "its own copy and heals it after a rename."),
+    "WEBRATING": ("Web rating", "The PUBLIC score for this track (0-100), the weighted mean of "
+                                "the web sources that stated one. Sources vote-count weighted, so a "
+                                "score thousands of people rated outweighs one with a handful of "
+                                "votes; the sources that answered are named in WEBRATING_SOURCE. "
+                                "Album-wide scores are never copied here — they live in "
+                                "ALBUMWEBRATING."),
+    "WEBRATING_SOURCE": ("Web rating sources", "A LIST: the \"; \"-joined names of the sources that "
+                                               "contributed to WEBRATING (MusicBrainz, RateYourMusic, …), "
+                                               "the convention RELEASECOUNTRY uses."),
+    "ALBUMWEBRATING": ("Album web rating", "The PUBLIC score for the whole release (0-100), repeated on "
+                                           "every track of the album — the same album-level slot "
+                                           "ALBUMITUNESADVISORY uses. Written beside WEBRATING, never in "
+                                           "place of it: a track no source rated still states what the "
+                                           "album did."),
+    "ALBUMWEBRATING_SOURCE": ("Album web rating sources", "A LIST: the names of the sources behind "
+                                                          "ALBUMWEBRATING, in the configured order."),
 }
 
 # --------------------------------------------------------------------------- #
@@ -292,6 +335,7 @@ TAG_WRITER = {
     "MEDIA": _script(1) + " · media/source normalization",
     "SOURCE": _script(1) + " · media/source normalization",
     "ITUNESADVISORY": f"{_AUTOTAG} · advisory fetch",
+    "ALBUMITUNESADVISORY": _AUTOTAG,
     "INSTRUMENTAL": f"{_AUTOTAG} · instrumental fetch",
     "GENRE": f"{_AUTOTAG} · genre import · {_script(10)} trims",
     "MOOD": f"{_AUTOTAG} · {_MOODS}",
@@ -346,6 +390,18 @@ TAG_WRITER = {
     # Nothing here writes it: it is the encoder's own byline, recorded by
     # whatever made the file.
     "ENCODEDBY": "the encoder that produced the file",
+    # The ratings API (server.ratings) is the only writer, and it writes on the
+    # click itself — no script pass touches an opinion.
+    "RATING": "the ratings API (server.ratings) — the star you clicked",
+    # The web rating has one writer and it only ever FILLS: a value the file
+    # already holds is left exactly as it is unless the run is forced
+    # (`force_web_ratings`), which is why nothing else in the pipeline needs to
+    # touch these tags — and every strip pass keeps them, since they are in
+    # TAG_MAP (TAG_ALLOWLIST is built from it).
+    "WEBRATING": _script(24),
+    "WEBRATING_SOURCE": _script(24),
+    "ALBUMWEBRATING": _script(24),
+    "ALBUMWEBRATING_SOURCE": _script(24),
     # MusicBrainz credits and the release facts no naming script reads: both
     # MusicBrainz paths write them through one helper (mlo.autotag), the beets
     # import per album and Auto Tagging when it already asks about a release.
@@ -375,6 +431,7 @@ DEFAULT_WRITER = _RELEASE_WRITER
 # REAL/FAKE, the seven-plus-one mood words in mlo.moods).
 _TAG_ENUM = {
     "ITUNESADVISORY": ("0", "1", "2"),
+    "ALBUMITUNESADVISORY": ("0", "1", "2"),
     "INSTRUMENTAL": ("0", "1"),
     # REAL / FAKE are what mlo.audit writes; MIX is foobar2000's verdict for a
     # file it heard both ways — a value the app reads (mlo.grader treats it as
@@ -386,6 +443,25 @@ _TAG_ENUM = {
     "INTEGRITY": ("OK", "FAIL", "UNKNOWN"),
     "LOG_CRC": ("OK", "MISMATCH"),
 }
+
+# Open value RANGES — a scale rather than a closed set of answers, so a client
+# can mark a value outside it as the anomaly without owning the scale. The
+# RATING scale is Picard's own (server.ratings converts it to half-stars); a
+# tag with no entry here states its range in its meaning line instead.
+_TAG_RANGE = {
+    "RATING": (0, 100),
+    # The web ratings use the same Picard scale (mlo.web_ratings.RATING_MAX),
+    # so the editor marks a value outside 0-100 the same way it marks a bad
+    # RATING — one scale, one rule.
+    "WEBRATING": (0, 100),
+    "ALBUMWEBRATING": (0, 100),
+}
+
+
+def _range_for(tag: str):
+    lo_hi = _TAG_RANGE.get(tag)
+    return [lo_hi[0], lo_hi[1]] if lo_hi else None
+
 
 # Tags whose `enum` comes from mlo.tagtext's canonical-value table (the table
 # every writer stores). AUDIT is not here: its vocabulary is stated in
@@ -456,6 +532,7 @@ TAG_CHECKS = {
     "TRANSLATION": ("grade_check_xlit_translation",),
     "TRANSLITERATION": ("grade_check_xlit_transliteration",),
     "MUSICBRAINZ_ALBUMID": ("grade_check_mb_links",),
+    "RATEYOURMUSIC_ALBUM": ("grade_check_rym_links",),
     # Tags whose VALUE has a canonical spelling (mlo.tagtext.CANONICAL_CASE)
     # are graded by grade_check_tag_case, beside whatever checks already
     # graded them.
@@ -484,6 +561,7 @@ TAG_ISSUE_CODES = {
     "TRANSLATION": ("XLIT_MISSING", "XLIT_UNNEEDED"),
     "TRANSLITERATION": ("XLIT_MISSING", "XLIT_UNNEEDED"),
     "MUSICBRAINZ_ALBUMID": ("MB_LINK",),
+    "RATEYOURMUSIC_ALBUM": ("RYM_LINK",),
     "ACOUSTID_ID": ("ACOUSTID_ID",),
     "ACOUSTID_FINGERPRINT": ("ACOUSTID_FINGERPRINT",),
     # The alias tag whose absence the check names, and the COMMENT value the
@@ -530,6 +608,7 @@ CHECK_LABELS = {
     "grade_check_extra_images": "Stray images",
     "grade_check_empty_folders": "Empty folders",
     "grade_check_expected_tracks": "Whole release present",
+    "grade_check_album_description": "Album description stored",
     "grade_check_raw_video": "Raw videos",
     "grade_check_lossless_source": "Lossless sources",
     "grade_check_disc_naming": "Disc rip-sheet naming",
@@ -537,12 +616,15 @@ CHECK_LABELS = {
     "grade_check_cd_cue": "CD — .cue present",
     "grade_check_cd_format": "CD — lossless format",
     "grade_check_crc": "CRC checksums",
+    "grade_check_artist_image": "Artist image stored",
+    "grade_check_artist_description": "Artist description stored",
     "grade_check_audit": "Require audit tag",
     "grade_check_flac_md5": "FLAC stream MD5 (STREAMINFO)",
     "grade_check_log_checksum": "Log checksum valid",
     "grade_check_accuraterip": "AccurateRip verified (audit only)",
     "grade_check_log_grade": "Log grade present & in range",
     "grade_check_mb_links": "MusicBrainz release link",
+    "grade_check_rym_links": "RateYourMusic release link",
     "grade_check_cover": "Cover art",
     "grade_check_cover_crop": "Cover aspect ratio (squareness)",
     "grade_check_sidecar_cover": "Per-track sidecar covers",
@@ -564,6 +646,7 @@ CHECK_LABELS = {
     "grade_check_xlit_translation": "Translation — needed, never extra",
     "grade_include_music": "Audio tracks",
     "grade_include_cover": "Cover art",
+    "grade_include_description": "Album description",
     "grade_include_cue": "CUE sheets",
     "grade_include_log": "Log files",
     "grade_include_lrc": "LRC lyrics",
@@ -787,6 +870,9 @@ def _build():
             "issue_codes": _issue_codes(key),
             "write_gate": _write_gate(key),
             "enum": _enum_for(key),
+            # The open scale (RATING's 0-100), or None for a tag whose values
+            # are words or free text.
+            "range": _range_for(key),
         })
 
     checks = _checks()

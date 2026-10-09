@@ -139,6 +139,15 @@ CREATE TABLE IF NOT EXISTS users (
     hash     TEXT,
     created  REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+    endpoint   TEXT PRIMARY KEY,
+    username   TEXT NOT NULL,
+    p256dh     TEXT NOT NULL,
+    auth       TEXT NOT NULL,
+    kinds      TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
 """
 # Migrations for databases written before users existed: the session's
 # username is added in place, and rows that predate it read back as "" — the
@@ -339,6 +348,9 @@ def delete_user(username) -> bool:
         try:
             conn.execute("DELETE FROM users WHERE username=?", (name,))
             conn.execute("DELETE FROM sessions WHERE username=?", (name,))
+            # Their devices too: nobody can sign in as them again, so a push to
+            # one of them would be news delivered to a stranger's phone.
+            conn.execute("DELETE FROM push_subscriptions WHERE username=?", (name,))
             conn.commit()
         finally:
             conn.close()
@@ -497,6 +509,11 @@ def revoke_all() -> int:
         conn = _conn()
         try:
             cur = conn.execute("DELETE FROM sessions")
+            # And every device: a phone that has just been signed out must not
+            # keep being woken with this server's news. It re-subscribes itself
+            # the moment somebody signs in on it again (lib/notify.ts refreshes
+            # the subscription on load), so nothing is lost by dropping them.
+            conn.execute("DELETE FROM push_subscriptions")
             conn.commit()
             return cur.rowcount or 0
         finally:
@@ -510,6 +527,117 @@ def session_count() -> int:
             row = conn.execute(
                 "SELECT COUNT(*) AS n FROM sessions WHERE expires_at > ?", (time.time(),)
             ).fetchone()
+            return int(row["n"]) if row else 0
+        finally:
+            conn.close()
+
+
+# ── push subscriptions ──────────────────────────────────────────────────────
+#
+# One row per device that asked to be woken with the server's own events (see
+# `server/events.py`, "Web Push"). They live here, beside sessions and users,
+# because this database already answers "which devices belong to which person",
+# and because a subscription is exactly the small, replaceable state a
+# self-hosted install must be able to lose without losing the library.
+# `username` is the session's own scope ("" = the default/admin one), so
+# signing in as somebody else on the same browser MOVES the row to them: an
+# endpoint is one device, whichever account last used it.
+
+def _kinds_text(kinds) -> str:
+    """The asked-for kinds as stored text. "" = every kind the server publishes."""
+    items = []
+    for kind in kinds or ():
+        name = str(kind or "").strip()
+        if name and name not in items:
+            items.append(name)
+    return ",".join(items)
+
+
+def push_subscribe(username, endpoint, p256dh, auth, kinds=()) -> None:
+    """Add or refresh one device's subscription.
+
+    `endpoint` is the key: a browser re-sends its subscription whenever the key
+    material or the page changes, and a second row for one device would send it
+    every frame twice.
+    """
+    now = time.time()
+    with _lock:
+        conn = _conn()
+        try:
+            conn.execute(
+                "INSERT INTO push_subscriptions"
+                " (endpoint, username, p256dh, auth, kinds, created_at, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)"
+                " ON CONFLICT(endpoint) DO UPDATE SET"
+                " username=excluded.username, p256dh=excluded.p256dh,"
+                " auth=excluded.auth, kinds=excluded.kinds,"
+                " updated_at=excluded.updated_at",
+                (str(endpoint), str(username or ""), str(p256dh), str(auth),
+                 _kinds_text(kinds), now, now))
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def push_unsubscribe(endpoint, username: str = None) -> int:
+    """Forget one device. `username` scopes it, so a caller can only drop its
+    own; `None` is the server's own pruning of a dead endpoint."""
+    if not endpoint:
+        return 0
+    with _lock:
+        conn = _conn()
+        try:
+            if username is None:
+                cur = conn.execute(
+                    "DELETE FROM push_subscriptions WHERE endpoint=?", (str(endpoint),))
+            else:
+                cur = conn.execute(
+                    "DELETE FROM push_subscriptions WHERE endpoint=? AND username=?",
+                    (str(endpoint), str(username or "")))
+            conn.commit()
+            return cur.rowcount or 0
+        finally:
+            conn.close()
+
+
+def push_subscriptions(username: str = None, kind: str = None) -> list:
+    """The devices a frame should reach, as `{endpoint, username, p256dh, auth,
+    kinds}` rows. `kind` honours what each row ASKED for: a row that asked for
+    nothing gets everything, one that asked for a list gets only those."""
+    with _lock:
+        conn = _conn()
+        try:
+            if username is None:
+                rows = conn.execute(
+                    "SELECT endpoint, username, p256dh, auth, kinds"
+                    " FROM push_subscriptions").fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT endpoint, username, p256dh, auth, kinds"
+                    " FROM push_subscriptions WHERE username=?",
+                    (str(username or ""),)).fetchall()
+        finally:
+            conn.close()
+    out = []
+    for row in rows:
+        wanted = str(row["kinds"] or "")
+        if kind and wanted and str(kind) not in wanted.split(","):
+            continue
+        out.append({"endpoint": row["endpoint"], "username": row["username"],
+                    "p256dh": row["p256dh"], "auth": row["auth"], "kinds": wanted})
+    return out
+
+
+def push_subscription_count(username: str = None) -> int:
+    with _lock:
+        conn = _conn()
+        try:
+            if username is None:
+                row = conn.execute("SELECT COUNT(*) AS n FROM push_subscriptions").fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT COUNT(*) AS n FROM push_subscriptions WHERE username=?",
+                    (str(username or ""),)).fetchone()
             return int(row["n"]) if row else 0
         finally:
             conn.close()

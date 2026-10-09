@@ -18,12 +18,11 @@ One scan answers every surface, so their numbers cannot disagree:
 
   * script 20 (``run_optimize_layout``) — the Run All step: scans, applies (the
     ``layout_apply`` config key / the runner's force flag) and persists what is
-    left. It is the ONLY way to apply the fixes: the Optimization page lists
-    it like any other script (the former separate Library-layout panel, with
-    its own Apply-fixes button and its own ``POST /api/library/layout/apply``
-    / ``remove-empty-artist`` routes, is gone);
-  * ``GET /api/library/layout`` — a read-only scan, which reports and changes
-    nothing (the Library/Album/Trash pages ask it after a move);
+    left;
+  * ``POST /api/library/layout/apply`` (server/main.py) — the same scan and
+    fix on demand, run by the Optimization page's Apply fixes button;
+  * ``GET /api/library/layout`` — the panel's read-only scan, which reports
+    and changes nothing;
   * ``GET /api/library/layout/report`` — the persisted report the Library
     page warns from, so its warning costs no second walk of the library.
 
@@ -39,7 +38,7 @@ import time
 
 from . import stats as mlo_stats
 from .discs import is_disc_dir
-from .paths import (IMAGE_EXTS, app_data_dir, library_root,
+from .paths import (IMAGE_EXTS, album_sidecar_of, app_data_dir, library_root,
                     mlo_root, move_path, trash_path)
 from .ui import Color, c, log, print_header
 
@@ -220,11 +219,12 @@ def artist_album_folders(artist_dir):
     """The album folders directly inside an artist folder, by name.
 
     An album folder is a DIRECTORY the artist folder holds. Files are not
-    albums: an artist folder holding no album directory is exactly the
-    `empty_artist` shape. This is the ONE definition of the question — the
-    scan's finding, the artist grade (mlo.grader.grade_artist) and the
-    remove-empty-artist route all ask it, so a folder one of them refuses to
-    act on is never one another reports as removable.
+    albums: an artist folder with no albums holds the artist's own artist.jpg
+    and description.txt and nothing else, which is exactly the `empty_artist`
+    shape. This is the ONE definition of the question — the scan's finding,
+    the artist grade (mlo.grader.grade_artist) and the remove-empty-artist
+    route all ask it, so a folder one of them refuses to act on is never one
+    another reports as removable.
     """
     try:
         return sorted(n for n in os.listdir(artist_dir)
@@ -491,8 +491,9 @@ def scan_library(cfg=None, stats=None):
     No targets means the whole library.
 
     What the app itself stores counts as expected, never as a stray: the
-    album's cover art next to the tracks, and the app's own manifests (only
-    audio with no album folder is reported inside an artist folder).
+    album's description.txt (mlo.paths.ALBUM_SIDECAR_NAMES) next to the
+    cover art, and inside an artist folder its artist.jpg / artist.png and
+    description.txt (only audio with no album folder is reported there).
 
     The artist folders are visited on a pool (`worker_count`, so the Worker
     threads setting sizes it): they share nothing but the music folder they
@@ -513,7 +514,7 @@ def scan_library(cfg=None, stats=None):
     modifying half is :func:`apply_fixes`, which counts what it changed.
     """
     from .naming import DEFAULT_NAMING_SCRIPT
-    from .paths import IMAGE_EXTS
+    from .paths import ALBUM_SIDECAR_NAMES, album_sidecar_of, IMAGE_EXTS
 
     cfg = cfg or {}
     folder = str(cfg.get("music_folder") or "")
@@ -658,8 +659,9 @@ def scan_library(cfg=None, stats=None):
                         "give it an album folder: Artists/<Artist>/<Album>/",
                         fix=_loose_fix(ap, folder, naming_script)))
                     closed(sink, reported=True)
-                # Any other file directly in an artist folder is not
-                # judged here: only audio with no album folder is.
+                # Any other file in an artist folder is the artist's own
+                # content (artist.jpg / artist.png / description.txt written
+                # by mlo.artistdata) — expected, so nothing to report.
                 else:
                     closed(sink, skipped=True)
                 continue
@@ -729,6 +731,48 @@ def scan_library(cfg=None, stats=None):
                     closed(sink, skipped=True)      # .lrc/.cue/.log/.accurip
                 elif ext in IMAGE_EXTS:
                     closed(sink, skipped=True)      # cover art
+                elif album_sidecar_of(f):
+                    # The album's description.txt — or a NUMBERED COPY of it
+                    # ("description (2).txt"): a file manager, a sync client, a
+                    # re-run of the import chain, or the organizer's own
+                    # leftover sweep (two writers, one destination) leaves one
+                    # behind. The canonical name is what it should be called,
+                    # so a copy with no canonical beside it is offered the
+                    # rename; a copy that HAS the canonical next to it is a
+                    # duplicate of a file the app already reads — reported as
+                    # its own row so it can be removed, which is what the owner
+                    # asked for after finding three of them in their library
+                    # ("description (2).txt") while the report said issues: [].
+                    canonical = album_sidecar_of(f)
+                    canonical_on_disk = False
+                    try:
+                        canonical_on_disk = any(
+                            other.lower() == canonical for other in os.listdir(ap))
+                    except OSError:
+                        pass
+                    if f.lower() == canonical:
+                        closed(sink, skipped=True)      # the app's own description
+                    elif canonical_on_disk:
+                        rows.append(_issue(
+                            "sidecar_copy", fp, folder,
+                            "album \u201c%s / %s\u201d holds \u201c%s\u201d beside "
+                            "\u201c%s\u201d" % (name, an, f, canonical),
+                            "a duplicate of the description the app already "
+                            "reads \u2014 nothing reads \u201c%s\u201d, and "
+                            "Apply moves it to the Trash" % f,
+                            fix={"action": "trash"}))
+                        closed(sink, reported=True)
+                    else:
+                        rows.append(_issue(
+                            "sidecar_copy", fp, folder,
+                            "album \u201c%s / %s\u201d stores its description as "
+                            "\u201c%s\u201d" % (name, an, f),
+                            "rename it to \u201c%s\u201d — the app reads either "
+                            "name, and Apply fixes renames without touching the "
+                            "text" % canonical,
+                            fix={"action": "rename",
+                                 "to": os.path.join(ap, canonical)}))
+                        closed(sink, reported=True)
                 elif f.startswith("."):
                     closed(sink, skipped=True)      # the app's own manifests
                 else:
@@ -757,8 +801,8 @@ def scan_library(cfg=None, stats=None):
             rows.append(_issue(
                 "empty_artist", p, folder,
                 "artist folder \u201c%s\u201d holds no album folder" % name,
-                "move it to the Trash (run Optimize library layout, script 20, to "
-                "settle it), or put one of the artist's albums inside it",
+                "remove it to the Trash (Optimize → Library layout → remove), "
+                "or put one of the artist's albums inside it",
                 fix={"action": "trash"}))
             closed(sink, reported=True)
         return rows, sink
@@ -953,8 +997,8 @@ def carry_album_files(src_dir, dst_dir, *, music_folder="", log=None):
 
     A mover takes the AUDIO and leaves everything else behind: script 14
     imports the tracks into the library and renames them, while the cover the
-    import's cover step fetched BEFORE the chain ran and the expected-tracklist
-    manifest stayed in the staging folder — so the
+    import's cover step fetched BEFORE the chain ran, the description beside it
+    and the expected-tracklist manifest stayed in the staging folder — so the
     album landed without artwork, the grader reported COVER, and the import was
     parked for a person over an album it had just found artwork for. This is the
     same rule the organizer applies when it renames an album ("move leftover
@@ -1122,8 +1166,21 @@ def _may_trash(src, kind, lib, folder):
         return False, "it is a folder now"
     name = os.path.basename(src)
     ext = os.path.splitext(name)[1].lower()
+    # A NUMBERED COPY of an album sidecar whose canonical sits beside it is the
+    # duplicate the scan reports (kind "sidecar_copy", fix "trash"): the app
+    # reads the canonical name, so removing the copy takes nothing away — and
+    # without this arm the row the scan just reported could never be acted on,
+    # because everything below refuses anything sidecar-shaped.
+    try:
+        canonical = album_sidecar_of(name)
+    except Exception:
+        canonical = ""
+    if canonical and name.lower() != canonical.lower() and \
+            os.path.exists(os.path.join(os.path.dirname(src), canonical)):
+        return True, ""
     if (_is_audio(name) or name.startswith(".")
-            or (ext and ext in _ALBUM_SIDECARS) or ext in IMAGE_EXTS):
+            or (ext and ext in _ALBUM_SIDECARS) or ext in IMAGE_EXTS
+            or canonical):
         return False, "it is audio, artwork or a sidecar now"
     return True, ""
 

@@ -35,24 +35,26 @@
  *     one column's value: it must cover exactly the columns it spans and must
  *     not overflow them. Counting it as column 0's value is what once reported
  *     a 40 px chevron column as "needs 108" — the group heading's own name;
- *   * the toolbar's facets do what they say: Explicit matches the count the
- *     payload reports, and Clean excludes them.
+ *   * the toolbar's facets do what they say: Rated keeps only rated rows,
+ *     Unrated drops them, Explicit matches the count the payload reports, and
+ *     Clean excludes them.
  *   * at 390 px the album page's TRACKLIST folds the columns a phone cannot use
  *     (the same `PHONE_HIDE` rule the Library's tables use), keeps the row's
  *     spine (# / name / length), hands the name a reading column — at least
  *     120 px, at most two lines, the whole title in its `title` — and keeps the
- *     row's chrome (the "…") laid out inside that cell and tappable with the
- *     phone's own 44 px hit area. At `md` and up nothing folds and the album
- *     table holds the floor its own columns sum to
+ *     row's chrome (the heart, the "…", the stars) laid out inside that cell
+ *     and tappable with the phone's own 44 px hit area. At `md` and up nothing
+ *     folds and the album table holds the floor its own columns sum to
  *     (`ALBUM_TRACK_MIN_W`, derived from the column spec — it was a pinned
  *     814 px before that). Before the phone fold existed the album page held
  *     that floor at every width, so a 390 px phone drew an 814 px table in a
  *     342 px wrapper and gave the name 8 px — one syllable per line, which is
  *     the owner's screenshot (issue #55).
  *
- * Point it at a scratch library (`MLO_MUSIC_FOLDER`), never at the library you
- * listen to. The servers under test are the ones the other checks use — 8011
- * and up, never the owner's 8000.
+ * It RATES ONE TRACK through `PUT /api/ratings` so the rating facet has
+ * something to find: point it at a scratch library (`MLO_MUSIC_FOLDER`), never
+ * at the library you listen to. The servers under test are the ones the other
+ * checks use — 8011 and up, never the owner's 8000.
  */
 let chromium;
 try {
@@ -62,7 +64,7 @@ try {
 } catch (e) {
   console.error("[check_library_tables] Playwright not found — install it with " +
     "`npm i -D playwright` (or set PLAYWRIGHT=/path/to/playwright).");
-  process.exit(2);
+  process.exit(1);
 }
 
 const ARGS = process.argv.slice(2);
@@ -83,6 +85,12 @@ const check = (name, ok, detail) => {
     console.error("[check_library_tables] the library has no tracks — point it at a scratch library with audio");
     process.exit(1);
   }
+  // One rated track, so "Rated" has exactly one row to find.
+  await fetch(`${BASE}/api/ratings`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path: tracks[0].path, rating: 8, scope: "track" }),
+  });
   const explicit = tracks.filter((t) => t.tags.ITUNESADVISORY === "1").length;
 
   const browser = await chromium.launch({ headless: process.env.HEADED ? false : true });
@@ -249,6 +257,12 @@ const check = (name, ok, detail) => {
   };
   console.log("\n[facets]");
   await openFilter();
+  await pick("Rated");
+  check("Rated keeps only the rated rows", (await geom()).rowCount === 1, `${(await geom()).rowCount} rows`);
+  await pick("Unrated");
+  check("Unrated drops the rated row", (await geom()).rowCount === tracks.length - 1,
+        `${(await geom()).rowCount} of ${tracks.length}`);
+  await pick("Any rating");
   await pick("Explicit");
   check("Explicit matches the payload's own count", (await geom()).rowCount === explicit,
         `${(await geom()).rowCount} vs ${explicit}`);
@@ -318,11 +332,13 @@ const check = (name, ok, detail) => {
       const { tr, link, text } = named[0];
       const cell = link.closest("td");
       const lh = parseFloat(getComputedStyle(link).lineHeight) || 20;
-      /** The chrome the cell must not squeeze out. The control is asked for by
+      /** The chrome the cell must not squeeze out. Each control is asked for by
        *  the name it PUBLISHES (its aria-label / title), not by a class the
-       *  markup may rename: the "…" track actions. */
+       *  markup may rename: the like heart, the "…" track actions, the stars. */
       const chrome = [
+        ["heart", cell.querySelector("button[aria-label*='favorite' i]")],
         ["…", cell.querySelector("button[title^='Track actions']")],
+        ["stars", cell.querySelector("[role='group'][aria-label^='Rating']")],
       ].map(([what, el]) => {
         if (!el) return { what, missing: true };
         // On screen before hit-testing: a point below the fold has no element.
@@ -406,12 +422,18 @@ const check = (name, ok, detail) => {
         !!phone.name && phone.name.titleAttr.includes(phone.name.text), (phone.name?.titleAttr || "").slice(0, 48));
   const chrome = phone.name?.chrome || [];
   check("the row's chrome lands inside the name cell, not squeezed out",
-        chrome.length === 1 && chrome.every((c) => !c.missing && c.inside && c.hit),
+        chrome.length === 3 && chrome.every((c) => !c.missing && c.inside && c.hit),
         chrome.map((c) => `${c.what} ${c.w ?? "?"}x${c.h ?? "?"}${c.inside ? "" : " outside"}${c.hit ? "" : " unhittable"}`).join(", "));
-  // The "…" button carries the phone's 44 px hit area (the app's `tap-hit`).
+  // The icon buttons carry the phone's 44 px hit area (the app's `tap-hit`);
+  // the stars keep the app's own star geometry — a 70 px strip whose halves are
+  // as small as they are on every other rating control in the app — so what is
+  // pinned for them is the width of that strip.
   check("the icon buttons carry the phone's 44 px hit area",
-        chrome.every((c) => c.tap >= 40),
-        chrome.map((c) => `${c.what} ${c.tap} px`).join(", "));
+        chrome.filter((c) => c.what !== "stars").every((c) => c.tap >= 40),
+        chrome.filter((c) => c.what !== "stars").map((c) => `${c.what} ${c.tap} px`).join(", "));
+  check("and the rating strip is a target in its own right (>= 40 px wide)",
+        (chrome.find((c) => c.what === "stars")?.w ?? 0) >= 40,
+        `${chrome.find((c) => c.what === "stars")?.w} px`);
   check("the phone row is not a runaway ribbon",
         (phone.name?.rowH ?? 0) < 180, `${phone.name?.rowH} px tall`);
 
@@ -591,8 +613,9 @@ const check = (name, ok, detail) => {
   /* The report behind it: "Columns in the app are way to long, atleast on
    * album pages, also rows seem to wide. To be perfectly clear, columns should
    * auto-fit to the space on screen." AlbumPage (and TrackPage) were the only
-   * pages without the `mx-auto max-w-[1600px]` wrapper the rest of the app
-   * carries, so the tracklist was the one surface that stretched to
+   * pages without the `mx-auto max-w-[1600px]` wrapper every other page
+   * carries — Home, Library, Artist, Downloads, Favorites, Grading, Settings,
+   * the import wizard — so the tracklist was the one surface that stretched to
    * the window: at 2560 the table was 2320 px wide and the name column alone
    * took 1712 of it. Since the name column is deliberately the row's one
    * flexible column (R313, and the owner's own earlier report about a title

@@ -134,8 +134,8 @@ export default function Modal({
   // live in a `.row-hover` span whose opacity is gated on `.group:hover`, so
   // the credits dialog — `fixed inset-0`, the whole screen — was blanked the
   // moment the pointer left the window and painted back when it returned
-  // Rendering it out of that subtree also puts it above the app's own
-  // fixed layers honestly (it is z-[60] against their z-50), instead of
+  // (#35). Rendering it out of that subtree also puts it above the fullscreen
+  // player honestly (it is z-[60] against the player's z-50), instead of
   // depending on which container happened to hold the row.
   return createPortal(
     <div

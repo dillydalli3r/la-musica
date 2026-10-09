@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Image, Loader2, RefreshCw, ExternalLink, Check } from "lucide-react";
-import { api } from "../api";
+import { api, offlineFallback } from "../api";
 import { useI18n } from "../lib/i18n";
 import {
   autoCoverSearch,
@@ -157,6 +157,7 @@ export default function CoverSearchModal({ albumPath, artist, album, onClose, on
           // import checked them against is not in this reply: said to be
           // unknown rather than restated as if we had verified it.
           identity: null,
+          cached: null,
         }
       : null
   );
@@ -284,7 +285,9 @@ export default function CoverSearchModal({ albumPath, artist, album, onClose, on
    *  automatic search and the Search button both come through here with a
    *  query built by `coverQuery`, so the two paths cannot send different
    *  parameters. A click always re-asks — the finder keeps no answers of its
-   *  own, so a re-search is never short-circuited by a stored one. */
+   *  own, so a re-search is never short-circuited by a stored one; the only
+   *  stored answer in the app is the offline copy, keyed by the query and
+   *  consulted only when a request gets no answer at all. */
   const runQuery = async (q: CoverQuery) => {
     setLoading(true);
     setError(null);
@@ -292,6 +295,8 @@ export default function CoverSearchModal({ albumPath, artist, album, onClose, on
     setLastQuery(q);
     try {
       const r = await api.coverSearch(q);
+      const cached = offlineFallback();
+      const key = coverSearchPath(q);
       setAnswer({
         query: q,
         results: r.results ?? [],
@@ -301,6 +306,9 @@ export default function CoverSearchModal({ albumPath, artist, album, onClose, on
         // What the server says it verified the rows against — its own words,
         // not ours restated: it is the answer to "why was this row rejected".
         identity: r.identity ?? null,
+        // An answer the offline copy supplied is recorded as such: a real
+        // answer, but not a fresh one, and the finder says which.
+        cached: cached && (cached.key === key || cached.key.endsWith(key)) ? { at: cached.at } : null,
       });
     } catch (e) {
       // The server's or the provider's own words, verbatim. Nothing here may
@@ -664,6 +672,14 @@ export default function CoverSearchModal({ albumPath, artist, album, onClose, on
               {t("cover.answered", { terms: termsOf(phase.query) })}
             </div>
             <div className="text-[11px] text-zinc-500">{t("cover.empty_hint")}</div>
+            {/* An answer that came off disk is said to be one: a stale zero
+                must not read as a fresh "there is nothing". */}
+            {phase.cached && (
+              <div className="text-[11px] text-amber-400/90">
+                {t("cover.offline")}
+                {phase.cached.at ? ` · ${new Date(phase.cached.at).toLocaleString()}` : ""}
+              </div>
+            )}
             {phase.notes.length > 0 && (
               <details className="text-[11px] text-zinc-500">
                 <summary className="cursor-pointer select-none">{t("cover.source_notes")}</summary>
@@ -676,6 +692,12 @@ export default function CoverSearchModal({ albumPath, artist, album, onClose, on
                 </ul>
               </details>
             )}
+          </div>
+        )}
+        {outcome && outcome.cached && (
+          <div className="text-[11px] text-amber-400/90 pb-2">
+            {t("cover.offline")}
+            {outcome.cached.at ? ` · ${new Date(outcome.cached.at).toLocaleString()}` : ""}
           </div>
         )}
         {outcome && (

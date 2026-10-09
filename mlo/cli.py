@@ -13,6 +13,7 @@ import importlib
 import os
 import traceback
 
+from .artistdata import run_optimize_artist_images
 from .audit import run_audit_library
 from .autotag import run_auto_tagging
 from .cue import run_format_cues
@@ -178,9 +179,10 @@ def show_config_menu(config):
         print(f" 33. Audit BPM                : {config.get('audit_bpm', True)}")
         print(f" 34. DR/ReplayGain Enabled    : {config.get('dr_replaygain_enabled', True)}")
         print(f" 35. ReplayGain Skip Existing : {config.get('replaygain_skip_existing', True)}")
-        print(f" 36. Auto Instrumental Tag    : {config.get('auto_instrumental', True)}")
-        print(f" 37. Force Auto Tagging       : {config.get('force_auto_tag', False)}")
-        print(f" 38. Key & BPM Enabled        : {config.get('audiometa_enabled', True)}")
+        print(f" 36. Auto Album Advisory      : {config.get('auto_advisory', True)}")
+        print(f" 37. Auto Instrumental Tag    : {config.get('auto_instrumental', True)}")
+        print(f" 38. Force Auto Tagging       : {config.get('force_auto_tag', False)}")
+        print(f" 39. Key & BPM Enabled        : {config.get('audiometa_enabled', True)}")
 
         print_separator()
         print("  Auto-detected encoder versions (.dependencies):")
@@ -434,18 +436,24 @@ def show_config_menu(config):
             pause_for_input()
 
         elif choice == "36":
+            config["auto_advisory"] = tf("Auto-derive ALBUMITUNESADVISORY from track ITUNESADVISORY? (y/n): ")
+            save_config(config)
+            print(f"\nSaved. Auto Album Advisory = {config['auto_advisory']}")
+            pause_for_input()
+
+        elif choice == "37":
             config["auto_instrumental"] = tf("Auto-set INSTRUMENTAL from lyrics presence? (y/n): ")
             save_config(config)
             print(f"\nSaved. Auto Instrumental = {config['auto_instrumental']}")
             pause_for_input()
 
-        elif choice == "37":
+        elif choice == "38":
             config["force_auto_tag"] = tf("Force re-tagging even when tags are already correct? (y/n): ")
             save_config(config)
             print(f"\nSaved. Force Auto Tagging = {config['force_auto_tag']}")
             pause_for_input()
 
-        elif choice == "38":
+        elif choice == "39":
             config["audiometa_enabled"] = tf("Enable Key & BPM analysis (script 12)? (y/n): ")
             save_config(config)
             print(f"\nSaved. Key & BPM Enabled = {config['audiometa_enabled']}")
@@ -509,9 +517,9 @@ def build_script_runners():
     not have, and mlo.cli is on the import path of the whole CLI).
 
     EVERY id SCRIPTS declares is wired: the menu and the runner map are two
-    halves of one promise, and 15 spent time missing from this map
-    — the CLI could list it, and Run All answered "Skipping unknown script
-    id" while the menu kept advertising it. A script with no runner here is
+    halves of one promise, and 15 and 19 both spent time missing from this map
+    — the CLI could list them, and Run All answered "Skipping unknown script
+    id" while the menu kept advertising them. A script with no runner here is
     therefore an error, not a skipped step, and tools/test_script_menus.py
     asserts the coverage so the next id cannot be added to the menu alone.
     """
@@ -533,6 +541,7 @@ def build_script_runners():
         15: ("server.script_runners", "run_release_tracklist"),
         16: ("mlo.moods", "run_detect_mood_energy"),
         17: ("mlo.lyrics_xlit", "run_lyrics_xlit"),
+        19: run_optimize_artist_images,
         20: run_optimize_layout,
         # 21 writes ACOUSTID_* tags, so it is resolved on first use like the
         # other tag-writing scripts (and it is not re-exported by mlo itself).
@@ -544,6 +553,10 @@ def build_script_runners():
         # 23 deletes tags through the same stripper script 10 uses, so it is
         # resolved on first use like every other pass that opens a container.
         23: ("mlo.taghygiene", "run_tag_hygiene"),
+        # 24 downloads from the public rating sources, so its fetchers live
+        # with the rest of the network code (server.integrations) and the
+        # module is resolved on first use like every other fetching script.
+        24: ("mlo.web_ratings", "run_web_ratings"),
     }
     runners = {}
     for sid, name, _desc in SCRIPTS:

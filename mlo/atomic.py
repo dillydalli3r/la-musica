@@ -41,6 +41,9 @@ TEMP_PREFIXES = (
     ".mlo_config_",       # mlo.config.save_config
     ".accurip_tmp_",      # mlo.accurip
     ".accurip_fmt_",      # mlo.format_all
+    ".artwork_",          # mlo.artistdata (artwork.json)
+    ".artist_",           # mlo.artistdata (artist image)
+    ".description_",      # mlo.artistdata (descriptions)
     ".audit_evidence_",   # mlo.audit
     ".cue_fix_",          # mlo.discs
     ".cue_fmt_",          # mlo.format_all

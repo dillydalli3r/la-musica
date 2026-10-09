@@ -851,10 +851,11 @@
    "label": "Album-level tags",
    "default": true,
    "tags": [
-    "ALBUM DYNAMIC RANGE"
+    "ALBUM DYNAMIC RANGE",
+    "ALBUMITUNESADVISORY"
    ],
    "group": "tracks",
-   "description": "grades ALBUM DYNAMIC RANGE · toggle grade_check_album_tags — on by default",
+   "description": "grades ALBUM DYNAMIC RANGE, ALBUMITUNESADVISORY · toggle grade_check_album_tags — on by default",
    "enabled": true,
    "issue_codes": [],
    "writers": [
@@ -1209,6 +1210,25 @@
    ],
    "group": "links",
    "description": "grades MUSICBRAINZ_ALBUMID · toggle grade_check_mb_links — on by default",
+   "enabled": true,
+   "issue_codes": [],
+   "writers": [
+    "Beets tagging (14)"
+   ],
+   "presets": [
+    "strict",
+    "balanced"
+   ]
+  },
+  {
+   "key": "grade_check_rym_links",
+   "label": "RateYourMusic release link",
+   "default": true,
+   "tags": [
+    "RATEYOURMUSIC_ALBUM"
+   ],
+   "group": "links",
+   "description": "grades RATEYOURMUSIC_ALBUM · toggle grade_check_rym_links — on by default",
    "enabled": true,
    "issue_codes": [],
    "writers": [
@@ -1582,7 +1602,8 @@
    "id": "links",
    "title": "Identity links",
    "keys": [
-    "grade_check_mb_links"
+    "grade_check_mb_links",
+    "grade_check_rym_links"
    ]
   },
   {
@@ -1696,6 +1717,7 @@
     "grade_check_excess_tags",
     "grade_check_raw_video",
     "grade_check_mb_links",
+    "grade_check_rym_links",
     "grade_check_lossless_source",
     "grade_check_mood",
     "grade_check_energy",
@@ -1768,6 +1790,7 @@
     "grade_check_excess_tags",
     "grade_check_raw_video",
     "grade_check_mb_links",
+    "grade_check_rym_links",
     "grade_check_lossless_source",
     "grade_check_mood",
     "grade_check_energy",
@@ -1856,6 +1879,7 @@
     "kind": "bool",
     "default": true,
     "enabled": true,
+    "flag": null,
     "used": true,
     "description": "toggle audit_thorough — on by default"
    },
@@ -1865,6 +1889,7 @@
     "kind": "number",
     "default": 0,
     "enabled": 0,
+    "flag": null,
     "used": true,
     "description": "value audit_cutoff_allow — 0 by default"
    },
@@ -1874,6 +1899,7 @@
     "kind": "bool",
     "default": true,
     "enabled": true,
+    "flag": null,
     "used": true,
     "description": "toggle audit_verify_cd_checksums — on by default"
    },
@@ -1883,6 +1909,7 @@
     "kind": "bool",
     "default": true,
     "enabled": true,
+    "flag": null,
     "used": true,
     "description": "toggle audit_cd_require_both — on by default"
    },
@@ -1892,6 +1919,7 @@
     "kind": "bool",
     "default": true,
     "enabled": true,
+    "flag": null,
     "used": true,
     "description": "toggle audit_integrity — on by default"
    },
@@ -1901,6 +1929,7 @@
     "kind": "bool",
     "default": true,
     "enabled": true,
+    "flag": null,
     "used": true,
     "description": "toggle audit_fail_on_unscorable_log — on by default"
    },
@@ -1910,6 +1939,7 @@
     "kind": "bool",
     "default": true,
     "enabled": true,
+    "flag": null,
     "used": true,
     "description": "toggle audit_verify_log_checksum — on by default"
    },
@@ -1919,6 +1949,7 @@
     "kind": "bool",
     "default": true,
     "enabled": true,
+    "flag": null,
     "used": true,
     "description": "toggle audit_require_accuraterip — on by default"
    },
@@ -1928,6 +1959,7 @@
     "kind": "number",
     "default": 100,
     "enabled": 100,
+    "flag": null,
     "used": true,
     "description": "value audit_log_score_threshold — 100 by default"
    },
@@ -1937,6 +1969,7 @@
     "kind": "bool",
     "default": true,
     "enabled": true,
+    "flag": null,
     "used": true,
     "description": "toggle audit_check_cd_format — on by default"
    },
@@ -1946,6 +1979,7 @@
     "kind": "number",
     "default": 250,
     "enabled": 250,
+    "flag": null,
     "used": true,
     "description": "value audit_batch_size — 250 by default"
    },
@@ -1955,6 +1989,7 @@
     "kind": "number",
     "default": 30,
     "enabled": 30,
+    "flag": null,
     "used": true,
     "description": "value audit_batch_timeout_s — 30 by default"
    },
@@ -1964,6 +1999,7 @@
     "kind": "number",
     "default": 30,
     "enabled": 30,
+    "flag": null,
     "used": true,
     "description": "value audit_per_file_timeout_s — 30 by default"
    },
@@ -1983,6 +2019,7 @@
     "kind": "bool",
     "default": true,
     "enabled": true,
+    "flag": null,
     "used": true,
     "description": "toggle audit_scaled_clipping — on by default"
    },
@@ -2125,6 +2162,7 @@
   "grade_check_naming",
   "grade_check_raw_video",
   "grade_check_replaygain",
+  "grade_check_rym_links",
   "grade_check_sidecar_cover",
   "grade_check_source",
   "grade_check_tag_blank_lines",

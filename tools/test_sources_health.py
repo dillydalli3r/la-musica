@@ -27,6 +27,7 @@ sys.path.insert(0, ROOT)
 import mlo.lyrics_providers as lyrics  # noqa: E402
 from mlo.lyrics_providers import SOURCES as LYRICS_SOURCES  # noqa: E402
 from server import credential_checks as cc  # noqa: E402
+from server import discover  # noqa: E402
 from server import discovery  # noqa: E402
 from server import integrations as intg  # noqa: E402
 from server import sources_health as sh  # noqa: E402
@@ -74,8 +75,8 @@ ids = [r["id"] for r in rows]
 # The RYM link row shares its id with the genre source that reads the same
 # cookie — the id may appear twice, the (kind, id) pair may not.
 expected = (list(LYRICS_SOURCES) + sorted(intg.ADVISORY_SOURCES)
-            + list(intg.GENRE_SOURCES)
-            + ["rateyourmusic"]
+            + list(intg.GENRE_SOURCES) + list(discovery.IMAGE_SOURCES)
+            + ["rateyourmusic"] + [spec["id"] for spec in discover.SOURCES]
             + list(cc.credential_ids()))
 ok(sorted(ids) == sorted(expected),
    f"every registered source is reported once ({len(ids)} rows, "
@@ -111,14 +112,14 @@ ok(len(link_rows) == 1 and link_rows[0]["id"] == "rateyourmusic"
    f"the one link row is RateYourMusic and asks for the cookie "
    f"({[r['label'] for r in link_rows]})")
 lyrics_rows = [r for r in rows if r["kind"] == "lyrics"]
-ok([r.get("rank") for r in lyrics_rows] == list(range(1, len(lyrics_rows) + 1)),
+ok([r.get("rank") for r in lyrics_rows] == [1, 2, 3, 4, 5, 6],
    f"the lyrics rows carry the registry's 1-based rank in order "
    f"({[r.get('rank') for r in lyrics_rows]})")
 ok(all(isinstance(r.get("notes"), str) and r["notes"] for r in lyrics_rows),
    "…and each one's own notes")
 ok(all("rank" not in r for r in rows if r["kind"] not in ("lyrics", "genre"))
-   and all("notes" not in r for r in rows if r["kind"] != "lyrics"),
-   "no other kind borrows the lyrics-only keys")
+   and all("notes" not in r for r in rows if r["kind"] not in ("lyrics", "discover")),
+   "no other kind borrows the lyrics-only or discover-only keys")
 
 # `provides` is on EVERY row of EVERY kind — the wizard's Keys step renders
 # one line per provider saying what it gives the app, so a kind that quietly
@@ -154,6 +155,18 @@ ok(all(r["label"] != r["id"] for r in rows),
 ok(all(r["label"] for r in rows), "no row has an empty label")
 ok(health["checked_at"].endswith("+00:00"),
    f"`checked_at` is an ISO UTC stamp ({health['checked_at']})")
+
+disc_rows = [r for r in rows if r["kind"] == "discover"]
+ok([r["id"] for r in disc_rows] == [spec["id"] for spec in discover.SOURCES],
+   f"the Discover rows ARE the /api/discover registry, in its own order "
+   f"({[r['id'] for r in disc_rows]})")
+ok(all(r.get("notes") == spec["note"] for r, spec in zip(disc_rows, discover.SOURCES)),
+   "…each carrying what that source can answer (the panel shows it)")
+ok(row({"sources": disc_rows}, "lastfm")["needs"] == ["lastfm_api_key"]
+   and row({"sources": disc_rows}, "spotify")["needs"]
+   == ["spotify_client_id", "spotify_client_secret"]
+   and row({"sources": disc_rows}, "musicbrainz")["configured"] is True,
+   "…with the credential the DISCOVER source itself needs")
 
 # The credentials kind is the one that answers a DIFFERENT question from the
 # source rows: is the saved login accepted. `discogs`, `lastfm` and `spotify`
@@ -281,6 +294,8 @@ for sid, seam in (("spotify-isrc", "spotify_advisory"),
        f"{calls(seam)})")
 ok(calls("lyrics_probe") >= 5,
    f"the configured lyrics providers WERE probed ({calls('lyrics_probe')} calls)")
+ok(calls("deezer_artist") >= 1,
+   f"the configured metadata source WAS probed ({calls('deezer_artist')} calls)")
 # Only the login row has nothing to paste, so it is the ONE credential asked
 # with an empty config; the six keyed rows never reach the provider.
 ok(calls("credential_check") == 1,
@@ -370,9 +385,9 @@ def fake_specs(kind=None):
          "probe": boom},
         {"id": "keyed-source", "kind": "advisory", "label": "Keyed",
          "needs": ["discogs_token"], "probe": boom},
-        {"id": "tool-source", "kind": "metadata", "label": "Tool",
-         "needs": ["ffmpeg"],
-         "probe": lambda cfg: ("skipped", "needs an external program")},
+        {"id": "ytdlp-source", "kind": "metadata", "label": "Tool",
+         "needs": ["yt-dlp"],
+         "probe": lambda cfg: ("skipped", "needs a track's YouTube id")},
     ]
     return [s for s in specs if kind is None or s["kind"] == kind]
 
@@ -393,8 +408,8 @@ try:
     ok(keyed["status"] == "skipped" and keyed["configured"] is False
        and "discogs_token" in keyed["detail"],
        f"an unconfigured source is skipped, never probed ({keyed['detail']})")
-    tool = by_id["tool-source"]
-    ok(tool["status"] in ("ok", "skipped") and "ffmpeg" in tool["needs"],
+    tool = by_id["ytdlp-source"]
+    ok(tool["status"] in ("ok", "skipped") and "yt-dlp" in tool["needs"],
        f"a tool requirement is named in needs ({tool['needs']})")
     # the whole payload survives a probe that raises, per kind
     for kind in ("lyrics", "genre"):
@@ -402,6 +417,25 @@ try:
         ok(len(one) == 1, f"kind={kind} still returns its one row")
 finally:
     sh._specs = REAL_SPECS
+
+print("== the discover probes ==")
+discovery.deezer_genre_list = lambda timeout=None: [{"id": 152, "name": "Rock"},
+                                                   {"id": 132, "name": "Pop"}]
+st, detail = sh._probe_discover("deezer", {})
+ok(st == "ok" and detail == "2 genres",
+   f"the Discover probe asks what that source is FOR ({detail})")
+discovery.musicbrainz_genre_list = lambda pages=2: {
+    "genres": [{"name": "rock", "id": "x"}], "count": 1, "loaded": 1, "done": True}
+st, detail = sh._probe_discover("musicbrainz", {})
+ok(st == "ok" and detail == "1 genre",
+   f"…and reports MusicBrainz's own taxonomy ({detail})")
+discovery.audiodb_artist = lambda name, timeout=None: {"genre": "Rock",
+                                                       "mood": "Melancholic"}
+st, detail = sh._probe_discover("audiodb", {})
+ok(st == "ok" and "no list endpoint" in detail,
+   f"a verification source says what it can do instead ({detail})")
+ok(sh._probe_discover("nope", {}) == ("skipped", "unknown source"),
+   "an id this probe does not own is skipped, never guessed at")
 
 print("== registry order ==")
 ok(sh.source_ids() == [r["id"] for r in rows],

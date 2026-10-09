@@ -392,6 +392,7 @@ def only_fix_pairs(cfg, ids, targets=None, force=None, progress=None,
 script_runners.run_chain = only_fix_pairs
 imports.run_cover_step = lambda album_dir, cfg=None: {"source": "stub"}
 imports.run_metadata_step = lambda path, cfg=None: {"items": []}
+imports.stamp_rym_links = lambda path, cfg=None: {"note": "stub"}
 try:
     out = imports.finish_album(os.path.dirname(COPIES["auto"]), dict(CFG))
 finally:

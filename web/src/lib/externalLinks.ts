@@ -1,19 +1,19 @@
 import { invoke } from "@tauri-apps/api/core";
-import { IN_TAURI } from "../api";
+import { IN_MOBILE_SHELL, IN_TAURI } from "../api";
 
-/** Follow a link that leaves the app. In the DESKTOP shell that means the OS
- *  browser, through the shell's own `open_external` command
- *  (desktop/src-tauri/src/lib.rs). Webviews have no tabs and wry denies a
- *  `target="_blank"` window outright, so these clicks used to do nothing at
- *  all — which is exactly the report this fixes. A command that fails still
- *  gets the link out of the door: `window.open` is inert in a shell but
- *  correct in a browser, so the fallback costs nothing and covers a shell
- *  older than the command.
+/** Follow a link that leaves the app. In the DESKTOP shell
+ *  (`IN_TAURI && !IN_MOBILE_SHELL`) that means the OS browser, through the
+ *  shell's own `open_external` command (desktop/src-tauri/src/lib.rs).
+ *  Webviews have no tabs and wry denies a `target="_blank"` window outright,
+ *  so these clicks used to do nothing at all — which is exactly the report
+ *  this fixes. A command that fails still gets the link out of the door:
+ *  `window.open` is inert in a shell but correct in a browser, so the fallback
+ *  costs nothing and covers a shell older than the command.
  *
- *  Everywhere else (a plain browser) this is plain `window.open`, which is
- *  what those clients already did. */
+ *  Everywhere else (a plain browser, a phone shell) this is plain
+ *  `window.open`, which is what those clients already did. */
 export function openExternal(url: string) {
-  if (IN_TAURI) {
+  if (IN_TAURI && !IN_MOBILE_SHELL) {
     invoke("open_external", { url }).catch(() => {
       window.open(url, "_blank", "noreferrer");
     });
@@ -26,7 +26,7 @@ export function openExternal(url: string) {
  *  it is the shell that has to do something special. A browser needs nothing
  *  installed: it already follows these anchors correctly. */
 export function attachExternalLinks() {
-  if (!IN_TAURI) return;
+  if (!IN_TAURI || IN_MOBILE_SHELL) return;
   document.addEventListener(
     "click",
     (e) => {

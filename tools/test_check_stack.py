@@ -266,13 +266,13 @@ check("defaults are DEFAULT_CONFIG's",
       all(c["default"] == bool(DEFAULT_CONFIG[c["key"]]) for c in checks))
 
 groups = {g["id"]: g for g in stack["groups"]}
-check("7 groups are described", len(groups) == 7, sorted(groups))
+check("8 groups are described", len(groups) == 8, sorted(groups))
 check("every check is in exactly one group",
       sorted(k for g in groups.values() for k in g["keys"]) == sorted(keys),
       [c["key"] for c in checks if c["group"] not in groups])
 
 tg = ts_groups()
-check("the Grading page's own groups were parsed", len(tg) == 7, sorted(tg))
+check("the Grading page's own groups were parsed", len(tg) == 8, sorted(tg))
 ts_map = {k: gid for gid, (_, ks) in tg.items() for k in ks}
 ts_titles = {gid: title for gid, (title, _) in tg.items()}
 check("group ids match the Grading page", sorted(tg) == sorted(groups), sorted(tg))
@@ -350,7 +350,7 @@ check("the toggle survives a re-read", row(put({}).json(), "grade_check_mood")
 # anchor-consistent order: normalize_config re-inserts every registry id the
 # saved order does not name (20, 21 and 23 among them, at their anchors), and
 # the check below is that a full order survives verbatim.
-order_new = [4, 1, 11, 3, 14, 15, 2, 13, 17, 8, 5, 6, 7, 9, 12, 16,
+order_new = [4, 1, 11, 3, 14, 15, 2, 13, 17, 8, 24, 5, 19, 6, 7, 9, 12, 16,
              10, 23, 20, 21]
 r = put({"order": order_new})
 check("a new chain order is accepted", r.status_code == 200, r.text[:200])

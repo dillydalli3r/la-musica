@@ -16,9 +16,9 @@ asserts the CONTRACT by counting constructor calls — no timings — with the
 shared client warmed and a stubbed transport mounted:
 
   * one client, process-wide;
-  * every app seam — the module-level get/post the providers use, the cover
-    probe seam, discovery's JSON seam and artcache's image seam — reaches
-    that client and builds NO new one (call count 0);
+  * every app seam — the module-level get/post the providers use, the
+    streaming cover/probe seams, discovery's JSON seam and artcache's image
+    seam — reaches that client and builds NO new one (call count 0);
   * and the shared client keeps no cookie jar, because the module-level API it
     replaces dropped response cookies with the client that received them.
 
@@ -55,6 +55,7 @@ def main():
         return 2
 
     from server import artcache, discovery, httpclient, integrations
+    from server import streaming_playlists
 
     # ---- one client, process-wide ---------------------------------------
     first = httpclient.client()
@@ -94,6 +95,8 @@ def main():
         probe = integrations._probe_get("https://img.example/front.jpg",
                                         nbytes=4)
         found = discovery._json("https://api.example/discovery")   # httpx.get
+        pl, pl_err, _meta = streaming_playlists._get(              # httpx.get
+            "https://api.example/playlist")
         status, image, ctype = artcache._get(                      # client.stream
             "https://img.example/cover.jpg", {"User-Agent": "t"}, 5.0)
     finally:
@@ -106,14 +109,14 @@ def main():
        f"{len(served)} request(s))")
     ok(httpclient.client() is first,
        "httpx: the shared client is still the same object after those calls")
-    ok(len(served) >= 5,
+    ok(len(served) >= 6,
        f"the seams really used it ({len(served)} request(s) reached the "
        f"stubbed transport: {', '.join(sorted(set(served)))})")
     ok(mb == PAYLOAD and post == PAYLOAD and err == "",
        f"MB and the advisory POST still return the body ({mb}, {post!r}, "
        f"{err!r})")
-    ok(found == PAYLOAD,
-       f"discovery's JSON seam still returns the body ({found})")
+    ok(found == PAYLOAD and pl == PAYLOAD and pl_err == "",
+       f"discovery and the playlist seam still return the body ({found}, {pl})")
     ok(probe == b"\xff\xd8\xff\xe0",
        f"the cover probe still answers with the response's first bytes "
        f"({probe!r})")

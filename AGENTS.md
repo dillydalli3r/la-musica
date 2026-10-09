@@ -15,7 +15,7 @@ python -m uvicorn server.main:app --host 127.0.0.1 --port 8011
 ## Always point a test run at a scratch music folder
 
 The app writes its state beside the library it is given, so a test that runs
-against the real folder can touch the owner's files:
+against the real folder can touch the owner's wishes, playlists and files:
 
 ```bash
 MLO_MUSIC_FOLDER=F:/tmp/mlo-<what-you-are-testing> \
@@ -112,7 +112,7 @@ When they do ask for one:
    when one moves.
 3. `git push origin main`, then tag and push it
    (`git tag -a vX.Y.Z -m "la musica X.Y.Z" && git push origin vX.Y.Z`): the tag
-   runs `.github/workflows/release.yml` — suites, then the web/desktop/
+   runs `.github/workflows/release.yml` — suites, then the web/desktop/mobile/
    docker builds and the published GitHub release (~10 min). Watch it with
    `gh run watch <id>`; a red job there is the release, not the change.
 
@@ -187,8 +187,8 @@ When they do ask for one:
   follow it.
 - **`createUpdaterArtifacts` and the signing key live in the desktop workflow,
   never in `tauri.conf.json`.** With them in the config, every build that is not
-  a release — a local `tauri build` — would demand the key and fail without it;
-  the workflow passes both,
+  a release — a local `tauri build`, the mobile workflow's compile of the same
+  crate — would demand the key and fail without it; the workflow passes both,
   and the release job assembles `latest.json` from the signatures the bundles
   left behind (`tools/make_updater_manifest.py`, whose suite pins every platform
   key Tauri's updater asks for). The app's endpoint and public key are in
@@ -198,6 +198,19 @@ When they do ask for one:
   that switch rejects any signature without a version in it — every update would
   fail, and the failure would look like a broken endpoint rather than a config
   mistake.
+- **The OS media card is the shell's, and the webview's own session stays off.**
+  Windows names a media session by its Application User Model ID, and the one
+  WebView2 publishes for the page's Media Session belongs to the RUNTIME's
+  process (`msedgewebview2.exe`), which resolves to no app — that is the
+  "Unknown app" label in Windows 11's media flyout, and it is not ours to set.
+  So the shell publishes its own session (`desktop/src-tauri/src/win_media.rs`,
+  opened on the main window in `lib.rs`'s setup hook) and the webview's is
+  switched off in `tauri.conf.json` (`additionalBrowserArgs`,
+  `HardwareMediaKeyHandling`). Those two lines plus the bridge between them —
+  the `set_now_playing` command, the `mlo-media-key` event, and the handlers
+  `PlayerBar.tsx` shares between `navigator.mediaSession` and the shell — are
+  one mechanism: turning either the session or the flag off alone leaves the
+  flyout with two cards for one song.
 - **A console child gets `CREATE_NO_WINDOW`.** The server runs windowed and owns
   no console, so anything launched without it flashes a terminal window;
   `mlo/deps.py`'s spawn probe did exactly that on the first Dependencies request.

@@ -1,7 +1,7 @@
 /** Column defs, visibility/width prefs, and the columns chooser + resizer.
  *
  * Imported by the library/album/cached/trash tables and their tracklists
- * (see AlbumPage, LibraryPage, ExportPage, TrashPage).
+ * (see AlbumPage, LibraryPage, DownloadsPage, TrashPage, FavoritesPage).
  * Column visibility and widths persist per view in localStorage. */
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
@@ -72,7 +72,7 @@ export const ALBUM_TRACK_COL_W: Record<string, string> = {
   //
   // The floor it needs — 280, what this cell's parts need on ONE line: the name
   // plus the marks that belong to it (advisory, cached, video, the issue
-  // counter) plus the row's constant trailing slot (the trailing controls),
+  // counter) plus the row's constant trailing slot (heart, "…", five stars),
   // measured 283 px on the widest row of a real album — is carried INTO the
   // cell by `ColFloorHolder` instead of by a width here, because a width is
   // exactly what stops the column absorbing the free width. It has to be a
@@ -206,7 +206,7 @@ export const PHONE_HIDE = " hidden md:table-cell";
  *  measured rather than stylistic: the page hands the table 342 px at 390 px,
  *  the corner control (columns chooser + select toggle) takes 76 and # + Dur
  *  another 144, so the Title column gets the last 122 — and the title cell has
- *  to hold the trailing controls beside the name too. The 52
+ *  to hold the heart, the "…" and the rating stars beside the name too. The 52
  *  px cover is what buys the name its room, and it is the one column this table
  *  can lose without costing the reader anything: the album's own cover is the
  *  hero above the table, and it is the art every track in the album shares. */
@@ -286,6 +286,10 @@ export const TRACK_COL_W: Record<string, string> = {
   // The tracklist's own id for the same length column the Tracks view calls
   // `duration` (see TRACK_PHONE_CLS).
   dur: "w-20",
+  // Five `sm` stars plus the click target around them — the same 104 px the
+  // album table gives its Rating column, so a rating reads the same width
+  // wherever it appears.
+  rating: "w-[104px]",
 };
 
 /** The floor an `auto` title column carries INTO its cell — the width of the
@@ -331,9 +335,9 @@ export const TRACK_COLS: Col[] = [
   { id: "media", label: "Media", sortKey: "tags.MEDIA" },
   { id: "duration", label: "Duration", sortKey: "tech.length" },
   { id: "bitrate", label: "Bitrate", sortKey: "tech.bitrate" },
-  // ReplayGain deliberately has NO column: it is playback metadata — a
-  // compatible player applies it to keep loudness even between tracks. Only
-  // Dynamic Range is shown.
+  // ReplayGain deliberately has NO column: it is playback metadata — the
+  // player applies it to keep loudness even between tracks. Only Dynamic
+  // Range is shown.
   { id: "dr", label: "DR", sortKey: "tags.DYNAMIC RANGE" },
   { id: "source", label: "Source", sortKey: "tags.SOURCE" },
   { id: "type", label: "Type", sortKey: "is_video" },
@@ -342,6 +346,16 @@ export const TRACK_COLS: Col[] = [
   { id: "lyricist", label: "Lyricist", sortKey: "tags.LYRICIST", defHidden: true },
   { id: "remixer", label: "Remixer", sortKey: "tags.REMIXER", defHidden: true },
 ];
+
+/** The Library's Tracks view own Rating column.
+ *
+ *  Here rather than in `TRACK_COLS` because the Library is the only table whose
+ *  rows carry a rating: the export preview and the offline cache draw the same
+ *  tracks without any rating data, and a column they cannot fill would be a
+ *  permanently blank 104 px on both. The value is the caller's own — the
+ *  Library injects the folder/track ratings into its rows (`ratedTracks`), and
+ *  the cell is a live star control, exactly like the album tracklist's. */
+export const TRACK_RATING_COL: Col = { id: "rating", label: "Rating", sortKey: "rating" };
 
 /** The track tables that list whole tracks in LIBRARY order — the Tracks view,
  *  the export preview, and the Library's expanded album rows (which share the
@@ -355,6 +369,7 @@ export const TRACK_PHONE_CLS: Record<string, string> = {
   genre: PHONE_HIDE, media: PHONE_HIDE, duration: PHONE_HIDE, dur: PHONE_HIDE,
   bitrate: PHONE_HIDE, dr: PHONE_HIDE, source: PHONE_HIDE, type: PHONE_HIDE,
   inst: PHONE_HIDE, composer: PHONE_HIDE, lyricist: PHONE_HIDE, remixer: PHONE_HIDE,
+  rating: PHONE_HIDE,
 };
 
 /** Tag columns the user added fold with the built-ins they sit beside. */
@@ -837,7 +852,7 @@ export function ColumnsMenu({
       {open && (
         <>
           <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
-          <div className={`absolute right-0 top-full mt-1 z-50 bg-card border border-border rounded-lg p-2 ${onAddCustom ? "w-56" : "w-48"} shadow-2xl max-h-[70vh] overflow-y-auto overscroll-contain`}>
+          <div className={`absolute right-0 top-full mt-1 z-50 bg-card border border-border rounded-lg p-2 ${onAddCustom ? "w-56" : "w-48"} shadow-2xl`}>
             <div className="text-[10px] uppercase tracking-wider text-zinc-500 px-2 pt-1 pb-1.5">{title}</div>
             {cols.map((c) => (
               <div key={c.id} className="flex items-center gap-2 px-2 py-1.5 text-xs hover:bg-panel rounded tap">

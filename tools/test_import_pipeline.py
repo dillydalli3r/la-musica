@@ -86,10 +86,10 @@ CFG = {"music_folder": MF, "import_auto_scripts": False, "import_scripts": [],
 # CUEs → 1 lyrics format), then content, then 10 Format all, then 4 Grade.
 # The chain IS the Run All order — one list, in `mlo.config` — minus the
 # library-wide scripts it declares (`LIBRARY_WIDE_SCRIPTS`): a script added to
-# Run All can never be silently missing from the import path again. Two were
-# (16 Mood & Energy, 17 Lyrics transliterate (AI): Run All ran them, an import
-# never did), which is what this assertion now catches — and nothing is left
-# out today: 20 (Optimize library layout) was the one
+# Run All can never be silently missing from the import path again. Three were
+# (16 Mood & Energy, 17 Lyrics transliterate (AI), 19 Optimize artist images:
+# Run All ran them, an import never did), which is what this assertion now
+# catches — and nothing is left out today: 20 (Optimize library layout) was the one
 # declared exception while its runner ignored `targets` and re-walked the whole
 # library per album, and it now scopes itself to the album it is handed.
 assert imports.DEFAULT_CHAIN == [sid for sid in DEFAULT_RUN_ALL_ORDER
@@ -103,7 +103,7 @@ assert set(DEFAULT_RUN_ALL_ORDER) - set(imports.DEFAULT_CHAIN) == set(), \
 assert 20 in imports.DEFAULT_CHAIN, imports.DEFAULT_CHAIN
 assert imports.DEFAULT_CHAIN.index(14) < imports.DEFAULT_CHAIN.index(20) \
     < imports.DEFAULT_CHAIN.index(4), imports.DEFAULT_CHAIN
-for _sid in (16, 17):
+for _sid in (16, 17, 19):
     assert _sid in imports.DEFAULT_CHAIN, \
         f"script {_sid} must be reached by an import, not only by Run All"
 assert imports.chain_for({}) == imports.DEFAULT_CHAIN
@@ -121,10 +121,9 @@ assert imports.chain_for({"import_auto_scripts": False}) == []
 # --------------------------------------------------------------------------- #
 # Registry + one script
 # --------------------------------------------------------------------------- #
-# Every script id the app ships, less the retired slots 18, 19 (Optimize artist
-# images) and 24 (Web ratings) — their slots stay empty: a stored force flag or
-# config references ids, so numbers do not move.
-assert sorted(script_runners.RUNNERS) == [i for i in range(1, 24) if i not in (18, 19)], \
+# Every script id the app ships, less the retired 18 (its slot stays empty:
+# a stored force flag or config references ids, so numbers do not move).
+assert sorted(script_runners.RUNNERS) == [i for i in range(1, 25) if i != 18], \
     sorted(script_runners.RUNNERS)
 assert script_runners.RUNNERS[2][0] == "Format CUEs", script_runners.RUNNERS[2]
 assert script_runners.RUNNERS[2][1].__name__ == "run_format_cues", script_runners.RUNNERS[2]
@@ -201,7 +200,7 @@ assert imports.chain_summary({"path": album}) == "", imports.chain_summary({"pat
 # --------------------------------------------------------------------------- #
 # There is no "stage and place, no tagging" flavour any more: that flavour is
 # what left auto-downloaded files without their optimization/tagging pass. The
-# same call stages the album (RYM links, cover) and then runs the
+# same call stages the album (RYM links, metadata, cover) and then runs the
 # configured chain over the folder the organizer left it at.
 DF_CFG = {"music_folder": MF, "import_scripts": [4, 3],
           "advisory_auto_fetch": True, "instrumental_auto_fetch": True,
@@ -212,8 +211,8 @@ defer_album = staging_album("Defer Album")
 DF_PATH = os.path.normpath(defer_album)
 _seen = {}
 _real_steps = {n: getattr(imports, n) for n in
-               ("fetch_advisories", "fetch_instrumentals",
-                "run_cover_step", "_stamp_release")}
+               ("stamp_rym_links", "fetch_advisories", "fetch_instrumentals",
+                "run_metadata_step", "run_cover_step", "_stamp_release")}
 _real_run_chain = script_runners.run_chain
 
 
@@ -225,8 +224,11 @@ def _spy(name, value):
 
 
 try:
+    imports.stamp_rym_links = _spy("rym", {"album": None, "artist": None,
+                                           "note": "", "written": 0})
     imports.fetch_advisories = _spy("advisory", {})
     imports.fetch_instrumentals = _spy("instrumental", {})
+    imports.run_metadata_step = _spy("metadata", {})
     imports.run_cover_step = _spy("cover", {})
     imports._stamp_release = _spy("genres", (0, 0))
     script_runners.run_chain = _spy("chain", [])
@@ -244,8 +246,10 @@ finally:
 # action is release-driven, and this fixture's files carry no MusicBrainz
 # identity to resolve a release from (tools/test_autonomous_import.py's album
 # has one and asserts the step runs there).
-assert default_seen == {"cover": 1,
+assert default_seen == {"rym": 1, "metadata": 1, "cover": 1,
                         "advisory": 1, "instrumental": 1, "chain": 1}, default_seen
+assert default_args["rym"][0][0] == (DF_PATH, DF_CFG), default_args["rym"]
+assert default_args["metadata"][0][0] == (DF_PATH, DF_CFG), default_args["metadata"]
 assert default_args["chain"][0][0][1] == [4, 3], default_args["chain"]
 assert default_args["chain"][0][1]["targets"] == [DF_PATH], default_args["chain"]
 assert full["chain"] == [4, 3] and full["chained"] is True, full
@@ -256,6 +260,93 @@ assert full["chain_off"] is False and full["scripts"] == [], full
 assert full["note"] == ("the script chain did not run — " + imports.SKIPPED_LYRICS), full
 assert full["skipped_families"] == [imports.SKIPPED_LYRICS], full["skipped_families"]
 assert imports.chain_summary(full) == full["note"], full
+
+# --------------------------------------------------------------------------- #
+# The metadata step WRITES what is missing (artist image + both descriptions)
+# --------------------------------------------------------------------------- #
+# The step every path runs (asserted above) is not decoration: with the sources
+# answering, an album whose artist folder holds no image and whose folders hold
+# no descriptions ends the import with all three on disk — the owner's ask that
+# an import FETCH this instead of leaving it to a hand-run script. Only the
+# sources are stubbed (the three `discovery` finders and the image fetch); the
+# writers below them are the real ones, and the artist image is a real
+# 1200×1200 JPEG that `artistdata.save_image` fits to the configured policy.
+# Its own music root: this suite asserts elsewhere on the exact contents of
+# `LIB`, and a library the check wants to see is not the one under test.
+META_ROOT = os.path.join(ROOT, "meta_music")
+META_ALBUM = os.path.join(META_ROOT, "Artists", "Test Artist", "Test Album")
+meta_track = make_wav(os.path.join(META_ALBUM, "01 - track.wav"))
+from mlo.audio import AudioFile as _AudioFile
+_af = _AudioFile(meta_track)
+_af.set_tag("ARTIST", "Test Artist")
+_af.set_tag("ALBUMARTIST", "Test Artist")
+_af.set_tag("ALBUM", "Test Album")
+
+import io as _io
+from PIL import Image as _Image
+_buf = _io.BytesIO()
+_Image.new("RGB", (1200, 1200), (10, 20, 30)).save(_buf, format="JPEG")
+ARTIST_JPEG = _buf.getvalue()
+
+from server import discovery as _discovery
+from server import integrations as _intg
+from mlo import artistdata as _artistdata
+_saved = {n: getattr(_discovery, n) for n in
+          ("artist_image", "artist_description", "album_description")}
+_saved_fetch = _intg.fetch_image_bytes
+_discovery.artist_image = lambda artist, mbid="", cfg=None: {
+    "url": "http://stub.invalid/artist.jpg", "source": "stub", "label": "Stub portrait"}
+_discovery.artist_description = lambda artist, mbid="", cfg=None: {
+    "text": "Test Artist is a band from the fixture.", "source": "stub",
+    "source_url": "http://stub.invalid/artist"}
+_discovery.album_description = lambda artist, album, cfg=None: {
+    "text": "Test Album is the fixture's first record.", "source": "stub",
+    "source_url": "http://stub.invalid/album"}
+_intg.fetch_image_bytes = lambda url, **kw: (ARTIST_JPEG, "image/jpeg")
+
+META_CFG = {"music_folder": META_ROOT, "metadata_auto_fetch": True,
+            "metadata_review": False, "artist_image_enabled": True,
+            "artist_description_enabled": True, "album_description_enabled": True}
+try:
+    artist_folder = _artistdata.artist_dir(META_CFG, "Test Artist")
+    assert artist_folder and not _artistdata.has_image(artist_folder)
+    assert not os.path.exists(os.path.join(META_ALBUM, "description.txt"))
+    out = imports.run_metadata_step(META_ALBUM, META_CFG)
+    applied = out["applied"]
+    assert applied["artist_image"], out
+    assert applied["artist_description"], out
+    assert applied["album_description"], out
+    assert _artistdata.has_image(artist_folder),         "the import fetched the artist's missing image"
+    with open(os.path.join(artist_folder, "description.txt"), encoding="utf-8") as fh:
+        assert "Test Artist is a band" in fh.read(), "the artist biography was written"
+    with open(os.path.join(META_ALBUM, "description.txt"), encoding="utf-8") as fh:
+        album_text = fh.read()
+    assert "Test Album is the fixture" in album_text, "the album blurb was written"
+
+    # A second run never overwrites what is stored: the writers fill, they do
+    # not replace — an edited description is the reader's, not the source's.
+    edited = "Hand-written blurb, keep me.\n"
+    with open(os.path.join(META_ALBUM, "description.txt"), "w", encoding="utf-8") as fh:
+        fh.write(edited)
+    again = imports.run_metadata_step(META_ALBUM, META_CFG)
+    assert again["applied"]["album_description"] in (None, ""), again
+    with open(os.path.join(META_ALBUM, "description.txt"), encoding="utf-8") as fh:
+        assert fh.read() == edited, "an existing description is left as it is"
+
+    # ...and the per-feature switches decide what may be fetched at all: with
+    # all three off, a fresh album writes nothing.
+    off_album = os.path.join(META_ROOT, "Artists", "Test Artist", "Switched Off")
+    make_wav(os.path.join(off_album, "01 - track.wav"))
+    off_cfg = dict(META_CFG, artist_image_enabled=False,
+                   artist_description_enabled=False, album_description_enabled=False)
+    off = imports.run_metadata_step(off_album, off_cfg)
+    assert not any((off["applied"] or {}).values()), off
+    assert not os.path.exists(os.path.join(off_album, "description.txt")), \
+        "a switched-off feature writes nothing"
+finally:
+    for _n, _fn in _saved.items():
+        setattr(_discovery, _n, _fn)
+    _intg.fetch_image_bytes = _saved_fetch
 
 # --------------------------------------------------------------------------- #
 # AcoustID: unusable says why, and says nothing about matching
@@ -338,13 +429,15 @@ assert all(r[3]["status"] == "imported" for r in progress_rows), progress_rows
 # the order the import works in. A row COUNT is satisfied by any producer that
 # happens to publish as many frames (and broken by one that publishes one
 # more), which is not what this line is here to say.
-# The cover step announces itself on its own now: it writes FILES (the art)
-# while the tag steps write TAGS, so it runs beside them — started after the
-# genre step (which settles the identity its lookup reads) and joined before
-# the chain (`imports._files_step`).
+# The metadata and cover steps announce themselves together now: they write
+# FILES (the review record, the art) while the four tag steps write TAGS, so
+# the pair runs beside them — started after the genre step (which settles the
+# identity its lookup reads) and joined before the chain. One frame for the
+# pair, because that is what it is: two steps on one worker, in their own
+# order (`imports._files_step`).
 # A phase frame says what this import is DOING, so an import with nothing to do
 # publishes none: this fixture's config runs no chain and switches every network
-# step off (links, cover art, advisories, instrumentals), and the
+# step off (links, metadata, cover art, advisories, instrumentals), and the
 # albums carry no MusicBrainz identity for the release-identity or genre steps
 # to work from — so there is no step to announce, and the strip must not be told
 # that there is (the owner's report: a step that is a no-op for this album, or a
@@ -353,7 +446,7 @@ assert all(r[3]["status"] == "imported" for r in progress_rows), progress_rows
 # section at the end of this file.
 PHASE_TEXTS = ("Looking up links…", "Stamping the release's identity…",
                "Fetching genres…", "Settling the digital release…",
-               "Fetching cover art…", "Fetching advisories…",
+               "Fetching metadata and cover art…", "Fetching advisories…",
                "Checking instrumentals…")
 phase_rows = [row for row in hook_rows if row[2] in PHASE_TEXTS]
 assert phase_rows == [], phase_rows
@@ -1334,7 +1427,9 @@ print("import pipeline: all assertions passed")
 #     every track that lacks it once the release or the user answers;
 #   * an untimed lyric — and one the formatter cannot canonicalise — is removed
 #     when the chain will fetch, and NOT touched when it will not (the honest
-#     report is the family's own skip there).
+#     report is the family's own skip there);
+#   * the album description comes from the import's own metadata step, whose
+#     "nothing found" answer is reported rather than left to the grade.
 print("== the digital release's own answers ==")
 
 DIG_MF = os.path.join(ROOT, "digital_music")
@@ -1418,6 +1513,7 @@ def _lyric_issues(issues=None):
 _before = _dig_issues()
 assert "Missing SOURCE (required for Digital Media)" in _before, sorted(_before)
 assert _lyric_issues(_before), sorted(_before)
+assert "Album description missing — fetch one on the album page" in _before, sorted(_before)
 
 # the suggestion: nothing states a source, so it is ASKED, with the config's
 # own default for the field — and nothing is written
@@ -1461,7 +1557,28 @@ _allowed = imports.settle_digital_lyrics(DIG_ALBUM, dict(DIG_CFG, lyrics_allow_p
                                          chain=[1, 13])
 assert _allowed["state"] == "allow-plain" and _allowed["dropped"] == 0, _allowed
 
-for _probe in ("Missing SOURCE (required for Digital Media)",):
+# the description: the import's OWN metadata step, and its honest answer when
+# nothing is found (no provider reachable / nothing to find)
+from server import discovery as _dig_discovery
+_real_album_description = _dig_discovery.album_description
+try:
+    _dig_discovery.album_description = lambda *a, **k: {}
+    _meta_cfg = dict(DIG_CFG, metadata_auto_fetch=True)
+    _nope = imports.settle_digital_import(DIG_ALBUM, _meta_cfg, chain=[1, 13], metadata=True)
+    assert _nope["metadata"]["applied"]["album_description"] is None, _nope["metadata"]
+    assert "Album description missing — fetch one on the album page" in _dig_issues(), \
+        "an album nothing can describe still grades as missing — and the settle says so"
+    _dig_discovery.album_description = lambda *a, **k: {
+        "text": "A digital release described by its own source.",
+        "source": "wikipedia", "source_url": "https://en.wikipedia.org/wiki/x"}
+    _got = imports.settle_digital_import(DIG_ALBUM, _meta_cfg, chain=[1, 13], metadata=True)
+    assert _got["metadata"]["applied"]["album_description"], _got["metadata"]
+    assert "Album description missing — fetch one on the album page" not in _dig_issues(), \
+        _dig_issues()
+finally:
+    _dig_discovery.album_description = _real_album_description
+for _probe in ("Missing SOURCE (required for Digital Media)",
+               "Album description missing — fetch one on the album page"):
     assert _probe not in _dig_issues(), (_probe, _dig_issues())
 assert not _lyric_issues(), _dig_issues()
 
@@ -1687,7 +1804,7 @@ print("== the import's published phases ==")
 # frame is the import's readout BEFORE its first script, so it names work that
 # is really about to happen to THIS album — a step that is a no-op for it (a CD
 # rip has nothing digital to settle), a family that is switched off (links,
-# cover art, advisories, instrumentals) or a decision the album states
+# metadata, cover art, advisories, instrumentals) or a decision the album states
 # nothing for (no release identity to stamp, no genre source to ask) is not
 # announced at all. Asserted as the EXACT sequence, in order, because "which
 # frames" is the whole contract — a count is satisfied by any producer that

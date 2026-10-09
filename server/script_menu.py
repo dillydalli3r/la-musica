@@ -1,7 +1,7 @@
 """Which script a details menu may offer for WHICH entity — asked of the
 registry that runs it, never typed into a menu.
 
-MAINTAIN -> the "…" menu beside an album, a track row, an artist or the
+MAINTAIN -> the "…" menu beside an album, a track row, an artist or a playlist
 selection is generated from THIS payload. Before it existed every menu carried
 its own hand-written handful of scripts (``web/src/components/TagActionsMenu``
 had ten of the twenty-one, and nothing made the two lists agree), so a script
@@ -24,14 +24,14 @@ twenty-one:
   file    the runner's work unit is a FILE. Hand it the selection's own paths
           and each file gets its own complete treatment (a tag, a sidecar
           named after the file, a re-encode, a measurement of that track).
-          Such a script applies from any menu that holds paths — a track row,
-          an album, an artist, the library.
+          Such a script applies from any menu that holds paths — a track row, a
+          playlist selection, an album, an artist, the library.
   folder  the runner's work unit is the FOLDER (its ``.cue``/``.accurip``/
           ``.lrc`` sidecars, its cover art, its release manifest, a per-album
-          measurement, the subtree's layout). An audio file on its own is not
-          something it can finish, so it is offered where a folder is in hand —
-          an album, an artist, the library — and NOT on a track row, which
-          holds files.
+          measurement, the artist image beside it, the subtree's layout). An
+          audio file on its own is not something it can finish, so it is
+          offered where a folder is in hand — an album, an artist, the library
+          — and NOT on a track row or a playlist, which hold files.
 
 A script the table does not know is reported in ``unclassified`` and offered
 everywhere: a menu that silently dropped a newly registered script is the drift
@@ -55,10 +55,10 @@ router = APIRouter()
 # --------------------------------------------------------------------------- #
 # The entity kinds a menu is mounted on
 # --------------------------------------------------------------------------- #
-# What each kind's menu hands a run: a track row holds FILES; an album, an
-# artist and the library hold FOLDERs (and the files under them). That split is
-# the whole of the applicability rule below.
-KINDS = ("album", "track", "artist", "library")
+# What each kind's menu hands a run: a track row and a playlist selection hold
+# FILES; an album, an artist and the library hold FOLDERs (and the files under
+# them). That split is the whole of the applicability rule below.
+KINDS = ("album", "track", "artist", "playlist", "library")
 _FOLDER_KINDS = ("album", "artist", "library")
 
 # --------------------------------------------------------------------------- #
@@ -105,6 +105,8 @@ SCOPES: Dict[int, str] = {
     16: "file",   # mlo/moods.py: per-file MOOD/ENERGY from that track's audio.
     17: "file",   # mlo/lyrics_xlit.py: per-file transforms — the
                   # TRANSLITERATION/TRANSLATION tags and .romaji.lrc sidecar.
+    19: "folder", # mlo/artistdata.py: the ARTIST folder's image is the subject
+                  # (artist_folders resolves a target to the artist it sits in).
     20: "folder", # mlo/layout.py: the subject is the shape of a subtree; a run
                   # with targets fixes exactly those trees.
     21: "file",   # mlo/acoustid.py: per-file ACOUSTID_ID/FINGERPRINT pair.
@@ -116,6 +118,12 @@ SCOPES: Dict[int, str] = {
                   # both clean exactly the files they hold — which is what
                   # makes "clean this album's tags" available without a
                   # re-encode (3) or a format pass (10).
+    24: "folder", # mlo/web_ratings.py: the ALBUM's public score is fetched once
+                  # and written to every track of the folder, and the track
+                  # answers are keyed to that album's identity — the work unit
+                  # is the album, exactly like 8. A file on its own has no
+                  # release-group id to ask about, so a track row is not a menu
+                  # this script can finish.
 }
 
 # One line per script, for the report and for the test's non-empty check.
@@ -137,10 +145,12 @@ BECAUSE: Dict[int, str] = {
     15: "writes one release manifest per album",
     16: "reads one file's mood and energy",
     17: "stores one file's transliteration/translation",
+    19: "re-fits the artist folder's image",
     20: "fixes the layout of a whole subtree",
     21: "completes one file's AcoustID pair",
     22: "submits one file's fingerprint with its MusicBrainz recording",
     23: "deletes one file's excess tags (unneeded aliases included)",
+    24: "fills one album's public rating, and each track's own",
 }
 
 # --------------------------------------------------------------------------- #

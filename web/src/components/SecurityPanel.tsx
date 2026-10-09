@@ -7,6 +7,7 @@ import ServerVersionNotice from "./ServerVersionNotice";
 import ClientUpdate from "./ClientUpdate";
 import { useI18n } from "../lib/i18n";
 import { isClientShell, probeServer, resetClientSetup, type ProbeResult } from "../lib/clientSetup";
+import { dropPush } from "../lib/notify";
 import { toast } from "../store";
 
 /** Settings → Security: the password, this client's session, and the facts a
@@ -104,13 +105,14 @@ export default function SecurityPanel() {
   const signOut = async (everywhere: boolean) => {
     setBusy(true);
     try {
+      await dropPush(); // this device must stop being woken once nobody is signed in
       if (everywhere) await api.authRevokeAll();
       else await api.authLogout();
       setToken(null);
       toast.success(everywhere ? t("auth.revoked") : t("auth.sign_out"));
-      // Reload rather than clearing state by hand: every cached query and the
-      // event socket are keyed on "being signed in", and the shell's own gate
-      // renders the login screen on the way back up.
+      // Reload rather than clearing state by hand: every cached query, the
+      // player and the event socket are keyed on "being signed in", and the
+      // shell's own gate renders the login screen on the way back up.
       window.location.reload();
     } catch (e) {
       toast.error(String(e));

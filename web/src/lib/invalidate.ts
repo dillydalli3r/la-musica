@@ -12,9 +12,9 @@ export function invalidateLibrary(qc: QueryClient): void {
     ["album"],
     ["artist"],
     ["track-tags"],
-    // The lyrics viewer and the track-details panel read a track's STORED tags
-    // with a 5-minute staleTime (`["tags", path]`); without this a tag write
-    // leaves the open track showing its old TITLE/tech for minutes.
+    // The player bar and the lyrics panes read the CURRENT track's tags with
+    // a 5-minute staleTime; without this a tag write leaves the playing track
+    // showing its old TITLE/tech for minutes.
     ["tags"],
     // The grade strip on Home and the Library page (GET /api/grades/summary):
     // a run that graded, tagged or imported just changed the very checks it

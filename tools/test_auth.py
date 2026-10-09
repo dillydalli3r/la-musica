@@ -252,28 +252,32 @@ check("the query token opens it too (websocket/shell case)", r.status_code == 20
 r = client.get("/api/config", headers={"Authorization": "Bearer forged-token"})
 check("a forged token does not", r.status_code == 401)
 
-print("== HTTP: CORS is the middleware's allow-list, nothing more (R278) ==")
-# Streaming and the video route that used to answer `*` for any origin (a
-# phone's <audio> is fetched with crossorigin="anonymous" and states an origin
-# the media loader decides) are gone, so no route widens CORS itself any more:
-# only the middleware's allow-list is echoed, which is what keeps the desktop
-# shell's tauri origin working while an unknown domain gets nothing.
-r = client.get("/api/config", headers={"Origin": "tauri://localhost",
-                                       "Authorization": f"Bearer {token}"})
-check("an allow-listed origin keeps its exact echo",
-      r.headers.get("access-control-allow-origin") == "tauri://localhost",
+print("== HTTP: the media routes state CORS for any origin (R278) ==")
+# A phone's <audio> is fetched with crossorigin="anonymous", and the origin the
+# MEDIA loader states is WebKit's business — it can be the page's own origin or
+# nothing at all (`Origin: null`) when the bytes are pulled by the media
+# process. No match, no load, and the app is fully reachable while pressing play
+# does nothing. So the two media routes answer `*` when the CORS middleware has
+# not already stated an origin, and only those two do.
+_nope = "/api/stream?path=" + "nope"
+r = client.get(_nope, headers={"Origin": "null", "Authorization": f"Bearer {token}"})
+check("a null-origin media request still gets a CORS answer",
+      r.headers.get("access-control-allow-origin") == "*",
       f"got {r.headers.get('access-control-allow-origin')!r} ({r.status_code})")
+r = client.get(_nope, headers={"Origin": "https://somewhere.example",
+                              "Authorization": f"Bearer {token}"})
+check("so does a browser on a domain this server has never heard of",
+      r.headers.get("access-control-allow-origin") == "*")
+_r = client.get("/api/videos/stream?path=" + "nope",
+                headers={"Origin": "null", "Authorization": f"Bearer {token}"})
+check("the video route is in the same rule",
+      _r.headers.get("access-control-allow-origin") == "*")
+r = client.get(_nope, headers={"Origin": "tauri://localhost",
+                              "Authorization": f"Bearer {token}"})
+check("an allow-listed origin keeps its exact echo",
+      r.headers.get("access-control-allow-origin") == "tauri://localhost")
 check("...and carries exactly ONE such header (two is a CORS failure)",
       len(r.headers.get_list("access-control-allow-origin")) == 1)
-r = client.get("/api/config", headers={"Origin": "https://somewhere.example",
-                                       "Authorization": f"Bearer {token}"})
-check("a browser on a domain this server has never heard of gets no CORS answer",
-      r.headers.get("access-control-allow-origin") is None,
-      f"got {r.headers.get('access-control-allow-origin')!r}")
-r = client.get("/api/config", headers={"Origin": "null",
-                                       "Authorization": f"Bearer {token}"})
-check("a null origin gets no CORS answer either",
-      r.headers.get("access-control-allow-origin") is None)
 r = client.get("/api/health", headers={"Origin": "https://somewhere.example"})
 check("no other route was widened",
       r.headers.get("access-control-allow-origin") is None,

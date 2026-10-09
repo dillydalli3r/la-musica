@@ -79,8 +79,11 @@ hidden = quoted_keys(array_body(meta_src, "export const HIDDEN_KEYS"))
 # config.json keeps loading. None of them is a group field a page renders, so
 # the two reachability checks below name them rather than failing:
 #   * the notification switches for the download/import-queue pipeline, still
-#     honoured by `server/events.py`.
-KEYS_WITHOUT_A_CONTROL = {"notify_download_done", "notify_import_ready"}
+#     honoured by `server/events.py`, and
+#   * the streaming import's unmatched-track selector, now a one-option report
+#     the import dialog states in words instead.
+KEYS_WITHOUT_A_CONTROL = {"notify_download_done", "notify_import_ready",
+                          "playlist_import_unmatched"}
 
 # The groups the steps render: `groups: [...]` entries plus every group title in
 # the module, so a group no step names (a tab nothing reaches) fails below.

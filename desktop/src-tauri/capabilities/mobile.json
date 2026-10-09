@@ -1,0 +1,16 @@
+{
+  "identifier": "mobile",
+  "description": "Android/iOS capability for the main window: the mobile shell only hosts the web UI, so it gets the core commands and native notifications — no folder picker (no dialog permission) and no autostart, which do not exist there. The app commands are named here because the app manifest in build.rs makes every one of them ACL-checked on every platform: without these lines the iOS bridge (the two pushes the shell makes) and the shell's own state would be refused on the very platform they exist for.",
+  "platforms": ["android", "iOS"],
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "notification:default",
+    "allow-ios-audio-state",
+    "allow-set-now-playing-liked",
+    "allow-set-playback-active",
+    "allow-set-now-playing",
+    "allow-shell-backend-choice",
+    "allow-choose-backend"
+  ]
+}

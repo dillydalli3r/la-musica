@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { EqBand } from "../api";
 import { EQ_FC_MAX, EQ_FC_MIN, EQ_GAIN_LIMIT, EQ_PREAMP_LIMIT, eqBandResponseDb, eqBandActive, eqResponseDb, eqType } from "../lib/eqNodes";
+import { currentAccent, subscribeAccent } from "../lib/accent";
 
 /** The decibel window the plot draws. Wider than any sane correction (AutoEq's
  *  are within ±12 dB) and narrower than the ±20 a single band may be set to, so
@@ -30,7 +31,7 @@ function fmtFreq(f: number): string {
  *
  *  The curve is not drawn from a hand-rolled formula — every line comes from the
  *  browser's own `BiquadFilterNode.getFrequencyResponse` (lib/eqNodes), the same
- *  maths the exports' EQ writes, so the plot cannot disagree with what is saved.
+ *  maths the player applies, so the plot cannot disagree with what is heard.
  *  Dragging a handle writes fc (horizontally, logarithmically) and gain
  *  (vertically); a shape-only band (a pass or a notch) has no gain to drag, so
  *  its handle moves on the frequency axis alone. Editing a NUMBER precisely is
@@ -57,7 +58,8 @@ export default function EqCurve({
   const dragRef = useRef<number | null>(null);
 
   // One offline context for the response maths: `getFrequencyResponse` needs a
-  // node, and there is no shared audio graph to borrow one from.
+  // node, and the main playback graph may not even exist yet (the EQ page can
+  // be opened before anything has played).
   const audio = useMemo(() => {
     try {
       return new OfflineAudioContext(1, 128, 48000);
@@ -109,10 +111,7 @@ export default function EqCurve({
     const c = canvas.getContext("2d");
     if (!c) return;
     c.setTransform(dpr, 0, 0, dpr, 0, 0);
-    // The accent token (index.css) — the one colour the app paints its curves,
-    // sliders and focus rings with. Read per draw so a canvas that outlives a
-    // theme change still repaints in the current one.
-    const accent = getComputedStyle(document.documentElement).getPropertyValue("--accent").trim() || "255 255 255";
+    const accent = currentAccent()[0];
     const rgb = (a: number) => `rgb(${accent.split(/\s+/).join(" ")} / ${a})`;
     const muted = "#71717a";
 
@@ -208,6 +207,13 @@ export default function EqCurve({
       c.setLineDash([]);
     }
   }, [audio, filters, freqs, geom, preampDb, selected]);
+
+  // Repaint when the accent changes. `draw` re-reads the colour on every call,
+  // so the subscription is all that was missing: the curve kept whatever colour
+  // it was first drawn with until an unrelated dependency moved (the reported
+  // "the equalizer stays purple after I pick orange"). One shared mechanism
+  // (lib/accent), not a timer per canvas.
+  useEffect(() => subscribeAccent(draw), [draw]);
 
   useEffect(() => { draw(); }, [draw]);
 

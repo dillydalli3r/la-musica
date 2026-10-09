@@ -112,18 +112,22 @@ EXPECTED_FOLDER_SCOPED = {
     10,  # the album's final pass + its sidecars        (mlo/format_all.py)
     14,  # beets imports album folders only             (server/beetscfg.py)
     15,  # one release manifest per album               (server/script_runners.py)
+    19,  # the artist folder's image                    (mlo/artistdata.py)
     20,  # the layout of a subtree                      (mlo/layout.py)
+    24,  # one album's public rating, and each track's  (mlo/web_ratings.py)
 }
-# Kinds whose menu holds folders; the other holds files.
+# Kinds whose menu holds folders; the other two hold files.
 EXPECTED_FOLDER_KINDS = {"album", "artist", "library"}
-EXPECTED_FILE_KINDS = {"track"}
+EXPECTED_FILE_KINDS = {"track", "playlist"}
 # Every script whose own _FORCE_KEYS is non-empty, frozen. 10 is here because
 # it owns a COMPOSITE flag set (the four passes it re-runs) — and each of those
 # four must be reachable from the menu, one entry per flag. 13 is NOT (since
 # v4.4.0): a lyrics run fills what is missing and never replaces stored words,
 # so it has no re-run to force (R330) — replacing one track's lyrics is
-# `POST /api/lyrics/auto` with force, not a library-wide script run.
-EXPECTED_FORCED = {1, 2, 3, 5, 6, 7, 8, 9, 10, 12, 15, 16, 17, 20}
+# `POST /api/lyrics/auto` with force, not a library-wide script run. 24 is here
+# since its flag joined the UI force tables (R362): the pass fills only, and
+# forcing it re-fetches a rating the file already carries.
+EXPECTED_FORCED = {1, 2, 3, 5, 6, 7, 8, 9, 10, 12, 15, 16, 17, 20, 24}
 
 FAILED: list = []
 
@@ -202,7 +206,7 @@ check("...and its absence is what the completeness check above fails on",
 print("== what each entity's menu offers ==")
 kinds_of = lambda kind: {row["id"] for row in data["scripts"] if kind in row["applies_to"]}
 album, track = kinds_of("album"), kinds_of("track")
-artist, library = kinds_of("artist"), kinds_of("library")
+artist, playlist, library = kinds_of("artist"), kinds_of("playlist"), kinds_of("library")
 
 check("the album menu offers every script", album == set(RUNNERS),
       str(sorted(set(RUNNERS) - album)))
@@ -222,7 +226,9 @@ check("an artist menu offers the album-shaped scrips too", artist == album,
       str(sorted(album ^ artist)))
 check("the library offers every script", library == set(RUNNERS),
       str(sorted(set(RUNNERS) - library)))
-check("the kinds are the four the model names and every one is decided",
+check("a playlist selection is a file list, like a track row", playlist == track,
+      str(sorted(track ^ playlist)))
+check("the kinds are the five the model names and every one is decided",
       sorted(KINDS) == sorted(EXPECTED_FOLDER_KINDS | EXPECTED_FILE_KINDS), str(KINDS))
 check("a file-scoped script reaches every kind",
       all(set(row["applies_to"]) == set(KINDS)

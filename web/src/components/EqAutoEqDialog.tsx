@@ -10,7 +10,7 @@ import { toast } from "../store";
  *  AutoEq is a catalogue of published headphone measurements
  *  (github.com/jaakkopasanen/AutoEq), and every model it has equalized is one
  *  `ParametricEQ.txt` in this app's own profile format — so importing one is
- *  the same store, the same parser and the same profile as pasting a file by
+ *  the same store, the same parser and the same player EQ as pasting a file by
  *  hand, with the search doing the finding. The server keeps the project's own
  *  index cached (a month) and fetches the one file the user picks, so this
  *  dialog never touches GitHub itself. */
@@ -156,8 +156,8 @@ export default function EqAutoEqDialog({
       </div>
 
       <p className="text-[11px] text-zinc-500">
-        Imported curves are stored as ordinary profiles: they show up in the profile list like
-        any other, and can be edited band by band. The correction is the measurement
+        Imported curves are stored as ordinary profiles: they show up in the profile list, apply to
+        playback like any other, and can be edited band by band. The correction is the measurement
         source's, applied to AutoEq's own target curve.
       </p>
     </Modal>

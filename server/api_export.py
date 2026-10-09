@@ -54,6 +54,7 @@ class ExportRequest(BaseModel):
     # None = the saved export_lyrics, else the library's own lyrics_format.
     lyrics: Optional[str] = None
     clean_tags: Optional[bool] = None
+    playlists: Optional[bool] = None
     sidecars: Optional[bool] = None
     # WHICH files the run writes: the family keys of exporter.FILE_FAMILIES
     # ("" / absent = the saved export_copy_files, else the `sidecars` switch

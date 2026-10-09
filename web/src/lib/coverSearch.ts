@@ -12,9 +12,9 @@
  *  DIFFERENT question from the one the Search button sends (it fired before
  *  the source list was known, so it carried no `sources` and no `country`),
  *  and “No covers found for this query.” was shown for anything that was not a
- *  zero-candidate answer — including a set of staged candidates that was
- *  empty. One builder and one state function are what make those impossible
- *  rather than unlikely. */
+ *  zero-candidate answer — including an answer from the offline copy, and a
+ *  set of staged candidates that was empty. One builder and one state function
+ *  are what make those impossible rather than unlikely. */
 
 import type { CoverResult, CoverSearchIdentity, TrackTags } from "../types";
 
@@ -83,7 +83,10 @@ export function coverQuery(
 
 /** The request's own path and query, with no server base — the one place the
  *  question's SHAPE is decided (which parameters, in which order, and which of
- *  them are omitted when empty). `api.coverSearch` sends exactly this string.
+ *  them are omitted when empty). `api.coverSearch` sends exactly this string,
+ *  and it is also the key the app's offline copy files an answer under (see
+ *  `offlineCache.cacheKey`: path + query), so an answer can never be read back
+ *  for a different question.
  *
  *  `tracks` rides only when the caller knows the count: the parameter is
  *  additive (a server that does not take it answers exactly as before), and
@@ -196,6 +199,12 @@ export interface CoverAnswer {
    *  reply from a server predating the field: what a row was judged by is then
    *  simply not known, and the finder says nothing about it. */
   identity: CoverSearchIdentity | null;
+  /** Set when the answer came out of the app's offline copy instead of the
+   *  server — `at` is that copy's write time, null when the service worker
+   *  answered and the copy's own age is unknown. `null` means the server
+   *  answered: an answer from disk is not a fresh zero-result, and the finder
+   *  says which it is showing. */
+  cached: { at: number | null } | null;
 }
 
 /** The album's own track count, read the way the SERVER reads it — the number
@@ -236,7 +245,7 @@ export type CoverSearchPhase =
   | { kind: "searching"; query: CoverQuery }
   | { kind: "blocked"; gaps: CoverIdentityGap[] }
   | { kind: "error"; message: string; query: CoverQuery | null }
-  | { kind: "empty"; query: CoverQuery; notes: string[] }
+  | { kind: "empty"; query: CoverQuery; notes: string[]; cached: { at: number | null } | null }
   | { kind: "ready"; answer: CoverAnswer };
 
 /** The finder's state, decided in ONE place and in ONE order, so the things a
@@ -275,7 +284,7 @@ export function coverSearchPhase(state: {
     return { kind: "searching", query: state.lastQuery ?? state.query };
   }
   if (state.answer.results.length === 0) {
-    return { kind: "empty", query: state.answer.query, notes: state.answer.notes };
+    return { kind: "empty", query: state.answer.query, notes: state.answer.notes, cached: state.answer.cached };
   }
   return { kind: "ready", answer: state.answer };
 }

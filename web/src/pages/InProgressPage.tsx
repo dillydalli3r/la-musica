@@ -93,9 +93,9 @@ function JobRow({ job }: { job: JobLock }) {
  *  would only mean the files are unprotected while the job is still writing
  *  to them — a job that must stop is stopped where it started. */
 export default function InProgressPage() {
-  // The app's one lock poll (lib/locks): the same payload every marked row
-  // reads, so this page can never show a different answer than the rows do —
-  // and it costs no extra request.
+  // The app's one lock poll (lib/locks): the same payload the player bar and
+  // every marked row read, so this page can never show a different answer than
+  // the player got — and it costs no extra request.
   const { data, isLoading } = useJobLocks();
   const jobs = data?.jobs ?? [];
   return (

@@ -108,7 +108,10 @@ LEGACY_DEFAULT_MEDIUM_ORDER = (
 # beets, whose generated config sets `move: yes`), then the sidecar namers
 # that must see final audio names (15 manifest → 2 CUEs → 1 lyrics format),
 # then content: 13 fetch lyrics → 17 AI transforms, 8 auto
-# tagging (mood/genre/advisory), 5 images (album covers), 6 audit, 7 DR
+# tagging (mood/genre/advisory), 24 web ratings (the public album/track score,
+# which needs the MBIDs 14/8 have just settled and must be on the file before
+# 10's canonical trim and 4's grade), 5 images → 19 artist images (the two image
+# passes together: covers then the artwork stored beside them), 6 audit, 7 DR
 # & ReplayGain, 9 AccurateRip, 12 key & BPM, 16 mood & energy, then 10
 # Format all (the canonical trim) with 23, the tag strip that deletes the
 # SAME excess lists on its own (junk names, a valued COMMENT, unneeded
@@ -145,7 +148,7 @@ LEGACY_DEFAULT_MEDIUM_ORDER = (
 # is idempotent, and it is the same move `beets_organize_after` already makes
 # for 14.
 # Keep in step with web/src/lib/scripts.ts (tests/test_script_menus).
-DEFAULT_RUN_ALL_ORDER = [11, 3, 14, 15, 2, 1, 13, 17, 8, 5, 6, 7, 9, 12, 16, 10, 23, 20, 21, 4]
+DEFAULT_RUN_ALL_ORDER = [11, 3, 14, 15, 2, 1, 13, 17, 8, 24, 5, 19, 6, 7, 9, 12, 16, 10, 23, 20, 21, 4]
 
 # The genre-source order that shipped before the two-source default: recognizing
 # it lets normalize_config treat it as "never customized" (see below).
@@ -163,13 +166,17 @@ AUDIO_TAG_FAMILIES = [
     "DYNAMIC_RANGE",  # DYNAMIC RANGE + ALBUM DYNAMIC RANGE (in-process, mlo/dr)
     "MEDIA_SOURCE",   # MEDIA + SOURCE (Digital Media normalization)
     "INSTRUMENTAL",   # INSTRUMENTAL (lyrics presence)
-    "ADVISORY",       # ITUNESADVISORY (the per-track advisory)
+    "ADVISORY",       # ITUNESADVISORY + ALBUMITUNESADVISORY
     "LYRICS",         # embedded LYRICS tag (and .lrc sidecar)
     "BPM",            # BPM (Key & BPM analysis)
     "INITIALKEY",     # INITIALKEY (Key & BPM analysis)
     "GENRE",          # GENRE (import / auto tagging, one per configured count)
     "MOOD",           # MOOD (audio/provider classification, script 8/16)
     "ENERGY",         # ENERGY (0-100, audio analysis, written with MOOD)
+    "RATING",         # RATING (0-100 Picard scale, the listener's own stars)
+    "WEBRATING",      # WEBRATING/ALBUMWEBRATING + their _SOURCE twins
+                      # (mlo.web_ratings: the aggregated PUBLIC score, same
+                      # 0-100 scale; gated by `web_ratings_enabled`)
 ]
 AUDIO_TAG_TYPES = ["flac", "mp3", "mp4", "ogg", "opus", "aac"]
 
@@ -187,6 +194,7 @@ _TAG_TO_FAMILY = {
     "SOURCE": "MEDIA_SOURCE",
     "INSTRUMENTAL": "INSTRUMENTAL",
     "ITUNESADVISORY": "ADVISORY",
+    "ALBUMITUNESADVISORY": "ADVISORY",
     "LYRICS": "LYRICS",
     "UNSYNCEDLYRICS": "LYRICS",
     "BPM": "BPM",
@@ -194,6 +202,15 @@ _TAG_TO_FAMILY = {
     "GENRE": "GENRE",
     "MOOD": "MOOD",
     "ENERGY": "ENERGY",
+    "RATING": "RATING",
+    # The public web rating (mlo.web_ratings, script 24) is a family of its
+    # own: it is not the listener's stars, so it must not follow RATING's
+    # master switch, and it is one unit — the value tags and their _SOURCE
+    # twins are written together and are on/off together.
+    "WEBRATING": "WEBRATING",
+    "WEBRATING_SOURCE": "WEBRATING",
+    "ALBUMWEBRATING": "WEBRATING",
+    "ALBUMWEBRATING_SOURCE": "WEBRATING",
     # integrity tags follow AUDIT family (written alongside audit when present)
     "AUDIO_MD5": "AUDIT",
     "INTEGRITY": "AUDIT",
@@ -213,14 +230,13 @@ def _audio_tag_family(tag_name):
     return _TAG_TO_FAMILY.get(name)
 
 
-# ITUNESADVISORY is the one ADVISORY tag, and it answers to its OWN switch:
-# the advisory FETCH resolves it from the providers, and script 8 only ever
-# zeroes it for an instrumental track. A family switch of its own would mean a
-# second name for the same thing, so the family defers to the tag's switch.
-# (ALBUMITUNESADVISORY is deliberately NOT a tag this app knows any more: the
-# album-level Apple advisory is not part of its vocabulary, so one is excess —
-# see mlo.audio.TAG_MAP / mlo.grader.TAG_ALLOWLIST — and the strip passes
-# remove it.)
+# The two ADVISORY tags answer to DIFFERENT switches, because different things
+# write them: `ALBUMITUNESADVISORY` is script 8's derivation — "Auto Album
+# Advisory", derived from the per-track values — while `ITUNESADVISORY` is what
+# the advisory FETCH resolves from the providers (script 8 only ever zeroes it
+# for an instrumental). One family switch for both meant that turning the
+# derivation off silently disabled the explicit "Fetch advisory rating" action,
+# and the refused run replied exactly like "no provider knew this track".
 _TAG_WRITE_SWITCH = {"ITUNESADVISORY": "advisory_auto_fetch"}
 
 # family -> the config key that is its master switch (None where two keys or a
@@ -234,9 +250,18 @@ _FAMILY_GLOBAL = {
     "DYNAMIC_RANGE": "write_dynamic_range_tags",
     "MEDIA_SOURCE": "normalize_media_source",
     "INSTRUMENTAL": None,  # gated by two keys; handle below
-    "ADVISORY": None,      # ITUNESADVISORY's own switch handles it
+    "ADVISORY": "auto_advisory",
     "GENRE": "genre_autofill",
     "MOOD": "mood_enabled",
+    # RATING is the user's own star rating (server.ratings): the API writes
+    # it the moment a star is clicked, so its master switch is what turns
+    # writing the TAG off while keeping the rating in the app.
+    "RATING": "write_rating_tags",
+    # The web rating's own feature switch is its master switch: with
+    # `web_ratings_enabled` off the script is skipped by the chain
+    # (server.script_runners._DISABLED) and nothing writes the tags
+    # either, so "off" means off in both halves.
+    "WEBRATING": "web_ratings_enabled",
     # ENERGY is written by the same analysis pass as MOOD, so it answers
     # to the same switch; the grader requires it when it is on.
     "ENERGY": "mood_enabled",
@@ -380,6 +405,29 @@ DEFAULT_CONFIG = {
     "cover_sources": [],
     # Album covers re-encode to 90% quality; other images keep max quality.
     "cover_jpeg_quality": 90,
+    # Artist artwork & text pulled from the discovery providers and stored in
+    # the library itself — Artists/<Artist>/artist.jpg, description.txt and
+    # artist.json (provenance: provider, source URL, fetch time). Artist
+    # images have no minimum resolution by default; they are only cropped to
+    # `artist_image_aspect` and re-encoded at the cover JPEG quality.
+    # A target size of 0 keeps the provider's native size.
+    "artist_image_enabled": True,
+    "artist_image_sources": [],       # ordered provider ids; [] = built-in order
+    "artist_image_crop": True,
+    # The shape every artist image is stored in, "width:height" (1:1 is the
+    # shipped square). Read by the fetch (mlo.artistdata), by the artist image
+    # grading check and by script 19, so the audit and the pass that fixes it
+    # judge by the same number. Only enforced while `artist_image_crop` is on.
+    "artist_image_aspect": "1:1",
+    "artist_image_target_size": 0,
+    "artist_description_enabled": True,
+    "album_description_enabled": True,
+    "description_sources": [],        # ordered provider ids; [] = built-in order
+    # Store the provider's FULL prose — the whole Wikipedia article, not its
+    # lead paragraph — as the description. OFF keeps the short summary form.
+    # Default ON: a lead paragraph is a teaser, and the UI has Read more for
+    # the long form.
+    "description_full": True,
 
     # Embedded cover art in audio files (applied by script 10 and the FLAC
     # optimizer). Default OFF: optimization REMOVES embedded art — covers
@@ -468,6 +516,11 @@ DEFAULT_CONFIG = {
     "write_log_grade": True,
     "write_replaygain_tags": True,
     "write_dynamic_range_tags": True,
+    # Rating a track also writes RATING (0-100, Picard's scale) into the file,
+    # and clearing a rating removes the tag. Off, ratings still live in the
+    # app's own database — only the tag write stops, which is what a library
+    # whose ratings belong to someone else's player wants.
+    "write_rating_tags": True,
 
     # Grading ships STRICT: a fresh install grades every file it holds with
     # every check, and the two keys this release moved are named below so the
@@ -602,6 +655,7 @@ DEFAULT_CONFIG = {
     # script 11 to normalize them to MKV. Remuxed MKV/MP4 videos are fine.
     "grade_check_raw_video": True,
     "grade_check_mb_links": True,   # MusicBrainz release (or group) link required
+    "grade_check_rym_links": True,  # RateYourMusic release link required
     # Lossless but uncompressed sources (WAV/AIFF/APE/WV/SHN) fail grading —
     # script 3 converts them to FLAC.
     "grade_check_lossless_source": True,
@@ -666,6 +720,15 @@ DEFAULT_CONFIG = {
     # script 10 clears what an earlier locale left behind (the same predicate,
     # mlo.grader.alias_keys_excess).
     "grade_check_alias_excess": True,
+    # The album description sidecar (description.txt) is a legitimate part of
+    # an album folder — allowed as a file category by default.
+    "grade_include_description": True,
+    # Text and artwork stored inside the library: the album's description.txt,
+    # the artist's artist.jpg and the artist's description.txt.
+    "grade_check_album_description": True,
+    "grade_check_artist_image": True,
+    "grade_check_artist_description": True,
+
     # Audio audit (AudioAuditor CLI): full-track detectors (silence, DR,
     # true peak, LUFS, BPM) instead of the fast scan; force re-audits files
     # that already carry an AUDIT verdict. Detector toggles map to the CLI's
@@ -744,6 +807,16 @@ DEFAULT_CONFIG = {
     "dr_replaygain_enabled": True,
     "replaygain_skip_existing": True,
     "force_dr_replaygain": False,
+    # Playback gain. "track" applies REPLAYGAIN_TRACK_GAIN, "album" prefers
+    # REPLAYGAIN_ALBUM_GAIN (falling back to the track value), "off" plays at
+    # unity. A track whose file carries no ReplayGain tags is analysed on
+    # demand (ffmpeg EBU R128, cached) instead of silently playing loud.
+    "replaygain_mode": "track",
+    "replaygain_preamp_db": 0.0,
+    "replaygain_analyze_missing": True,
+    # Peak-aware limiting: clamp the applied gain so the track's peak cannot
+    # clip when it is known.
+    "replaygain_clip_protection": True,
 
     # Video remux (script 11): every video container -> MKV with the video
     # copied bit-exact and every audio stream re-encoded to FLAC (lossless
@@ -766,6 +839,23 @@ DEFAULT_CONFIG = {
     "video_flac_level": 8,
     "video_remove_original": True,
     "video_process_mp4": False,
+
+    # Music videos from YouTube (server/youtube.py, yt-dlp). 0 max height =
+    # whatever the source offers (best).
+    "youtube_enabled": True,
+    "youtube_max_height": 0,
+    # Cookies for yt-dlp: the user's own browser session, which is the only
+    # thing that opens an age-gated, members-only or rate-limited video —
+    # YouTube answers "Sign in to confirm your age" without one, and a fresh
+    # IP gets throttled. `none` is the default because a cookie jar is a
+    # credential and sending one is the user's decision, never a default.
+    # `file` reads the ONE jar the app owns (<music>/.mlo/data/cookies.txt,
+    # written by Settings → Videos; see server/api_youtube.py) and `browser`
+    # lets yt-dlp read the browser's own store. Both yt-dlp paths
+    # (server/youtube.py: the importable module and the vendored binary)
+    # honour whichever is set.
+    "youtube_cookies_mode": "none",
+    "youtube_cookies_browser": "chrome",
 
     # Library codec target (script 3 and every import). The library's audio
     # format is a SETTING, not an assumption: `library_codec` names what the
@@ -822,6 +912,7 @@ DEFAULT_CONFIG = {
     "lossless_remove_original": True,
 
     # Auto Tagging (script 8)
+    "auto_advisory": True,
     "auto_instrumental": True,
     # ON by default: a track with no words cannot be explicit, so an
     # instrumental's advisory is 0. Turn it off to leave an instrumental's
@@ -853,8 +944,8 @@ DEFAULT_CONFIG = {
 
     # Lyrics sources, tried in order until one has the song — each provider
     # falls back to the next, and every one of them answers with TIMESTAMPS.
-    # Empty = the built-in order (LRCLIB, NetEase, Kugou, QQ Music, Kuwo);
-    # see Settings → Lyrics.
+    # Empty = the built-in order (LRCLIB, NetEase, Kugou, QQ Music, Kuwo,
+    # YouTube captions); see Settings → Lyrics.
     "lyrics_sources": [],
     # Accept plain (unsynced) lyrics when no provider has a synced version.
     # Off (the default) means synced or nothing: the chain ships timestamps
@@ -869,6 +960,10 @@ DEFAULT_CONFIG = {
     # for never pays for an extra lookup. Off, the search runs once under the
     # tags as they are.
     "lyrics_search_aliases": True,
+    # YouTube captions through yt-dlp, for tracks that carry a video id (tag or
+    # the "[<id>]" the video download leaves in the file name). Never searches
+    # YouTube on its own. Off = that provider is simply not in the chain.
+    "lyrics_youtube_captions": True,
 
     # AI-assisted lyric transforms (script 17). Any OpenAI-compatible
     # /chat/completions endpoint works (OpenAI, OpenRouter, LM Studio,
@@ -1158,9 +1253,42 @@ DEFAULT_CONFIG = {
     # album (1 req/s, and cached for 30 days like every other RYM page) — the
     # fallback is skipped entirely when the live page can answer.
     "rym_archive_fallback": True,
-    # Whether the RateYourMusic link resolver may ask rateyourmusic.com (the
-    # Sources probe); off = it answers without making a request.
+    # Auto-resolve RateYourMusic album + artist links during import; off =
+    # links are only ever set by hand in the link editor.
     "rym_links_auto": True,
+    # Web ratings (script 24, mlo.web_ratings): the aggregated public score for
+    # an album and for each track, stored beside RATING on the same 0-100
+    # Picard scale as WEBRATING / ALBUMWEBRATING (+ their _SOURCE tags). OFF =
+    # the chain skips the script (SCRIPT_GATES/_DISABLED) AND the WEBRATING tag
+    # family refuses to write (should_write_audio_tag -> family_global).
+    "web_ratings_enabled": True,
+    # The sources asked, in order — a PRIORITY list exactly like genre_sources:
+    # it fixes the asking order and therefore the order the names appear in
+    # WEBRATING_SOURCE / ALBUMWEBRATING_SOURCE. An empty list, or one naming
+    # nothing real, falls back to mlo.web_ratings.SOURCES (the same ids).
+    # RateYourMusic SHIPS FIRST: it is the widest public verdict the app can
+    # read (one score from tens of thousands of ratings) and it rides the SAME
+    # page fetch its genres already make — one request, one cache entry, one
+    # refusal latch. It is ARCHIVE-backed whenever the live page refuses (a
+    # rym_cookie without a matching cf_clearance is refused today), and so are
+    # albumoftheyear and Discogs, so an album costs ~23 s against ~1 s for
+    # MusicBrainz alone; the fetch is cached 30 days, so that is a first-run
+    # cost per album, not a per-run one. MusicBrainz stays ON because it is the
+    # only source that answers for a TRACK at all (the recording's rating, the
+    # work's as a fallback): with it off, a track gets no WEBRATING and only
+    # the album carries a score. Discogs skips cleanly without a
+    # discogs_token.
+    "web_ratings_sources": ["rateyourmusic", "musicbrainz", "albumoftheyear", "discogs"],
+    # Album of the Year refuses every automated client (measured — plain HTTP,
+    # headless and headed Chromium and a reader proxy all got Cloudflare 403),
+    # so its page is read from the newest ARCHIVED capture (Wayback), resolved
+    # through the same archive machinery the RYM readers use. OFF = the source
+    # contributes nothing and the chain reports it as skipped. Ships ON.
+    "aoty_archive_fallback": True,
+    # Manual override for script 24: fill-only is the contract, so a value
+    # already on the file survives every run unless this is set. Set by hand
+    # (a config edit), never by a menu — the same shape script 13 has.
+    "force_web_ratings": False,
     # Advisory (ITUNESADVISORY) auto-fetch on import: EVERY applicable source
     # is asked in one pass and cross-referenced — Deezer by ISRC, Spotify by
     # ISRC when configured below, Apple's explicit-edition album route and
@@ -1187,6 +1315,28 @@ DEFAULT_CONFIG = {
     # entirely; it is never required and its absence can never fail an import.
     "spotify_client_id": "",
     "spotify_client_secret": "",
+    # Importing a playlist from a streaming service (Playlists → Import from a
+    # streaming service). Three decisions, all of them about what an import
+    # does with a track the library does NOT have:
+    #   * parent_albums — OFF: the import is informational, the playlist holds
+    #     the matched paths and nothing is queued. ON: every imported track
+    #     whose album the library does not hold queues its PARENT ALBUM through
+    #     the existing add-by-name path (server.api_add: MusicBrainz match, then
+    #     the wish queue). Albums, never tracks — the dialog can override this
+    #     per import.
+    #   * unmatched — "skip": unmatched rows are reported and left out (the
+    #     default). "wish": each unmatched track is also queued by name, so the
+    #     wish queue searches for it too.
+    #   * create_empty — whether an import that matched nothing still creates
+    #     the (empty) playlist, so the attempt is visible in the playlists list.
+    "playlist_import_parent_albums": False,
+    "playlist_import_unmatched": "skip",
+    "playlist_import_create_empty": True,
+    # Artist image / artist description / album description auto-fetch on
+    # import. With metadata_review on, candidates are staged and only written
+    # when the user applies one.
+    "metadata_auto_fetch": True,
+    "metadata_review": False,
     # Mood & genre tagging (script 8, Auto tagging). MOOD is derived from the
     # track's audio (librosa features: tempo, energy, brightness, dynamics)
     # and, in hybrid mode, cross-checked against provider metadata; GENRE is
@@ -1197,6 +1347,16 @@ DEFAULT_CONFIG = {
     # Script 3/10 removes tags outside the canonical set while optimizing.
     "strip_unknown_tags": True,
 
+    # Home — the library highlight shelves on the sidebar's Home section.
+    "home_recent_count": 12,
+    # Discovery — the external music APIs behind artist artwork and
+    # descriptions (Deezer, ListenBrainz, iTunes, TheAudioDB, Wikipedia).
+    # Empty source lists = the built-in order; every feature walks its list and
+    # falls back to the next provider, and MusicBrainz stays the final fallback
+    # so results keep their MBIDs.
+    "discovery_enabled": True,
+    "discovery_timeout_s": 8,
+
     # Misc
     "auto_advance": True,
     # 0 means automatic: every core this process may use, capped only by each
@@ -1204,6 +1364,57 @@ DEFAULT_CONFIG = {
     # inside another). A positive value is that many lanes for every script —
     # the one knob, useful on slower disks or shared machines.
     "worker_limit": 0,
+    # How many tracks an offline download fetches at once — the browser's own
+    # download queue and the bulk transfer endpoint both read it, so one key
+    # describes the whole path. A local server can stream several FLACs in
+    # parallel; more than a handful mostly thrashes the disk and the network.
+    "download_concurrency": 3,
+    # What a downloaded (offline) copy is encoded as — the Downloads page and
+    # the Download button cache a track on the device, and this is the audio
+    # those bytes hold. `copy` is the shipped default and always names the
+    # file's OWN codec: the cache gets exactly the library's bytes, nothing is
+    # re-encoded, and a track is never downloaded in a codec it is not already
+    # in. A codec name (the same list library_codec takes, from
+    # mlo.containers.CODECS) re-encodes the track ON THE WAY OUT instead, for
+    # a device that has no room for the library's format; the library file is
+    # never touched. Playback of a transcoded copy is offline-only (see
+    # playback_source) — streaming always serves the library's own bytes.
+    "download_codec": "copy",
+    # The rate that re-encode uses: kbps for the CBR targets (mp3/aac/opus),
+    # libvorbis' own 0-10 quality scale for ogg. 0 = the codec's own shipped
+    # default, exactly like library_codec_bitrate. Ignored while the codec is
+    # `copy` (nothing is being encoded) and by a lossless target.
+    "download_bitrate": 0,
+    # Which bytes the PLAYER takes for a track this device has downloaded:
+    #   stream (default) — the server's stream endpoint, i.e. the library file
+    #     itself, at full quality, whether or not a copy sits in the cache;
+    #   downloaded — the cached copy, so playback costs no bandwidth and works
+    #     with the server away.
+    # The default is `stream` because a streamed track is always the library's
+    # own file while a downloaded one may be a smaller rendition
+    # (download_codec). A server that cannot be reached is not a preference:
+    # with the API answering from its cache the downloaded copy plays whatever
+    # this says, because it is the only thing that can.
+    "playback_source": "stream",
+    # Whether the player joins two tracks with no gap: the idle of its two
+    # audio elements preloads the next sequential track, and a natural end
+    # hands the sound over to it instead of going through a load. On (the
+    # shipped default) an album plays as the CD did; off, every track is
+    # loaded and started on its own — the honest choice for a shuffle-style
+    # listener, a gapless-hostile device, or a file that ends with silence the
+    # handover would swallow. It gates the preload and the handover only; the
+    # normal load path is unchanged, and it never affects what plays.
+    "gapless_playback": True,
+    # Whether the queue keeps playing past its own last track: the player
+    # appends a handful of the library's SIMILAR tracks (scored locally from
+    # the library's own tags by `server.recommend`, so the answer needs no
+    # network and cannot stall the music) as ORDINARY queue rows — the reader
+    # can reorder, remove and see them like any other row. Off (the shipped
+    # default) the queue ends after its last track exactly as it always did;
+    # the switch is the whole feature, and nothing is appended while Repeat
+    # one is armed. Its batch bounds live in `server.recommend`
+    # (QUEUE_DEFAULT_LIMIT / QUEUE_MAX_LIMIT).
+    "infinite_playback": False,
     "run_all_order": list(DEFAULT_RUN_ALL_ORDER),
 
     # Export to device (Export page). Each key is the SAVED DEFAULT behind one
@@ -1257,6 +1468,16 @@ DEFAULT_CONFIG = {
     # preamp and filters are rendered into the same ffmpeg filter chain as the
     # ReplayGain gain above.
     "export_eq_profile": "",
+    # The Equalizer APO / Peace profile the PLAYER applies while it plays — a
+    # built-in preset id or an imported profile's, "" = no EQ. One key for
+    # every client, not a per-device preference: the curve is part of what the
+    # library sounds like, the same reason `replaygain_mode` is one key. The
+    # profile's own Preamp travels with it (the player puts the gain in front
+    # of its biquad chain, which is what keeps a boosted curve from clipping).
+    # The EQUALIZER page is where it is picked and edited (and the only place a
+    # curve is heard before it is saved); the Settings page carries the raw id
+    # as text, the same way the export's profile key has always been editable.
+    "playback_eq_profile": "",
     # Where an export goes: "server" (a drive/folder this machine can see, the
     # drive picker on the Export page) or "zip" (staged in the app's data dir
     # and handed back as one archive — the only destination a browser can offer
@@ -1265,8 +1486,13 @@ DEFAULT_CONFIG = {
     # Write only the canonical tag set on transcodes instead of letting the
     # source's leftover frames ride along beside it.
     "export_clean_tags": True,
+    # .m3u8 playlists next to the exported albums (and one for the whole
+    # export) — what a DAP needs to show album order. OFF by default: an album
+    # export carries audio, and a playlist (server.playlists.export_m3u8) is
+    # what writes a playlist file.
+    "export_playlists": False,
     # The switch `export_copy_files` below replaced: mirror cover.*/
-    # .lrc/.cue/.log next to the exported audio.
+    # description.txt/artist image/.lrc/.cue/.log next to the exported audio.
     # OFF by default: the cover travels EMBEDDED in each file
     # (export_embed_covers) and the rip's evidence (.cue/.log/.accurip) stays
     # in the library, where the audit and the grading read it. Still honoured —
@@ -1278,8 +1504,8 @@ DEFAULT_CONFIG = {
     "export_sidecars": False,
     # WHICH files an export writes, as the family keys of
     # server.exporter.FILE_FAMILIES (the tracks themselves, the covers, the
-    # lyrics, the cue sheets, the rip log, the checksum lists, the
-    # text/notes/scans, the playlists the album carries,
+    # lyrics, the cue sheets, the rip log, the album's description, the
+    # checksum lists, the text/notes/scans, the playlists the album carries,
     # and anything else it holds). EMPTY means "nobody has chosen": the
     # `export_sidecars` switch above still decides then, and an install that
     # touched neither exports the tracks alone — the behaviour it always had.
@@ -1376,6 +1602,7 @@ _BOOL_KEYS = {
 }
 _INT_RANGES = {
     "video_crf": (0, 51),
+    "youtube_max_height": (0, 4320),
     "video_flac_level": (0, 8),
     "jpegxl_effort": (1, 10),
     "lrc_timestamp_precision": (2, 3),
@@ -1392,10 +1619,14 @@ _INT_RANGES = {
     "grade_log_score_threshold": (0, 100),
     "audit_log_score_threshold": (0, 100),
     "worker_limit": (0, 64),
+    "download_concurrency": (1, 8),
     "cover_target_size": (0, 4000),
     "cover_jpeg_target_size": (0, 4000),
     "cover_png_target_size": (0, 4000),
     "cover_jxl_target_size": (0, 4000),
+    "home_recent_count": (4, 60),
+    "artist_image_target_size": (0, 4000),
+    "discovery_timeout_s": (3, 30),
     "import_bulk_concurrency": (1, 16),
     "mb_genre_count": (1, GENRE_COUNT_MAX),
     "export_embed_cover_jpeg_quality": (1, 100),
@@ -1409,6 +1640,10 @@ _INT_RANGES = {
     # means "the codec's own shipped default".
     "library_codec_bitrate": (0, 512),
     "library_codec_quality": (0, 8),
+    # The offline download's own rate, clamped per codec when it is used
+    # (mlo.containers.codec_args) like the library one above; 0 = the codec's
+    # own shipped default and `download_codec` = "copy" ignores it entirely.
+    "download_bitrate": (0, 512),
 }
 _CHOICES = {
     "lyrics_format": {"EMBEDDED", "LRC", "BOTH"},
@@ -1417,6 +1652,9 @@ _CHOICES = {
     "import_autonomy": {"automatic", "review"},
     "auth_mode": {"auto", "required", "off"},
     "advisory_fallback": {"0", "2", "none"},
+    # What a streaming playlist import does with a track the library does not
+    # have (see DEFAULT_CONFIG): report it only, or queue it by name too.
+    "playlist_import_unmatched": {"skip", "wish"},
     "ai_genre_effort": {"minimal", "low", "medium", "high", "max"},
     "lrc_zero_timestamp_target": {"EMBEDDED", "LRC", "BOTH"},
     # Sync granularity required of (and targeted for) synced lyrics:
@@ -1429,6 +1667,7 @@ _CHOICES = {
     "video_preset": {"ultrafast", "superfast", "veryfast", "faster", "fast",
                      "medium", "slow", "slower", "veryslow"},
     "mood_source": {"audio", "provider", "hybrid"},
+    "replaygain_mode": {"track", "album", "off"},
     # The export's own loudness/equalizer/destination choices (see
     # DEFAULT_CONFIG): a stored typo falls back to the shipped default rather
     # than reaching ffmpeg or the exporter as an unknown mode.
@@ -1439,6 +1678,22 @@ _CHOICES = {
     "library_codec": {"flac", "alac", "wav", "aiff", "mp3", "aac", "ogg",
                       "opus", "keep"},
     "library_codec_optimize": {"all", "lossless_to_lossy", "keep"},
+    # What a downloaded copy is encoded as: the file's own codec (`copy`), or
+    # one of mlo.containers.CODECS' targets. A stored typo falls back to the
+    # shipped default rather than reaching ffmpeg as an unknown codec.
+    "download_codec": {"copy", "flac", "alac", "wav", "aiff", "mp3", "aac",
+                       "ogg", "opus"},
+    # Which copy the player takes when a track is downloaded: the server's
+    # stream (the default) or the cached one.
+    "playback_source": {"stream", "downloaded"},
+    # How yt-dlp gets the user's cookies, and which browser's store it reads
+    # in browser mode. The browser list is yt-dlp's own (server/youtube.py
+    # holds the same tuple as COOKIES_BROWSERS, so the validator, the settings
+    # field and the module cannot drift apart).
+    "youtube_cookies_mode": {"none", "file", "browser"},
+    "youtube_cookies_browser": {"chrome", "chromium", "edge", "firefox",
+                                "brave", "opera", "safari", "vivaldi",
+                                "whale"},
 }
 
 
@@ -1593,12 +1848,21 @@ def normalize_config(user=None) -> dict:
     except (TypeError, ValueError):
         cfg["cover_crop_threshold"] = 0.05
 
+    # The artist image's configured aspect ("W:H"). Validated with the parser the
+    # fetch, the audit and script 19 all read, so a hand-edited config cannot
+    # wedge the grader into failing every artist image for a shape nothing can
+    # parse — an unusable value falls back to the shipped default.
+    from .artistdata import parse_aspect
+    if parse_aspect(cfg.get("artist_image_aspect")) is None:
+        cfg["artist_image_aspect"] = DEFAULT_CONFIG["artist_image_aspect"]
+
     for k, default, lo, hi in (
         ("discs_toc_tolerance_s", 4.0, 0.5, 10.0),
         ("discs_toc_unique_margin_s", 4.0, 0.5, 10.0),
         ("jpegxl_distance", 0.0, 0.0, 2.0),
         ("grader_strict_square_threshold", 0.005, 0.0, 0.05),
         ("acoustid_min_score", 0.75, 0.0, 1.0),
+        ("replaygain_preamp_db", 0.0, -24.0, 24.0),
         # The transient-store cap: GB, and a negative is the same OFF the
         # Settings row documents as 0 (a floor, so a hand-edited "-1" can never
         # become a cap of minus one byte). The ceiling is the row's own max —
@@ -1695,36 +1959,7 @@ def normalize_config(user=None) -> dict:
                  "discovery_search_sources", "mb_search_source",
                  # the LRCLIB publish feature (script 18, its switch and its
                  # force flag) is gone: a saved config stops carrying them.
-                 "lrclib_auto_publish", "force_publish",
-                 # Playback, offline downloads and YouTube import are gone
-                 # with the player; a saved config stops carrying their keys.
-                 "playback_source", "gapless_playback", "infinite_playback",
-                 "playback_eq_profile", "replaygain_mode",
-                 "replaygain_preamp_db", "replaygain_analyze_missing",
-                 "replaygain_clip_protection", "download_concurrency",
-                 "download_codec", "download_bitrate", "youtube_enabled",
-                 "youtube_max_height", "youtube_cookies_mode",
-                 "youtube_cookies_browser", "playlist_import_parent_albums",
-                 "playlist_import_unmatched", "playlist_import_create_empty",
-                 # Web ratings (script 24) and artist artwork / descriptions
-                 # are gone with their modules.
-                 "metadata_auto_fetch", "metadata_review",
-                 # The YouTube-captions lyrics provider is gone with the
-                 # YouTube import.
-                 "lyrics_youtube_captions",
-                 "write_rating_tags", "web_ratings_enabled",
-                 "web_ratings_sources", "aoty_archive_fallback",
-                 "force_web_ratings", "artist_image_enabled",
-                 "artist_image_sources", "artist_image_crop",
-                 "artist_image_aspect", "artist_image_target_size",
-                 "artist_description_enabled", "album_description_enabled",
-                 "description_sources", "description_full",
-                 "grade_include_description", "grade_check_album_description",
-                 "grade_check_artist_image", "grade_check_artist_description",
-                 # Home shelves, discovery providers and exported playlists
-                 # are gone too.
-                 "home_recent_count", "discovery_enabled", "discovery_timeout_s",
-                 "export_playlists"):
+                 "lrclib_auto_publish", "force_publish"):
         cfg.pop(dead, None)
 
     # The same rule for the ADVISORY family, applied by PREFIX instead of by
@@ -1747,10 +1982,10 @@ def normalize_config(user=None) -> dict:
     if name and user_segment(name) != name:
         cfg["auth_username"] = ""
 
-    # Lyrics provider preference list. Empty means "use the built-in order";
-    # unknown ids are dropped so a hand-edited config can never wedge the
-    # feature.
-    for k in ("lyrics_sources",):
+    # Provider preference lists (discovery, lyrics, artist images, artwork
+    # text). Empty means "use the built-in order"; unknown ids are dropped so
+    # a hand-edited config can never wedge a feature.
+    for k in ("lyrics_sources", "artist_image_sources", "description_sources"):
         v = cfg.get(k)
         if isinstance(v, str):
             v = [t for t in v.replace("\n", ";").split(";") if t.strip()]
@@ -1856,13 +2091,15 @@ def normalize_config(user=None) -> dict:
             # 23 (tag strip) are KEPT instead: they are the newest ids and have
             # never meant anything else, so a saved order that holds one holds
             # the user's own position for it, and shedding it would silently
-            # undo that. An order written before they existed simply has none and
-            # gets them from the same anchor rule below — except 22, which is
+            # undo that. 24 (web ratings) joins them: it is new, it never meant
+            # anything else, and a user who has put it in their order means it.
+            # An order written before they existed simply has none and gets
+            # them from the same anchor rule below — except 22, which is
             # deliberately never anchored: it submits to a PUBLIC database, so
             # it runs when a person put it in their chain (or pressed it in a
             # menu), never because an install was upgraded
             # (server.script_runners.OPT_IN_SCRIPTS).
-            if ((1 <= script_id <= 14 or script_id in (20, 21, 22, 23))
+            if ((1 <= script_id <= 14 or script_id in (20, 21, 22, 23, 24))
                     and script_id not in clean_order):
                 clean_order.append(script_id)
     # Migrate legacy sequential default [1..8] to systematic pipeline
@@ -1903,6 +2140,8 @@ def normalize_config(user=None) -> dict:
         # 17 AI transforms — after the lyrics it reads, before the analysis
         # passes and grading
         _insert_script(clean_order, 17, [13, 12, 16])
+        # 19 artist images — with script 5's image pass, whose policy it shares
+        _insert_script(clean_order, 19, [5, 8, 16])
         # 20 layout scan — right before grading, so the report describes the
         # names 10 (Format all, the canonical trim) has just settled instead
         # of the ones a saved order was still about to rewrite
@@ -1914,6 +2153,11 @@ def normalize_config(user=None) -> dict:
         # deletes by: the final tag passes together, then the read-outs (20,
         # 21) and the grader, which is where the shipped order puts it.
         _insert_script(clean_order, 23, [10, 16, 12])
+        # 24 web ratings — right behind 8 (Auto tagging), where the shipped
+        # order puts it: both are tag-filling fetches that want the release
+        # identity 14/beets has settled, and both must land before 10's trim
+        # and 4's grade.
+        _insert_script(clean_order, 24, [8, 14, 13])
     cfg["run_all_order"] = clean_order or list(DEFAULT_RUN_ALL_ORDER)
     return cfg
 

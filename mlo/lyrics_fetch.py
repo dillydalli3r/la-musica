@@ -39,7 +39,7 @@ from .lyrics import (
     _process_lyrics_for_audio,
 )
 from .lyrics_providers import (  # noqa: F401  (lrclib_fetch is a re-export shim)
-    SOURCE_LABELS, fetch_lyrics, lrclib_fetch, provider_order,
+    SOURCE_LABELS, fetch_lyrics, lrclib_fetch, provider_order, youtube_id_from,
 )
 from .paths import AUDIO_EXTS
 from .stats import (
@@ -257,6 +257,12 @@ def fetch_one(path, config, replace=False, mark_absent=True):
             duration = af.audio.info.length
         except Exception:
             pass
+        # A YouTube id is the ONLY thing the captions provider can work with;
+        # it never searches, so nothing is guessed from the tags (the file name
+        # carries "[<id>]" — the template the video download itself writes).
+        youtube_id = youtube_id_from(af.get_tag("YOUTUBEID"),
+                                     af.get_tag("YOUTUBE_URL"),
+                                     os.path.basename(path))
         # AUTOMATIC writes only take lyrics we are confident about. The search
         # floor (0.6) is deliberately loose — it is what a person browsing
         # candidates wants — but nothing is written here that a person would
@@ -271,7 +277,7 @@ def fetch_one(path, config, replace=False, mark_absent=True):
         # MusicBrainz lookups the names come from.
         album = af.get_tag("ALBUM")
         hit = fetch_lyrics(
-            config, artist, title, album, duration,
+            config, artist, title, album, duration, youtube_id=youtube_id,
             min_score=_AUTO_MIN_SCORE,
             aliases=lambda: _search_aliases(af.get_tag, config, artist, title,
                                             album))

@@ -1,7 +1,9 @@
 """Ad-hoc library queries — one engine, one field catalogue.
 
 GET  /api/library/fields   the ONE catalogue: every field the library payload
-                           holds, grouped for a builder UI.
+                           holds, grouped for a builder UI. The smart-playlist
+                           rule editor renders this too, so a field is defined
+                           once and can never drift between the two.
 POST /api/library/query    conditions + sort + group + facets, answered by
                            ``mlo.query`` against the SAME payload the library
                            page renders (``server.library.build_library`` is
@@ -10,7 +12,7 @@ GET  /api/library/facets   value counts for one field, one walk, no per-row
                            tag read.
 
 Nothing here evaluates a condition: ``mlo.query`` owns the operator semantics,
-so every ad-hoc query answers identically. This module
+so a saved smart playlist and an ad-hoc query answer identically. This module
 owns the CATALOGUE (what a client may ask for) and turns a request that names
 something that does not exist into a 400 instead of a silently empty answer.
 """
@@ -20,10 +22,11 @@ import re
 import threading
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 
 from mlo import query as query_mod
 from server import library as lib_mod
+from server.auth import current_user
 from server.tags_registry import registry
 
 router = APIRouter()
@@ -34,6 +37,7 @@ router = APIRouter()
 # Group order is the order a builder renders: what the user browses by first.
 GROUPS: Tuple[Tuple[str, str], ...] = (
     ("tags", "Tags"),
+    ("rating", "Rating"),
     ("grade", "Grade"),
     ("audit", "Audit"),
     ("tech", "Technical"),
@@ -51,6 +55,7 @@ _NUMERIC_TAGS = frozenset({
     "BPM", "DYNAMIC RANGE", "ALBUM DYNAMIC RANGE", "ENERGY", "ORIGINALYEAR",
     "REPLAYGAIN_TRACK_GAIN", "REPLAYGAIN_TRACK_PEAK",
     "REPLAYGAIN_ALBUM_GAIN", "REPLAYGAIN_ALBUM_PEAK",
+    "RATEYOURMUSIC_ALBUM", "RATEYOURMUSIC_TRACK", "RATEYOURMUSIC_ARTIST",
 })
 
 # Dates: text (an ISO date and a bare year are both text), but they order and
@@ -59,9 +64,9 @@ _NUMERIC_TAGS = frozenset({
 _ORDINAL_TEXT = frozenset({"DATE", "ORIGINALDATE"})
 _ORDINAL_OPS = ("lt", "gt", "lte", "gte", "between")
 
-# Ops an older evaluator accepted for ANY field. They stay accepted here: a
-# stored rule must keep evaluating even where the catalogue does not offer the
-# op for that field.
+# Ops the original smart-playlist evaluator accepted for ANY field. They stay
+# accepted here: a stored rule must keep evaluating even where the catalogue
+# does not offer the op for that field.
 LEGACY_OPS = frozenset({"eq", "ne", "lt", "gt", "lte", "gte", "contains",
                         "missing", "present"})
 
@@ -156,6 +161,37 @@ def _tag_fields() -> List[dict]:
     return out
 
 
+# The one op set every rating field shares: the comparisons, the range, and the
+# two emptiness tests that ARE a rating's own (is_unrated/is_rated) — so the
+# generic number ops (missing/present) are not offered on top. Shared by the
+# track field and the two entity fields: they are one family in three scopes
+# and must never advertise different answers.
+_RATING_OPS = ("eq", "ne", "lt", "gt", "lte", "gte", "between",
+               "is_unrated", "is_rated")
+
+
+def _rating_field() -> dict:
+    """The track rating field. Stars (halves), from the rating store the server
+    layer injects — never from the file's RATING tag, which is Picard's 0-100
+    scale."""
+    # Explicit ops: is_unrated/is_rated ARE this field's emptiness test.
+    return _field("rating", "Rating", "number", targets=("tracks",),
+                  vmin=0, vmax=5, step=0.5, facetable=True, ops=_RATING_OPS,
+                  hint="Stars (halves), 0-5. Unrated tracks carry no value.")
+
+
+def _entity_rating_field(scope: str, label: str, hint: str) -> dict:
+    """One folder-scope rating field (``album.rating`` / ``artist.rating``).
+
+    The USER's verdict on that entity, out of the same store and in the same
+    unit and ops as ``rating`` — the average of the tracks' ratings is a
+    different number and is NOT what this field holds. Answerable from a track
+    row too (as ``album.audit`` is): a track row reports the verdict on the
+    album or artist it sits under."""
+    return _field(f"{scope}.rating", label, "number", vmin=0, vmax=5, step=0.5,
+                  facetable=True, ops=_RATING_OPS, hint=hint)
+
+
 def _grade_fields() -> List[dict]:
     return [
         _field("grade_pct", "Grade %", "number", vmin=0, vmax=100,
@@ -244,6 +280,10 @@ def _album_fields() -> List[dict]:
         _field("album.media", "Media", "enum", facetable=True,
                values=_enum_of("MEDIA")),
         _field("album.track_count", "Track count", "number"),
+        _entity_rating_field(
+            "album", "Album rating",
+            "Stars (halves), 0-5: your own verdict on the album, not the "
+            "average of its tracks' ratings."),
         _field("album.audit", "Album audit", "enum", facetable=True,
                values=("REAL", "FAKE", "Mix"),
                hint="The album's verdict, readable from a track row too."),
@@ -258,6 +298,10 @@ def _artist_fields() -> List[dict]:
         _field("artist.track_count", "Track count", "number"),
         _field("artist.grade_pct", "Artist grade %", "number", vmin=0, vmax=100,
                hint="Rollup of the artist's albums."),
+        _entity_rating_field(
+            "artist", "Artist rating",
+            "Stars (halves), 0-5: your own verdict on the artist, not an "
+            "average of their albums or tracks."),
         _field("artist.audit", "Artist audit", "enum", facetable=True,
                values=("REAL", "FAKE", "Mix"),
                hint="Rollup of the artist's albums."),
@@ -275,6 +319,7 @@ def _enum_of(tag_key: str) -> Optional[Sequence[str]]:
 # this decides what each one contains, so neither is restated.
 _GROUP_FIELDS = {
     "tags": _tag_fields,
+    "rating": lambda: [_rating_field()],
     "grade": _grade_fields,
     "audit": lambda: [_audit_field()],
     "tech": _tech_fields,
@@ -349,7 +394,7 @@ def _bare_names() -> Set[str]:
 def bool_fields() -> Set[str]:
     """The catalogue's boolean fields, dotted AND bare (a saved rule says
     ``is_video``, the catalogue spells it ``library.is_video``). One
-    definition, read by the query endpoint."""
+    definition, read by both the query endpoint and the playlist evaluator."""
     _index()
     return _derived["bool"]
 
@@ -454,26 +499,92 @@ def _validated(body: dict) -> dict:
 
 
 # --------------------------------------------------------------------------- #
+# Rating store
+# --------------------------------------------------------------------------- #
+def rating_source(user: str):
+    """``rating_of(path, raw_tag) -> half-stars`` for the engine, with the
+    folder scopes attached as ``rating_of.folder(scope, path)``.
+
+    The store is read ONCE per scope and only when a condition actually names a
+    rating field (the engine calls this per row, the first call pays). Truth
+    order is the store's own: a DB row wins, else the file's RATING tag
+    converted out of Picard's 0-100 scale, else unrated. A folder has no tag,
+    so a folder row is the whole truth there.
+
+    The folder half is an attribute of the same callable because the engine
+    needs one fact a track lookup does not carry: which KIND of entity the path
+    names (``mlo.query``'s module docstring states the contract). A source
+    without it makes every album/artist rating field read unrated."""
+    state: Dict[str, Any] = {}
+
+    def store():
+        if "mod" not in state:
+            try:
+                from server import ratings as ratings_mod
+            except Exception:
+                # The ratings slice not landed yet: nothing is rated, which is
+                # what the payload alone can prove.
+                ratings_mod = None
+            state["mod"] = ratings_mod
+        return state["mod"]
+
+    def map_of(scope: str) -> Dict[str, int]:
+        key = f"map:{scope}"
+        if key not in state:
+            mod = store()
+            try:
+                state[key] = (mod.map_for(user=user, scope=scope) if mod else {}) or {}
+            except Exception:
+                state[key] = {}
+        return state[key]
+
+    def rating_of(path: str, raw_tag):
+        mod = store()
+        if mod is None:
+            return None
+        half = map_of("track").get(path)
+        if half is None and raw_tag not in (None, ""):
+            try:
+                half = mod.from_tag(raw_tag)
+            except Exception:
+                half = None
+        return half
+
+    def folder(scope: str, path: str):
+        """The user's stored verdict on an album/artist folder (None when
+        unrated). No tag fallback exists for a folder, and the map carries
+        half-stars already — which is the unit the engine asked for."""
+        if store() is None:
+            return None
+        return map_of(scope).get(path)
+
+    rating_of.folder = folder
+    return rating_of
+
+
+# --------------------------------------------------------------------------- #
 # Endpoints
 # --------------------------------------------------------------------------- #
 @router.get("/api/library/fields")
 def library_fields():
-    """The ONE field catalogue: what the query builder renders and what this
-    API accepts."""
+    """The ONE field catalogue: what the query builder renders, what the
+    smart-playlist rule editor renders, and what this API accepts."""
     return catalogue()
 
 
 @router.post("/api/library/query")
-def library_query(body: dict):
+def library_query(body: dict, request: Request):
     """Conditions + sort + group + facets over the cached library payload."""
     req = _validated(body or {})
     cfg = _config()
     library = lib_mod.build_library(cfg)
-    return query_mod.run(library, req, bool_fields=bool_fields())
+    return query_mod.run(library, req,
+                         rating_of=rating_source(current_user(request)),
+                         bool_fields=bool_fields())
 
 
 @router.get("/api/library/facets")
-def library_facets(field: str,
+def library_facets(request: Request, field: str,
                    limit: int = query_mod.FACET_LIMIT,
                    q: Optional[str] = Query(None), target: str = "tracks"):
     """Value counts for one field over the whole library.
@@ -485,6 +596,7 @@ def library_facets(field: str,
         raise _bad(f"unknown target: {target}")
     library = lib_mod.build_library(_config())
     rows = (row for row, _payload in query_mod.walk(library, target))
-    out = query_mod.facet(rows, name, limit=max(0, int(limit)), q=q)
+    out = query_mod.facet(rows, name, limit=max(0, int(limit)), q=q,
+                          rating_of=rating_source(current_user(request)))
     out["target"] = target
     return out

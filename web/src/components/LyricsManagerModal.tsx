@@ -10,7 +10,7 @@ import Modal from "./Modal";
 interface Candidate {
   id: number;
   /** Which provider supplied this hit (LRCLIB, NetEase, Kugou, QQ Music,
-   *  Kuwo). */
+   *  Kuwo, YouTube captions). */
   provider?: string;
   artistName: string;
   trackName: string;
@@ -159,7 +159,7 @@ export default function LyricsManagerModal({
         bodyClass="px-5 py-4 space-y-3"
         footer={
           <div className="text-[10px] text-zinc-600">
-            Applying hands the lyrics to the editor — saving still follows your lyrics format &amp; save-target settings.
+            Applying hands the lyrics to the editor / player — saving still follows your lyrics format &amp; save-target settings.
           </div>
         }
       >
@@ -177,7 +177,7 @@ export default function LyricsManagerModal({
         <button
           className={`btn-ghost !py-1.5 text-xs ${editorOpen ? "!text-accent" : ""}`}
           onClick={() => setEditorOpen(true)}
-          title="Full-screen lyrics editor: per-line timestamps, word/syllable splitting and auto-distribution"
+          title="Full-screen lyrics editor: tap line/word/syllable times along the vocals, speed control"
         >
           <PenLine className="h-3.5 w-3.5" /> Enhanced editor
         </button>
@@ -268,6 +268,7 @@ export default function LyricsManagerModal({
           artist={artist}
           track={track}
           album={album}
+          duration={duration}
           initialLyrics={currentText ?? ""}
           onClose={() => setEditorOpen(false)}
           onSaved={onSaved}

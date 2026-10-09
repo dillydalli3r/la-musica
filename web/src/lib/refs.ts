@@ -1,11 +1,31 @@
 /** Stable entity references.
 
  The app prefers MusicBrainz IDs wherever an entity is *referenced* (page
- URLs, artist names) so links keep working when files move or
+ URLs, favorites, playlist rows) so links keep working when files move or
  get reorganized. Resolving "mb:<id>" back to the current path happens
- server-side (server/mbresolve.py). Tag writes always use the
+ server-side (server/mbresolve.py). Playback and tag writes always use the
  freshly resolved path.
 */
+
+import type { MouseEvent } from "react";
+
+import type { Album, Artist, Library } from "../types";
+
+/** Shared click behavior for entity-title links on play rows: a plain mouse
+ * click falls through to the row's play handler (preventDefault stops the
+ * router), while Ctrl/Shift/cmd-click — and a keyboard activation, which
+ * arrives as a click with detail 0 — opens the target page IN-APP: the
+ * browser's new-tab default is deliberately suppressed so the viewer stays
+ * inside the app. Middle-click keeps the native new-tab behavior. */
+export function entityLinkClick(e: MouseEvent, open: () => void) {
+  if (e.ctrlKey || e.metaKey || e.shiftKey || e.detail === 0) {
+    e.preventDefault();
+    e.stopPropagation();
+    open();
+  } else {
+    e.preventDefault();
+  }
+}
 
 type TrackLike = { path?: string; tags?: { MUSICBRAINZ_TRACKID?: string | null } };
 type AlbumLike = {
@@ -50,6 +70,22 @@ export function artistRef(a: ArtistLike): string {
   const id = a.albums?.find((al) => al.meta?.MUSICBRAINZ_ALBUMARTISTID)?.meta
     ?.MUSICBRAINZ_ALBUMARTISTID;
   return id ? `/artist/mb:${id}` : `/artist/${encodeURIComponent(a.path)}`;
+}
+
+/** The library rows a playing track's folder belongs to. A queue row carries
+ *  only `albumPath`, but the routes above prefer MusicBrainz IDs — albumRef
+ *  wants the album's meta, artistRef the artist's album list — and those live
+ *  in the `/api/library` payload the surfaces already hold. An exact path
+ *  match is the whole lookup: an album folder IS an entry of the artist folder
+ *  that contains it. `null` means the library does not list this folder (a
+ *  download being previewed), i.e. there is no page to open for it. */
+export function libraryRow(
+  lib: Library | undefined,
+  albumPath: string
+): { album: Album; artist: Artist } | null {
+  for (const artist of lib?.artists ?? [])
+    for (const album of artist.albums) if (album.path === albumPath) return { album, artist };
+  return null;
 }
 
 /** The artist's MusicBrainz album-artist ID, if any album carries one. */

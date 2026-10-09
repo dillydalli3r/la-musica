@@ -56,6 +56,7 @@ const GROUPS: Group[] = [
       "grade_check_extra_images",
       "grade_check_empty_folders",
       "grade_check_expected_tracks",
+      "grade_check_album_description",
       "grade_check_raw_video",
       "grade_check_lossless_source",
       "grade_check_disc_naming",
@@ -63,6 +64,15 @@ const GROUPS: Group[] = [
       "grade_check_cd_cue",
       "grade_check_cd_format",
       "grade_check_crc",
+    ],
+  },
+  {
+    id: "artist",
+    title: "Artist",
+    desc: "Graded once per ARTIST folder, not per album — the artist page shows the same two checks and its own badge.",
+    keys: [
+      "grade_check_artist_image",
+      "grade_check_artist_description",
     ],
   },
   {
@@ -80,9 +90,10 @@ const GROUPS: Group[] = [
   {
     id: "links",
     title: "Identity links",
-    desc: "The release-level MusicBrainz identity link, graded per track.",
+    desc: "The two release-level identity links, graded per track.",
     keys: [
       "grade_check_mb_links",
+      "grade_check_rym_links",
     ],
   },
   {
@@ -132,6 +143,7 @@ const GROUPS: Group[] = [
     keys: [
       "grade_include_music",
       "grade_include_cover",
+      "grade_include_description",
       "grade_include_cue",
       "grade_include_log",
       "grade_include_lrc",
@@ -177,7 +189,7 @@ const CHECK_DESC: Record<string, string> = {
   grade_check_extra_images: "Images that are neither cover.* nor per-track sidecars fail the album.",
   grade_check_empty_folders: "A folder with no audio track anywhere beneath it fails the run (issue code EMPTY_FOLDER) — albums come from audio files, so such a folder would otherwise be skipped silently. A folder still holding part of the album (cover.*, .cue, .log, .lrc, .accurip) counts too: its audio is gone. Hidden and app-state folders are ignored.",
   grade_check_expected_tracks: "An album must hold the WHOLE release. It fails when it carries a MusicBrainz release id but no .mlo_expected.json (issue code EXPECTED_TRACKS_MISSING — nothing can say whether it is complete), and when the tracklist it does carry names a track the folder does not have (EXPECTED_TRACKS_INCOMPLETE): 14 of a CD's 15 tracks is a broken album, not a small one, and the album page greys out the tracks that never arrived. The manifest records the release's own tracklist; script 15 (Release tracklist) writes it. An album with neither a release id nor a recorded tracklist is not graded on it — script 15 writes no manifest without one, so the check could never be cleared.",
-  
+  grade_check_album_description: "The album folder needs a non-blank description.txt — fetch one on the album page.",
   grade_check_raw_video: "Un-remuxed videos (VOB/AVI/WMV/TS) fail — run script 11 to normalize them to MKV.",
   grade_check_lossless_source: "Uncompressed lossless sources (WAV/AIFF/APE/WV/SHN) fail — script 3 converts them to FLAC.",
   grade_check_disc_naming: "A CD's .log / .cue / .accurip files must follow the configured disc pattern (CD-1, CD-2 … by default). The check runs whatever auto-rename is set to — with it off, renaming them is a manual job (the issue text says so). Disc FOLDERS are the layout scan's business: it reports a folder inside an album that is not a disc folder, and the naming script covers their letter case.",
@@ -185,12 +197,15 @@ const CHECK_DESC: Record<string, string> = {
   grade_check_cd_cue: "Every CD disc needs a .cue sheet.",
   grade_check_cd_format: "CD tracks must be FLAC (lossless).",
   grade_check_crc: "Every track must be covered by a per-track CRC in its own disc's .log, and that CRC must match the CRC of the track's decoded audio — coverage alone is not enough (issue codes CRC / CRC_MISMATCH).",
+  grade_check_artist_image: "The artist folder must hold an artist.jpg / artist.png that decodes, matches the configured artist_image_aspect (±2%) and stays under the artist_image_target_size ceiling (issue codes ARTIST_IMAGE_MISSING / _CORRUPT / _FORMAT / _OVERSIZED / _ASPECT / _UPSCALED). An image below the target is reported as a note and passes — nothing here upscales. Script 19 (Optimize artist images) fixes every one of them.",
+  grade_check_artist_description: "The artist folder must hold a non-blank description.txt (issue code ARTIST_DESCRIPTION_MISSING).",
   grade_check_audit: "Tracks must carry an AUDIT tag (run Audit Library). ON by default — the verdict is the rip's OWN evidence (the .log's per-track CRC against the decoded audio, then AccurateRip), never a spectral guess, so it fails only a disc nothing verified. Off, an unaudited library is never failed for the tag.",
   grade_check_flac_md5: "A FLAC states the MD5 of its own DECODED audio (STREAMINFO), and this check asks whether it is true. A stream whose audio does not hash to the digest it states is corrupt or dishonestly written and fails the track (issue code FLAC_MD5) — no tag write can move that digest, so the verdict is about the audio, not the tags. A stream that states NO MD5 (all zero) is reported as 'FLAC MD5 absent' / UNVERIFIED (issue code FLAC_MD5_ABSENT) and does not fail the track: unknown is not the same as wrong, and it is never counted as verified. The answer comes from Audit Library (script 6) when it already decoded the file, and otherwise from the reference check (`flac -t`) run during grading.",
   grade_check_log_checksum: "A log checksum that IS PRESENT must verify. One that is absent is not required and costs nothing: XLD, EAC before v1.0 and a 1.0+ log whose 'Log checksum' line is gone are all judged by their per-track CRCs (issue code LOG_CHECKSUM fires only on a checksum that was there and did not verify).",
   grade_check_accuraterip: "A .accurip whose verdict is not REAL marks the album's AUDIT FAKE (and each affected track red) — grading itself is reserved to tagging, so this key never costs a grade point. Turn on 'Require audit tag' for that verdict to fail the album.",
   grade_check_log_grade: "LOG_GRADE tag must exist and be 0–100.",
   grade_check_mb_links: "The MusicBrainz release (or its release group) must be tagged.",
+  grade_check_rym_links: "The RateYourMusic release page URL must be tagged.",
   grade_check_cover: "The album must have cover art meeting the configured size, squareness and crop rules.",
   grade_check_cover_crop: "The cover's width/height must be square within cover_crop_threshold — an aspect-ratio test, not crop detection (issue: 'Cover aspect ratio WxH not square').",
   grade_check_sidecar_cover: "Sidecar covers (01 - Song.jpg) must meet the same cover rules.",
@@ -212,7 +227,7 @@ const CHECK_DESC: Record<string, string> = {
   grade_check_xlit_translation: "Computed against the reader's language (the first of 'Lyrics translation languages'): a track already in that language must not carry a TRANSLATION tag or a .<lang>.lrc sidecar (XLIT_UNNEEDED), and one that is not must have the right one (XLIT_MISSING, which also names a mismatch like TRANSLATION-DE stored for English lyrics).",
   grade_include_music: "The music files themselves.",
   grade_include_cover: "cover.* images count toward the grade.",
-  
+  grade_include_description: "description.txt (fetched on the album page) counts as the app's own file rather than a stray one.",
   grade_include_cue: ".cue sidecars count toward the grade.",
   grade_include_log: ".log sidecars count toward the grade.",
   grade_include_lrc: ".lrc sidecars count toward the grade.",
@@ -373,9 +388,10 @@ export default function GradingPage() {
       "grade_check_lyrics_blank_lines", "grade_check_cue_blank_lines",
       "grade_check_filename_case", "grade_check_ext_case", "grade_check_excess_tags",
       "grade_check_alias_excess",
-      "grade_check_mb_links",
+      "grade_check_mb_links", "grade_check_rym_links",
       // content checks — nothing breaks if the library ships without them
-      "grade_check_replaygain",
+      "grade_check_replaygain", "grade_check_album_description",
+      "grade_check_artist_image", "grade_check_artist_description",
     ];
     setLocal((c) => {
       const next = { ...(c ?? {}) };

@@ -1,10 +1,10 @@
 """Which external sources work right now — one payload for the setup wizard.
 
-One row shape for every kind: the lyrics providers, the advisory
-(ITUNESADVISORY) routes, the genre sources, the discover sources and the LINK
-sources (the RateYourMusic album/artist links an import stamps). Every row says
-what it needs, whether that is configured here, and — when asked to probe —
-what actually answered.
+Five kinds of source, one row shape: the lyrics providers, the advisory
+(ITUNESADVISORY) routes, the genre sources, the metadata (artist image)
+providers and the LINK sources (the RateYourMusic album/artist links an import
+stamps). Every row says what it needs, whether that is configured here, and —
+when asked to probe — what actually answered.
 
 `probe=False` (the default) answers from the config alone: NO request leaves
 this machine, unconfigured rows are `skipped` and the rest are `ok`
@@ -14,8 +14,9 @@ this machine, unconfigured rows are `skipped` and the rest are `ok`
 sample the lyrics providers already probe with (Radiohead / Creep / Pablo
 Honey), in parallel, and reports what came back:
 
-  * `ok`      — it answered ("synced lyrics, 38 lines", "6 genres"),
-  * `skipped` — it cannot run here at all (no key, RYM refusing us),
+  * `ok`      — it answered ("synced lyrics, 38 lines", "6 genres",
+                "artist photo 1000x1000"),
+  * `skipped` — it cannot run here at all (no key, no yt-dlp, RYM refusing us),
   * `fail`    — it ran and had nothing, or raised.
 
 Nothing here ever raises or writes anything: a broken source is a row, not a
@@ -23,6 +24,7 @@ Nothing here ever raises or writes anything: a broken source is a row, not a
 there is exactly one sample and one set of probe rules.
 """
 import concurrent.futures
+import re
 import time
 from datetime import datetime, timezone
 
@@ -49,17 +51,19 @@ SAMPLE_ISRC = "GBAYE9200070"
 # Spotify is simply skipped without a client secret, so a REJECTED secret read
 # as "not configured". These rows ask the provider's own credential endpoint
 # instead; see server/credential_checks.
-KINDS = ("lyrics", "advisory", "genre", "links", "credentials")
+KINDS = ("lyrics", "advisory", "genre", "metadata", "links", "discover",
+         "credentials")
 
 # The ask order of the advisory routes — `resolve_advisory_route`'s own order.
 _ADVISORY_ORDER = ["deezer-isrc", "spotify-isrc", "apple-album", "itunes-song",
-                   "discogs-parental"]
+                   "discogs-parental", "youtube-age"]
 _ADVISORY_LABELS = {
     "deezer-isrc": "Deezer (ISRC)",
     "spotify-isrc": "Spotify (ISRC)",
     "apple-album": "Apple (album editions)",
     "itunes-song": "iTunes (song search)",
     "discogs-parental": "Discogs (parental advisory)",
+    "youtube-age": "YouTube (age gate)",
 }
 
 # What each advisory route states — one line per route, taken from its own
@@ -77,6 +81,8 @@ _ADVISORY_PROVIDES = {
                    "trackExplicitness.",
     "discogs-parental": "the parental-advisory flag on the release's Discogs "
                         "entry; needs a token.",
+    "youtube-age": "a track's YouTube video age gate; needs the video's id and "
+                   "yt-dlp.",
 }
 
 # Genre source labels — the spellings the settings UI already shows.
@@ -155,6 +161,13 @@ def _count_detail(names, label="genres"):
     if not names:
         return ""
     return "%d %s" % (len(names), label[:-1] if len(names) == 1 else label)
+
+
+def _image_detail(label, url):
+    """*label* plus the pixel size when the provider bakes it into the URL."""
+    match = re.search(r"(\d{2,5})x(\d{2,5})", str(url or ""))
+    return "%s %sx%s" % (label, match.group(1), match.group(2)) if match \
+        else label
 
 
 def _why(prefix, reason):
@@ -239,6 +252,11 @@ def _probe_advisory(pid, cfg):
         if flagged:
             return "ok", "parental advisory flagged on the sample's edition"
         return "ok", "release found, no advisory flag"
+
+    if pid == "youtube-age":
+        # Like the captions provider: there is nothing to probe without a
+        # track's own video id, and nothing here ever searches YouTube.
+        return "skipped", "needs a track's YouTube id"
 
     return "skipped", "unknown source"
 
@@ -392,6 +410,155 @@ def _probe_genre(pid, cfg):
 
 
 # --------------------------------------------------------------------------- #
+# Discover (/api/discover/*) — genre lists, genre browse, recommendations
+# --------------------------------------------------------------------------- #
+# One probe per registry source, each asking the thing that source is FOR, so
+# the panel's answer means "this source can do its job here" rather than "a
+# request did not raise". The registry note travels on the row (`notes`), which
+# is what explains that TheAudioDB/Wikidata/Wikipedia are description and
+# verification sources — they publish no genre list at all.
+def _probe_discover(pid, cfg):
+    from server import discovery
+    from server import integrations as intg
+
+    if pid == "musicbrainz":
+        got = discovery.musicbrainz_genre_list(pages=1)
+        detail = _count_detail([row["name"] for row in got["genres"]])
+        if not detail:
+            return "fail", "MusicBrainz stated no genres"
+        if not got.get("done"):
+            return "ok", "%s (partial: %d of %s)" % (detail, got["loaded"],
+                                                     got["count"] or "?")
+        return "ok", detail
+
+    if pid == "deezer":
+        detail = _count_detail([row["name"] for row in discovery.deezer_genre_list()])
+        return ("ok", detail) if detail else ("fail", "no Deezer genre list")
+
+    if pid == "itunes":
+        got = discovery.itunes_genre_albums("shoegaze", limit=1)
+        rows = got.get("rows") or []
+        return ("ok", "%s for a genre search" % _count_detail(
+            [r.get("title") for r in rows], "albums")) if rows \
+            else ("fail", "no Apple genre album")
+
+    if pid == "audiodb":
+        row = discovery.audiodb_artist(SAMPLE_ARTIST) or {}
+        parts = [p for p in (row.get("genre"), row.get("mood")) if p]
+        return ("ok", " · ".join(parts) + " (states a named artist's genre, "
+                                          "no list endpoint)") if parts \
+            else ("fail", "TheAudioDB stated no genre for the sample artist")
+
+    if pid == "lastfm":
+        started = time.time()
+        got = discovery.lastfm_tag_top("albums", "shoegaze", limit=1, cfg=cfg)
+        detail = _count_detail([r.get("title") for r in got.get("rows") or []],
+                               "albums")
+        if detail:
+            return "ok", "%s under the sample tag" % detail
+        return "fail", _why("no Last.fm albums for the sample tag",
+                            discovery.lastfm_last_error(started))
+
+    if pid == "listenbrainz":
+        mbid = _artist_mbid(cfg)
+        if not mbid:
+            return "fail", "could not resolve the sample artist on MusicBrainz"
+        rows = discovery.listenbrainz_similar_artists(mbid, limit=1) or []
+        return ("ok", _count_detail([r.get("title") for r in rows],
+                                    "artists") + " similar to the sample") if rows \
+            else ("fail", "no ListenBrainz similar artists")
+
+    if pid == "discogs":
+        started = time.time()
+        got = discovery.discogs_style_search("Shoegaze", limit=1, cfg=cfg)
+        rows = got.get("rows") or []
+        if rows:
+            return "ok", "%s under the sample style" % _count_detail(
+                [r.get("title") for r in rows], "releases")
+        got_http = discovery.last_http_error("api.discogs.com")
+        reason = ""
+        if got_http and float(got_http.get("at") or 0) >= started \
+                and got_http.get("status"):
+            reason = (f"Discogs answered HTTP {got_http['status']} "
+                      f"{got_http['body']}").strip()
+        return "fail", _why("no Discogs release for the sample style", reason)
+
+    if pid == "wikidata":
+        got = discovery.wikidata_genres(term="%s %s" % (SAMPLE_ARTIST, SAMPLE_ALBUM))
+        detail = _count_detail((got or {}).get("genres"))
+        return ("ok", "%s (description source, never a list)" % detail) if detail \
+            else ("fail", "Wikidata stated no genres")
+
+    if pid == "wikipedia":
+        summary = discovery.wikipedia_summary(SAMPLE_ARTIST) or {}
+        return ("ok", "article summary (description source, never a list)") \
+            if summary.get("extract") or summary.get("description") \
+            else ("fail", "no Wikipedia summary")
+
+    if pid == "spotify":
+        started = time.time()
+        got = discovery.spotify_genre_albums("rock", limit=1, cfg=cfg)
+        rows = got.get("rows") or []
+        if rows:
+            return "ok", "%s for a genre search" % _count_detail(
+                [r.get("title") for r in rows], "albums")
+        return "fail", _why("no Spotify genre album",
+                            intg.spotify_last_error(started))
+
+    if pid == "rym":
+        # RateYourMusic is a CHARTS-only source here (its genre reading lives
+        # in the import chain), so its probe asks the thing this registry entry
+        # is FOR: its all-time song chart. The refusal is reported in RYM's own
+        # words — the whole point of the row.
+        try:
+            got = intg.rym_charts(kind="tracks", period="all", limit=1, cfg=cfg)
+        except Exception as e:
+            return "fail", str(e)
+        rows = got.get("rows") or []
+        if rows:
+            return "ok", "%s (the %s chart)" % (
+                _count_detail([r.get("title") for r in rows], "songs"),
+                got.get("chart") or "all-time")
+        return "fail", "the chart page stated no rows we could read"
+
+    return "skipped", "unknown source"
+
+
+# --------------------------------------------------------------------------- #
+# Metadata (artist image) providers
+# --------------------------------------------------------------------------- #
+def _probe_metadata(pid, cfg):
+    from server import discovery
+
+    if pid == "deezer":
+        row = discovery.deezer_artist(SAMPLE_ARTIST) or {}
+        url = row.get("image")
+        return ("ok", _image_detail("artist photo", url)) if url \
+            else ("fail", "no Deezer artist photo")
+
+    if pid == "audiodb":
+        row = discovery.audiodb_artist(SAMPLE_ARTIST) or {}
+        for key, label in (("thumb", "artist thumb"), ("banner", "artist banner"),
+                           ("fanart", "artist fanart")):
+            if row.get(key):
+                return "ok", _image_detail(label, row[key])
+        return "fail", "no TheAudioDB artist image"
+
+    if pid == "itunes":
+        url = discovery.itunes_artist_artwork(SAMPLE_ARTIST)
+        return ("ok", _image_detail("album artwork (no artist photo API)", url)) \
+            if url else ("fail", "no Apple artwork for the sample artist")
+
+    if pid == "wikipedia":
+        summary = discovery.wikipedia_summary(SAMPLE_ARTIST) or {}
+        url = summary.get("image")
+        return ("ok", _image_detail("lead image", url)) if url \
+            else ("fail", "no Wikipedia lead image")
+
+    return "skipped", "unknown source"
+
+
+# --------------------------------------------------------------------------- #
 # Link sources — the RYM album/artist links an import stamps
 # --------------------------------------------------------------------------- #
 _RYM_LABELS = {"rateyourmusic": "RateYourMusic links (album + artist)"}
@@ -454,7 +621,8 @@ def _specs(kind=None):
     specs = []
     for src in available_sources():
         pid = src["id"]
-        # Every provider is keyless. `rank`
+        # All six providers are keyless: the captions one needs yt-dlp
+        # *installed*, which is what the wizard has to check for it. `rank`
         # (1-based, the registry's own order), `notes` and `provides` all come
         # straight from the registry so the wizard reads them from ONE payload:
         # `notes` is the capability text the settings list shows and
@@ -464,12 +632,13 @@ def _specs(kind=None):
                       "synced": True, "rank": src.get("rank"),
                       "notes": src.get("notes") or "",
                       "provides": src.get("notes") or "",
-                      "needs": [],
+                      "needs": ["yt-dlp"] if pid == "youtube" else [],
                       "probe": lambda cfg, p=pid: _probe_lyrics(p, cfg)})
 
     for pid in _ADVISORY_ORDER:
         needs = {"spotify-isrc": ["spotify_client_id", "spotify_client_secret"],
-                 "discogs-parental": ["discogs_token"]}.get(pid, [])
+                 "discogs-parental": ["discogs_token"],
+                 "youtube-age": ["yt-dlp"]}.get(pid, [])
         specs.append({"id": pid, "kind": "advisory",
                       "label": _ADVISORY_LABELS[pid], "needs": list(needs),
                       "provides": _ADVISORY_PROVIDES.get(pid, ""),
@@ -489,6 +658,13 @@ def _specs(kind=None):
                       "label": _GENRE_LABELS.get(pid, pid), "needs": list(needs),
                       "probe": lambda cfg, p=pid: _probe_genre(p, cfg)})
 
+    for pid in discovery.IMAGE_SOURCES:
+        specs.append({"id": pid, "kind": "metadata",
+                      "label": discovery.SOURCE_LABELS.get(pid, pid),
+                      "needs": [],
+                      "provides": discovery.SOURCE_NOTES.get(pid, ""),
+                      "probe": lambda cfg, p=pid: _probe_metadata(p, cfg)})
+
     # Links: the RYM pair an import writes onto the album's tracks. It needs
     # the same cookie the genre row prompts for — that is the point: the
     # wizard shows one place to paste it and one button that proves it works.
@@ -499,6 +675,18 @@ def _specs(kind=None):
                                   "import writes onto the tracks — the same "
                                   "cookie the genre row asks for.",
                       "probe": lambda cfg, p=pid: _probe_links(p, cfg)})
+
+    # Discover: `server.discover` IS the registry for the /api/discover/*
+    # surface, so its sources are read from there — a source added to that
+    # registry appears in this panel (and in the wizard) without a second list
+    # to keep in step. `notes` is the source's own capability text.
+    from server import discover as discover_mod
+
+    for spec in discover_mod.SOURCES:
+        specs.append({"id": spec["id"], "kind": "discover",
+                      "label": spec["label"], "needs": list(spec["needs"]),
+                      "notes": spec["note"], "provides": spec["note"],
+                      "probe": lambda cfg, p=spec["id"]: _probe_discover(p, cfg)})
 
     # Credentials: the logins every row above depends on, each asked through
     # its provider's own credential endpoint (server.credential_checks). The
@@ -518,10 +706,27 @@ def _specs(kind=None):
     return [s for s in specs if kind is None or s["kind"] == kind]
 
 
+# Requirements that are an INSTALLED tool rather than a config key. They live
+# in the same `needs` list (that is what the wizard has to fix), but they are
+# checked by looking for the tool.
+_TOOLS = ("yt-dlp",)
+
+
 def _missing(spec, cfg):
-    """The config keys this spec still needs — [] when ready."""
+    """The config keys / tools this spec still needs — [] when ready."""
     cfg = cfg or {}
-    return [k for k in spec["needs"] if not str(cfg.get(k) or "").strip()]
+    out = [k for k in spec["needs"]
+           if k not in _TOOLS and not str(cfg.get(k) or "").strip()]
+    return out + [t for t in spec["needs"]
+                  if t in _TOOLS and not _tool_available(t)]
+
+
+def _tool_available(tool):
+    if tool != "yt-dlp":
+        return False
+    from mlo.lyrics_providers import _ytdlp_exe
+
+    return bool(_ytdlp_exe())
 
 
 def _timed(fn, cfg):

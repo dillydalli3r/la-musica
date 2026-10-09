@@ -74,6 +74,11 @@ ok(
     "api.ts must not build the query string itself",
 )
 ok(
+    "...and the offline copy's key IS that path (path + query)",
+    "export function cacheKey" in read("web/src/lib/offlineCache.ts")
+    and "coverSearchPath" in api,
+)
+ok(
     "the component has exactly ONE call site of api.coverSearch",
     count(modal, "api.coverSearch(") == 1,
     f"found {count(modal, 'api.coverSearch(')}",
@@ -121,6 +126,16 @@ ok(
     "an in-flight search shows the searching state (never the empty one)",
     'phase.kind === "searching"' in modal and 't("cover.searching")' in modal,
 )
+ok(
+    "an answer that came off disk is labelled with the offline copy",
+    "offlineFallback()" in modal and count(modal, 't("cover.offline")') == 2,
+    "both the empty and the ready state must say when the answer is a stored one",
+)
+ok(
+    "...which api.ts reports for the endpoint that could not be reached",
+    "export function offlineFallback()" in api,
+)
+
 # The finder's WRITE is the wizard's too. `POST /api/cover/fromurl` is refused
 # for an album outside the music folder unless the request carries the wizard's
 # `staged` opt-in — the same flag every other cover call the wizard makes

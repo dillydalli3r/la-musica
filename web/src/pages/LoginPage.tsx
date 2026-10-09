@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { KeyRound, Loader2, Lock, Server, ShieldCheck } from "lucide-react";
-import { api, normalizeServerUrl, setServerUrl, setToken, serverUrl, IN_TAURI } from "../api";
+import { api, normalizeServerUrl, setServerUrl, setToken, serverUrl, IN_MOBILE_SHELL, IN_TAURI } from "../api";
 import { toast } from "../store";
 import { useI18n } from "../lib/i18n";
 import PageHeader from "../components/PageHeader";
@@ -14,9 +14,9 @@ import PageHeader from "../components/PageHeader";
  *  * **setup** — nobody has claimed this server yet, so the useful action is
  *    choosing a password, not guessing one (the API answers 428 for every
  *    other call until it exists);
- *  * **address** — a client shell with no server picked yet, where the first
- *    question is *where* the server is. The desktop shell finds its own on
- *    127.0.0.1, but the address can always be corrected here.
+ *  * **address** — a client shell (desktop/iOS/Android) with no server
+ *    picked yet, where the first question is *where* the server is. The
+ *    desktop shell finds its own on 127.0.0.1; a phone has to be told.
  *
  * The screen therefore renders whichever of those the server's own
  * `/api/auth/status` describes, rather than assuming "sign in".
@@ -172,7 +172,12 @@ export default function LoginPage({ onSignedIn }: { onSignedIn: () => void }) {
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               autoComplete={needsSetup ? "new-password" : "current-password"}
-              autoFocus
+              // Not on a phone: this screen's FIRST field is the server address
+              // (a mobile client has to be told where its server is), and an
+              // auto-opened keyboard on the password box scrolls that field out
+              // of the viewport before the user has seen it. iOS does the
+              // scrolling itself, when the user taps the field they mean.
+              autoFocus={!IN_MOBILE_SHELL}
             />
           </label>
 

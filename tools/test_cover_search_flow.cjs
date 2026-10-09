@@ -17,7 +17,9 @@
  *   * a request in flight is "searching", never "empty" — and the empty state
  *     is reachable ONLY from a real zero-candidate answer, which carries the
  *     terms it was asked for;
- *   * a failed request surfaces the server's or the provider's own words;
+ *   * a failed request surfaces the server's or the provider's own words, and
+ *     an answer that came out of the app's offline copy is marked as such (a
+ *     stored zero is not a fresh "there is nothing");
  *   * an answer belongs to its query: two different questions have two
  *     different request paths, and the terms shown are the ANSWER's, not the
  *     fields as they stand after an edit.
@@ -171,6 +173,7 @@ const check = (label, condition) => {
     provider: null,
     chosen: null,
     notes: ["covers.musichoarders.xyz: empty", "deezer: empty (nothing for this name)"],
+    cached: null,
   };
   const empty = coverSearchPhase({ query: autoQuery, loading: false, error: null, answer: zeroAnswer, lastQuery: autoQuery });
   check("a real zero-candidate answer is 'empty'", empty.kind === "empty");
@@ -205,6 +208,17 @@ const check = (label, condition) => {
   );
   check("...and the query it failed on, for the retry", failed.kind === "error" && coverSearchPath(failed.query) === MANUAL_PATH);
   check("...not 'empty'", failed.kind !== "empty");
+  const staleZero = coverSearchPhase({
+    query: autoQuery,
+    loading: false,
+    error: null,
+    answer: { ...zeroAnswer, cached: { at: 1700000000000 } },
+    lastQuery: autoQuery,
+  });
+  check(
+    "an answer that came off disk is marked (a stored zero is not a fresh one)",
+    staleZero.kind === "empty" && staleZero.cached.at === 1700000000000
+  );
 
   const blocked = coverSearchPhase({
     query: coverQuery(coverIdentity({})),
@@ -228,7 +242,7 @@ const check = (label, condition) => {
     answer: zeroAnswer,
     lastQuery: null,
   });
-  check("once typed, that same album's search is shown", typed.kind === "empty");
+  check("once typed, that same album's search is shown", typed.kind === "empty" && typed.cached === null);
 
   console.log("\nan answer belongs to its query");
   const other = coverQuery(coverIdentity({ artist: "My Bloody Valentine", album: "m b v" }), { sources: SOURCES, country: COUNTRY });
@@ -236,7 +250,7 @@ const check = (label, condition) => {
   check("...so a stored answer can never be read back for the other", coverSearchPath(other) !== MANUAL_PATH);
   check("the same question always builds the same path", coverSearchPath(autoQuery) === coverSearchPath(coverQuery(LOVELESS, { sources: SOURCES, country: COUNTRY })));
   check(
-    "the path is what api.ts sends, and it is never doubled",
+    "the path IS the offline copy's key (path + query), which is what api.ts sends",
     coverSearchPath(autoQuery).startsWith("/cover/search?") && !coverSearchPath(autoQuery).includes("//")
   );
 

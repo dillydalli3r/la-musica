@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { IN_TAURI } from "../api";
+import { IN_MOBILE_SHELL, IN_TAURI } from "../api";
 
 /** The three window glyphs, drawn HERE rather than taken from the icon set.
  *
@@ -84,11 +84,11 @@ export const TITLEBAR_H = "2rem";
  *  Rendered on EVERY screen of the desktop shell, the setup wizard and the
  *  address/claim screens included: an undecorated window with no bar there
  *  would have no way left to be moved or closed. `null` everywhere else — a
- *  plain browser gets its window chrome from its host.
+ *  browser and a phone shell get their window chrome from their host.
  *
- *  It sits at `z-[70]`, above the dialogs (`z-[60]`): the window controls are
- *  the one thing that must never be painted over, so a modal dims the app and
- *  leaves the chrome alone.
+ *  It sits at `z-[70]`, above the fullscreen player (`z-50`) and the dialogs
+ *  (`z-[60]`): the window controls are the one thing that must never be
+ *  painted over, so a modal dims the app and leaves the chrome alone.
  *
  *  macOS draws its controls on the LEFT, in its own order — the whole point of
  *  a custom bar is that it looks native, and a Mac with Windows' three buttons
@@ -98,13 +98,13 @@ export default function TitleBar() {
 
   // Publish the bar's height as that inset. The bar sits in the app's flow, so
   // everything INSIDE the shell is below it already; a `fixed inset-0` overlay
-  // anchors to the window, and its own top row came out underneath the window
-  // controls on Windows (owner report). Set on <html> rather than the app box
-  // because overlays are portalled to <body>. Retired with the bar, so a browser
-  // — where the host draws the chrome and this component renders nothing —
-  // keeps 0. */
+  // anchors to the window, and the fullscreen player's top row (the exit button
+  // and the queue readout) came out underneath the window controls on Windows
+  // (owner report). Set on <html> rather than the app box because the player is
+  // portalled to <body>. Retired with the bar, so a browser and a phone — where
+  // the host draws the chrome and this component renders nothing — keep 0. */
   useEffect(() => {
-    if (!IN_TAURI) return;
+    if (!IN_TAURI || IN_MOBILE_SHELL) return;
     const root = document.documentElement;
     root.style.setProperty("--mlo-titlebar-h", TITLEBAR_H);
     return () => {
@@ -113,7 +113,7 @@ export default function TitleBar() {
   }, []);
 
   useEffect(() => {
-    if (!IN_TAURI) return;
+    if (!IN_TAURI || IN_MOBILE_SHELL) return;
     const win = getCurrentWindow();
     let alive = true;
     const read = () => {
@@ -131,10 +131,10 @@ export default function TitleBar() {
     };
   }, []);
 
-  if (!IN_TAURI) return null;
+  if (!IN_TAURI || IN_MOBILE_SHELL) return null;
   const win = getCurrentWindow();
-  // Desktop macOS — never an iPad in desktop mode, which differs by reporting
-  // touch points.
+  // Desktop macOS, as opposed to an iPad in desktop mode (`maxTouchPoints`,
+  // the same test `IN_MOBILE_SHELL` makes).
   const mac = /macintosh|mac os x/i.test(navigator.userAgent) && (navigator.maxTouchPoints || 0) <= 1;
 
   const minimize = { d: GLYPHS.minus, crisp: true, label: "Minimize", onClick: () => void win.minimize() };

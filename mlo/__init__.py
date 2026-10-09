@@ -26,6 +26,7 @@ Modules:
     accurip     AccurateRip .accurip generation + verification (script 9)
     format_all  final canonical pass, embedded cover policy (script 10)
     grader      per-album compliance grading
+    artistdata  artist artwork + descriptions stored inside the library (script 19)
     layout      read-only library-layout report, stored under .mlo/data (script 20)
     audit       audio integrity auditing via the AudioAuditor CLI
     cli         interactive console menu
@@ -58,6 +59,7 @@ _LAZY = {
     "DEFAULT_CONFIG": "config",
     "load_config": "config",
     "save_config": "config",
+    "run_optimize_artist_images": "artistdata",
     "run_auto_tagging": "autotag",
     "run_format_cues": "cue",
     "run_optimize_flacs": "flac",

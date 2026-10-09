@@ -49,7 +49,7 @@ listed = lp.available_sources()
 assert [s["id"] for s in listed] == lp.SOURCES, listed
 assert all(set(s) == {"id", "kind", "label", "synced", "free", "needs",
                       "rank", "notes"} for s in listed), listed
-assert [s["rank"] for s in listed] == [1, 2, 3, 4, 5], listed
+assert [s["rank"] for s in listed] == [1, 2, 3, 4, 5, 6], listed
 assert all(s["synced"] and s["free"] and s["needs"] == [] for s in listed), listed
 assert all(s["notes"].strip() for s in listed), listed
 
@@ -286,7 +286,8 @@ with Patch(lp, _get_json=fake_api([LRCLIB_PLAIN_ONLY])):
 # --------------------------------------------------------------------------- #
 def fixed_hit(artist, title, sync=True):
     """A provider stub answering one name pair, counting its calls."""
-    def provider(_artist, _title, album=None, duration=None, cfg=None):
+    def provider(_artist, _title, album=None, duration=None, cfg=None,
+                 youtube_id=None):
         calls.append((_artist, _title))
         if _artist != artist or _title != title:
             return None

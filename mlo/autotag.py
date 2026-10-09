@@ -1,13 +1,16 @@
-"""Automatic tagging: INSTRUMENTAL + MOOD + GENRE.
+"""Automatic tagging: ALBUMITUNESADVISORY + INSTRUMENTAL + MOOD + GENRE.
 
 Script 8 ("Auto Tagging") derives values that would otherwise have to be
-filled in by hand. It does NOT write ALBUMITUNESADVISORY: the app keeps the
-per-track ITUNESADVISORY it fetches or the user sets, and an album-level
-Apple-advisory tag is not part of its vocabulary any more — such a tag is
-excess (see mlo.grader.TAG_ALLOWLIST, keyed off mlo.audio.TAG_MAP) and
-Optimize tags (script 23) / Format all (script 10) remove it.
+filled in by hand:
 
-1) INSTRUMENTAL, cross-referenced from every available source
+1) ALBUMITUNESADVISORY from the per-track ITUNESADVISORY (set manually):
+       0 = unrated / not explicit, 1 = explicit, 2 = edited / safe.
+   Across ALL of the album's tracks (every disc in a multi-disc folder):
+       any explicit track (1)      -> 1
+       else any edited/safe track (2) -> 2
+       else                        -> 0
+
+2) INSTRUMENTAL, cross-referenced from every available source
    (`server.instrumental`: LRCLIB's own `instrumental` flag, Spotify
    audio-features when configured, the track's own name, lyrics evidence):
        any source says instrumental -> 1
@@ -16,7 +19,7 @@ Optimize tags (script 23) / Format all (script 10) remove it.
        keeps its tag as it is; absence of evidence is never read as
        "instrumental".
 
-2) MOOD from the track's own audio (``mlo.moods``: tempo, energy, brightness,
+3) MOOD from the track's own audio (``mlo.moods``: tempo, energy, brightness,
    dynamics → valence/arousal quadrant), refined by the track's GENRE in
    hybrid mode, plus ENERGY — the 0-100 arousal the verdict was scored from.
    Grading requires the tags, so every track gets them unless the file cannot
@@ -24,7 +27,7 @@ Optimize tags (script 23) / Format all (script 10) remove it.
    (mlo.moods extracts their audio through ffmpeg), and the GENRE they carry
    is written through the same video tag writer.
 
-3) GENRE is TRIMMED, never imported. This script asks no provider for a
+4) GENRE is TRIMMED, never imported. This script asks no provider for a
    genre and derives no family of its own: genres come from the import
    pipeline (`server/imports.py`, the genre chain — MusicBrainz and
    RateYourMusic per track, with the configured sources behind them) or from
@@ -64,12 +67,21 @@ from .ui import print_header, log, c, Color
 
 
 # ----------------------------------------------------------------------
-# INSTRUMENTAL (single-pass per album)
+# ALBUMITUNESADVISORY / INSTRUMENTAL (single-pass per album)
 # ----------------------------------------------------------------------
 def _album_files(album_dir):
     return sorted(
         os.path.join(album_dir, f)
         for f in os.listdir(album_dir) if is_audio_file(f))
+
+
+def _derive_advisory(advisories):
+    """1 if any explicit advisory, else 2 if any safe, else 0."""
+    if any(v == "1" for v in advisories):
+        return 1
+    if any(v == "2" for v in advisories):
+        return 2
+    return 0
 
 
 # INSTRUMENTAL cross-reference (server.instrumental), reached from script 8
@@ -1529,6 +1541,9 @@ def run_auto_tagging(config):
 
     print_header("Auto Tagging")
     log(f"music folder: {folder}")
+    if config.get("auto_advisory", True):
+        log("  ALBUMITUNESADVISORY: from per-track ITUNESADVISORY "
+            "(any explicit -> 1, else any safe -> 2, else 0)")
     log("  MUSICBRAINZ release identity: label, catalog number, barcode, "
         "country, type, status, language, script, ASIN, licence, medium + "
         "missing MBIDs (release id, release-group id, artist ids, per-track "
@@ -1567,6 +1582,7 @@ def run_auto_tagging(config):
             f"imported by a script (only the import and manual edits write them)")
 
     force = config.get("force_auto_tag", False)
+    do_advisory = config.get("auto_advisory", True)
     do_instrumental = config.get("auto_instrumental", True)
     do_mood = config.get("mood_enabled", True)
     do_genre = config.get("genre_autofill", True)
@@ -1606,7 +1622,7 @@ def run_auto_tagging(config):
     def process_album(album):
         files = _album_files(album)
         if not files:
-            return album, 0, None, []
+            return album, 0, None, None, []
 
         # Single pass: load every file once and cache the values needed,
         # instead of re-parsing each file for advisory + instrumental.
@@ -1622,6 +1638,8 @@ def run_auto_tagging(config):
                 info.append({
                     "af": af,
                     "advisory": str(af.get_tag("ITUNESADVISORY") or "").strip(),
+                    "album_advisory": str(
+                        af.get_tag("ALBUMITUNESADVISORY") or "").strip(),
                     "instrumental": str(af.get_tag("INSTRUMENTAL") or "").strip(),
                     "has_lyrics": bool(lyr and str(lyr).strip()) or
                         os.path.exists(os.path.splitext(path)[0] + ".lrc"),
@@ -1629,24 +1647,25 @@ def run_auto_tagging(config):
             except Exception:
                 continue
         if not info:
-            return album, 0, None, []
+            return album, 0, None, None, []
 
-        # ONE container rewrite per file for the WHOLE album pass. The stages
+        # ONE container rewrite per file for the WHOLE album pass. Six stages
         # below fill tags (the whitespace fix, the release identity,
-        # INSTRUMENTAL, the instrumental advisory zero) and every set_tag used
-        # to save the whole container for itself — a whole-file copy of a
-        # 30 MB track per tag, on a library whose script 3 writes
-        # `--padding=0` so there is no padding to absorb them. The flush at
-        # the bottom is where all of them land at once, exactly as
-        # `_fill_release_tags` already does for its own dozen; a handle that
-        # only implements get/set (a caller's stub) cannot defer and keeps
-        # writing per tag, like before.
+        # INSTRUMENTAL, the derived album advisory, the instrumental zero and
+        # its re-derivation) and every set_tag used to save the whole
+        # container for itself — six whole-file copies of a 30 MB track for
+        # six tags, on a library whose script 3 writes `--padding=0` so there
+        # is no padding to absorb them. The flush at the bottom is where all
+        # of them land at once, exactly as `_fill_release_tags` already does
+        # for its own dozen; a handle that only implements get/set (a caller's
+        # stub) cannot defer and keeps writing per tag, like before.
         deferred = [d["af"] for d in info if hasattr(d["af"], "defer_save")]
         for af in deferred:
             af.defer_save(True)
 
         modified = 0
         notes = []
+        advisory_value = None
 
         # Formatting: ensure GENRE has no leading/trailing spaces and
         # ITUNESADVISORY is exactly 0/1/2 without spaces. This is the
@@ -1723,9 +1742,29 @@ def run_auto_tagging(config):
             if instrumental_modified:
                 notes.append("instrumental")
 
-        # 2) Auto-zero ITUNESADVISORY for instrumental tracks (must run AFTER
-        # the instrumental fix above; ITUNESADVISORY, the PER-TRACK advisory,
-        # is the only advisory tag this app writes).
+        # 2) Derive ALBUMITUNESADVISORY from current per-track advisories (respect per-type gate)
+        advisory_modified = 0
+        if do_advisory:
+            # Only include advisories for tracks where we can write album advisory, or where advisory is enabled
+            advisories_for_derive = [d["advisory"] for d in info]
+            advisory_value = _derive_advisory(advisories_for_derive)
+            # Check if write needed (filter to writable files)
+            need_write = []
+            for d in info:
+                if d["album_advisory"] != str(advisory_value) and should_write_audio_tag(config, "ALBUMITUNESADVISORY", filepath=d["af"].path):
+                    need_write.append(d)
+            # When force is True, rewrite even if already correct (count as modified for stats)
+            write_list = need_write if not force else [d for d in info if should_write_audio_tag(config, "ALBUMITUNESADVISORY", filepath=d["af"].path)]
+            if write_list:
+                for d in write_list:
+                    if d["af"].set_tag("ALBUMITUNESADVISORY", str(advisory_value)):
+                        modified += 1
+                        advisory_modified += 1
+                        d["album_advisory"] = str(advisory_value)
+                if advisory_modified:
+                    notes.append(f"advisory={advisory_value}")
+
+        # 3) Auto-zero ITUNESADVISORY for instrumental tracks (must run AFTER instrumental fix + advisory derive)
         zero_modified = 0
         if do_zero_advisory_for_instrumental:
             for d in info:
@@ -1740,6 +1779,21 @@ def run_auto_tagging(config):
                         d["advisory"] = "0"
             if zero_modified:
                 notes.append("zero advisory for instrumental")
+                # Re-derive album advisory if we zeroed any track (album may need to go from 1/2 -> 0)
+                if do_advisory:
+                    new_val = _derive_advisory(d["advisory"] for d in info)
+                    if new_val != advisory_value:
+                        for d in info:
+                            if d["album_advisory"] != str(new_val) and should_write_audio_tag(config, "ALBUMITUNESADVISORY", filepath=d["af"].path):
+                                if d["af"].set_tag("ALBUMITUNESADVISORY", str(new_val)):
+                                    modified += 1
+                        advisory_value = new_val
+                        # Update note if advisory already appended
+                        # Replace last advisory note if present
+                        for i, n in enumerate(notes):
+                            if n.startswith("advisory="):
+                                notes[i] = f"advisory={new_val}"
+                                break
 
         # The album's ONE write per file (see the deferral at the top). A
         # failed flush wrote nothing at all — every tag above was applied in
@@ -1752,7 +1806,7 @@ def run_auto_tagging(config):
                          + ", ".join(failed[:3])
                          + (f" (+{len(failed) - 3} more)"
                             if len(failed) > 3 else ""))
-        return album, modified, notes, info
+        return album, modified, notes, advisory_value, info
 
     def mood_genre_for_track(item):
         """The two PER-TRACK stages of Auto tagging: the GENRE cap and MOOD.
@@ -1807,8 +1861,7 @@ def run_auto_tagging(config):
     counts = {"ok": 0, "skip": 0, "fail": 0}
     pbar = _make_pbar(len(album_dirs), "AutoTag", unit="album")
     workers = worker_count(config, maximum=8, items=len(album_dirs))
-    # Stage 1: the album-level work (release identity, instrumental, the
-    # instrumental advisory zero).
+    # Stage 1: the album-level work (release identity, instrumental, advisory).
     album_results = {}
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futures = {ex.submit(process_album, a): a for a in sorted(album_dirs)}
@@ -1822,7 +1875,7 @@ def run_auto_tagging(config):
     per_album = {}
     track_work = [(album, d)
                   for album in sorted(album_results)
-                  for d in ((album_results[album][3] or [])
+                  for d in ((album_results[album][4] or [])
                             if not isinstance(album_results[album], Exception) else [])]
     if track_work:
         # Sized by TRACKS, not albums: the work waiting here is one decode per
@@ -1855,7 +1908,7 @@ def run_auto_tagging(config):
                 (os.path.basename(album), str(result or "no result")))
             _pbar_update(pbar, counts, kind="fail")
             continue
-        _album, modified, notes, _info = result
+        _album, modified, notes, advisory_value, _info = result
         notes = list(notes or [])
         mood_modified, genre_trimmed = per_album.get(album, (0, 0))
         modified = (modified or 0) + mood_modified + genre_trimmed

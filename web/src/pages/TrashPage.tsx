@@ -400,8 +400,8 @@ export default function TrashPage() {
     </>
   );
 
-  /** Card actions for the grid view — restore and delete, over the card's
-   *  cover. */
+  /** Card actions replace the library's play button (a trashed album cannot
+   *  be played) and sit exactly where it did. */
   const cardActions = (e: Entry) => (
     <div className="absolute left-2 top-9 flex gap-1 row-hover transition-opacity">
       <button

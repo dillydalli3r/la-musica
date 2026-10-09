@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """Every version string in the tree must agree, before anything is built.
 
-The app reports `mlo.__version__` on `/api/health`, but a handful of other
-files name their own version and nothing compared them: `tauri.conf.json`
-(which every installer takes its version from), the Tauri crate,
-`desktop/package.json`, `web/package.json`, the Dockerfile's `MLO_VERSION`
-(which is what a running container knows about itself) and the README header.
-A release where one of them was missed ships a build that disagrees with
-itself — an installer whose Settings pane says 3.0.0 while the file name says
-3.1.0 — and nothing failed.
+The app reports `mlo.__version__` on `/api/health`, but five other files name
+their own version and nothing compared them: `tauri.conf.json` (which the iOS
+IPA's plist and every installer take their version from), the Tauri crate,
+`desktop/package.json` (which names the IPA file), `web/package.json`, the
+Dockerfile's `MLO_VERSION` (which is what a running container knows about
+itself) and the README header. A release where one of them was missed ships a
+build that disagrees with itself — an IPA whose Settings pane says 3.0.0 while
+the file name says 3.1.0 — and nothing failed.
 
 Run:  python tools/check_versions.py           (exit 0 = all agree, 1 = drift)
       python tools/check_versions.py v3.1.0    (also require the tag to match)
@@ -99,6 +99,11 @@ def main():
                 return 1
             print(f"  ok    only mlo-desktop moved in the lock ({source})")
 
+    # The iOS build number ships in the same plist as the marketing version;
+    # two numbers that can disagree is the exact drift this script exists for.
+    found["desktop/src-tauri/tauri.conf.json (iOS bundleVersion)"] = str(
+        (conf.get("bundle") or {}).get("iOS", {}).get("bundleVersion") or "")
+
     for path in ("desktop/package.json", "web/package.json"):
         found[path] = str(json.loads(read(path)).get("version") or "")
 
@@ -114,6 +119,12 @@ def main():
 
     found["README.md"] = find(r'^\*\*v([0-9][^*]*)\*\*', read("README.md"),
                               "README.md", "version header")
+
+    # desktop/README quotes the iOS bundle version in prose; a stale number
+    # there is actively misleading during a release.
+    found["desktop/README.md"] = find(
+        r'`bundle\.iOS\.bundleVersion` ([0-9][^,\s]*)', read("desktop/README.md"),
+        "desktop/README.md", "quoted `bundle.iOS.bundleVersion`")
 
     drift = {p: v for p, v in found.items() if v != source}
     for path, value in sorted(found.items()):

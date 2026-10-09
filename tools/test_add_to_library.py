@@ -146,6 +146,7 @@ CHAIN_CFG = {"music_folder": MF, "import_auto_scripts": False,
              "metadata_auto_fetch": False, "cover_auto_fetch": False,
              "lyrics_format": "EMBEDDED"}
 
+imports.stamp_rym_links = lambda path, cfg=None: {"note": "stub", "album": "", "artist": ""}
 imports.run_metadata_step = lambda path, cfg=None: {"items": []}
 cover_step_saw = []
 
@@ -164,8 +165,11 @@ imports.run_cover_step = fake_cover_step
 # The ADD-time pre-fetch (`pending_albums.create` → `imports.prefetch_album`)
 # runs the import chain's own steps early — the metadata step and the cover
 # search. The artist image / description candidates are stubbed by
-# `imports.run_metadata_step` above; the one seam still left is the cover
-# finder, which must not be reached for real here.
+# `imports.run_metadata_step` above; the two seams still left are the links
+# resolver and the cover finder, and neither may be reached for real here.
+intg_mod.rym_links = lambda artist="", album="", cfg=None, mbid=None: {
+    "album": "https://rateyourmusic.com/release/album/a/b/",
+    "artist": "https://rateyourmusic.com/artist/a", "note": "stub"}
 cover_searches = []
 
 
@@ -696,7 +700,7 @@ ok(bool(payload_row["cover_file"]), "the placeholder cover is the album's cover"
 eq(payload_row["path"], page_folder.replace(os.sep, "/"), "path is the folder the page asked for")
 # the content the ADD pre-fetched, recorded on the marker
 prefetched = payload_row.get("prefetched") or {}
-ok("cover_candidates" in prefetched,
+ok("cover_candidates" in prefetched and "links" in prefetched,
    "the marker records what the add pre-fetched", prefetched)
 eq(cover_searches[-1]["release_mbid"], release_variant(2, "x")["id"],
    "the pre-fetch asked the cover finder for THIS release's own cover")

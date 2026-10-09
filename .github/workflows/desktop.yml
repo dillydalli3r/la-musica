@@ -172,7 +172,8 @@ jobs:
         # and the release job turns those into the `latest.json` every installed
         # app reads. Both are passed HERE rather than put in tauri.conf.json on
         # purpose: with them in the config, every build that is not a release —
-        # a local `tauri build` — would demand the key and fail without it.
+        # a local `tauri build`, the mobile workflow's compile of the same
+        # crate — would demand the key and fail without it.
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
@@ -186,15 +187,21 @@ jobs:
         # because `bundle.windows.nsis` named none, which no amount of checking
         # the committed files could reveal. So each platform's bundle is opened
         # here. `tools/test_icons.py` proves the repo's icon files are the
-        # artwork; this step proves the macOS bundle carries it.
+        # artwork; this step proves the installers carry them.
         shell: bash
         run: |
           set -e
-          # `find` on a bundle directory this platform did not produce exits
-          # non-zero — so every lookup is guarded by an existence test instead
-          # of a redirect, which pipefail would otherwise turn into a failed
-          # step.
+          # `python3` is not on the Windows runner's PATH, `python` is not on
+          # the macOS/Linux ones, so the interpreter is resolved rather than
+          # assumed. GitHub runs this script with `-e -o pipefail`, and `find`
+          # on a bundle directory this platform did not produce exits non-zero
+          # — so every lookup is guarded by an existence test instead of a
+          # redirect, which pipefail would otherwise turn into a failed step.
+          PY="$(command -v python3 || command -v python)"
           B=desktop/src-tauri/target/release/bundle
+          # `find` recurses, so the app exe's lookup is bounded to depth 1 —
+          # otherwise it matches the NSIS installer under bundle/nsis and the
+          # app exe itself is never looked at.
           first() { if [ -d "$1" ]; then find "$1" -maxdepth "${3:-9}" -name "$2" 2>/dev/null | head -1; fi; }
 
           APP="$(first "$B" '*.app')"
@@ -206,13 +213,28 @@ jobs:
             echo "ok: $APP carries the committed icon.icns"
           fi
 
+          EXE="$(first desktop/src-tauri/target/release '*.exe' 1)"
+          if [ -n "$EXE" ]; then "$PY" tools/bundle_icons.py --exe "$EXE"; fi
+
+          NSIS="$(first "$B/nsis" '*.exe')"
+          if [ -n "$NSIS" ]; then "$PY" tools/bundle_icons.py --exe "$NSIS"; fi
+
           DEB="$(first "$B/deb" '*.deb')"
           if [ -n "$DEB" ]; then
             rm -rf /tmp/debicons && mkdir -p /tmp/debicons
             dpkg-deb -x "$DEB" /tmp/debicons
-            find /tmp/debicons/usr/share/icons /tmp/debicons/usr/share/pixmaps \
-              -name '*.png' -print -quit 2>/dev/null | grep -q . \
-              || { echo "::error::$DEB installs no icon files"; exit 1; }
+            # The icons the package INSTALLS, not every PNG inside it: the
+            # bundled backend brings the SPA's own images, and the deb places
+            # the whole app under `/usr/lib/la musica/` — a path with a space,
+            # which this word-splitting loop cannot survive, and not a desktop
+            # icon to art-check anyway.
+            found=0
+            for icon in $(find /tmp/debicons/usr/share/icons /tmp/debicons/usr/share/pixmaps \
+                          -name '*.png' 2>/dev/null); do
+              found=1
+              "$PY" tools/bundle_icons.py --png "$icon"
+            done
+            [ "$found" = 1 ] || { echo "::error::$DEB installs no icon files"; exit 1; }
           fi
 
           # Each install must CARRY the backend the shell spawns. Nothing in

@@ -326,6 +326,7 @@ def check_autotag_no_reopen_after_fix(tmp):
     try:
         autotag.run_auto_tagging(cfg(
             music_folder=lib,
+            auto_advisory=False,
             auto_instrumental=False,
             mood_enabled=False,
             genre_autofill=True,
@@ -1033,6 +1034,61 @@ def check_images_oxipng_thread_cap(tmp):
        f"script 5: a 0/unknown share adds no thread flag (measured {seen[:1]})")
 
 
+def check_images_artist_art_kept(tmp):
+    """Script 5 must never rename artist artwork to cover.*."""
+    if not HAS_PIL:
+        return skip("script 5: artist artwork (Pillow missing)")
+    lib = os.path.join(tmp, "img_lib")
+    artist = os.path.join(lib, "Artists", "Some Artist")
+    album = os.path.join(artist, "2001 - Album")
+    solo = os.path.join(lib, "Artists", "Other Artist", "1999 - Solo Album")
+    os.makedirs(album)
+    os.makedirs(solo)
+    artist_png = make_image(os.path.join(artist, "artist.png"), (900, 900),
+                            fmt="PNG")
+    album_cover = make_image(os.path.join(album, "cover.jpg"), (600, 600))
+    # The album that must still get its rename: a scan named front.jpg.
+    front = make_image(os.path.join(solo, "front.jpg"), (600, 600))
+    make_flac(os.path.join(solo, "01 - Track.flac"),
+              tags={"TITLE": "Track", "TRACKNUMBER": "1"})
+
+    images.run_process_images(cfg(music_folder=lib, targets=None,
+                                  reencode_images=False))
+
+    ok(os.path.exists(artist_png),
+       "script 5: Artists/<Artist>/artist.png is still there after the run")
+    ok(not os.path.exists(os.path.join(artist, "cover.png")),
+       "script 5: no cover.* was created in the artist folder")
+    ok(os.path.exists(album_cover),
+       "script 5: the album's own cover.jpg was left where it was")
+    ok(os.path.exists(os.path.join(solo, "cover.jpg")) and not os.path.exists(front),
+       "script 5: an album folder's front.jpg is still renamed to cover.jpg")
+
+    from mlo.artistdata import has_image
+    ok(has_image(artist) is True,
+       "script 5: the app still finds the artist image afterwards")
+
+    # Same fixture, pre-fix behaviour: with the guard neutralised the artist
+    # image IS renamed away — that is the defect this check exists for.
+    before = os.path.join(tmp, "img_lib_before")
+    artist_b = os.path.join(before, "Artists", "Some Artist")
+    os.makedirs(os.path.join(artist_b, "2001 - Album"))
+    artist_b_png = make_image(os.path.join(artist_b, "artist.png"), (900, 900),
+                              fmt="PNG")
+    make_image(os.path.join(artist_b, "2001 - Album", "cover.jpg"), (600, 600))
+    real_guard = images._artist_image_guard
+    images._artist_image_guard = lambda mf: (lambda p: False)
+    try:
+        images.run_process_images(cfg(music_folder=before, targets=None,
+                                      reencode_images=False))
+    finally:
+        images._artist_image_guard = real_guard
+    ok(not os.path.exists(artist_b_png)
+       and os.path.exists(os.path.join(artist_b, "cover.png")),
+       "script 5: without the guard the artist image is renamed to cover.png "
+       "(the pre-fix defect, reproduced)")
+
+
 def check_fsync_dir(tmp):
     keeps = os.path.join(tmp, "fsync")
     os.makedirs(keeps)
@@ -1058,13 +1114,68 @@ def check_fsync_dir(tmp):
            "the directory fsync still opens + fsyncs the folder on POSIX")
 
 
+def check_artist_image_lanes(tmp):
+    """Script 19: one artist image at a time, or a pool of them.
+
+    Every artist folder carries its own image file, written atomically, so the
+    folders share nothing — and the work is a decode plus an encode, which is
+    what Pillow releases the GIL inside. The pass walked artist after artist on
+    the runner thread. The fake stands in for the re-encode so this measures the
+    LANES and not Pillow.
+    """
+    import time
+    from mlo import artistdata
+
+    root = os.path.join(tmp, "artist_lanes_lib", "Artists")
+    for i in range(6):
+        folder = os.path.join(root, f"Artist {i:02d}")
+        os.makedirs(folder)
+        make_image(os.path.join(folder, "artist.png"), (64, 64), fmt="PNG")
+    LATENCY = 0.12
+    seen = []
+
+    def fake_optimize(folder, config):
+        seen.append(folder)
+        time.sleep(LATENCY)
+        return {"path": os.path.join(folder, "artist.png"), "before": (64, 64),
+                "after": (64, 64), "changed": True, "reason": "re-fitted",
+                "error": ""}
+
+    real = artistdata.optimize_artist_image
+    artistdata.optimize_artist_image = fake_optimize
+
+    def run(worker_limit):
+        c = cfg(music_folder=os.path.join(tmp, "artist_lanes_lib"),
+                worker_limit=worker_limit)
+        t0 = time.perf_counter()
+        st = artistdata.run_optimize_artist_images(c)
+        return st, time.perf_counter() - t0
+
+    try:
+        seq_stats, t_seq = run(1)
+        par_stats, t_par = run(0)
+    finally:
+        artistdata.optimize_artist_image = real
+
+    ok(len(seen) == 12, f"script 19: both runs visit every artist ({len(seen)})")
+    ok(seq_stats["modified_count"] == par_stats["modified_count"] == 6,
+       f"script 19: every image is re-fitted either way "
+       f"({seq_stats['modified_count']}/{par_stats['modified_count']} of 6)")
+    ok(seq_stats["error_count"] == par_stats["error_count"] == 0,
+       "script 19: and neither run reports a failure")
+    ok(t_par < t_seq * 0.6,
+       f"script 19: 6 images x {LATENCY * 1000:.0f} ms take {t_par:.2f} s with "
+       f"lanes vs {t_seq:.2f} s one at a time ({t_seq / t_par:.1f}x)")
+
+
 def check_accurip_album_lanes(tmp):
     """Script 9: one CD album at a time, or a pool of them.
 
     An album's AccurateRip pass owns its folder, its cue and its CD-{n} files,
     and its slow half is one decode + CUETools verification per track. The fake
     stands in for that half (`_generate_via_cuetools`) so this measures the
-    LANES, not ffmpeg.
+    LANES, not ffmpeg — the same trick script 19's check uses for the
+    re-encode.
     """
     import time
 
@@ -1620,13 +1731,15 @@ def main():
         ("script 3  Optimize FLACs (level only)", check_encoder_version_does_not_reencode),
         ("script 5  Process images (alpha probe)", check_images_alpha_probe),
         ("script 5  Process images (progressive)", check_images_progressive_honoured),
+        ("script 5  Process images (artist art)", check_images_artist_art_kept),
         ("script 5  Process images (converted PNG)", check_images_converted_png_optimized),
         ("script 5  Process images (oxipng lanes)", check_images_oxipng_thread_cap),
         ("script 11 Remux videos", check_remux_single_probe),
         ("script 13 Fetch lyrics (lanes)", check_lyrics_fetch_concurrency),
         ("script 13 Fetch lyrics (fills only)", check_lyrics_fetch_never_replaces),
+        ("script 19 Artist images (lanes)", check_artist_image_lanes),
         ("script 9  AccurateRip (lanes)", check_accurip_album_lanes),
-        ("script 20 Optimize library layout (lanes)", check_layout_scan_lanes),
+        ("script 20 Scan library layout (lanes)", check_layout_scan_lanes),
         ("script 1  Format lyrics (one open)", check_lyrics_one_open_per_track),
         ("script 1  Format lyrics (album pass reads)", check_lyrics_album_pass_still_reads),
         ("script 10 Format all (cover cache)", check_format_all_cover_prepared_once),

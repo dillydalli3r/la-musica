@@ -4,16 +4,16 @@ import { useSearchParams, Link } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   UploadCloud, ExternalLink, Check, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, Wand2,
-  Plus, Trash2, Disc3, FolderOpen, X, Loader2, AlertTriangle,
+  Plus, Trash2, Disc3, FolderOpen, X, Search, Loader2, Image as ImageIcon, AlertTriangle,
   Languages, FileArchive, Fingerprint,
 } from "lucide-react";
-import { api, answerSources, replyFor, IN_TAURI } from "../api";
-import type { AdvisoryFetchResult } from "../api";
+import { api, answerSources, replyFor, IN_MOBILE_SHELL, IN_TAURI } from "../api";
+import type { AdvisoryFetchResult, MetadataFetchItem, MetadataItemKind } from "../api";
 import { toast, useStore } from "../store";
 import {
   advisoryLine, advisoryOutcome, allowPlainOf, LyricsKindChip,
 } from "../components/Badges";
-
+import { LinkValidChip } from "../components/Links";
 import LyricsViewer, { lyricsKindOf, parseLrc } from "../components/LyricsViewer";
 import CoverSearchModal from "../components/CoverSearchModal";
 import GenreSourcesTray from "../components/GenreSourcesTray";
@@ -21,8 +21,9 @@ import CoverImg, { TrackCover } from "../components/CoverImg";
 import PageHeader from "../components/PageHeader";
 import { ForceControl, useForceRun } from "../components/ForceRun";
 import { useI18n } from "../lib/i18n";
+import MetadataReviewModal from "../components/MetadataReviewModal";
 import type {
-  AcoustidAlbumMatch, AcoustidMatch, AcoustidSubmitResult, AcoustidWrite,
+  AcoustidAlbumMatch, AcoustidMatch, AcoustidSubmitResult, AcoustidWrite, CoverResult,
   ImportBulkJob, ImportPrompt, ImportScriptsPreview, ImportSettleResult, LyricsAutoResult, MBRelease, MatchSuggestion,
   ScriptRunResult, Track, UnpackedTree,
 } from "../types";
@@ -445,6 +446,20 @@ export default function ImportWizard() {
   const [excluded, setExcluded] = useState<Set<string>>(new Set());
 
   const [mbLink, setMbLink] = useState("");
+  const [rymLink, setRymLink] = useState("");
+  const [rymValid, setRymValid] = useState<boolean | null>(null);
+  // Which page /api/rym/validate recognized: only an album page belongs in
+  // RATEYOURMUSIC_ALBUM (a song/artist page stored there looks resolved
+  // forever and blocks the automatic album lookup).
+  const [rymKind, setRymKind] = useState<string | null>(null);
+  const [rymNote, setRymNote] = useState("");
+  const [rymArtistLink, setRymArtistLink] = useState("");
+  // The artist field's own verdict, the same way the album field keeps one:
+  // only an ARTIST page may be written as RATEYOURMUSIC_ARTIST.
+  const [rymArtistValid, setRymArtistValid] = useState<boolean | null>(null);
+  const [rymArtistKind, setRymArtistKind] = useState<string | null>(null);
+  const [rymArtistNote, setRymArtistNote] = useState("");
+  const [findingLinks, setFindingLinks] = useState(false);
   const [detectedFromTags, setDetectedFromTags] = useState(false);
   const [mbSearch, setMbSearch] = useState("");
   const [searchHits, setSearchHits] = useState<any[]>([]);
@@ -516,8 +531,9 @@ export default function ImportWizard() {
   const [coverSel, setCoverSel] = useState<Set<string>>(new Set());
   const [coverUrl, setCoverUrl] = useState("");
   const [trackCoverUrl, setTrackCoverUrl] = useState("");
-  // Cover finder in the Covers step.
-  const [coverSearch, setCoverSearch] = useState(false);
+  // Cover finder in the Covers step: null = closed, else the candidates it
+  // opens on (empty = search from scratch, staged rows = the import's picks).
+  const [coverSearch, setCoverSearch] = useState<{ results?: CoverResult[]; provider?: string | null } | null>(null);
   const albumCoverInput = useRef<HTMLInputElement>(null);
   const trackCoverInput = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
@@ -529,9 +545,9 @@ export default function ImportWizard() {
   // and, when the action counts its own steps, its count. An action that
   // reports neither still gets a moving indeterminate bar plus the clock.
   // A per-slice selector, like the library page: a bare useStore() would
-  // re-render every step of the wizard on toast writes too.
+  // re-render every step of the wizard on playback/queue/toast writes too.
   const progress = useStore((s) => s.progress);
-  const [act, setAct] = useState<{ label: string; kind?: "run"; done?: number; total?: number } | null>(null);
+  const [act, setAct] = useState<{ label: string; kind?: "metadata" | "run"; done?: number; total?: number } | null>(null);
   // The relay frame that was already on screen when the current action
   // started. Both surfaces show the LAST frame that reached them, so a frame
   // older than this one belongs to whatever ran before the action — an
@@ -648,7 +664,7 @@ export default function ImportWizard() {
 
   const { data: lib } = useQuery({ queryKey: ["library"], queryFn: () => api.library() });
 
-  // The app config the wizard's steps read (music folder, lyrics policy, …).
+  // Metadata review is off unless the config explicitly turns it on.
   const { data: cfg } = useQuery({ queryKey: ["config"], queryFn: api.config });
   /** The user's own `lyrics_allow_plain` (off by default): with it off, a
    *  track whose lyrics are plain — untimed — is shown as a FAILING state on
@@ -659,6 +675,8 @@ export default function ImportWizard() {
    *  user pointed the wizard at). Every path-taking call below passes this, so
    *  the server's opt-in staged allowance covers this album — and only it. */
   const staged = !!albumPath && !inMusicFolder(albumPath, cfg?.music_folder);
+  /** Album folder whose metadata review modal is open (metadata_review only). */
+  const [reviewPath, setReviewPath] = useState<string | null>(null);
 
   // Remember this manual import so the app can offer to continue it after a
   // reload: a short debounce collapses a step change's several state writes
@@ -678,6 +696,115 @@ export default function ImportWizard() {
     }, 700);
     return () => clearTimeout(timer);
   }, [albumPath, step, staged, uploaded]);
+
+  // ---- artist image / artist description / album description -----------
+  // What an import owes besides the audio; the artwork step accounts for all
+  // three. The artist is resolved by NAME exactly like the fetch route does
+  // (mlo.artistdata.artist_dir), so a row and a fetch can never disagree about
+  // which folder they mean; the payload's `path` says where it landed. Album
+  // description comes from the album payload's own `artwork` block. The key
+  // matches the artist page's data, so both share one cache entry.
+  const { data: albumDetail, refetch: refetchAlbumDetail } = useQuery({
+    queryKey: ["album", albumPath],
+    queryFn: () => api.album(albumPath!, staged),
+    enabled: !!albumPath && step === 3,
+  });
+  const artistName =
+    albumDetail?.album_artist ||
+    (release?.artists ?? []).map((a) => a.name).join(", ").trim() ||
+    "";
+  const { data: artistArt, refetch: refetchArtistArt } = useQuery({
+    queryKey: ["artistArtwork", artistName],
+    queryFn: () => api.artistArtwork(artistName),
+    enabled: !!artistName && step === 3,
+    // An artist the library does not have a folder for yet is "missing", not
+    // an error worth retrying three times.
+    retry: false,
+  });
+  // Per-item outcome of the last fetch in this step (null = none yet),
+  // keyed by item kind: the route answers one entry per item asked for.
+  const [metaReply, setMetaReply] = useState<Partial<Record<MetadataItemKind, MetadataFetchItem>> | null>(null);
+  const [metaError, setMetaError] = useState<string | null>(null);
+
+  /** The three rows the artwork step accounts for, from the payloads the
+   *  artist and album pages already read (`present` + who supplied it). The
+   *  Settings toggles that gate the two artist items come from the config the
+   *  wizard already holds, so a row a fetch may not touch says why. */
+  const metaRows: {
+    kind: MetadataItemKind;
+    label: string;
+    present: boolean;
+    source?: string | null;
+    enabled: boolean;
+  }[] = [
+    {
+      kind: "artist_image",
+      label: "Artist image",
+      present: !!artistArt?.image.present,
+      source: artistArt?.image.source,
+      enabled: cfg?.artist_image_enabled !== false,
+    },
+    {
+      kind: "artist_description",
+      label: "Artist description",
+      present: !!artistArt?.description.present,
+      source: artistArt?.description.source,
+      enabled: cfg?.artist_description_enabled !== false,
+    },
+    {
+      kind: "album_description",
+      label: "Album description",
+      present: !!albumDetail?.artwork?.description,
+      source: albumDetail?.artwork?.description_source,
+      enabled: true,
+    },
+  ];
+
+  /** Fetch whatever of those three is missing, for this album folder — one
+   *  request per item, so the bar advances 1/3 → 3/3 and the reply says what
+   *  happened to each (`fetched`, `present`, `disabled`, `not-found`,
+   *  `error`). The rows are re-read afterwards, so a fetched image or
+   *  description shows up as present and a click never lands on nothing. */
+  const fetchArtistMeta = async () => {
+    if (!albumPath) {
+      toast("Open the wizard on an album folder first");
+      return;
+    }
+    setBusy(true);
+    setMetaError(null);
+    const out: Partial<Record<MetadataItemKind, MetadataFetchItem>> = {};
+    try {
+      for (const [i, row] of metaRows.entries()) {
+        setAct({
+          kind: "metadata",
+          label: `Metadata: ${row.label} (${i + 1}/${metaRows.length})`,
+          done: i,
+          total: metaRows.length,
+        });
+        const res = await api.albumMetadataFetch({ path: albumPath, items: [row.kind], staged });
+        Object.assign(out, res.items);
+      }
+      setMetaReply({ ...out });
+      const got = Object.entries(out).filter(([, it]) => it.state === "fetched");
+      const rest = Object.entries(out).filter(([, it]) => it.state !== "fetched" && it.state !== "present");
+      toast(
+        got.length
+          ? `Fetched ${got.map(([k]) => k.replace(/_/g, " ")).join(", ")}`
+          : rest.length
+            ? `Nothing fetched — ${rest.map(([k, it]) => `${k.replace(/_/g, " ")}: ${it.state}${it.detail ? ` (${it.detail})` : ""}`).join("; ")}`
+            : "Everything was already present"
+      );
+      await Promise.all([refetchArtistArt(), refetchAlbumDetail()]);
+      qc.invalidateQueries({ queryKey: ["artist"] });
+    } catch (e) {
+      setMetaReply({ ...out });
+      setMetaError(String(e));
+      toast.error(String(e));
+    } finally {
+      setAct(null);
+      setBusy(false);
+    }
+  };
 
   // Real dimensions of the album cover, re-read whenever a cover changes.
   const { data: coverInfo } = useQuery({
@@ -921,6 +1048,83 @@ export default function ImportWizard() {
     }
     pickRelease(id);
   };
+
+  // Debounced RYM link validation. The server reports WHICH page it is, so an
+  // artist paste is routed to the artist field instead of being written as the
+  // album link, and a song page is refused with the reason.
+  useEffect(() => {
+    if (!rymLink.trim()) {
+      setRymValid(null);
+      setRymKind(null);
+      return;
+    }
+    const t = setTimeout(async () => {
+      try {
+        const r = (await api.rymValidate(rymLink.trim())) as { valid: boolean; kind?: string | null };
+        if (r.kind === "artist") {
+          // Not a wrong paste, just the wrong field — move it, say so, and
+          // leave the album field empty so auto-find can fill it.
+          setRymArtistLink(rymLink.trim());
+          setRymLink("");
+          setRymValid(null);
+          setRymKind(null);
+          setRymNote("That is a RateYourMusic artist page — moved to the artist link");
+          return;
+        }
+        // `valid` from the server just means "a RYM URL"; for the ALBUM field
+        // only an album page counts, so a song/other page reads as invalid
+        // here (the chip and the note say which).
+        setRymValid(r.valid && (r.kind == null || r.kind === "album"));
+        setRymKind(r.kind ?? null);
+        setRymNote(
+          r.kind === "song"
+            ? "That is a RateYourMusic song page, not an album"
+            : r.kind === "other"
+              ? "That is a RateYourMusic page, but not an album"
+              : ""
+        );
+      } catch {
+        setRymValid(false);
+        setRymKind(null);
+        setRymNote("Could not check the link");
+      }
+    }, 400);
+    return () => clearTimeout(t);
+  }, [rymLink]);
+
+  // The artist field validates through the same call, and accepts only an
+  // artist page: a song or album paste here would be written to every track as
+  // RATEYOURMUSIC_ARTIST and never resolve to the artist.
+  useEffect(() => {
+    if (!rymArtistLink.trim()) {
+      setRymArtistValid(null);
+      setRymArtistKind(null);
+      setRymArtistNote("");
+      return;
+    }
+    const t = setTimeout(async () => {
+      try {
+        const r = (await api.rymValidate(rymArtistLink.trim())) as { valid: boolean; kind?: string | null };
+        const kind = r.kind ?? null;
+        setRymArtistValid(r.valid && (kind == null || kind === "artist"));
+        setRymArtistKind(kind);
+        setRymArtistNote(
+          kind === "artist" || kind == null
+            ? ""
+            : kind === "album"
+              ? "That is a RateYourMusic album page — paste the artist page"
+              : kind === "song"
+                ? "That is a RateYourMusic song page, not an artist"
+                : "That is a RateYourMusic page, but not an artist"
+        );
+      } catch {
+        setRymArtistValid(false);
+        setRymArtistKind(null);
+        setRymArtistNote("Could not check the link");
+      }
+    }, 400);
+    return () => clearTimeout(t);
+  }, [rymArtistLink]);
 
   const defaultTrackName = (p: string) => {
     const base = p.split("/").pop() ?? "";
@@ -1188,8 +1392,13 @@ export default function ImportWizard() {
    *  client of a server the user runs), so each one goes through the ordinary
    *  path for it — a folder through the same scan the folder button uses, an
    *  archive through the server-side unpack, a single file as the one-entry
-   *  listing that scan answers with. */
+   *  listing that scan answers with. A phone reaches no server filesystem at
+   *  all: there the wizard says so rather than swallowing the drop. */
   const handleDropPaths = async (paths: string[]) => {
+    if (IN_MOBILE_SHELL) {
+      toast("A phone cannot read dropped files — use Browse individual files, or the web UI.");
+      return;
+    }
     setUnpacked([]);
     const out: ImportFile[] = [];
     let folders = 0;
@@ -1259,8 +1468,18 @@ export default function ImportWizard() {
   };
 
   const pickFolderNative = async () => {
-    if (!IN_TAURI) {
-      // no native dialog outside the desktop shell — fall back to the folder input
+    const inTauri = !!(window as any).__TAURI_INTERNALS__;
+    if (IN_MOBILE_SHELL) {
+      // The mobile shell registers no commands: there is no native folder
+      // dialog to open, and the phone cannot read the server's filesystem
+      // anyway. Say so, then fall through to the file input, which is the
+      // one picker a phone actually has.
+      toast("Folder browsing is a desktop feature — on a phone, import from the web UI or the desktop app.");
+      document.getElementById("import-folder")?.click();
+      return;
+    }
+    if (!inTauri) {
+      // no native dialog in a plain browser — fall back to the folder input
       document.getElementById("import-folder")?.click();
       return;
     }
@@ -1405,6 +1624,10 @@ export default function ImportWizard() {
       setAlbumPath(results[0].path);
       setStep(1);
       qc.invalidateQueries({ queryKey: ["library"] });
+      // Committed. With metadata_review on (Settings → Metadata) the review is
+      // offered right here, while the album is fresh, instead of on a later
+      // visit to its page.
+      if (cfg?.metadata_review === true) setReviewPath(results[0].path);
       // Several albums: hand the staged queue to the bulk job, which moves
       // whatever is still outside the library and runs the import chain per
       // album. The queue panel polls api.importBulkStatus for progress.
@@ -1574,6 +1797,49 @@ export default function ImportWizard() {
   const albumTargets = (): string[] =>
     uploaded.length ? uploaded.map((a) => a.path) : albumPath ? [albumPath] : [];
 
+  /** Ask RYM for this album's and this artist's pages and PREFILL both fields.
+   *  Nothing is written here: an empty field is filled for review, and a field
+   *  the user already typed in is left alone. False = nothing to look up yet. */
+  const findRymLinks = async (): Promise<boolean> => {
+    // Who and what RYM is asked about: the fetched release first, else the
+    // album's own tags — the only source an auto-imported album has.
+    const artist =
+      (release?.artists ?? []).map((a) => a.name).join(", ").trim() ||
+      (stepTracks.length ? trackArtist(stepTracks[0].path) : "");
+    const album = trackAlbum ?? currentAlbumName;
+    if (!artist && !album) return false;
+    setFindingLinks(true);
+    try {
+      const r = await api.rymResolve(artist, album);
+      const foundAlbum = r.album;
+      const foundArtist = r.artist;
+      if (foundAlbum) setRymLink((cur) => (cur.trim() ? cur : foundAlbum));
+      if (foundArtist) setRymArtistLink((cur) => (cur.trim() ? cur : foundArtist));
+      setRymNote(
+        foundAlbum || foundArtist
+          ? "found on RateYourMusic — review, then Continue saves it"
+          : r.note || "nothing found on RateYourMusic — paste the URLs"
+      );
+    } catch {
+      setRymNote("Lookup failed — paste the URLs instead");
+    } finally {
+      setFindingLinks(false);
+    }
+    return true;
+  };
+
+  // Once per album on entering the Links step: an auto-imported album lands
+  // here with no links at all, so the lookup waits for the tags/release that
+  // give it a name, then runs itself.
+  const linksAutoFound = useRef<string | null>(null);
+  useEffect(() => {
+    if (step !== 1 || !albumPath || linksAutoFound.current === albumPath) return;
+    findRymLinks().then((ran) => {
+      if (ran) linksAutoFound.current = albumPath;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step, albumPath, stepTracks, release]);
+
   const nextFromLinks = async () => {
     const typed = extractMbid(mbLink) || "";
     const rid = typed || releaseId || "";
@@ -1593,9 +1859,16 @@ export default function ImportWizard() {
       // null only after saying why.
       const rel = await pickRelease(rid, albumPath);
       if (!rel) return;
-      // The release the wizard matched rides along on the commit, which is the
-      // step's ONE pass over the album.
-      await api.importCommit(albumPath, `https://musicbrainz.org/release/${rel.id}`, staged);
+      // Only an ALBUM page may be stored as the album link — rymValid is
+      // already false for a song/other page, and an artist paste never lands
+      // in this field at all. The artist page is artist-level, so it goes on
+      // every track as RATEYOURMUSIC_ARTIST — and only a link the server
+      // confirmed as an ARTIST page: a song or album paste in this field would
+      // be a wrong artist link forever. Both ride along on the commit, which
+      // is the step's ONE pass over the album.
+      const albumLink = rymValid ? rymLink.trim() : undefined;
+      const artistLink = rymArtistValid ? rymArtistLink.trim() : "";
+      await api.importCommit(albumPath, `https://musicbrainz.org/release/${rel.id}`, albumLink, staged, artistLink || undefined);
       toast("Links saved to album");
       setStep(2);
     } catch (e) {
@@ -1971,6 +2244,24 @@ export default function ImportWizard() {
     qc.invalidateQueries({ queryKey: ["library"] });
     qc.invalidateQueries({ queryKey: ["coverInfo", albumPath] });
   };
+
+  // Candidates the import already fetched and staged for a cover-less album
+  // (`cover_review` on) — the same set the album page offers as one pick.
+  // Asked only while there is no cover file, never for a covered album.
+  const stagedCovers = useQuery({
+    queryKey: ["stagedCovers", albumPath],
+    queryFn: async () => {
+      const c = await api.metadataCandidates(
+        release?.artists.map((a) => a.name).join(", ") || trackArtist(stepTracks[0]?.path ?? ""),
+        albumPath!,
+        staged
+      );
+      return c.staged?.covers ?? null;
+    },
+    enabled: !!albumPath && !coverInfo?.file,
+    retry: false,
+  });
+  const stagedCoverRows = stagedCovers.data?.results ?? null;
 
   /** Cover results: amber banner when the image is under the minimum size
    *  (the backend writes it anyway and says so), toast for the outcome.
@@ -2817,6 +3108,7 @@ const finish = async () => {
           staged,
         });
         setSettleResult(settled);
+        await Promise.all([refetchAlbumDetail(), refetchArtistArt()]);
       } catch (e) {
         setFinishMsg(`Settle failed — ${e}`);
       }
@@ -2900,7 +3192,15 @@ const finish = async () => {
     setGenres({});
     setDiscGenres({});
     setMbLink("");
+    setRymLink("");
+    setRymValid(null);
+    setRymKind(null);
+    setRymArtistValid(null);
+    setRymArtistKind(null);
+    setRymArtistNote("");
     setLyrOpen(new Set());
+    setRymNote("");
+    setRymArtistLink("");
     setSearchHits([]);
     // reset per-track drafts so album B never inherits album A's data
     setLyricsDrafts({});
@@ -2913,10 +3213,12 @@ const finish = async () => {
     setCoverSel(new Set());
     setCoverUrl("");
     setTrackCoverUrl("");
-    setCoverSearch(false);
+    setCoverSearch(null);
     // Results fetched for album A must not sit on album B's steps: the
-    // advisory/genre answers, the per-script run report and the fingerprint
-    // match are all per-album reads.
+    // metadata rows, the advisory/genre answers, the per-script run report
+    // and the fingerprint match are all per-album reads.
+    setMetaReply(null);
+    setMetaError(null);
     setAdvReply(null);
     setAdvError(null);
     setGenreJobResult(null);
@@ -3675,6 +3977,45 @@ const finish = async () => {
                   <span className="font-semibold text-zinc-200">{release.title}</span> · {release.artists.map((a) => a.name).join(", ")} · {release.date} · {release.medium_count} disc(s) · {release.media.length} tracks
                 </div>
               )}
+              <div className="text-sm font-semibold text-zinc-300 pt-2">RateYourMusic links (optional)</div>
+              <div className="flex flex-wrap items-center gap-2">
+                <input
+                  className={`input flex-1 ${rymValid === true ? "!border-emerald-700" : rymValid === false ? "!border-red-800" : ""} tap`}
+                  placeholder="Album: https://rateyourmusic.com/release/…"
+                  value={rymLink}
+                  onChange={(e) => {
+                    setRymLink(e.target.value);
+                    setRymNote(""); // a stale "That is an artist page" must not outlive the paste it described
+                  }}
+                />
+                <LinkValidChip state={rymValid} kind={rymKind} />
+                <button
+                  className="btn-ghost shrink-0 tap"
+                  onClick={findRymLinks}
+                  disabled={findingLinks || busy}
+                  title="Ask RateYourMusic for this album's and this artist's pages and fill both fields for review"
+                >
+                  {findingLinks ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Search className="h-3.5 w-3.5" />}{" "}
+                  Find links
+                </button>
+              </div>
+              {rymNote && <div className="text-[10px] text-amber-300/80">{rymNote}</div>}
+              <div className="flex flex-wrap items-center gap-2">
+                <input
+                  className={`input flex-1 ${rymArtistValid === true ? "!border-emerald-700" : rymArtistValid === false ? "!border-red-800" : ""} tap`}
+                  placeholder="Artist: https://rateyourmusic.com/artist/…"
+                  value={rymArtistLink}
+                  onChange={(e) => {
+                    setRymArtistLink(e.target.value);
+                    setRymArtistNote("");
+                  }}
+                />
+                <LinkValidChip state={rymArtistValid} kind={rymArtistKind} />
+              </div>
+              <div className="text-[10px] text-zinc-600">
+                Written to every track as RATEYOURMUSIC_ARTIST — only an artist page is accepted.
+              </div>
+              {rymArtistNote && <div className="text-[10px] text-amber-300/80">{rymArtistNote}</div>}
             </div>
             <div className="flex flex-wrap items-center gap-2">
               <button className="btn-primary tap" onClick={handleFetch} disabled={busy}>
@@ -3798,6 +4139,76 @@ const finish = async () => {
             )}
           </MinBlock>
 
+          <MinBlock min={minMode} here={missingHere} mine="">
+            {/* What an import owes besides the cover: the artist's image and
+                description, and the album's own description. Each row states
+                whether it is already there and who supplied it; one button
+                fetches whatever is missing and the rows are re-read after. */}
+            <div className="panel px-3 py-2 space-y-1.5">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-sm font-semibold text-zinc-300">Artist &amp; album metadata</span>
+                <span className="text-[11px] text-zinc-500">
+                  artist: {artistName || "—"}
+                  {artistArt?.path ? <span className="font-mono"> · {artistArt.path}</span> : null}
+                </span>
+                {metaReply && (
+                  <button className="btn-ghost !py-0.5 !px-1.5 text-[11px] ml-auto tap" onClick={() => setMetaReply(null)}>
+                    Clear result
+                  </button>
+                )}
+                <button
+                  className={`btn-ghost !py-1 text-xs tap ${metaReply ? "" : "ml-auto"}`}
+                  onClick={fetchArtistMeta}
+                  disabled={busy || !albumPath}
+                  title="Ask the configured sources for the missing artist image, artist description and album description; what is already present is left alone"
+                >
+                  <CloudDownloadIcon /> Fetch missing
+                </button>
+              </div>
+              {act?.kind === "metadata" && (
+                <ActionBar active label={act.label} done={act.done} total={act.total} />
+              )}
+              {metaRows.map((row) => {
+                const item = metaReply?.[row.kind];
+                return (
+                  <div key={row.kind} className="flex flex-wrap items-center gap-2 text-[11px]">
+                    <span className="w-28 sm:w-40 shrink-0 text-zinc-400">{row.label}</span>
+                    <span
+                      className={`chip border shrink-0 ${
+                        row.present
+                          ? "bg-emerald-900/40 text-emerald-300 border-emerald-800"
+                          : "bg-raise text-zinc-500 border-border"
+                      }`}
+                    >
+                      {row.present ? "present" : "missing"}
+                    </span>
+                    <span className="text-zinc-500 truncate" title={row.source ?? undefined}>
+                      {row.present ? (row.source ?? "source unknown") : ""}
+                    </span>
+                    {!row.enabled && (
+                      <span className="text-amber-300/90 shrink-0">
+                        fetching switched off in Settings (Artist images &amp; descriptions)
+                      </span>
+                    )}
+                    {item && (
+                      <span
+                        className={`ml-auto shrink-0 ${item.state === "error" ? "text-red-300" : "text-zinc-400"}`}
+                        title={item.detail ?? undefined}
+                      >
+                        {item.state === "fetched" ? `fetched · ${item.source ?? "?"}` : `${item.state}${item.detail ? ` — ${item.detail}` : ""}`}
+                      </span>
+                    )}
+                  </div>
+                );
+              })}
+              {metaError && (
+                <div className="text-[11px] text-red-300" role="alert">
+                  Metadata fetch failed — {metaError}
+                </div>
+              )}
+            </div>
+          </MinBlock>
+
           <MinBlock min={minMode} here={missingHere} mine="cover">
             <div className="grid md:grid-cols-2 gap-3">
               <div className="panel p-4 space-y-2">
@@ -3817,10 +4228,42 @@ const finish = async () => {
                   <button className="btn-ghost !py-1 text-xs tap" onClick={() => albumCoverInput.current?.click()} disabled={busy}>
                     <UploadCloud className="h-3.5 w-3.5" /> Upload image
                   </button>
-                  <button className="btn-ghost !py-1 text-xs tap" onClick={() => setCoverSearch(true)} disabled={busy}>
+                  <button className="btn-ghost !py-1 text-xs tap" onClick={() => setCoverSearch({})} disabled={busy}>
                     Search covers
                   </button>
                 </div>
+                {/* The import staged covers for this album but the pick is the
+                    user's — same one-click affordance as the album page. */}
+                {!coverInfo?.file && !!stagedCoverRows?.length && (
+                  <>
+                    <button
+                      className="btn-primary !py-1.5 text-xs tap"
+                      onClick={() =>
+                        setCoverSearch({ results: stagedCoverRows, provider: stagedCovers.data?.provider ?? null })
+                      }
+                      title="Covers fetched during import, ranked by the cover policy, waiting for you to pick one"
+                    >
+                      <ImageIcon className="h-3.5 w-3.5" /> Choose a cover ({stagedCoverRows.length})
+                    </button>
+                    {/* the policy's own pick, said before the picker opens:
+                        what it is, and the reason that put it first */}
+                    {stagedCovers.data?.chosen && (
+                      <div className="text-[11px] text-zinc-500">
+                        {t("cover.best_pick")}:{" "}
+                        <span className="text-zinc-300">
+                          {stagedCovers.data.chosen.source}
+                          {stagedCovers.data.chosen.width && stagedCovers.data.chosen.height
+                            ? ` · ${stagedCovers.data.chosen.width}×${stagedCovers.data.chosen.height}px`
+                            : ""}
+                        </span>
+                        <span className="block text-zinc-600">
+                          {t("cover.pick_reason")}:{" "}
+                          {(stagedCovers.data.chosen.reasons ?? []).slice(-1)[0] ?? ""}
+                        </span>
+                      </div>
+                    )}
+                  </>
+                )}
               </div>
 
               <div className="panel p-4 space-y-2">
@@ -4053,9 +4496,14 @@ const finish = async () => {
                 // folder's own file count is NOT used — a partial rip of the
                 // matched release would then contradict the right cover.
                 trackCount={release?.media?.length || undefined}
-                onClose={() => setCoverSearch(false)}
+                initialResults={coverSearch.results}
+                initialProvider={coverSearch.provider}
+                initialChosen={stagedCovers.data?.chosen ?? null}
+                initialNotes={stagedCovers.data?.notes ?? []}
+                onClose={() => setCoverSearch(null)}
                 onApplied={() => {
                   refreshCovers();
+                  qc.invalidateQueries({ queryKey: ["stagedCovers", albumPath] });
                   qc.invalidateQueries({ queryKey: ["album"] });
                 }}
               />
@@ -4723,6 +5171,16 @@ const finish = async () => {
                         : t("import.settle.lyrics_ok")}
                 </span>
               </div>
+              <div className="flex items-center gap-2">
+                <span className="w-28 shrink-0 text-zinc-400">{t("import.settle.description")}</span>
+                <span className="text-zinc-400">
+                  {settleResult.metadata?.applied?.album_description
+                    ? t("import.settle.description_fetched")
+                    : settleResult.metadata?.staged
+                      ? t("import.settle.description_staged")
+                      : t("import.settle.description_missing")}
+                </span>
+              </div>
             </div>
           )}
           <div className="mt-5 bg-panel rounded-lg border border-border p-4">
@@ -4879,6 +5337,17 @@ const finish = async () => {
             </button>
           </div>
         </div>
+      )}
+
+      {/* Metadata review for the album just committed. The artist is its
+          parent folder — the images and descriptions the modal edits live
+          there. Dismissing it never touches the wizard's own step state. */}
+      {reviewPath && (
+        <MetadataReviewModal
+          artist={baseName(reviewPath.split("/").slice(0, -1).join("/"))}
+          albumPath={reviewPath}
+          onClose={() => setReviewPath(null)}
+        />
       )}
     </div>
   );

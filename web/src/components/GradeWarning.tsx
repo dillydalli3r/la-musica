@@ -72,10 +72,11 @@ function Finding({ item }: { item: GradeWarningItem }) {
           names buried the album it was about; the count is the finding, and the
           names stay one hover away (and full in the Library's Failing filter). */}
       {/* The count, and ONE hover away the names of the checks behind it —
-          the tag codes AND the album-wide sentences the grader itself wrote,
-          because the row prints only the first sentence it has: a
-          finding whose check was not the first sentence used to name every
-          other failing check and never that one. */}
+          the tag codes AND the album-wide sentences the grader itself wrote
+          ("Album description missing — fetch one on the album page" is one of
+          them), because the row prints only the first sentence it has: a
+          finding whose description check was not the first sentence used to
+          name every other failing check and never that one. */}
       {item.codes.length > 0 && (
         <span
           className="text-amber-300/80"

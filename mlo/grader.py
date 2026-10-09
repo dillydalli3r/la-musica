@@ -50,7 +50,7 @@ from .cue import canonical_cue_text
 from .naming import (DEFAULT_NAMING_SCRIPT, UNKNOWN_RELEASE_TYPE,
                      cue_ref_names, lookup_style_release_type,
                      mb_style_release_type, name_key)
-from .paths import (AUDIO_EXTS, IMAGE_EXTS,
+from .paths import (ALBUM_SIDECAR_NAMES, AUDIO_EXTS, IMAGE_EXTS,
                     LIB_AUDIO_EXTS, LIB_VIDEO_EXTS, get_track_cover,
                     library_root, load_expected_tracks, load_pending,
                     load_track_covers)
@@ -289,6 +289,7 @@ VIDEO_SKIP_TAGS = {
 
 
 ALBUM_TAGS = [
+    "ALBUMITUNESADVISORY",
     "ALBUM DYNAMIC RANGE",
 ]
 
@@ -414,52 +415,22 @@ def tag_key_allowed(key):
     return ku.split(":", 1)[0] in BEETS_ID3_FRAMES
 
 
-# A value that NAMES AN EXTERNAL LINK. Nothing this pipeline writes is a link:
-# a MusicBrainz identity is a UUID/ID (a bare MBID), never a URL, and the store
-# a SOURCE names is a NAME ("Bandcamp"), not an address. A stored URL is
-# therefore always somebody else's — a ripper, a vendor tagger, a pasted
-# RateYourMusic page — and this app does not keep it (spec R343). The host the
-# app ITSELF used to stamp (rateyourmusic.com) is matched with or without a
-# scheme, so links written by an older version surface even when no "https://"
-# survived whatever rewrote them.
-_URL_RE = re.compile(
-    r"(?:[a-z][a-z0-9+.\-]*://\S+"     # any scheme://host/path
-    r"|www\.\S+"                        # www.host/path
-    r"|\brateyourmusic\.com\S*)",       # the app's old RYM link host
-    re.IGNORECASE)
+def tag_value_excess(key, value):
+    """Whether a tag whose NAME is in the vocabulary still carries a value
+    nothing in this pipeline writes.
 
-
-def tag_value_excess_reason(key, value):
-    """Why a vocabulary tag's VALUE is excess: ``"comment"``, ``"link"``, or
-    ``""`` when the value is one this pipeline writes.
-
-    Two value-level rules, both under the excess-tag grade and its strip
-    passes:
-
-      * COMMENT is the one NAME the vocabulary HOLDS whose value nothing here
-        writes (mlo.tagtext leaves it alone as free text, which is exactly why
-        a stored value is always somebody else's note);
-      * any value naming an external LINK (_URL_RE) — a bare MusicBrainz id is
-        not a link and is fine, so `MUSICBRAINZ_ALBUMID` and the rest are
-        untouched.
-    """
+    COMMENT is the one such name: every writer this app has stores a name it
+    owns, and COMMENT is not one of them (mlo.tagtext leaves it alone as free
+    text, which is exactly why a value there is always somebody else's note —
+    a ripper, a vendor tagger, a friend's rip). The strip passes delete it
+    with the same predicate the grade uses (see mlo.containers /
+    mlo.format_all), gated on `strip_unknown_tags` like the name rule."""
     ku = str(key).upper()
     if ku.startswith(("TXXX:", "----:")):
         ku = ku.rsplit(":", 1)[-1]
-    if _tag_key_norm(ku) == "COMMENT" and str(value or "").strip():
-        return "comment"
-    if _URL_RE.search(str(value or "")):
-        return "link"
-    return ""
-
-
-def tag_value_excess(key, value):
-    """Whether a tag whose NAME is in the vocabulary still carries a value
-    nothing in this pipeline writes — a non-empty COMMENT, or a URL. One
-    predicate for the grade and for the strip passes (mlo.format_all,
-    mlo.taghygiene), gated on `strip_unknown_tags` like the name rule, so a
-    strip can never leave a value the grade flags."""
-    return bool(tag_value_excess_reason(key, value))
+    if _tag_key_norm(ku) != "COMMENT":
+        return False
+    return bool(str(value or "").strip())
 
 
 def stored_alias_tags(af, base):
@@ -973,7 +944,8 @@ SIDECAR_TYPES = {
 # Category -> config key deciding whether files of that kind are allowed.
 # 'other' is opt-in (extra files fail grading by default). Videos — remuxed
 # MKV and raw VOB/AVI/... — are their own allowed-by-default category; raw
-# videos still fail the dedicated un-remuxed-video check.
+# videos still fail the dedicated un-remuxed-video check. 'description' is
+# the app's own description.txt: it may not be called a stray file.
 CATEGORY_INCLUDE_KEYS = {
     "music": "grade_include_music",
     "cover": "grade_include_cover",
@@ -982,6 +954,7 @@ CATEGORY_INCLUDE_KEYS = {
     "lrc": "grade_include_lrc",
     "accurip": "grade_include_accurip",
     "video": "grade_include_video",
+    "description": "grade_include_description",
     "other": "grade_include_other",
 }
 
@@ -1013,7 +986,7 @@ def _video_category_exts():
 
 def _classify_file(f):
     """Category of a filename: music / cover / cue / log / lrc / accurip /
-    video / other."""
+    video / description / other."""
     low = f.lower()
     if low.endswith(_video_category_exts()):
         # Video containers FIRST: LIB_AUDIO_EXTS is AUDIO_EXTS +
@@ -1035,6 +1008,10 @@ def _classify_file(f):
         return "lrc"
     if low.endswith(".accurip"):
         return "accurip"
+    if low in ALBUM_SIDECAR_NAMES:
+        # The album/artist description the app writes itself — a legitimate
+        # library file, allowed by default like the cover art next to it.
+        return "description"
     return "other"
 
 
@@ -1095,13 +1072,18 @@ def _extra_images(album_dir, all_files, audio_files):
     ("01 - Song.jpg", extended stems like "01 - Song.front.jpg" count too —
     the same convention the organizer's sidecar pass follows), nor an image
     listed in the per-track cover manifest (a shared image is named after one
-    track only, so its stem says nothing about the other tracks that use it)."""
+    track only, so its stem says nothing about the other tracks that use it),
+    nor the artist's own artist.jpg / artist.png (stored at artist level by
+    mlo.artistdata — never stray album art)."""
+    from .artistdata import ARTIST_IMAGE_STEMS
     track_stems = {os.path.splitext(f)[0].lower() for f in audio_files}
     mapped = {v.lower() for v in load_track_covers(album_dir).values()}
     out = []
     for f in sorted(all_files):
         low = f.lower()
         if not low.endswith(IMAGE_EXTS) or low in COVER_NAMES:
+            continue
+        if os.path.splitext(low)[0] in ARTIST_IMAGE_STEMS:
             continue
         full = os.path.join(album_dir, f)
         if _skip_grading_file(full):
@@ -1767,10 +1749,10 @@ def _ambiguous_lrc_stems(filenames):
 # An episode of a podcast carries the PODCASTSERIES tag (mlo.autotag, written
 # from MusicBrainz's `part of` a series of type Podcast): it has no lyrics to
 # embed (the LYRICS check requires them of every non-instrumental track), no
-# album bio any source would write, and no MusicBrainz genre vocabulary that
-# describes it. Grading it with those checks ON is what would fail a podcast
-# FOR BEING a podcast — they are the music catalogue's expectations, not
-# defects of the episode.
+# RateYourMusic page to link, no album bio any source would write, and no
+# MusicBrainz genre vocabulary that describes it. Grading it with those checks
+# ON is what would fail a podcast FOR BEING a podcast — they are the music
+# catalogue's expectations, not defects of the episode.
 #
 # The CD-rip expectations need nothing here: every one of them is already
 # gated on MEDIA=CD (mlo.grader._is_cd, mlo.audit), and an episode's medium is
@@ -1779,6 +1761,8 @@ def _ambiguous_lrc_stems(filenames):
 # so this rule cannot weaken one existing check for a music release.
 _PODCAST_MUSIC_ONLY_CHECKS = (
     "grade_check_lyrics",
+    "grade_check_rym_links",
+    "grade_check_album_description",
     "grade_check_genre",
     "grade_check_genre_count",
     "grade_check_genre_order",
@@ -1852,7 +1836,8 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
     tracks = []
     issues = {}
     # Informational lines for this album: they say what was NOT checked,
-    # never that something failed.
+    # never that something failed. The artist grade has carried the same
+    # channel since the image checks (_artist_image_issues).
     notes = []
 
     album_tag_values = {}
@@ -2238,36 +2223,22 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                             "Optimize FLACs (script 3) / Format all (script 10) "
                             "to strip them)", basename)
                 track["issues"].append("TAGS")
-            # Value-level rules of the same check and the same strip passes:
-            # a non-empty COMMENT (the one allowed NAME whose value nothing
-            # here writes) and any value naming an external LINK (a URL — raw
-            # MusicBrainz ids are not links and stay fine) each fail the track
-            # with their own issue code, and script 10 / Optimize tags delete
-            # the tag.
-            _reasons: dict[str, set] = {}
-            for _k, _v in (af.all_tags() or {}).items():
-                _why = tag_value_excess_reason(_k, _v)
-                if _why:
-                    _reasons.setdefault(_why, set()).add(str(_k))
-            _value_issues = (
-                ("comment", "COMMENT",
-                 "Comment tag carries a value: ",
-                 "to clear it"),
-                ("link", "LINK",
-                 "Tag carries an external link: ",
-                 "to remove it"),
-            )
-            for _why, _code, _lead, _tail in _value_issues:
-                _keys = sorted(_reasons.get(_why) or ())
-                if not _keys:
-                    continue
+            # COMMENT is the one name the vocabulary HOLDS whose value this
+            # pipeline never writes (mlo.tagtext leaves it alone as free text,
+            # which is what makes a stored value always somebody else's note —
+            # a ripper's or a vendor tagger's). A VALUE-level rule of the same
+            # check and the same strip passes: a non-empty COMMENT fails the
+            # track with its own issue code and script 10 / Optimize delete it.
+            _comments = sorted({str(_k) for _k, _v in (af.all_tags() or {}).items()
+                                if tag_value_excess(_k, _v)})
+            if _comments:
                 total_checks += 1
                 failed_checks += 1
-                add_issue(_lead + ", ".join(_keys)
+                add_issue("Comment tag carries a value: " + ", ".join(_comments)
                           + " (run Optimize tags (script 23) on the album, or "
                             "Optimize FLACs (script 3) / Format all (script 10) "
-                            + _tail + "; raw MusicBrainz ids are kept)", basename)
-                track["issues"].append(_code)
+                            "to clear it)", basename)
+                track["issues"].append("COMMENT")
 
         if cfg.get("grade_check_key_bpm", True) and not is_video_track:
             for t in ("INITIALKEY", "BPM"):
@@ -2705,15 +2676,17 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                                        if md5_state == MD5_ABSENT
                                        else "FLAC_MD5_UNKNOWN")
 
-        # MusicBrainz identity link — required for a PASS.
-        # The MusicBrainz RELEASE (falling back to its release group) is the
-        # one link graded; artist / recording / per-track links stay optional
-        # (they power extra buttons but are not graded).
+        # MusicBrainz / RateYourMusic identity links — required for a PASS.
+        # Exactly two links are graded: the MusicBrainz RELEASE (falling
+        # back to its release group) and the RateYourMusic release-group
+        # page. Artist / recording / per-track RYM links stay optional —
+        # they power extra buttons but are not graded.
         mb_release = str(
             af.get_tag("MUSICBRAINZ_ALBUMID") or af.get_tag("MUSICBRAINZ_RELEASEGROUPID") or ""
         ).strip()
         if mb_release:
             album_has_mbid = True
+        rym_release = str(af.get_tag("RATEYOURMUSIC_ALBUM") or "").strip()
         if should_write_audio_tag(cfg, "MUSICBRAINZ_ALBUMID", filepath=ap) and cfg.get(
             "grade_check_mb_links", True
         ):
@@ -2722,6 +2695,14 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                 failed_checks += 1
                 add_issue("Missing MusicBrainz release link (import from MusicBrainz)", basename)
                 track["issues"].append("MB_LINK")
+        if should_write_audio_tag(cfg, "RATEYOURMUSIC_ALBUM", filepath=ap) and cfg.get(
+            "grade_check_rym_links", True
+        ):
+            total_checks += 1
+            if not rym_release:
+                failed_checks += 1
+                add_issue("Missing RateYourMusic release link", basename)
+                track["issues"].append("RYM_LINK")
 
         # Rip-log score (MEDIA=CD releases only, checked once MEDIA is
         # known - read here, graded in the CD section below).
@@ -4414,6 +4395,17 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                 shown += f" (+{len(extra_imgs) - 4} more)"
             add_issue(f"Extra artwork not tied to any track: {shown}", "album")
 
+    # Album description (the album page's "fetch description" feature):
+    # <album>/description.txt must exist and be non-blank. Lazy import — the
+    # grader is imported from contexts that must not pull in the image stack.
+    if cfg.get("grade_check_album_description", True):
+        from .artistdata import has_description as _has_description
+        total_checks += 1
+        if not _has_description(album_dir):
+            failed_checks += 1
+            add_issue("Album description missing — fetch one on the album page",
+                      "album")
+
     # File extensions must be lowercase ("01 - Song.FLAC" fails). organize
     # lowercases every extension it touches.
     if cfg.get("grade_check_ext_case", True):
@@ -4655,21 +4647,141 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
     }
 
 
+# Artist-level checks (the artist folder, not an album): the image and the
+# text the artist page fetches into the library. Order is display order; the
+# labels are what the UI shows for each row.
+ARTIST_CHECKS = [
+    {"key": "grade_check_artist_image", "label": "Artist image",
+     "description": "The artist folder must hold an artist.jpg / artist.png "
+                    "whose size, aspect and format match the configured "
+                    "artist-image policy."},
+    {"key": "grade_check_artist_description", "label": "Artist description",
+     "description": "The artist folder must hold a non-blank description.txt."},
+]
+
+# Issue codes per artist check, and the artwork key each one reports on. The
+# image check raises several: its size, its shape, its container and its
+# decodability are four different verdicts on one file, and each one names the
+# numbers it judged. ARTIST_IMAGE_UNDERSIZED is the informational one — the
+# result carries it in `notes`, never in `issues`, because nothing here upscales
+# and failing an image below the target would fail the folder forever.
+_ARTIST_CHECK_ISSUES = {
+    "grade_check_artist_image": (("ARTIST_IMAGE_MISSING", "ARTIST_IMAGE_CORRUPT",
+                                  "ARTIST_IMAGE_FORMAT", "ARTIST_IMAGE_OVERSIZED",
+                                  "ARTIST_IMAGE_ASPECT", "ARTIST_IMAGE_UPSCALED",
+                                  "ARTIST_IMAGE_UNDERSIZED"), "image"),
+    "grade_check_artist_description": (("ARTIST_DESCRIPTION_MISSING",),
+                                       "description"),
+}
+
+
+def _artist_image_issues(folder, image_file, cfg, where):
+    """(issues, notes) for an artist folder's image.
+
+    Judged on the decoded file — Pillow reads the pixels, never the name or the
+    suffix — and every reason names the numbers behind it. An image this app
+    wrote is also compared with the size it recorded writing it: anything larger
+    on disk had pixels invented for it afterwards, which is worth saying because
+    a resized-up photo looks detailed at a glance.
+
+    The policy (aspect, tolerance, target, ceiling) comes from mlo.artistdata, so
+    this check and script 19, which fixes what it reports, cannot judge by
+    different numbers."""
+    from .artistdata import (ARTIST_IMAGE_EXTS, DEFAULT_ASPECT,
+                             aspect_deviation, decode_size, image_policy,
+                             recorded_size, unsupported_image)
+
+    label = "Artist image"
+
+    def issue(code, reason):
+        return {"code": code, "label": label, "where": where, "reason": reason}
+
+    if not image_file:
+        other = unsupported_image(folder)
+        if other:
+            exts = " / ".join(ARTIST_IMAGE_EXTS)
+            return ([issue("ARTIST_IMAGE_FORMAT",
+                           f"{os.path.basename(other)} is not an artist image "
+                           f"this app reads ({exts}) — script 19 converts it")], [])
+        return ([issue("ARTIST_IMAGE_MISSING",
+                       "no artist.jpg / artist.png in the folder — fetch one from "
+                       "the artist page (script 19 can only re-fit an image that "
+                       "is there)")], [])
+
+    name = os.path.basename(image_file)
+    size = decode_size(image_file)
+    if size is None:
+        try:
+            nbytes = os.path.getsize(image_file)
+        except OSError:
+            nbytes = 0
+        return ([issue("ARTIST_IMAGE_CORRUPT",
+                       f"{name} does not decode ({nbytes} bytes) — re-fetch it; "
+                       f"script 19 cannot repair bytes that are not an image")], [])
+
+    width, height = size
+    longest = max(width, height)
+    aspect, tolerance, target, max_side = image_policy(cfg)
+    issues, notes = [], []
+
+    if longest > max_side:
+        expected = (f"the configured artist_image_target_size {target}px"
+                    if target > 0 else
+                    f"the {max_side}px artist-image ceiling "
+                    f"(artist_image_target_size is 0 = keep the native size)")
+        issues.append(issue(
+            "ARTIST_IMAGE_OVERSIZED",
+            f"{width}x{height}: longest side {longest}px, {longest - max_side}px "
+            f"over {expected} (script 19 downscales it)"))
+    elif target > 0 and longest < target:
+        notes.append(issue(
+            "ARTIST_IMAGE_UNDERSIZED",
+            f"{width}x{height} is below the configured {target}px target "
+            f"({target - longest}px short) — accepted, and never upscaled: an "
+            f"enlarged photo would be invented detail"))
+
+    if aspect:
+        deviation = aspect_deviation(size, aspect)
+        if deviation > tolerance:
+            configured = str(cfg.get("artist_image_aspect") or DEFAULT_ASPECT)
+            issues.append(issue(
+                "ARTIST_IMAGE_ASPECT",
+                f"{width}x{height} is {width / float(height):.3f}:1, not the "
+                f"configured {configured} ({aspect:.3f}:1) — {deviation:.1%} off, "
+                f"tolerance {tolerance:.0%} — script 19 crops it to {configured}"))
+
+    recorded = recorded_size(folder, cfg)
+    if recorded and longest > max(recorded):
+        issues.append(issue(
+            "ARTIST_IMAGE_UPSCALED",
+            f"{width}x{height} on disk, {recorded[0]}x{recorded[1]} when this app "
+            f"wrote it — {longest / float(max(recorded)):.2f}x larger, so its "
+            f"extra detail is interpolated or came from outside the app (script 19 "
+            f"restores the stored size)"))
+
+    return issues, notes
+
+
 def grade_artist(artist_dir, cfg=None) -> dict:
-    """Grade an artist folder on the one thing still left to it: that it holds
-    an album at all. Album-level checks — tags, logs, covers — never run here,
-    and the artist artwork/text checks are gone with the features that fetched
-    them.
+    """Grade an artist folder on the things that apply to it: its image, its
+    description (ARTIST_CHECKS), and that it holds an album at all. Album-level
+    checks — tags, logs, covers — never run here.
 
-    Two folder-level verdicts never go through the check arithmetic — an
-    unreadable/absent folder (ARTIST_FOLDER_MISSING) and a folder holding no
-    album at all (ARTIST_EMPTY) each report one issue and invent no checks,
-    because neither is a folder this app can grade whatever the settings say.
+    The image check is judged on the decoded file (the configured aspect and
+    size, the format, decodability, and whether the pixels were enlarged after
+    this app wrote them); *issues* fail it, *notes* inform without failing —
+    an undersized image is perfectly acceptable here. Every issue carries a
+    `reason` naming the numbers behind it.
 
-    *pct* is 100 with nothing graded: nothing graded is nothing failed, so
-    *pass* is True (the album rule reports the same 100% for an album whose
-    checks are all switched off).
+    *pct* is 100 with both checks disabled: nothing graded is nothing failed,
+    so *pass* is True there (the album rule reports the same 100% for an album
+    whose checks are all switched off). Two folder-level verdicts never go
+    through that arithmetic — an unreadable/absent folder
+    (ARTIST_FOLDER_MISSING) and a folder holding no album at all
+    (ARTIST_EMPTY) each report one issue and invent no checks, because neither
+    is a folder this app can grade whatever the settings say.
     """
+    cfg = cfg or {}
     folder = str(artist_dir or "")
     where = os.path.basename(folder.replace("\\", "/").rstrip("/")) or folder
     out = {
@@ -4681,6 +4793,7 @@ def grade_artist(artist_dir, cfg=None) -> dict:
         "pass": False,
         "issues": [],
         "notes": [],
+        "artwork": {"image": False, "image_file": None, "description": False},
     }
     if not folder or not os.path.isdir(folder):
         out["issues"].append({
@@ -4689,29 +4802,57 @@ def grade_artist(artist_dir, cfg=None) -> dict:
         })
         return out
 
+    from .artistdata import has_description, image_path
     # The album-folder question is mlo.layout's (the scanner reports the same
     # folder as `empty_artist`), so the grade and the scan answer it alike.
     from .layout import artist_album_folders
+    image_file = image_path(folder)
+    out["artwork"] = {
+        "image": bool(image_file),
+        "image_file": image_file,
+        "description": has_description(folder),
+    }
 
     # An artist folder holding no album folder at all is not a graded artist:
-    # nothing under it can be graded as music, and the library still lists it
-    # as an artist. It fails the way an absent folder does — one issue, no
-    # checks invented. `mlo.layout` reports the same folder as `empty_artist`,
-    # and removing it (script 20, Optimize library layout) goes through the
-    # Trash.
+    # its image and description are the artist's own cover, nothing under it
+    # can be graded as music, and the library still lists it as an artist. It
+    # fails the way an absent folder does — one issue, no checks invented —
+    # because the artefact checks describe a folder that can hold an album, and
+    # reporting image/description grades for one that cannot would be a score
+    # for the wrong question. `mlo.layout` reports the same folder as
+    # `empty_artist`, and the removal the panel offers goes through the Trash.
     if not artist_album_folders(folder):
         out["issues"].append({
             "code": "ARTIST_EMPTY", "label": "Artist albums", "where": where,
             "reason": "no album folder in this artist folder — nothing here is "
                       "an album, so there is nothing to grade as music. Add "
-                      "one of the artist's albums, or move the folder to the "
-                      "Trash (run Optimize library layout, script 20)",
+                      "one of the artist's albums, or remove the folder to the "
+                      "Trash (Optimize → Library layout → remove)",
         })
         return out
 
-    # Nothing graded is nothing failed, exactly like an album with every check
-    # switched off (format_grade_report reads it as 100%).
+    for check in ARTIST_CHECKS:
+        if not cfg.get(check["key"], True):
+            # Toggle off: the artefact is neither required nor counted.
+            continue
+        out["checks"] += 1
+        codes, art_key = _ARTIST_CHECK_ISSUES[check["key"]]
+        if check["key"] == "grade_check_artist_image":
+            found, notes = _artist_image_issues(folder, image_file, cfg, where)
+            out["notes"].extend(notes)
+        elif out["artwork"][art_key]:
+            found = []
+        else:
+            found = [{"code": codes[0], "label": check["label"], "where": where,
+                      "reason": "no description.txt (or it is blank)"}]
+        if found:
+            out["failed_checks"] += 1
+            out["issues"].extend(found)
+
     out["pass_count"] = out["checks"] - out["failed_checks"]
+    # Nothing graded is nothing failed, exactly like an album with every check
+    # switched off (format_grade_report reads it as 100%): a 0 here contradicted
+    # that and showed a passing artist folder as "0%".
     out["pct"] = (100.0 if not out["checks"]
                   else 100.0 * out["pass_count"] / out["checks"])
     out["pass"] = out["failed_checks"] == 0
