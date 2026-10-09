@@ -747,8 +747,11 @@ def _is_slskd_pid(pid):
     Something else squatting slskd's web port must never be taskkilled just
     because it happens to answer on that port."""
     try:
+        # CREATE_NO_WINDOW: the server runs windowed and owns no console, so a
+        # bare `tasklist` allocates one and a terminal flashes up (mlo/subproc.py).
         out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
-                             capture_output=True, text=True, timeout=10).stdout
+                             capture_output=True, text=True, timeout=10,
+                             creationflags=CREATE_NO_WINDOW).stdout
     except Exception:
         return False
     return "slskd" in (out or "").lower()
@@ -764,9 +767,12 @@ def _kill_port_listener(port):
     the listener is ours (instance_owner)."""
     try:
         if os.name == "nt":
+            # CREATE_NO_WINDOW: the server runs windowed and owns no console, so
+            # a bare `netstat` flashes a terminal window (mlo/subproc.py).
             out = subprocess.run(
                 ["netstat", "-ano", "-p", "TCP"],
                 capture_output=True, text=True, timeout=10,
+                creationflags=CREATE_NO_WINDOW,
             ).stdout
             pids = set()
             for ln in out.splitlines():
@@ -779,8 +785,11 @@ def _kill_port_listener(port):
                     continue
                 if not _is_slskd_pid(pid):
                     continue
+                # CREATE_NO_WINDOW: a bare `taskkill` flashes a terminal window
+                # (mlo/subproc.py).
                 subprocess.run(["taskkill", "/F", "/PID", pid],
-                               capture_output=True, timeout=10)
+                               capture_output=True, timeout=10,
+                               creationflags=CREATE_NO_WINDOW)
                 killed = True
             return killed
         r = subprocess.run(["fuser", "-k", f"{port}/tcp"],
@@ -1112,7 +1121,15 @@ def listen_port_state(cfg=None):
     cfg = cfg or load_config()
     port = _int_setting(cfg, "soulseek_listen_port", 50000)
     ours = client_running(cfg)
-    out = {"listen_port": port, "listening": False, "holder": "",
+    # `obfuscated_port` is the number a Soulseek client (SoulseekQt, Nicotine+)
+    # would call this host's OBFUSCATED port — the listen port + 1 — derived
+    # here so the page shows one number the server stands behind. It is INFO
+    # ONLY: slskd implements no obfuscated route (Soulseek.NET logs in with the
+    # plain listen_port only and advertises no obfuscated port), so nothing
+    # listens on this number and nothing has to be forwarded to it. 0 when the
+    # listen port is unknown/0, which is also how the page knows not to show it.
+    out = {"listen_port": port, "obfuscated_port": port + 1 if port else 0,
+           "listening": False, "holder": "",
            "bindable": None, "conflict": None, "error": "",
            "mapping": portmap_state(cfg)}
     free, why = _port_bindable(port)
@@ -1170,7 +1187,8 @@ def port_status_payload(cfg=None):
 
     `slskd_error` is the daemon's OWN line about a port it could not use — the
     only place that failure is explained, since slskd reports nothing about the
-    listener over REST."""
+    listener over REST. `obfuscated_port` is derived (listen port + 1, 0 when
+    unknown) and is information only — slskd advertises no obfuscated port."""
     cfg = cfg or load_config()
     state = listen_port_state(cfg)
     state["slskd_error"] = listen_port_error()

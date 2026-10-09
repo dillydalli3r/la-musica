@@ -1502,6 +1502,12 @@ export interface SlskStatus {
    *  only then — `refused` carries the router's own words in `detail`. */
   listen_port_state: {
     listen_port: number;
+    /** Derived, information only: the number a Soulseek client (SoulseekQt,
+     *  Nicotine+) would call this host's OBFUSCATED port — `listen_port` + 1.
+     *  slskd implements no obfuscated route and advertises no obfuscated port,
+     *  so nothing listens there and nothing has to be forwarded to it.
+     *  0 when `listen_port` is unknown/0, and the page then shows nothing. */
+    obfuscated_port: number;
     listening: boolean;
     /** "slskd" when our daemon accepts on it, "another program" when a
      *  foreign process does — the conflict the WEB port already reports. */

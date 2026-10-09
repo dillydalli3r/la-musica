@@ -28,9 +28,12 @@ nothing answers — is what proves the probe is BOUNDED instead of hanging.
 
 Run:  python tools/test_soulseek_port.py
 """
+import json
 import os
 import socket
+import subprocess
 import sys
+import tempfile
 import threading
 import time
 
@@ -58,6 +61,46 @@ WAN = "8.8.8.8"
 LAN = "192.168.1.5"
 GATEWAY = "192.168.1.1"
 
+def status_payload(port):
+    """A `/api/soulseek/status` payload as `soulseek.port_status_payload` fills
+    it, for the page render below. `obfuscated_port` is the DERIVED readout the
+    panel shows beside the listen port (soulseek.listen_port_state: listen
+    port + 1, 0 when the port is unknown) — information only, never a second
+    port to forward, because slskd advertises no obfuscated port."""
+    return {
+        "installed": True, "listen_port": port, "web_port": 5030,
+        "listen_port_state": {
+            "listen_port": port,
+            "obfuscated_port": port + 1 if port else 0,
+            "listening": True, "holder": "slskd", "bindable": False,
+            "conflict": None, "error": "", "slskd_error": "",
+            "mapping": {
+                "enabled": True, "listen_port": port, "mapped_port": port,
+                "state": "mapped", "detail": "the router lists the mapping.",
+                "method": "upnp", "verified": True, "external_ip": WAN,
+                "internal_ip": LAN, "gateway": GATEWAY, "tried": [],
+                "attempts": [], "checked_at": 0, "in_flight": False,
+                "expires_at": 0,
+            },
+        },
+    }
+
+
+def render_ports_panel(port):
+    """Render the REAL Soulseek ports panel from a status payload (node + Vite,
+    tools/check_soulseek_ports.mjs). Exit 2 is this repo's "the tooling is not
+    installed" (no node / no web/node_modules)."""
+    fd, path = tempfile.mkstemp(suffix=".json", prefix="mlo_ports_")
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(status_payload(port), f)
+    try:
+        return subprocess.run(
+            ["node", os.path.join("tools", "check_soulseek_ports.mjs"), path],
+            cwd=ROOT, capture_output=True, text=True)
+    finally:
+        os.unlink(path)
+
+
 # --------------------------------------------------------------------------- #
 # The seams: everything that would talk to a router or to slskd
 # --------------------------------------------------------------------------- #
@@ -66,6 +109,19 @@ soulseek.client_running = lambda cfg=None: True   # an slskd of ours is answerin
 soulseek.server_state = lambda cfg=None: {"isLoggedIn": True}
 soulseek.listen_port_error = lambda: ""           # neither log is read in a test
 soulseek.login_error = lambda cfg=None: ""
+
+# The derived `obfuscated_port` the payload carries is INFORMATION, not a port
+# anything listens on: the listen port + 1 (what a Soulseek client would CALL
+# this host's obfuscated port), and 0 — which the page renders as nothing — when
+# the listen port is unknown/0. The bind probe is stubbed so this stays a
+# payload assertion, not a socket test.
+_real_bind = soulseek._port_bindable
+soulseek._port_bindable = lambda port: (True, "")
+assert soulseek.listen_port_state(
+    {"soulseek_listen_port": 21455})["obfuscated_port"] == 21456
+assert soulseek.listen_port_state(
+    {"soulseek_listen_port": 0})["obfuscated_port"] == 0
+soulseek._port_bindable = _real_bind
 portmap.default_gateway = lambda: GATEWAY
 portmap.local_ip = lambda gateway="": LAN
 reads = {"value": portmap._out("no_gateway", method="upnp",
@@ -747,5 +803,28 @@ sp._connect = lambda host, port, timeout: (False, "connection refused")
 listener.close()
 held.close()
 seed(None)
+
+# --------------------------------------------------------------------------- #
+# The PAGE: the derived obfuscated port, rendered beside the listen port
+# --------------------------------------------------------------------------- #
+# `obfuscated_port` is INFORMATION the payload carries — the listen port + 1, the
+# number a Soulseek client (SoulseekQt, Nicotine+) would CALL this host's
+# obfuscated port. slskd advertises no obfuscated port and listens on the plain
+# one only, so the page shows it as a fact, never as a second port to forward.
+# The REAL page renders from a status payload (tools/check_soulseek_ports.mjs),
+# in both directions: the readout appears with a known port, and nothing is
+# invented when it is unknown/0.
+shown = render_ports_panel(21455)
+unknown = render_ports_panel(0)
+if shown.returncode == 2 or unknown.returncode == 2:
+    print("SKIPPED  the ports-panel render check (node or web/node_modules "
+          "missing): " + (shown.stderr.strip().splitlines() or [""])[0])
+else:
+    assert shown.returncode == 0, \
+        "the ports-panel render check failed:\n" + shown.stdout + shown.stderr
+    assert unknown.returncode == 0, \
+        "the unknown-port render check failed:\n" + unknown.stdout + unknown.stderr
+    ok(True, shown.stdout.strip().removeprefix("ok  "))
+    ok(True, unknown.stdout.strip().removeprefix("ok  "))
 
 print(f"\nAll {passed} checks passed.")

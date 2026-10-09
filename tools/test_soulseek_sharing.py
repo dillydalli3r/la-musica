@@ -447,6 +447,11 @@ assert audit["status"] == "listen_unconfirmed" and audit["ok"] is False, audit["
 # the port readout names every port that has to be reachable, which is one
 assert any("TCP 50000 is the only port involved" in n for n in audit["notes"]), \
     audit["notes"]
+# ...and the payload carries the derived obfuscated port as INFORMATION — the
+# listen port + 1, what a Soulseek client would call this host's obfuscated
+# port. slskd implements no obfuscated route, so it is a readout the page shows,
+# never a second port anything has to reach (the note above says so).
+assert audit["port"]["obfuscated_port"] == 50001, audit["port"]
 
 # ...and when the host DOES publish it, the compose file is cleared by
 # measurement and what is left is in front of the host — named as the router, at

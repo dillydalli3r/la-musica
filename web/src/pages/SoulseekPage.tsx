@@ -4327,6 +4327,24 @@ export default function SoulseekPage() {
               title="Port the Soulseek network sees (listen_port in slskd)"
             />
           </label>
+          {/* Information, not an instruction: the number a Soulseek client
+              (SoulseekQt, Nicotine+) would call this host's obfuscated port —
+              the listen port + 1. slskd implements no obfuscated route and
+              advertises no obfuscated port, so nothing listens there and
+              nothing has to be forwarded to it. Derived by the server
+              (listen_port_state.obfuscated_port) and shown only when known. */}
+          {Number(status.listen_port_state?.obfuscated_port) > 0 && (
+            <span
+              className="text-[10px] text-zinc-600"
+              title={`What a Soulseek client (SoulseekQt, Nicotine+) would call this host's obfuscated port: the listen port + 1. slskd implements no obfuscated route — it advertises no obfuscated port and listens on the plain port only — so this number is information, not a route to reach: nothing listens on it and nothing needs forwarding to it.`}
+            >
+              obfuscated{" "}
+              <span className="font-mono text-zinc-500">
+                {status.listen_port_state.obfuscated_port}
+              </span>{" "}
+              (slskd does not listen there)
+            </span>
+          )}
           <label className="flex items-center gap-1.5 text-zinc-500">
             Web UI
             <input
