@@ -8,7 +8,7 @@ import {
   MessageSquare, X, Wand2, CheckCheck, MessageCircleQuestion, Layers,
 } from "lucide-react";
 import { api } from "../api";
-import type { ImportRunStatus, ReadyAlbum, SlskAutoFile, SlskAutoJob, SlskStatus, SlskAutoProgress, SlskConversation, SlskDownloads, SlskMessage, SlskPortCheck, SlskQueueItem, SlskQueuePayload, SlskQueueScope, SlskSearchProgress, SlskTransfer, StagingEntry, StagingRoot, StagingRootId } from "../api";
+import type { ImportRunStatus, ReadyAlbum, SlskAutoFile, SlskAutoJob, SlskStatus, SlskAutoProgress, SlskConversation, SlskDownloads, SlskMessage, SlskPortCheck, SlskQueueItem, SlskQueuePayload, SlskQueueScope, SlskSearchProgress, SlskTransfer, SlskUploadFile, SlskUploadPeer, StagingEntry, StagingRoot, StagingRootId } from "../api";
 import { toast } from "../store";
 import { useLiveTransfers, type TransfersFrame } from "../lib/notifications";
 import { SOULSEEK_QUEUE_KEY as QUEUE_KEY, STAGE_LABEL } from "../lib/acquisition";
@@ -5410,34 +5410,22 @@ function StagingPanel() {
  *  two brackets of noise in a history row). */
 const OPAQUE_SEG = /^(p2p|\[?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\]?)$/i;
 
-/** The fields one upload row of slskd's upload tree carries that this list
- *  draws. The tree arrives as slskd's own JSON (see server/soulseek.py's
- *  `uploads_state`), so the names it may spell are written down once, here. */
-interface SharedUpload {
-  username?: string;
-  dir?: string;
-  filename?: string;
-  size?: number;
-  bytesTransferred?: number;
-  state?: string;
-  requestedAt?: string;
-  startedAt?: string;
-  endedAt?: string;
-}
+/** A file in a peer's upload history, as the server grouped it
+ *  (`uploads_summary`). The names are slskd's own, spelled once by the server,
+ *  so there is nothing to guess here. */
+type UploadItem = SlskUploadFile;
 
 /** What ONE uploaded file's row says: the album it belongs to (falling back to
- *  the file's own name), the peer, when it went, and its size — never the path
- *  slskd walks to it.
+ *  the file's own name) and the file itself, its FULL size, and the bytes moved
+ *  so far while it is still arriving.
  *
- *  slskd groups uploads per user and per remote directory, and names each file
- *  by its path below the share root. The album is the LAST real folder in that
- *  path (a bare file name leaves no folder at all, and then the file names
- *  itself), the peer is the username with the same opaque levels stripped, and
- *  the time is whichever stamp slskd published for the transfer — when it
- *  ended, when it started, or when it was requested. Anything slskd did not say
- *  is left empty here rather than invented, and the untouched path rides in the
- *  row's tooltip so the full detail is still one hover away. */
-function sharedUpload(f: SharedUpload) {
+ *  `size` is the file's own size — NEVER the partial bytes, which are the
+ *  progress drawn beside it; a finished transfer's row shows `size` alone.
+ *  slskd names each file by its path below the share root (OPAQUE_SEG strips
+ *  the bookkeeping levels), so the album is the LAST real folder in that path
+ *  (a bare file name has none, and then the file names itself). The untouched
+ *  path rides in the row's tooltip so the full detail is one hover away. */
+function uploadFile(f: UploadItem) {
   const segments = (p: unknown) => String(p ?? "").replace(/\\/g, "/")
     .split("/").map((s) => s.trim()).filter((s) => s && !OPAQUE_SEG.test(s));
   const inFile = segments(f.filename);
@@ -5445,23 +5433,26 @@ function sharedUpload(f: SharedUpload) {
   const file = inFile.length ? inFile[inFile.length - 1] : "file";
   const album = inDir.length ? inDir[inDir.length - 1]
     : (inFile.length > 1 ? inFile[inFile.length - 2] : "");
-  const raw = String(f.username ?? "");
-  const inPeer = segments(raw);
-  // A username that is nothing but opaque levels is the network's own label for
-  // a peer this app cannot name: say `p2p` rather than print the UUIDs.
-  const peer = inPeer.length ? inPeer[inPeer.length - 1] : (raw ? "p2p" : "");
-  const stamp = Date.parse(String(f.endedAt || f.startedAt || f.requestedAt || ""));
+  const size = Math.max(0, Number(f.size) || 0);
+  // Never let a stale counter overflow the file's own size in the progress line.
+  const done = size > 0 ? Math.min(size, Math.max(0, Number(f.bytesTransferred) || 0))
+                        : Math.max(0, Number(f.bytesTransferred) || 0);
+  const finished = Object.keys(DONE_STATES).some((k) => String(f.state ?? "").includes(k));
   return {
-    album, file, peer,
-    live: f.state === "InProgress",
-    when: Number.isFinite(stamp) ? timeAgo(stamp / 1000) : "",
+    album, file, size, done, finished,
+    percent: size > 0 ? Math.min(100, Math.round((done / size) * 100)) : 0,
+    when: f.last ? timeAgo(f.last) : "",
     state: String(f.state ?? ""),
     full: [String(f.dir ?? ""), String(f.filename ?? "")].filter(Boolean).join("/"),
   };
 }
 
-/** Shared history: what other users are / were downloading from you —
- * live uploads plus everything completed, from slskd's upload transfers. */
+/** Shared history: who is / has been downloading from this share. ONE ROW PER
+ *  PEER — the server groups slskd's per-file tree per user (`uploads_summary`),
+ *  so the panel is a list of PEOPLE, not a wall of files: each row says how
+ *  many files the peer took, the total size of them, and when they last took
+ *  something. Expanding a row lists that peer's own files, each with its FULL
+ *  size — and, while one is still running, the bytes moved so far beside it. */
 function UploadsPanel({ running }: { running: boolean }) {
   const { data } = useQuery({
     queryKey: ["soulseekUploads"],
@@ -5469,53 +5460,96 @@ function UploadsPanel({ running }: { running: boolean }) {
     enabled: running,
     refetchInterval: 5000,
   });
-  const files = ((data?.uploads ?? []) as any[]).flatMap((u: any) =>
-    (u.directories ?? []).flatMap((d: any) =>
-      (d.files ?? []).map((f: any) => ({ ...f, username: u.username, dir: d.directory }))));
-  const sharingNow = files.filter((f: any) => f.state === "InProgress");
-  const past = files.filter((f: any) => f.state !== "InProgress");
-  const totalGiven = past.reduce((n: number, f: any) => n + (f.bytesTransferred ?? f.size ?? 0), 0);
+  const [open, setOpen] = useState<string | null>(null);
+  const peers: SlskUploadPeer[] = data?.uploads ?? [];
+  const totalFiles = peers.reduce((n, p) => n + (p.files ?? 0), 0);
+  const totalBytes = peers.reduce((n, p) => n + (p.bytes ?? 0), 0);
+  const sharingNow = peers.reduce((n, p) => n + (p.active ?? 0), 0);
 
   return (
     <div className="panel">
       <div className="flex items-center justify-between gap-2 flex-wrap mb-2">
         <div className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Shared history (uploads)</div>
-        {files.length > 0 && (
+        {peers.length > 0 && (
           <div className="flex gap-1 text-[10px]">
-            <span className="chip text-[9px] bg-sky-900/40 text-sky-300 border border-sky-800">sharing now {sharingNow.length}</span>
-            <span className="chip text-[9px] bg-raise border border-border text-zinc-300">past {past.length}</span>
-            <span className="chip text-[9px] bg-panel border-border/60 text-zinc-500">{fmtSize(totalGiven)} given</span>
+            <span className="chip text-[9px] bg-sky-900/40 text-sky-300 border border-sky-800">sharing now {sharingNow}</span>
+            <span className="chip text-[9px] bg-raise border border-border text-zinc-300">
+              {peers.length} {peers.length === 1 ? "peer" : "peers"}
+            </span>
+            <span className="chip text-[9px] bg-panel border-border/60 text-zinc-500">
+              {fmtCount(totalFiles)} {totalFiles === 1 ? "file" : "files"} · {fmtSize(totalBytes)} given
+            </span>
           </div>
         )}
       </div>
       {!running ? (
         <EmptyState title="slskd is not running" hint="Start it above to share your library." />
-      ) : files.length === 0 ? (
+      ) : peers.length === 0 ? (
         <EmptyState title="No uploads yet" hint="No one has pulled from your shares since slskd last started." />
       ) : (
-        <div className="space-y-1 max-h-[300px] overflow-auto stagger">
-          {[...sharingNow, ...past].slice(0, 60).map((f) => {
-            // What this row IS, off slskd's own fields (see `sharedUpload`):
-            // album, file, peer, time — and the full path for the tooltip.
-            const u = sharedUpload(f);
-            const full = u.full || u.file;
+        <div className="space-y-0.5 max-h-[340px] overflow-auto stagger">
+          {peers.map((p) => {
+            const expanded = open === p.username;
             return (
-              <div key={`${f.username}\u0000${f.dir}\u0000${f.filename}`}
-                className="flex items-center gap-3 px-2 py-1.5 rounded hover:bg-white/[0.04] text-xs"
-                title={[full, u.state].filter(Boolean).join("\n")}>
-                <div className="flex-1 min-w-0">
-                  <div className="truncate text-zinc-200" title={full}>{u.album || u.file}</div>
-                  <div className="truncate text-[10px] text-zinc-600" title={full}>
-                    {u.peer || "unknown user"}
-                    {u.album ? ` · ${u.file}` : ""}
+              <div key={p.username} className="rounded border border-transparent hover:border-border/60 hover:bg-white/[0.03]">
+                <button
+                  type="button"
+                  className="w-full flex items-center gap-2 px-2 py-1.5 text-xs text-left tap"
+                  onClick={() => setOpen(expanded ? null : p.username)}
+                  aria-expanded={expanded}
+                  title={expanded ? "Hide the files this peer took" : "Show the files this peer took"}
+                >
+                  {expanded ? <ChevronDown className="h-3.5 w-3.5 shrink-0 text-zinc-500" />
+                            : <ChevronRight className="h-3.5 w-3.5 shrink-0 text-zinc-500" />}
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="truncate text-zinc-200">{p.username || "unknown user"}</span>
+                      {p.active > 0 && (
+                        <span className="chip text-[9px] bg-sky-900/40 text-sky-300 border border-sky-800 shrink-0">
+                          sharing now
+                        </span>
+                      )}
+                    </div>
+                    <div className="truncate text-[10px] text-zinc-600">
+                      {p.files} {p.files === 1 ? "file" : "files"} · {fmtSize(p.bytes)}
+                      {p.active > 0 && p.transferred > 0 && ` · ${fmtSize(p.transferred)} sent`}
+                      {p.truncated > 0 && ` · ${p.truncated} older not shown`}
+                    </div>
                   </div>
-                </div>
-                <span className="text-zinc-500 w-16 text-right shrink-0">
-                  {fmtSize(f.bytesTransferred ?? f.size ?? 0)}
-                </span>
-                <span className="text-zinc-500 w-20 text-right shrink-0 truncate">
-                  {u.live ? "sharing now" : u.when || "—"}
-                </span>
+                  <span className="text-zinc-500 w-20 text-right shrink-0 truncate">
+                    {p.last ? timeAgo(p.last) : "—"}
+                  </span>
+                </button>
+                {expanded && (
+                  <div className="border-t border-border/40">
+                    {p.items.map((f, i) => {
+                      const u = uploadFile(f);
+                      const full = u.full || u.file;
+                      return (
+                        <div key={`${f.dir}\u0000${f.filename}\u0000${i}`}
+                          className="flex items-center gap-3 px-2 py-1 border-t border-border/30 first:border-t-0 text-xs"
+                          title={[full, u.state].filter(Boolean).join("\n")}>
+                          <div className="flex-1 min-w-0 pl-5">
+                            <div className="truncate text-zinc-300" title={full}>{u.album || u.file}</div>
+                            {u.album && (
+                              <div className="truncate text-[10px] text-zinc-600" title={full}>{u.file}</div>
+                            )}
+                          </div>
+                          {u.finished ? (
+                            <span className="text-zinc-500 w-20 text-right shrink-0">{fmtSize(u.size)}</span>
+                          ) : (
+                            <span className="text-sky-400 w-28 text-right shrink-0 tabular-nums">
+                              {fmtSize(u.done)} / {fmtSize(u.size)}
+                            </span>
+                          )}
+                          <span className="text-zinc-600 w-16 text-right shrink-0 truncate">
+                            {u.finished ? (u.when || "—") : `${u.percent}%`}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
             );
           })}

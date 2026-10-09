@@ -15,6 +15,7 @@ log all live in a temp directory.
 
 Run:  python tools/test_soulseek_sharing.py
 """
+import datetime
 import os
 import re
 import shutil
@@ -234,10 +235,26 @@ assert downloads not in [slskd_share(d)[1] for d in dirs], dirs
 (text_off, _k) = soulseek.generate_yaml(dict(CFG, soulseek_share_library=False))
 assert "\nshares:" not in text_off, "sharing is off but the config still shares"
 
+# the periodic re-scan is slskd's own `shares.cache.retention` (MINUTES): the
+# cache's retention limit is also the automatic re-scan interval, and it is
+# empty ("never") unless written, so without it the index only moves at boot or
+# when the app asks after a change it made itself
+_on = soulseek.generate_yaml(dict(CFG, soulseek_share_rescan_minutes=1440))[0].splitlines()
+_i = _on.index("shares:")
+assert "  cache:" in _on[_i:], _on[_i:]
+assert "    retention: 1440" in _on[_i:], _on[_i:]
+# 0/blank keeps slskd's default of never (the key is not written at all), and
+# sharing off writes no cache section either
+for off in (0, None, "", -5):
+    body_off = soulseek.generate_yaml(dict(CFG, soulseek_share_rescan_minutes=off))[0]
+    assert "cache:" not in body_off, body_off
+assert "cache:" not in text_off, text_off
+
 # slskd validates transfers.upload.slots as Range(1, int.MaxValue) and EXITS
 # when it is out of range — the settings field calls 0 "unlimited", so a 0 used
 # to leave every install with no daemon at all (and therefore no share)
-for value, want in ((0, 10), (None, 10), ("", 10), ("4", 4), (20, 20), (-3, 1)):
+for value, want in ((0, 10), (None, 10), ("", 10), ("4", 4), (20, 20),
+                    (50, 50), (99, 50), (-3, 1)):
     cfg = dict(CFG)
     if value is None:
         cfg.pop("soulseek_upload_slots", None)
@@ -247,6 +264,11 @@ for value, want in ((0, 10), (None, 10), ("", 10), ("4", 4), (20, 20), (-3, 1)):
     slots = int([l for l in body.splitlines() if l.strip().startswith("slots:")][0].split(":")[1])
     assert slots == want, (value, slots)
     assert slots >= 1, "slskd refuses to boot on slots < 1"
+
+# ...and the shipped default is a real sharing count, not the 2 that used to
+# throttle every install: slskd's own default of 10 simultaneous uploads
+from mlo.config import DEFAULT_CONFIG
+assert DEFAULT_CONFIG["soulseek_upload_slots"] == 10
 
 # ...and the same for the download slots, which the app clamps to 1..20
 for value, want in ((0, 1), (None, 15), ("7", 7), (99, 20)):
@@ -785,6 +807,73 @@ else:
 fake.statuses.pop("GET /shares/contents", None)
 
 print("ok  browsing our own account is answered from our own share, and says so")
+
+
+# --------------------------------------------------------------------------- #
+# 5) the upload history is grouped PER PEER, carrying the FILE's own size
+# --------------------------------------------------------------------------- #
+# slskd serves uploads as user -> directory -> file. The panel is a list of
+# PEOPLE, so the route hands it one entry per peer; `bytes` is the FILE sizes —
+# never the partial bytes moved so far, which ride along as progress — and the
+# most recent few files come with it.
+fake.uploads = [
+    {"username": "peer one", "directories": [{
+        "directory": "Artists\\Some Artist\\Some Album (1999)",
+        "files": [
+            {"filename": "Artists\\Some Artist\\Some Album (1999)\\01 - A Track.flac",
+             "size": 1000, "bytesTransferred": 1000,
+             "state": "Completed, Succeeded", "endedAt": "2026-01-02T03:04:05Z"},
+            {"filename": "Artists\\Some Artist\\Some Album (1999)\\02 - B Track.flac",
+             "size": 2000, "bytesTransferred": 500,
+             "state": "InProgress", "startedAt": "2026-01-02T04:00:00Z"},
+        ]}]},
+    {"username": "peer two", "directories": [{"directory": "Music\\Other", "files": [
+        # no zone marker: slskd's UTC stamp must not be read as local time
+        {"filename": "Music\\Other\\a.flac", "size": 4000, "bytesTransferred": 4000,
+         "state": "Completed, Succeeded", "endedAt": "2026-01-01T00:00:00"},
+    ]}]},
+    # a transfer slskd reported without a username names nobody: left out
+    {"username": "", "directories": [{"files": [
+        {"filename": "orphan.flac", "size": 9, "state": "InProgress"}]}]},
+]
+ready()
+payload = srv_main.soulseek_uploads()
+assert list(payload) == ["uploads"], payload
+peers = payload["uploads"]
+assert [p["username"] for p in peers] == ["peer one", "peer two"], peers
+first = peers[0]
+assert (first["files"], first["active"], first["bytes"], first["transferred"]) \
+    == (2, 1, 3000, 1500), first
+assert first["last"] == datetime.datetime(
+    2026, 1, 2, 4, 0, tzinfo=datetime.timezone.utc).timestamp(), first["last"]
+assert first["truncated"] == 0, first
+# the newest file first, and EVERY item carries the file's OWN size — the
+# finished one and the one still running alike (progress is the extra field)
+assert [i["filename"].split("\\")[-1] for i in first["items"]] \
+    == ["02 - B Track.flac", "01 - A Track.flac"], first["items"]
+assert [i["size"] for i in first["items"]] == [2000, 1000], first["items"]
+assert [i["bytesTransferred"] for i in first["items"]] == [500, 1000], first["items"]
+# the naive stamp was read as UTC, not as this machine's local time
+assert peers[1]["last"] == datetime.datetime(
+    2026, 1, 1, tzinfo=datetime.timezone.utc).timestamp(), peers[1]["last"]
+
+# a peer who pulled more files than the cap still reports the true totals: the
+# list is the newest _UPLOAD_ITEMS_PER_PEER, the counts describe everything
+fake.uploads = [{"username": "bulk", "directories": [{"directory": "Music\\Album",
+    "files": [{"filename": f"Music\\Album\\{n:02d}.flac", "size": 10,
+               "bytesTransferred": 10, "state": "Completed, Succeeded",
+               "endedAt": "2026-01-02T00:00:00Z"} for n in range(25)]}]}]
+summary = soulseek.uploads_summary(CFG)
+assert len(summary) == 1, summary
+assert summary[0]["files"] == 25 and summary[0]["bytes"] == 250, summary[0]
+assert len(summary[0]["items"]) == 20 and summary[0]["truncated"] == 5, summary[0]
+
+# no uploads at all: an empty list, not an error (the panel's empty state)
+fake.uploads = []
+assert soulseek.uploads_summary(CFG) == []
+
+print("ok  the upload history groups per peer with file sizes, totals and a "
+      "bounded file list; an empty tree stays an empty list")
 
 
 shutil.rmtree(_TMP, ignore_errors=True)

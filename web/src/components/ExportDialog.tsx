@@ -10,11 +10,7 @@ import Segmented from "./Segmented";
 import Modal from "./Modal";
 import ConfirmButton from "./ConfirmButton";
 import EqProfileModal from "./EqProfileModal";
-
-/** The dropdown's synthetic entry for a codec's "custom value" field; the
- * backend takes the plain number the field holds (kbps, or 0-10 for Vorbis),
- * so nothing but the form needs to know the word. */
-export const CUSTOM = "custom";
+import CodecQualitySelect, { CUSTOM, effectiveKbps } from "./CodecQualitySelect";
 
 /** The dropdown value that means "the structure the user typed" in
  *  `structure_script` (server.exporter.CUSTOM_STRUCTURE). */
@@ -81,21 +77,6 @@ export const BLANK_FORM: ExportForm = {
 
 export function fmtGB(n: number | null): string {
   return n === null ? "—" : `${(n / 1024 ** 3).toFixed(1)} GB`;
-}
-
-/** Effective kbps for the drive-fit estimate, from the server's own preset
- * hints (server/exporter.py CODECS). null = unpredictable: a bit-exact copy,
- * a lossless re-encode, or a custom Vorbis q. */
-export function effectiveKbps(spec: ExportCodecSpec | undefined, quality: string, custom: string): number | null {
-  if (!spec) return null;
-  const preset = spec.presets.find((p) => p.v === quality);
-  if (preset) return preset.kbps;
-  if (spec.custom && spec.custom.mode === "kbps") {
-    const n = parseInt(quality === CUSTOM ? custom : quality, 10);
-    if (!Number.isFinite(n)) return null;
-    return Math.min(spec.custom.max, Math.max(spec.custom.min, n));
-  }
-  return null;
 }
 
 /** One option row: the checkbox plus its one-line explanation. The
@@ -406,7 +387,7 @@ export function ExportOptionsPanel({ e, hint }: {
   hint?: ReactNode;
 }) {
   const queryClient = useQueryClient();
-  const { f, set, setMany, spec, kbps, estBytes, seconds, paths, busy, target, eq, cancelling } = e;
+  const { f, set, setMany, spec, estBytes, seconds, paths, busy, target, eq, cancelling } = e;
   const zip = target === "zip";
   const eqSelected = [...(eq?.presets ?? []), ...(eq?.profiles ?? [])].find((p) => p.id === f.eq_profile);
   /* The id the form carries but the catalogue does not: a profile that was
@@ -533,69 +514,18 @@ export function ExportOptionsPanel({ e, hint }: {
       )}
 
       <div className="text-xs font-bold text-zinc-300 mt-4 mb-2">Format</div>
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-        <label className="text-[10px] text-zinc-500 flex flex-col gap-1">
-          Codec
-          <select
-            className="input !py-1 text-xs min-w-0 tap"
-            value={f.codec}
-            /* ONE write, not two: the codec and the quality reset it triggers
-               have to land together, or the reset is applied to the codec this
-               render still held and the choice is lost. */
-            onChange={(ev) => setMany({ codec: ev.target.value, quality: "" })}
-          >
-            {!e.specs && <option value={f.codec}>Loading codecs…</option>}
-            {Object.entries(e.specs?.codecs ?? {}).map(([v, cs]) => (
-              <option key={v} value={v}>{cs.label}</option>
-            ))}
-          </select>
-        </label>
-        <label className="text-[10px] text-zinc-500 flex flex-col gap-1">
-          Quality
-          <select
-            className="input !py-1 text-xs min-w-0 tap"
-            value={f.quality || spec?.default || ""}
-            onChange={(ev) => set("quality", ev.target.value)}
-            /* Disabled for a codec with no knobs (copy) AND while the codec
-               table is still on its way: an enabled box with nothing in it
-               reads as a control that does not work. */
-            disabled={!spec || (!spec.presets.length && !spec.custom)}
-          >
-            {/* copy has no knobs — a disabled placeholder keeps the box legible */}
-            {!spec?.presets.length && !spec?.custom ? (
-              <option value="">—</option>
-            ) : (
-              <>
-                {spec.presets.map((q) => (
-                  <option key={q.v} value={q.v}>{q.label}</option>
-                ))}
-                {spec.custom && (
-                  <option value={CUSTOM}>
-                    {spec.custom.mode === "q" ? "Custom q…" : "Custom bitrate…"}
-                  </option>
-                )}
-              </>
-            )}
-          </select>
-        </label>
-      </div>
-      {/* custom bitrate / q — the server clamps to the same range again */}
-      {spec?.custom && f.quality === CUSTOM && (
-        <label className="flex flex-wrap items-center gap-2 mt-2 text-[10px] text-zinc-500">
-          {spec.custom.mode === "q"
-            ? `Custom q (${spec.custom.min}–${spec.custom.max})`
-            : `Custom bitrate (${spec.custom.min}–${spec.custom.max} kbps)`}
-          <input
-            className="input !py-1 text-xs w-24 min-w-0 tap"
-            type="number"
-            min={spec.custom.min}
-            max={spec.custom.max}
-            value={e.customValue}
-            onChange={(ev) => e.setCustomValue(ev.target.value)}
-          />
-          {kbps !== null && <span className="text-zinc-600">~{kbps} kbps effective</span>}
-        </label>
-      )}
+      <CodecQualitySelect
+        specs={e.specs?.codecs}
+        codec={f.codec}
+        quality={f.quality}
+        customValue={e.customValue}
+        /* ONE write, not two: the codec and the quality reset it triggers
+           have to land together, or the reset is applied to the codec this
+           render still held and the choice is lost. */
+        onCodec={(v) => setMany({ codec: v, quality: "" })}
+        onQuality={(v) => set("quality", v)}
+        onCustomValue={e.setCustomValue}
+      />
       <label className="text-[10px] text-zinc-500 flex flex-col gap-1 mt-2">
         Folder structure
         <select

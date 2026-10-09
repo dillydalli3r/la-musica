@@ -14,6 +14,7 @@ The generated config lives at <music folder>/.mlo/data/slskd.yaml; a random
 web API key is minted per start and kept in memory (the web UI is bound to
 localhost).
 """
+import datetime
 import json
 import os
 import re
@@ -350,7 +351,7 @@ def generate_yaml(cfg=None):
     # boot with: no daemon, no share, no search. slskd has no unlimited slot
     # count — 0/blank now means slskd's own default of 10 simultaneous
     # uploads, which is the behaviour the setting was asking for.
-    ul_slots = max(1, min(20, _int_setting(cfg, "soulseek_upload_slots", 0) or 10))
+    ul_slots = max(1, min(50, _int_setting(cfg, "soulseek_upload_slots", 0) or 10))
     # Speed limits, in KiB/s (0 = unlimited, emitted as slskd's int.MaxValue
     # default). The Settings UI's "kB/s" fields write soulseek_up_limit /
     # soulseek_down_limit, which the old YAML never read at all — so a limit
@@ -436,6 +437,16 @@ def generate_yaml(cfg=None):
         lines += [f"    - {_share_entry_yaml(p, alias)}" for p, alias in shares]
         lines.append("  filters:")
         lines += [f"    - {x}" for x in exclude]
+        # `shares.cache.retention` is slskd's ONLY periodic re-scan knob: the
+        # cache's retention limit doubles as the automatic re-scan interval, in
+        # MINUTES, and it is empty ("never") by default — without it the index
+        # only moves at boot or when this app asks after a library change. That
+        # covers everything the app itself does, so this is the backstop for an
+        # edit made outside it (a manual file, a NAS sync, another organizer);
+        # 0 keeps slskd's own default of never.
+        retention = max(0, _int_setting(cfg, "soulseek_share_rescan_minutes", 0))
+        if retention > 0:
+            lines += ["  cache:", f"    retention: {retention}"]
     text = "\n".join(lines) + "\n"
     return text, api_key
 
@@ -1759,6 +1770,106 @@ def uploads_state(cfg=None, timeout=30.0):
         if e.response is not None and e.response.status_code == 404:
             return []
         raise
+
+
+# The uploads panel is a PER-PEER history, not a per-file log. slskd's tree is
+# user -> directory -> file; the panel only needs the peer, what they took and
+# when, so the grouping is done here, where the tree already is — the payload
+# stops carrying slskd's directory nesting. The per-peer file list is capped so
+# one peer who pulled a whole discography cannot make the 5 s poll expensive;
+# the count (`files`) and byte totals still describe EVERY transfer, and the
+# dropped files' sizes stay in `bytes`.
+_UPLOAD_ITEMS_PER_PEER = 20
+_UPLOAD_PEERS_MAX = 200
+# slskd stamps a transfer at each step; the newest one that exists is "when".
+_UPLOAD_STAMP_KEYS = ("endedAt", "startedAt", "requestedAt", "enqueuedAt")
+
+
+def _utc_epoch(value):
+    """slskd's ISO timestamp -> epoch seconds, None when absent/unparseable.
+
+    slskd serializes DateTime in UTC but may omit the zone marker; a stamp
+    without one is read as UTC rather than as local time, so "last upload"
+    cannot drift by the machine's own offset."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        dt = datetime.datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    return dt.timestamp()
+
+
+def uploads_summary(cfg=None, timeout=30.0):
+    """slskd's upload tree grouped ONE ENTRY PER PEER, newest activity first.
+
+    Each entry describes a peer and what they took from this share:
+      username     the peer
+      files        every transfer slskd has for them (live and finished)
+      active       how many of those are still running
+      bytes        the sum of the FILES' own sizes (never the partial bytes
+                   moved so far — that is what the panel shows per file)
+      transferred  the sum of bytesTransferred, i.e. progress so far
+      last         epoch seconds of the newest transfer, or None
+      items        the most recent _UPLOAD_ITEMS_PER_PEER transfers, each
+                   {filename, dir, size, bytesTransferred, state, last}
+      truncated    how many of this peer's files the cap left off
+
+    At most _UPLOAD_PEERS_MAX peers are returned (newest activity first), so a
+    share with hundreds of past downloaders cannot make the poll unbounded.
+    """
+    peers = {}
+    for entry in uploads_state(cfg, timeout=timeout) or []:
+        if not isinstance(entry, dict):
+            continue
+        user = str(entry.get("username") or "")
+        if not user:
+            continue
+        peer = peers.setdefault(user, {"username": user, "files": 0,
+                                       "active": 0, "bytes": 0,
+                                       "transferred": 0, "last": None,
+                                       "items": []})
+        for d in entry.get("directories") or []:
+            directory = str((d or {}).get("directory") or "")
+            for f in (d or {}).get("files") or []:
+                if not isinstance(f, dict):
+                    continue
+                size = max(0, int(f.get("size") or 0))
+                done = max(0, int(f.get("bytesTransferred") or 0))
+                state = str(f.get("state") or "")
+                stamp = next((t for t in
+                              (_utc_epoch(f.get(k)) for k in _UPLOAD_STAMP_KEYS)
+                              if t is not None), None)
+                peer["files"] += 1
+                peer["bytes"] += size
+                peer["transferred"] += done
+                if not finished_transfer(state):
+                    peer["active"] += 1
+                if stamp is not None and (peer["last"] is None or stamp > peer["last"]):
+                    peer["last"] = stamp
+                peer["items"].append({
+                    "filename": str(f.get("filename") or ""),
+                    "dir": directory,
+                    "size": size,
+                    "bytesTransferred": done,
+                    "state": state,
+                    "last": stamp,
+                })
+    out = []
+    for peer in peers.values():
+        # Newest transfer first inside the peer, then keep only the most recent
+        # few; the omitted ones are still counted in `files`/`bytes`.
+        peer["items"].sort(key=lambda i: i["last"] or 0, reverse=True)
+        peer["truncated"] = max(0, len(peer["items"]) - _UPLOAD_ITEMS_PER_PEER)
+        peer["items"] = peer["items"][:_UPLOAD_ITEMS_PER_PEER]
+        out.append(peer)
+    out.sort(key=lambda p: p["last"] or 0, reverse=True)
+    return out[:_UPLOAD_PEERS_MAX]
 
 
 def upload_start_frames(prev, uploads):

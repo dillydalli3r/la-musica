@@ -1492,13 +1492,15 @@ def soulseek_downloads_clear(req: SoulseekClearRequest):
 
 @app.get("/api/soulseek/uploads")
 def soulseek_uploads():
-    """Upload transfer tree — the shared-history view (per user / file).
+    """Upload history grouped ONE ENTRY PER PEER (see `uploads_summary`): who
+    took what, how many files and bytes, and when they last took something —
+    not one row per file, which is not what the panel wants to draw.
 
     503 when slskd is down (an empty list would read as "nothing shared yet")."""
     from server import soulseek
     if not (soulseek.is_running() or soulseek.web_up(load_config())):
         raise HTTPException(503, "slskd is not running — start it first")
-    return {"uploads": soulseek.uploads_state()}
+    return {"uploads": soulseek.uploads_summary()}
 
 
 def _review_file_info(p, ffprobe=None):
@@ -5375,38 +5377,39 @@ def track_download(path: str = Query(...)):
                         filename=os.path.basename(p))
 
 
-_EXPORT_CODECS = {
-    # codec: (ext, lossless, ffmpeg args template)
-    "flac": (".flac", True, ["-c:a", "flac", "-compression_level", "{level}"]),
-    "alac": (".m4a", True, ["-c:a", "alac"]),
-    "wav": (".wav", True, ["-c:a", "pcm_s16le"]),
-    "mp3": (".mp3", False, ["-c:a", "libmp3lame", "-b:a", "{bitrate}k"]),
-    "aac": (".m4a", False, ["-c:a", "aac", "-b:a", "{bitrate}k"]),
-    "opus": (".opus", False, ["-c:a", "libopus", "-b:a", "{bitrate}k", "-vbr", "on"]),
-}
-
-
 @app.get("/api/track/export")
 def track_export(path: str = Query(...), codec: str = Query("flac"),
-                 bitrate: int = Query(320), level: int = Query(5)):
-    """Transcode a library track to the requested codec/bitrate and serve it
-    as a download. Lossless (flac/alac/wav) ignores the bitrate; lossy
-    codecs take 64–500 kbps."""
+                 quality: str = Query("")):
+    """Transcode a library track to the requested codec/quality and serve it
+    as a download.
+
+    The vocabulary is server.exporter's own (`CODECS` / `codec_specs` /
+    `_codec_args`): the codec is any key of `CODECS`, the quality any preset
+    key it publishes (V0/320/q8/…) or the custom number the UI's field sends —
+    the SAME pair the Export page posts to `/api/export`, so the per-track
+    panel offers no codec or quality the run would refuse. `copy` (the export
+    page's own default) skips the transcode entirely and serves the ORIGINAL
+    file.
+    """
     codec = codec.lower().strip()
-    if codec not in _EXPORT_CODECS:
+    spec = exporter.CODECS.get(codec)
+    if spec is None:
         raise HTTPException(400, f"unsupported codec: {codec}")
-    ext, _lossless, args_tpl = _EXPORT_CODECS[codec]
     p = os.path.normpath(mbresolve.resolve_track(path) or path)
     if not os.path.isfile(p):
         raise HTTPException(404, "file not found")
     if not _in_music_folder(p, _music_folder()):
         raise HTTPException(400, "path is outside the music folder")
-    bitrate = max(64, min(500, int(bitrate)))
-    level = max(0, min(8, int(level)))
-    args = [a.format(bitrate=bitrate, level=level) for a in args_tpl]
+    if codec == "copy":
+        # No ffmpeg needed: the source file IS its own export, served as a
+        # download under the name the browser should save it as.
+        return FileResponse(p, media_type="application/octet-stream",
+                            filename=os.path.basename(p))
+    ext = spec.get("ext") or os.path.splitext(p)[1]
+    args = exporter._codec_args(codec, quality)
     # The encode-and-serve step is server.api_media's (it is what the offline
-    # download's own rendition uses); this route only owns its codec table and
-    # the save-dialog naming.
+    # download's own rendition uses); this route owns only the codec table it
+    # reads from the exporter and the save-dialog naming.
     from server import api_media
     return api_media.encoded_response(p, args, ext, "application/octet-stream",
                                       attachment=True)

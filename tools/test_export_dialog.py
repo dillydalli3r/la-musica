@@ -363,6 +363,40 @@ try:
     finally:
         assert listing(empty_dest) == [], listing(empty_dest)
 
+    # ------------------------------------- the per-track export panel's request
+    # The player bar's export panel sends `codec` + `quality` — the SAME field
+    # names the Export page posts and the exporter's own tables speak. There is
+    # no second codec table: the route takes its codecs from exporter.CODECS
+    # and its ffmpeg arguments from the exporter's own builder, so a preset the
+    # panel offers (mp3 V0, say) resolves to exactly the arguments the Export
+    # page's run would use. The builder is called DIRECTLY here — no ffmpeg.
+    import inspect
+    panel_params = set(inspect.signature(mlo_main.track_export).parameters)
+    assert panel_params == {"path", "codec", "quality"}, panel_params
+    # Both names are the run's positional vocabulary (server.exporter.FORM_FIELDS)
+    # and the API's own request fields — one vocabulary, not the panel's own.
+    assert {"codec", "quality"} <= set(exporter.FORM_FIELDS)
+    assert {"codec", "quality"} <= set(api_export.ExportRequest.model_fields)
+
+    # Every preset of every codec resolves to its own preset arguments.
+    for name, spec in exporter.CODECS.items():
+        for preset in spec.get("presets", []):
+            assert exporter._codec_args(name, preset["v"]) == preset["args"], (name, preset["v"])
+    assert exporter._codec_args("mp3", "V0") == ["-c:a", "libmp3lame", "-q:a", "0"]
+
+    # The route serves the exporter's `copy` codec with NO transcode: the
+    # ORIGINAL file's own bytes (the panel's default, and the Export page's own
+    # shipped default). This proves the route reads exporter.CODECS and serves a
+    # real download, and it needs no ffmpeg.
+    with open(one, "rb") as fh:
+        original = fh.read()
+    r = client.get("/api/track/export", params={"path": one, "codec": "copy", "quality": ""})
+    assert r.status_code == 200 and r.content == original, (r.status_code, len(r.content))
+    # An unknown codec is refused in the exporter's own vocabulary, never
+    # silently mapped onto another table's.
+    r = client.get("/api/track/export", params={"path": one, "codec": "nope", "quality": ""})
+    assert r.status_code == 400 and "unsupported codec" in r.json()["detail"], r.text[:200]
+
     # --------------------------------------------------------- cancelling a run
     # The owner's report: a long export to a slow drive had no way to stop. The
     # route asks the running export to stop, the pass checks at the next FILE
@@ -429,4 +463,6 @@ print("ok  export dialog: shared option set == the API's run options, the defaul
       "(menu == the exporter's table, audio-only / audio+artwork, empty + unknown "
       "refused), the classic sidecar switch and playlists opt-in, the structure "
       "menu + custom structure preview/run agree, bad structures and targets 400, "
+      "the per-track panel's codec+quality vocabulary == the exporter's tables "
+      "(mp3 V0 -> the exporter's own args, copy serves the original), "
       "a running export stops at a file boundary and keeps what it wrote")

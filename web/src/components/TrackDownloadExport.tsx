@@ -1,26 +1,21 @@
 import { useEffect, useState } from "react";
-import { useQueryClient } from "@tanstack/react-query";
-import { ArrowDown, ArrowDownToLine, FileOutput } from "lucide-react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { ArrowDown, ArrowDownToLine, FileOutput, Save } from "lucide-react";
 import { api } from "../api";
 import { toast } from "../store";
 import { CACHED_PATHS_KEY, CACHED_SIZES_KEY, cacheTrack, isTrackCached, uncacheTrack } from "../lib/mediaCache";
 import Popover from "./Popover";
-
-/** Codec choices for per-track exports; lossy codecs expose a bitrate. */
-const CODECS = [
-  { id: "flac", label: "FLAC (lossless)", lossy: false },
-  { id: "alac", label: "ALAC (lossless)", lossy: false },
-  { id: "wav", label: "WAV (lossless)", lossy: false },
-  { id: "mp3", label: "MP3", lossy: true, defaultBitrate: 320 },
-  { id: "aac", label: "AAC / M4A", lossy: true, defaultBitrate: 256 },
-  { id: "opus", label: "Opus", lossy: true, defaultBitrate: 192 },
-];
-
-const BITRATES = [96, 128, 160, 192, 256, 320, 448, 500];
+import CodecQualitySelect, { CUSTOM } from "./CodecQualitySelect";
 
 /** "Download" caches the track inside the player (offline playback — no
  * file lands in the Downloads folder); "Export" is the real file-saving
- * action: transcode to the chosen codec/bitrate and save.
+ * action: transcode to the chosen codec/quality and save.
+ *
+ * The codec list and the quality control come straight from the server
+ * (`GET /api/export/codecs` → server.exporter.CODECS), the SAME vocabulary the
+ * Export page renders and the run accepts — MP3 offers V0…V5 and the CBR
+ * rates, FLAC its levels, AAC/Opus their bitrates, and the codecs that take one
+ * a custom value. Nothing here mirrors a table of its own.
  *
  * `up` opens the popover above the button — required on the bottom-anchored
  * player bar, where a downward menu is off-screen. */
@@ -36,14 +31,37 @@ export default function TrackDownloadExport({ path, title, compact, iconOnly, di
   up?: boolean;
 }) {
   const [open, setOpen] = useState(false);
-  const [codec, setCodec] = useState("flac");
-  const [bitrate, setBitrate] = useState(320);
   const [busy, setBusy] = useState(false);
   const qc = useQueryClient();
   // cache state for the current track
   const [cached, setCached] = useState(false);
   const [cacheBusy, setCacheBusy] = useState(false);
-  const chosen = CODECS.find((c) => c.id === codec) ?? CODECS[0];
+
+  /* The codec table and the saved defaults are the server's own: the panel
+   * opens on the `export_codec`/`export_quality` the Export page's "Save as
+   * default" wrote (read from the app's shared ["config"] cache), and only the
+   * user's own edit overrides them. `null` state = "still following the
+   * saved default". */
+  const { data: specs } = useQuery({ queryKey: ["exportCodecs"], queryFn: api.exportCodecs });
+  const { data: cfg } = useQuery({ queryKey: ["config"], queryFn: api.config, staleTime: 5 * 60 * 1000 });
+  const table = specs?.codecs;
+  const rawCodec = String(cfg?.["export_codec"] ?? "").trim() || "copy";
+  const savedCodec = !table ? rawCodec : (rawCodec in table ? rawCodec : "copy");
+  const savedQuality = String(cfg?.["export_quality"] ?? "");
+
+  const [codecState, setCodecState] = useState<string | null>(null);
+  const [qualityState, setQualityState] = useState<string | null>(null);
+  const [custom, setCustom] = useState<string | null>(null);
+
+  const codec = codecState ?? savedCodec;
+  const spec = table?.[codec];
+  // A codec with knobs starts on its own default preset (the server's table).
+  const knobs = !!(spec && (spec.presets.length > 0 || spec.custom));
+  const shownQuality = knobs ? (qualityState ?? savedQuality) || spec?.default || "" : "";
+  const customValue = custom ?? String(spec?.custom?.default ?? "");
+  // What the run actually receives: "custom" resolves to the number, "" to the
+  // codec's own default — the same resolution the Export page applies.
+  const requestQuality = shownQuality === CUSTOM ? customValue : shownQuality;
 
   useEffect(() => {
     let dead = false;
@@ -82,15 +100,31 @@ export default function TrackDownloadExport({ path, title, compact, iconOnly, di
     setBusy(true);
     try {
       const a = document.createElement("a");
-      a.href = api.trackExportUrl(path, codec, bitrate);
+      a.href = api.trackExportUrl(path, codec, requestQuality);
       a.download = "";
       document.body.appendChild(a);
       a.click();
       a.remove();
-      toast(`Exporting as ${chosen.label}${chosen.lossy ? ` @ ${bitrate} kbps` : ""} — the save dialog opens when it's ready`);
+      const label = spec?.presets.find((p) => p.v === shownQuality)?.label;
+      toast(`Exporting as ${spec?.label ?? codec}${label ? ` · ${label}` : ""} — the save dialog opens when it's ready`);
       setOpen(false);
     } finally {
       setBusy(false);
+    }
+  };
+
+  /** Save this codec + quality as the export default, the same
+   * `export_codec`/`export_quality` keys the Export page's "Save as default"
+   * writes — so the panel opens on it next time, and every export surface
+   * agrees. */
+  const saveAsDefault = async () => {
+    try {
+      await api.exportSaveDefaults({ codec, quality: requestQuality });
+      qc.invalidateQueries({ queryKey: ["config"] });
+      qc.invalidateQueries({ queryKey: ["exportDefaults"] });
+      toast.success(`Default export: ${spec?.label ?? codec}`);
+    } catch (e) {
+      toast.error(`Could not save the default: ${e instanceof Error ? e.message : e}`);
     }
   };
 
@@ -125,31 +159,35 @@ export default function TrackDownloadExport({ path, title, compact, iconOnly, di
           open={open}
           onClose={() => setOpen(false)}
           placement={up ? "top" : "bottom"}
-          panelClass="w-60 p-3 space-y-2.5"
+          panelClass="w-64 p-3 space-y-2.5"
         >
             {title && <div className="text-[11px] text-zinc-400 truncate">{title}</div>}
-            <label className="block text-[10px] uppercase tracking-wider text-zinc-500">Codec</label>
-            <select className="input !py-1 text-xs" value={codec} onChange={(e) => {
-              setCodec(e.target.value);
-              const c = CODECS.find((x) => x.id === e.target.value);
-              if (c?.lossy && c.defaultBitrate) setBitrate(c.defaultBitrate);
-            }}>
-              {CODECS.map((c) => (
-                <option key={c.id} value={c.id}>{c.label}</option>
-              ))}
-            </select>
-            {chosen.lossy && (
-              <>
-                <label className="block text-[10px] uppercase tracking-wider text-zinc-500">Bitrate</label>
-                <select className="input !py-1 text-xs" value={bitrate} onChange={(e) => setBitrate(Number(e.target.value))}>
-                  {BITRATES.map((b) => (
-                    <option key={b} value={b}>{b} kbps</option>
-                  ))}
-                </select>
-              </>
-            )}
+            <CodecQualitySelect
+              stacked
+              specs={table}
+              codec={codec}
+              quality={shownQuality}
+              customValue={customValue}
+              /* A new codec invalidates the quality it was on, so it resets to
+                 the codec's own default — one write, codec and quality
+                 together. */
+              onCodec={(v) => {
+                setCodecState(v);
+                setQualityState("");
+                setCustom(null);
+              }}
+              onQuality={setQualityState}
+              onCustomValue={setCustom}
+            />
             <button className="btn-primary w-full !py-1.5 text-xs" onClick={exportTrack} disabled={busy}>
-              {busy ? "Preparing…" : `Export ${chosen.label}${chosen.lossy ? ` · ${bitrate}k` : ""}`}
+              {busy ? "Preparing…" : `Export ${spec?.label ?? codec}`}
+            </button>
+            <button
+              className="btn-ghost w-full !py-1 text-[11px] inline-flex items-center justify-center gap-1.5"
+              onClick={saveAsDefault}
+              title="Use this codec and quality for every export — the Export page's own saved default"
+            >
+              <Save className="h-3.5 w-3.5" /> Set as default
             </button>
         </Popover>
       </div>

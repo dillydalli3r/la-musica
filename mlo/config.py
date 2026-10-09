@@ -1147,7 +1147,14 @@ DEFAULT_CONFIG = {
     # (`_batch_width`), so the app never asks slskd for more than it will
     # serve.
     "soulseek_download_slots": 15,
-    "soulseek_upload_slots": 2,
+    # How many peers may download from this share AT ONCE. Ten is slskd's own
+    # default (and what a 0/blank value is left to — see generate_yaml). The
+    # shipped value used to be 2, which throttled the one thing a sharing app
+    # is FOR: a peer's queue only moves while it holds one of these slots, so
+    # two of them meant a third requester waited until someone finished. The
+    # per-transfer speed limit (below) is what bounds the bandwidth a slot may
+    # use, so raising the count does not by itself oversubscribe the line.
+    "soulseek_upload_slots": 10,
     "soulseek_upload_limit_kib": 0,
     "soulseek_download_limit_kib": 0,
     # slskd's HTTPS listener binds an extra port (5031) with a self-signed
@@ -1366,6 +1373,15 @@ DEFAULT_CONFIG = {
     "soulseek_share_dirs": [],
     # Extra share filters — substrings/paths slskd must NOT share.
     "soulseek_share_exclude": [],
+    # How often slskd re-scans the shared folders on its own, in MINUTES. This
+    # is slskd's own `shares.cache.retention` (`--share-cache-retention` /
+    # SLSKD_SHARE_CACHE_RETENTION): the cache's retention limit doubles as the
+    # automatic re-scan interval, and it is EMPTY by default — slskd then only
+    # re-indexes at boot or when asked. The app already asks after every
+    # library change it makes (`refresh_shares_soon`), so this is the backstop
+    # for changes made OUTSIDE the app (a manual edit, a NAS sync, an organizer
+    # tool): a day. 0 disables it, leaving slskd's own default of "never".
+    "soulseek_share_rescan_minutes": 1440,
 
     # Wishes — MusicBrainz releases saved to the library WITHOUT downloading.
     # A background worker re-searches Soulseek for each wish on an interval
@@ -1968,8 +1984,14 @@ _INT_RANGES = {
     "soulseek_up_limit": (0, 100000),
     "soulseek_down_limit": (0, 100000),
     "soulseek_download_slots": (1, 20),
-    "soulseek_upload_slots": (0, 20),
+    # slskd accepts any upload slot count >= 1; 50 is a practical ceiling well
+    # above what a home connection can serve (each slot is a concurrent peer
+    # transfer), not a slskd limit. Downloads stay at 20 because the app's own
+    # 5 x 3 candidate product is what they are sized against.
+    "soulseek_upload_slots": (0, 50),
     "soulseek_upload_limit_kib": (0, 1000000),
+    # The automatic re-scan interval, in minutes: off at 0, up to 31 days.
+    "soulseek_share_rescan_minutes": (0, 44640),
     "soulseek_download_limit_kib": (0, 1000000),
     "soulseek_auto_log_min_score": (0, 100),
     "soulseek_auto_search_wait": (2, 300),
