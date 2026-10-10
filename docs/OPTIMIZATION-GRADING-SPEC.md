@@ -6676,7 +6676,15 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   the challenge.** rateyourmusic.com sits behind Cloudflare, and only a
   `cf_clearance` cookie gets past it — bound to the SAME User-Agent and the
   SAME egress IP that earned it. So `rym_user_agent` (empty = the built-in
-  Chrome UA) sets the UA the requests are sent with, and a stored cookie with
+  Chrome UA) sets the UA the requests are sent with — and the client hints
+  (`sec-ch-ua`/`sec-ch-ua-mobile`/`sec-ch-ua-platform`) are derived from
+  whatever UA that is (`_rym_apply_ua`), because a User-Agent claiming Chrome
+  141 beside the built-in `sec-ch-ua` naming 124 is a shape no browser
+  produces; the UA override is exactly the setting a user reaches for to make
+  a foreign `cf_clearance` count, and leaving the hints contradicting it would
+  keep the request synthetic. A challenge while the app still sends the
+  built-in UA names that binding as the suspect too (`_rym_reason`): the cookie
+  may be fine and only its browser's UA missing. A stored cookie with
   no `cf_clearance` says so in `_rym_reason` and in the credential warnings
   the Sources panel renders, naming both halves of the pair. The status check
   reads the interstitial out of a NON-200 body too — the live site serves the

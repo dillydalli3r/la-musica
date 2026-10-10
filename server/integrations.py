@@ -2736,6 +2736,43 @@ def _rym_cookiejar(cfg=None):
     return _rym_jar
 
 
+def _rym_apply_ua(headers, ua):
+    """Fit `headers` to *ua* — the User-Agent AND the client hints that go
+    with it.
+
+    MEASURED: Chrome sends `sec-ch-ua*` on every request and they name its own
+    major build, so a request whose User-Agent says Chrome 141 while
+    `sec-ch-ua` says 124 is a combination no browser produces. That mismatch is
+    exactly what a `rym_user_agent` override used to create — the one setting a
+    user reaches for to make a `cf_clearance` count (Cloudflare binds it to the
+    UA that earned it) — so the override has to carry the hints along or the
+    request still looks synthetic. A non-Chromium UA (Firefox, an odd string)
+    sends no client hints at all, so they are dropped rather than left to
+    contradict it; the rest of the header set is a browser's either way."""
+    headers["User-Agent"] = ua
+    match = re.search(r"Chrome/(\d+)", ua or "")
+    if not match:
+        for key in ("sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform"):
+            headers.pop(key, None)
+        return headers
+    version = match.group(1)
+    headers["sec-ch-ua"] = ('"Chromium";v="%s", "Google Chrome";v="%s", '
+                            '"Not-A.Brand";v="99"' % (version, version))
+    headers["sec-ch-ua-mobile"] = \
+        "?1" if re.search(r"Mobile|Android|iPhone|iPad", ua or "") else "?0"
+    if "Windows" in ua:
+        headers["sec-ch-ua-platform"] = '"Windows"'
+    elif "Android" in ua:
+        headers["sec-ch-ua-platform"] = '"Android"'
+    elif "iPhone" in ua or "iPad" in ua:
+        headers["sec-ch-ua-platform"] = '"iOS"'
+    elif "Mac OS X" in ua or "Macintosh" in ua:
+        headers["sec-ch-ua-platform"] = '"macOS"'
+    else:
+        headers["sec-ch-ua-platform"] = '"Linux"'
+    return headers
+
+
 def _rym_headers(cfg=None, warm=False):
     """The full Chrome header set — see RYM_HEADERS.
 
@@ -2749,9 +2786,9 @@ def _rym_headers(cfg=None, warm=False):
     The User-Agent is the built-in Chrome one unless `rym_user_agent` overrides
     it (`_rym_user_agent`): Cloudflare binds `cf_clearance` to the exact UA
     that solved the challenge, so a clearance earned by another Chrome build
-    validates only when that build's UA is what is sent."""
-    headers = dict(RYM_HEADERS)
-    headers["User-Agent"] = _rym_user_agent(cfg)
+    validates only when that build's UA is what is sent — and the client hints
+    are made to agree with whatever UA that is (`_rym_apply_ua`)."""
+    headers = _rym_apply_ua(dict(RYM_HEADERS), _rym_user_agent(cfg))
     if warm:
         headers.pop("Referer", None)
         headers["Sec-Fetch-Site"] = "none"
@@ -2887,6 +2924,16 @@ def _rym_reason(cfg=None, status=None, challenge=False, tries=1):
             why += (", and it carries no `cf_clearance` — that cookie and "
                     "`rym_user_agent` must BOTH match the browser (and "
                     "network) that passed the challenge")
+        elif cookie and _rym_user_agent(cfg) == RYM_HEADERS["User-Agent"]:
+            # The classic case: a good cookie from a browser whose Chrome is
+            # NOT the build this app sends by default. `cf_clearance` is bound
+            # to the UA that earned it, so a stale-looking refusal here is a
+            # UA mismatch, not an expired cookie — and it is the one cause the
+            # user can fix without re-exporting anything.
+            why += (", and the app is sending its built-in User-Agent "
+                    "(Chrome/124) — the clearance is bound to the browser that "
+                    "earned it, so set `rym_user_agent` to that browser's own "
+                    "User-Agent if it is not this build")
         return why + "; " + _RYM_HOWTO
     if status == 429:
         return ("HTTP 429 — RYM is throttling this network (retried %dx)"
@@ -2916,6 +2963,21 @@ def rym_last_response():
         info["at_iso"] = datetime.fromtimestamp(info["at"], timezone.utc) \
             .isoformat(timespec="seconds")
     return info
+
+
+def _rym_last_reason():
+    """The refusal RYM recorded for the latch in force, or "".
+
+    Only meaningful while `_rym_warned` holds: a successful answer records an
+    empty reason, and the latch is what says a refusal is the last thing that
+    happened. The genre chain quotes this in its skip sentence so the import
+    report says WHY the cookie was refused rather than only that it was — the
+    how-to tail is dropped, because the skip sentence already names the fix."""
+    if not _rym_warned:
+        return ""
+    reason = str(_rym_last_info.get("reason") or "")
+    tail = "; " + _RYM_HOWTO
+    return reason[:-len(tail)] if reason.endswith(tail) else reason
 
 
 def _rym_note(cfg=None, answered=False):
@@ -4916,8 +4978,10 @@ def _genre_source_skip(source, cfg):
                     "(RateYourMusic refuses an automated client without one; "
                     "or set cf_solver_url)")
         if _rym_blocked(cfg):
-            return ("skipped: RateYourMusic refused this cookie — paste a "
+            why = _rym_last_reason()
+            base = ("skipped: RateYourMusic refused this cookie — paste a "
                     "fresh one in Settings → Discovery")
+            return ("%s (%s)" % (base, why)) if why else base
         return None
     if source == "albumoftheyear":
         # Same rule for AOTY: a cleared cookie, or a solver. Without either the

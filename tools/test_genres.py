@@ -437,6 +437,11 @@ with contextlib.redirect_stdout(io.StringIO()):
 _note = got["notes"]["rateyourmusic"]
 assert "archiv" not in _note.lower() and "snapshot" not in _note.lower(), _note
 assert "refused this cookie" in _note, _note
+# …and it carries WHY, in RYM's recorded words, so the import toast is
+# actionable rather than a bare "refused": the challenge, and the built-in
+# User-Agent the app is sending while the stored cookie has a cf_clearance.
+assert "Cloudflare challenge" in _note, _note
+assert "built-in User-Agent" in _note, _note
 
 # (a3) Album of the Year's refusal is REPORTED as a refusal, not "no data" —
 # and a refusal is NOT remembered as a 30-day negative, so pasting a fresh

@@ -814,10 +814,32 @@ try:
     assert len(fake.headers) == 2, fake.headers
     for sent in fake.headers:                    # warm-up AND the page
         assert sent["User-Agent"] == UA, sent
-    # nothing ELSE moved with it: the rest of the header set is still the
-    # built-in one (only the UA is the caller's to override)
+    # the client hints move WITH the UA: a User-Agent claiming Chrome 131
+    # beside a `sec-ch-ua` naming 124 is a combination no real browser
+    # produces, and the WAF is what notices. The rest of the header set does
+    # not depend on the UA.
     assert fake.headers[1]["Accept"] == intg.RYM_HEADERS["Accept"], \
         fake.headers[1]
+    for sent in fake.headers:
+        assert 'v="131"' in sent["sec-ch-ua"], sent
+        assert "124" not in sent["sec-ch-ua"], sent
+        assert sent["sec-ch-ua-platform"] == '"macOS"', sent
+        assert sent["sec-ch-ua-mobile"] == "?0", sent
+
+    # a non-Chromium UA sends no client hints at all, so an override to one
+    # must not carry Chrome's: a Firefox User-Agent beside `sec-ch-ua` is the
+    # same kind of contradiction the hints exist to avoid
+    fake = nirvana_fake()
+    FF = ("Mozilla/5.0 (X11; Linux x86_64; rv:132.0) Gecko/20100101 "
+          "Firefox/132.0")
+    intg.rym_links("Nirvana", "MTV Unplugged in New York",
+                   cfg={"rym_links_auto": True, "rym_user_agent": FF},
+                   mbid=NIRVANA_GROUP)
+    for sent in fake.headers:
+        assert sent["User-Agent"] == FF, sent
+        assert "sec-ch-ua" not in sent, sent
+        assert "sec-ch-ua-mobile" not in sent, sent
+        assert "sec-ch-ua-platform" not in sent, sent
 
     # ----------------------------------------------------------------------- #
     # 17) the refusal the live site actually serves: HTTP 403 whose BODY is
