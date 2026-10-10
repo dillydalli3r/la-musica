@@ -35,6 +35,12 @@ from . import tags_registry as _tags_registry
 # and the optional FlareSolverr-compatible solver (`cfchallenge.fetch_page` /
 # `solve`). It imports nothing from here, so there is no cycle.
 from . import cfchallenge
+# The route that actually clears the two hosts: a real Chrome/Edge driven over
+# DevTools (`server/browserfetch.py`). Measured 2026-10-10 — the solver cannot
+# pass either challenge, and RYM refuses a cleared cookie from a non-browser
+# client, so every scrape of those hosts goes through here when a browser
+# exists. It imports nothing from this module either.
+from . import browserfetch
 # Album of the Year's LIVE scraper (fetch + resolve + parse), shared by the
 # genre chain and the web-rating fetch. It imports only `cfchallenge` and
 # `mlo.config` lazily, so there is no cycle.
@@ -3455,11 +3461,14 @@ def _rym_get(path, params=None, cfg=None, expect=None):
         # A page, or the negative beside one (`_RYM_MISS`): the second is a
         # 404 this ladder already paid for, and "no such page" is an answer.
         return None if hit == _RYM_MISS else hit
-    if _rym_blocked(cfg):
+    if _rym_blocked(cfg) and not browserfetch.available(cfg):
         # RYM refused an earlier request under this same cookie (a challenge,
         # a 403, no connection). The candidates left cannot do better, and
         # asking them at 1 req/s is how an import of a few dozen albums used
         # to burn minutes on a source that was never going to answer.
+        #
+        # Unless a real browser can fetch it: the latch is about THIS cookie,
+        # and `server/browserfetch.py` does not need one.
         return None
     url = f"{RYM_BASE}{path}"
     _rym_warm(cfg)
@@ -3482,6 +3491,23 @@ def _rym_get(path, params=None, cfg=None, expect=None):
     # same slugs, the same scrapers — and the clearance cookies it won are
     # reused by later plain requests, so one solve buys many fast pages.
     if cfchallenge.is_challenge(r.text or "", r.status_code):
+        # The real browser comes first (it is the route that WORKS — see
+        # `server/browserfetch.py`); the solver is the fallback for a host whose
+        # challenge a browser cannot reach either. The page either returns is
+        # RYM's live page — the same slugs, the same scrapers — and the
+        # clearance the browser won stays in its own profile, so the next page
+        # is fetched without meeting the challenge again.
+        try:
+            live = browserfetch.fetch(str(getattr(r, "url", "") or url), cfg)
+        except Exception:
+            live = None
+        if (live and live.get("html")
+                and not cfchallenge.is_challenge(live["html"])):
+            _rym_record(200, url)
+            _rym_route.update({"route": "live", "cached": False, "url": url,
+                               "snapshot": "", "solved": True})
+            _rym_cache_write(key, live["html"])
+            return live["html"]
         solved = cfchallenge.solve(str(getattr(r, "url", "") or url), cfg)
         if (solved and solved.get("html")
                 and not cfchallenge.is_challenge(solved["html"])):
@@ -5057,20 +5083,26 @@ def _genre_source_skip(source, cfg):
     already refused this cookie (`_rym_blocked`) are both known without
     spending a request on them. The reason is what the caller reports, so "no
     data" never has to stand in for "there was nothing to ask with".
+    This is the only thing that can fetch a scraped host here: MEASURED
+    2026-10-10, FlareSolverr cannot pass either challenge, and RateYourMusic
+    refuses a cleared cookie from any non-browser client — so a real browser
+    (`server/browserfetch.py`) is the route that works, and a source is skipped
+    only when there is no cookie, no SOLVER, and no browser either.
     """
     cfg = cfg or {}
+    browse = browserfetch.available(cfg)
     if source == "rateyourmusic":
         # The genre chain reads the LIVE page only (no archive route — the
         # owner's rule). A cleared cookie is what a live request needs, and a
         # solver (`cf_solver_url`) can stand in for it. Without either there is
         # nothing to ask with: RYM refuses an unattended client outright, so
         # this is skipped BEFORE a request instead of paying one to confirm it.
-        if not _rym_cookie(cfg) and not cfchallenge.solver_url(cfg):
+        if not _rym_cookie(cfg) and not cfchallenge.solver_url(cfg) and not browse:
             return ("skipped: no rym_cookie in Settings → Discovery "
                     "(RateYourMusic refuses an automated client without one; "
                     "or set cf_solver_url)")
         failed = _solver_failure(cfg, "rateyourmusic.com")
-        if failed and not _rym_cookie(cfg):
+        if failed and not _rym_cookie(cfg) and not browse:
             # The solver IS configured and it lost: do not spend another 60 s
             # proving it per album, and do not tell the user to paste a cookie
             # as though nothing else had been tried.
@@ -5078,14 +5110,15 @@ def _genre_source_skip(source, cfg):
                     "Cloudflare challenge (%s) — the site refuses this client "
                     "from this network; a cleared rym_cookie is the other "
                     "route" % failed)
-        if not _rym_cookie(cfg) and cfchallenge.probing("rateyourmusic.com"):
+        if not _rym_cookie(cfg) and cfchallenge.probing("rateyourmusic.com") \
+                and not browse:
             # The solver is mid-solve for this host RIGHT NOW (the boot warm-up,
             # usually). `solve` would start none — one browser, one solve — so
             # there is nothing to wait for and nothing to blame: the chain says
             # so and moves on to the source that can answer.
             return ("skipped: the solver is testing RateYourMusic right now — "
                     "no answer yet; try again in a moment")
-        if _rym_blocked(cfg):
+        if _rym_blocked(cfg) and not browse:
             why = _rym_last_reason()
             base = ("skipped: RateYourMusic refused this cookie — paste a "
                     "fresh one in Settings → Discovery")
@@ -5095,17 +5128,18 @@ def _genre_source_skip(source, cfg):
         # Same rule for AOTY: a cleared cookie, or a solver. Without either the
         # site answers the challenge to every client this project can run, so
         # the source is skipped rather than asked to fail.
-        if not aoty.cookie(cfg) and not cfchallenge.solver_url(cfg):
+        if not aoty.cookie(cfg) and not cfchallenge.solver_url(cfg) and not browse:
             return ("skipped: no aoty_cookie in Settings → Discovery "
                     "(Album of the Year refuses an automated client without "
                     "one; or set cf_solver_url)")
         failed = _solver_failure(cfg, "albumoftheyear.org")
-        if failed and not aoty.cookie(cfg):
+        if failed and not aoty.cookie(cfg) and not browse:
             return ("skipped: FlareSolverr could not pass Album of the Year's "
                     "Cloudflare challenge (%s) — the site refuses this client "
                     "from this network; a cleared aoty_cookie is the other "
                     "route" % failed)
-        if not aoty.cookie(cfg) and cfchallenge.probing("albumoftheyear.org"):
+        if not aoty.cookie(cfg) and cfchallenge.probing("albumoftheyear.org") \
+                and not browse:
             return ("skipped: the solver is testing Album of the Year right "
                     "now — no answer yet; try again in a moment")
         return None
@@ -6018,12 +6052,17 @@ def genre_chain(artist="", album="", release=None, limit=None, sources=None,
     for i, source in enumerate(order, 1):
         if source in ("rateyourmusic", "albumoftheyear"):
             left = cfchallenge.budget_left()
-            if left is not None and left < cfchallenge.MIN_SOLVE_BUDGET:
+            if (left is not None and left < cfchallenge.MIN_SOLVE_BUDGET
+                    and not browserfetch.available(cfg)):
                 # A request with a deadline (the genre import) has spent it on
                 # a host that could not answer, so the second scraped source is
                 # not asked at all rather than given a solve it cannot finish.
                 # It is REPORTED as not asked — and MusicBrainz, keyless and
                 # never challenged, is still free to answer below.
+                #
+                # Only while no browser can fetch it: the deadline is the
+                # SOLVER's budget, and a real browser (which needs no solver at
+                # all) is not bound by it.
                 notes[source] = skipped[source] = (
                     "not asked: the genre import's time budget ran out — "
                     "RateYourMusic and Album of the Year take longer than this "

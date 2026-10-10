@@ -262,3 +262,19 @@ When they do ask for one:
   sets from `integrations.GENRE_IMPORT_BUDGET_S`); `warm_solver` caches a
   clearance it WON as well as the failures it met. Any new user-facing path that
   can touch a browser must set a budget too, or it inherits the same stall.
+- **The two scraped hosts are fetched by a REAL browser, and that is not a
+  fallback to be "simplified" away.** MEASURED, 2026-10-10: FlareSolverr cannot
+  pass either challenge; a cleared cookie read out of the owner's own Firefox —
+  fresh, unexpired, sent with that browser's exact User-Agent — still gets
+  `403 Just a moment…` from RateYourMusic over `httpx` AND over `curl_cffi`
+  impersonating Firefox 135/144/157 (AOTY accepts it, RYM does not); and
+  HEADLESS is detected by both Chrome and Firefox. `server/browserfetch.py`
+  drives this machine's own Chrome/Edge over DevTools, is preferred to the
+  solver inside `cfchallenge.fetch_page`, and keeps the clearance in a profile
+  under the app's state dir (`<music>/.mlo/data/browser`, ~280 MB) so later
+  fetches never meet the challenge. It is gated on `cf_browser_fetch`, and that
+  gate reads "no cfg, or no key ⇒ OFF" — so a suite's own cfg can never launch
+  a browser on the machine running it, and a suite that DOES exercise the route
+  patches the module (see `tools/test_browserfetch.py`). A smoke run with the
+  live config will open one window, placed off to the side: expect it, and make
+  sure whatever started it stops it (`main.py`'s lifespan does).

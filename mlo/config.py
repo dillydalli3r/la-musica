@@ -1688,6 +1688,17 @@ DEFAULT_CONFIG = {
     # How long the solver may spend on one page, in milliseconds (FlareSolverr's
     # own budget). A hard challenge can take most of a minute.
     "cf_solver_timeout": 60000,
+    # Whether this machine's own Chrome/Edge may be driven — over its DevTools
+    # protocol — to fetch a page the two scraped hosts refuse every plain
+    # client. Ships ON, because MEASURED 2026-10-10 it is the ONLY route that
+    # clears them: FlareSolverr cannot pass either challenge (a 60 s timeout,
+    # every attempt, on a clean process), and RateYourMusic refuses a cleared
+    # cookie from every non-browser client tried, including curl_cffi
+    # impersonating Firefox. With it OFF, those two sources answer only from a
+    # cache or a cleared cookie. It opens ONE window (placed off to the side,
+    # `server/browserfetch.py`) and keeps it for the session; the clearance it
+    # wins lives in the profile the app owns, so later fetches are fast.
+    "cf_browser_fetch": True,
     # Auto-resolve RateYourMusic album + artist links during import; off =
     # links are only ever set by hand in the link editor.
     "rym_links_auto": True,

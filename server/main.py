@@ -324,6 +324,15 @@ async def _lifespan(app: FastAPI):
         solver.stop()
     except Exception:
         pass
+    # The browser this app drives for the two scraped hosts is its own child
+    # too, and it is a FULL Chromium: left behind, it is a window the user did
+    # not open and a few hundred megabytes. Its profile stays — that is where
+    # the clearance it earned lives, so the next run starts already cleared.
+    try:
+        from server import browserfetch
+        browserfetch.stop()
+    except Exception:
+        pass
 
 
 # --------------------------------------------------------------------------- #

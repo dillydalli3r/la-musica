@@ -1209,6 +1209,10 @@ export default function SettingsPage() {
           help: "How long the solver may take to answer a challenge before the request is given up on. Default 60000.",
         },
         {
+          k: "cf_browser_fetch", label: "Fetch a refused page with a real browser", type: "bool",
+          help: "On, a page Cloudflare will not serve the app is fetched by this machine's own Chrome (or Edge), driven by the app — measured 2026-10-10, the only route that actually clears RateYourMusic and Album of the Year: the bundled FlareSolverr cannot pass either challenge, and RateYourMusic refuses a cleared cookie from anything but a real browser. It opens one window, placed off to the side, and keeps it for the session; the clearance it earns is remembered in the app's own browser profile, so later fetches do not meet the challenge at all. Off, those two sources answer only from a cache or a cookie you pasted.",
+        },
+        {
           k: "rym_links_auto", label: "Auto-find RateYourMusic links", type: "bool",
           help: "Asks rateyourmusic.com for the album and artist pages during an import (and from the link editor's Auto-find button). An existing link is never overwritten, and when RYM refuses the request the import carries on untouched — the link is then left for you to paste by hand.",
         },

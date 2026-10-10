@@ -1,29 +1,42 @@
 """Live pages through Cloudflare, for the two scraped sources (RYM, AOTY).
 
 Both sites answer a plain client with Cloudflare's "Just a moment…"
-interstitial. MEASURED, 2026-10-10, from this machine, against both hosts:
-plain HTTP, `curl_cffi` impersonating Chrome, headless Playwright/Chromium,
-and a real headed Chrome driven by `nodriver` ALL received the 403 challenge —
-so a live page needs one of the two things a challenge cannot refuse:
+interstitial. MEASURED, 2026-10-10, from this machine:
 
-  * a CLEARED SESSION — the `cf_clearance` cookie (and the matching
-    `rym_user_agent`) of a browser that already passed the challenge. The user
-    pastes it; it is sent as a normal cookie, and the request is then a plain
-    fast HTTP GET (see `server.integrations._rym_get` for RYM and
-    `aoty_page` for AOTY).
-  * a SOLVER — a FlareSolverr-compatible service (`cf_solver_url`), a real
-    browser it keeps warm, which solves the challenge once per host and hands
-    back the page AND the cookies that did it. Those cookies are then reused
-    for the plain-HTTP fast path until they expire, so one solve buys many
-    fast requests.
+  * the interstitial is served to EVERY client on its first navigation — that
+    includes the real browsers, so "it met the challenge" is not the question.
+    The question is what CLEARS it, and on these two hosts the answer differs.
+  * a REAL BROWSER clears both, by itself, in seconds: a plain Chrome and a
+    plain Firefox, pointed at the URL, hand back the live page.
+  * a CLEARED SESSION alone is enough for Album of the Year — its
+    `cf_clearance`, read out of the owner's own Firefox and sent with that
+    browser's User-Agent, answers `200` with the real page over plain `httpx`.
+  * a CLEARED SESSION is NOT enough for RateYourMusic: the same fresh, genuine
+    cookie set is refused `403 Just a moment...` over `httpx` AND over
+    `curl_cffi` impersonating Firefox 135, 144 and 157.
+  * HEADLESS is detected: `--headless=new` Chrome and `--headless` Firefox both
+    end on the interstitial. A real window is load-bearing.
+  * FlareSolverr's bundled Chromium never passes either challenge — "Error
+    solving the challenge. Timeout after 60.0 seconds", every attempt, on a
+    clean process with 20 GB free.
+
+So a live page comes from whichever of these can be had, in this order:
+
+  1. a CLEARED SESSION, as a plain fast HTTP GET (see
+     `server.integrations._rym_get` for RYM and `aoty_page` for AOTY);
+  2. a REAL BROWSER this machine already has (`server/browserfetch.py`, gated
+     on `cf_browser_fetch`) — the only route that clears RYM, and it caches the
+     clearance in the profile the app owns, so later pages are fast;
+  3. a SOLVER (`cf_solver_url`), a FlareSolverr-compatible service. Kept
+     because the failure above is a fact about THIS network, not a law: where
+     one can pass, it wins the same clearance cookies and the plain path takes
+     over. It is asked only when the browser is off or could not answer.
 
 Nothing here pretends the archive is live: the Wayback route was removed from
 both scrapers on the owner's instruction ("I want live info from each site").
 
-The one entry point the scrapers use is `fetch_page`: try the fast HTTP path
-with whatever clearance cookies are in hand, and only when Cloudflare answers
-with a challenge does the solver get asked. A site that is not behind a
-challenge (MusicBrainz, or an already-cleared RYM) never pays for the solver.
+The one entry point the scrapers use is `fetch_page`. A site that is not behind
+a challenge (MusicBrainz, or an already-cleared RYM) pays for none of this.
 """
 from __future__ import annotations
 
@@ -33,6 +46,12 @@ import os
 import re
 import threading
 import time
+
+# The route that actually clears the two scraped hosts: a real Chrome/Edge
+# driven over DevTools (`server/browserfetch.py`). Imported at module level on
+# purpose — it imports nothing from here, so there is no cycle, and a name
+# imported INSIDE one function would be local to it and shadow this one.
+from . import browserfetch
 
 # The marker every one of these interstitials carries. Deliberately broad — a
 # page that merely MENTIONS "checking your browser" in prose is not a thing
@@ -578,6 +597,20 @@ def fetch_page(url, cfg=None, *, headers=None, cookies=None, params=None,
                 "challenge": False, "via": "http"}
 
     if solve_on_challenge:
+        # A REAL BROWSER FIRST, and the solver only if there is none: MEASURED,
+        # 2026-10-10 — the solver cannot pass either host's challenge (a 60 s
+        # timeout, every attempt, on a clean process), while a real Chrome
+        # clears both in seconds and keeps the clearance in the profile this
+        # app owns. Asking the solver first would spend its whole timeout
+        # before reaching the route that works. `server/browserfetch.py`.
+        try:
+            got = browserfetch.fetch(url, cfg)
+        except Exception:
+            got = None
+        if got and got.get("html") and not is_challenge(got["html"]):
+            return {"ok": True, "html": got["html"],
+                    "status": got.get("status") or 200,
+                    "challenge": False, "via": "browser"}
         solved = solve(url, cfg)
         if solved and solved.get("html") and not is_challenge(solved["html"]):
             _remember(host, solved.get("cookies"), solved.get("user_agent"))
