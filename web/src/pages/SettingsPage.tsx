@@ -1329,7 +1329,7 @@ export default function SettingsPage() {
         },
         {
           k: "rym_archive_fallback", label: "RateYourMusic: fall back to archived pages", type: "bool",
-          help: "Applies to RateYourMusic LINKS and CHARTS only — genres and ratings come from the live site now (with the RYM cookie or a solver). A release page or chart rateyourmusic.com will not serve is read from the Wayback Machine's snapshot of the SAME page and parsed the same way; the import report names the snapshot and its date.",
+          help: "Applies to RateYourMusic CHARTS only — genres and ratings come from the live site now (with the RYM cookie or a solver). A chart page rateyourmusic.com will not serve is read from the Wayback Machine's snapshot of the SAME page and parsed the same way; the report names the snapshot and its date.",
         },
         {
           k: "ai_genre_inference", label: "Let a model rank the genres", type: "bool",

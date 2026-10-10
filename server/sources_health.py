@@ -19,10 +19,10 @@ Honey), in parallel, and reports what came back:
   * `skipped` — it cannot run here at all (no key, no yt-dlp, RYM refusing us),
   * `fail`    — it ran and had nothing, or raised.
 
-A source with a SECOND route is not "skipped" when its key is absent: with
-`rym_archive_fallback` on (the shipped default) RateYourMusic reads its pages
-from the Wayback Machine, so its rows stay `ok` and are still probed without a
-`rym_cookie` — the key is still in `needs` (the panel prompts for it) and
+A source can still run without a `needs` entry when something else stands in
+for it: a Cloudflare solver (`cf_solver_url`) reads the scraped GENRE rows
+without their cookie, and the RYM LINKS row resolves from MusicBrainz without
+`rym_cookie`. The entry stays in `needs` (the panel prompts for it) and
 `optional_needs` says which of `needs` the source can run without.
 
 Nothing here ever raises or writes anything: a broken source is a row, not a
@@ -673,16 +673,14 @@ def _optional_keys(spec, cfg):
     most of them.
 
     A source is normally unrunnable without its key, which is why `needs` is
-    also what the panel prompts for. RateYourMusic is the exception: with
-    `rym_archive_fallback` on (the key ships True), the archived snapshot of
-    its pages answers whether or not a `rym_cookie` is set, so the live site
-    being unavailable is not the SOURCE being unavailable. The cookie is still
-    prompted for (it is what upgrades the read to the live page), which is why
-    it stays in `needs` and only the STATUS/`probe` decision consults this. A
-    cfg that switched the fallback off — or that never carried the key — has
-    no second route, so the cookie is required again (`optional_gate` names
-    the key that decides it; a spec without one is unconditional, like the
-    links row, whose second route is MusicBrainz rather than the archive).
+    also what the panel prompts for. Two rows are the exception. The scraped
+    GENRE rows run without their cookie when a Cloudflare solver is configured
+    (`cf_solver_url` — pages are read through it), and the RYM LINKS row runs
+    without `rym_cookie` because MusicBrainz states the same page for many
+    releases. In both, the cookie stays in `needs` (the panel prompts for it)
+    and only the STATUS/`probe` decision consults this. `optional_gate` names
+    the key that decides a GATED entry (the genre rows' `cf_solver_url`); a
+    spec without one is unconditional, like the links row.
     """
     out = list(spec.get("optional") or ())
     gate = str(spec.get("optional_gate") or "")

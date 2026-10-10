@@ -48,16 +48,16 @@ and the aggregation testable with saved fixtures, and it is why a source that
 cannot answer costs nothing: it returns None and the mean is taken over the
 sources that did.
 
-ALBUM OF THE YEAR IS READ FROM AN ARCHIVED CAPTURE, deliberately. Its site
-answers Cloudflare's JS challenge to every automated client this project can
-run — 403 to a plain HTTP client, to HEADLESS and to HEADED Chromium, and to a
-reader proxy (all measured 2026-10-01) — so the live page is not asked at all;
-``server.integrations.aoty_album_page`` resolves the album's own page through
-the Wayback index and replays the newest capture, the same route the RYM
-readers take when there is no cookie. The page's markup this parser reads was
-taken from exactly such a capture, so the parse is pinned to a real payload
-rather than guessed: a source whose payload could not be pinned would not ship
-at all.
+ALBUM OF THE YEAR IS READ LIVE, through the same Cloudflare path the RYM
+readers use (`server.aoty`, via `cfchallenge`): a cleared `aoty_cookie` (or a
+solver, `cf_solver_url`) reads the real page. The site answers Cloudflare's JS
+challenge to every automated client without one — MEASURED 2026-10-10: a plain
+HTTP client, curl_cffi, headless Chromium and a headed real Chrome all got the
+403 — so with no credential the source reports the challenge instead of
+inventing a value. ``server.integrations.aoty_page`` resolves the album's own
+page through the site's search and confirms it by slug. The markup this parser
+reads is pinned against a real capture in `tools/test_aoty.py`, so the parse is
+pinned to a real payload rather than guessed.
 """
 from __future__ import annotations
 

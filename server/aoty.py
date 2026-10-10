@@ -26,21 +26,22 @@ What each page answers (all VERIFIED against real page markup):
 The numeric id embedded in every AOTY URL cannot be derived from names, so a
 page is RESOLVED through AOTY's own search (`/search/?q=`): the first link of
 the right kind whose slug carries the words asked about is the page, and it is
-confirmed by the page's own title before it is read. Pages are cached 30 days
-(the negative included) with the app's other scraped data.
+confirmed by the page's own title before it is read. A page a caller asked for
+is remembered 30 days by that caller (`integrations._genre_cached`) — but a
+CHALLENGE is not: a refusal is not "AOTY has no such page", and remembering it
+would keep answering "no data" after the user pasted the cookie that fixes it.
+`last_response` says which of the two the last fetch was.
 
 Parsers are pure — HTML in, dict out — so `tools/test_aoty.py` pins them
 against real markup with no network.
 """
 from __future__ import annotations
 
-import hashlib
 import html as _html
-import json
-import os
 import re
 import threading
 import time
+from datetime import datetime, timezone
 from urllib.parse import quote_plus, urlparse
 
 from . import cfchallenge
@@ -60,12 +61,18 @@ AOTY_HEADERS = {
     "Upgrade-Insecure-Requests": "1",
 }
 
-CACHE_TTL = 30 * 86400.0       # genre/score data moves slowly
-_MISS = "\x00aoty-no-page"     # a "no such page" answer, cached like any other
-_CACHE: dict = {}
-_CACHE_LOCK = threading.Lock()
 _LAST = 0.0
 _MIN_INTERVAL = 1.0            # AOTY's own etiquette: one request a second
+_PACE_LOCK = threading.Lock()  # the 1 req/s pacing, held across callers
+
+# The last fetch's outcome, for the report — see `last_response`. AOTY has ONE
+# route (live), so the difference between "AOTY refused us" (a Cloudflare
+# challenge: a fresh `aoty_cookie` or `cf_solver_url` fixes it) and "AOTY holds
+# no genre row for this release" is a difference `_aoty_note` has to be able to
+# state; "no data" hides the first behind the second. `fetch` writes it, and a
+# caller also reads `ok` to refuse to cache a transient refusal as if it were a
+# real "no such page".
+_LAST_INFO: dict = {}
 
 # --------------------------------------------------------------------------- #
 # The credential and the live fetch
@@ -184,15 +191,18 @@ def fetch(path, cfg=None):
     """One LIVE AOTY path → its HTML, or None.
 
     Goes through `cfchallenge.fetch_page` (cleared cookie, then solver), paced
-    to one request a second, and cached 30 days including the negative. Returns
-    None for a challenge or a miss; the caller reports which (the chain's own
-    note does), never an archived page.
+    to one request a second. Returns None for a challenge or a miss; the caller
+    reports which (the chain's own note does) — `last_response` is where it
+    reads the two apart — and never an archived page. The 30-day memory of an
+    answer belongs to the caller (`integrations._genre_cached`), which is why a
+    transient refusal is NOT one of them: only a page AOTY really served, or a
+    real "no such page", is worth remembering.
     """
-    global _LAST
+    global _LAST, _LAST_INFO
     if not path:
         return None
     url = path if path.startswith("http") else f"{AOTY_BASE}{path}"
-    with _CACHE_LOCK:
+    with _PACE_LOCK:
         wait = _MIN_INTERVAL - (time.time() - _LAST)
         if wait > 0:
             time.sleep(wait)
@@ -200,11 +210,31 @@ def fetch(path, cfg=None):
     got = cfchallenge.fetch_page(url, cfg, headers=headers(cfg),
                                  cookies=dict(cookie_pairs(cfg)), timeout=25.0,
                                  host="albumoftheyear.org")
-    if not got.get("ok") or not got.get("html"):
-        return None
-    if "albumoftheyear.org" not in str(url) and "albumoftheyear.org" not in got["html"]:
-        return None
-    return got["html"]
+    ok = bool(got.get("ok")) and bool(got.get("html"))
+    if ok and "albumoftheyear.org" not in str(url) and \
+            "albumoftheyear.org" not in got["html"]:
+        ok = False
+    _LAST_INFO = {"ok": ok, "challenge": bool(got.get("challenge")),
+                  "via": str(got.get("via") or ""),
+                  "status": got.get("status"), "url": url,
+                  "at": time.time()}
+    return got["html"] if ok else None
+
+
+def last_response():
+    """AOTY's last fetch outcome, for the report — {} before the first fetch.
+
+    `ok`/`challenge`/`via` come from `cfchallenge.fetch_page`, `status` and
+    `url` from the request, `at`/`at_iso` when it happened. It exists for the
+    same reason RYM's `rym_last_response` does: a source that answered nothing
+    must be able to say whether the SITE refused the request (a challenge — a
+    credential the user can fix) or simply had nothing.
+    """
+    info = dict(_LAST_INFO)
+    if info:
+        info["at_iso"] = datetime.fromtimestamp(info["at"], timezone.utc) \
+            .isoformat(timespec="seconds")
+    return info
 
 
 # --------------------------------------------------------------------------- #

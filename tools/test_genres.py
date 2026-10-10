@@ -23,8 +23,7 @@ What this pins, with every HTTP seam stubbed (no network at all):
   * the merged order is `genre_sources` order, so a reversed list reverses the
     result;
   * the two scraped sources are read LIVE only — the genre chain has no
-    archive/Wayback route (`_rym_archive_on`/`_aoty_archive_on` belong to the
-    RYM links/charts features, not here);
+    archive/Wayback route (`_rym_archive_on` governs the RYM charts, not here);
   * the cap (`mb_genre_count`) is enforced PER TRACK, and a track's own
     recording genres stay ahead of the release-wide ones;
   * a source that fails (a blocked RYM, a raising adapter) removes only its
@@ -55,6 +54,7 @@ import contextlib
 import io
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -259,11 +259,10 @@ def stub_mb(payloads):
 def stub_aoty(album=None, artist=None):
     """Album of the Year's page seam (`integrations.aoty_page`).
 
-    The genre chain reaches the scraped page through `aoty_page` (and its
-    `aoty_album_page` wrapper), so replacing that one function stubs the whole
-    source: `kind` says which page was asked for, and the return is the HTML
-    `aoty.parse_album` / `aoty.parse_artist` will read. Returns the call log
-    (list of `kind`s).
+    The genre chain reaches the scraped page through `aoty_page`, so replacing
+    that one function stubs the whole source: `kind` says which page was asked
+    for, and the return is the HTML `aoty.parse_album` / `aoty.parse_artist`
+    will read. Returns the call log (list of `kind`s).
     """
     calls = []
 
@@ -421,6 +420,48 @@ assert got["notes"]["rateyourmusic"].startswith(
 assert got["per_track"][(1, 1)][0] == "Shoegaze", got["per_track"]
 assert "rateyourmusic" not in got["sources"][FILE_ONE], got["sources"]
 assert buf.getvalue().count("rateyourmusic") == 1, buf.getvalue()
+
+# (a2) The refusal sentence must not blame an archived snapshot. The genre
+# chain has no archive route (the owner's rule), and a real config carries
+# `rym_archive_fallback: True` — with that key present the note used to claim
+# "no archived snapshot of this page answered" for a snapshot nobody asked for.
+clear()
+stub_rym({"rateyourmusic.com": RYM_CHALLENGE})
+stub_aoty(AOTY_ALBUM_PAGE, AOTY_ARTIST_PAGE)
+stub_mb({"release-group/rg-1": {"genres": [{"name": "Progressive Rock"}]}})
+arch_cfg = dict(CFG, rym_archive_fallback=True)
+with contextlib.redirect_stdout(io.StringIO()):
+    got = intg.genre_chain(artist="Test Artist", album="Test Album",
+                           release=RELEASE, cfg=arch_cfg, limit=6,
+                           files=[FILE_ONE, FILE_TWO])
+_note = got["notes"]["rateyourmusic"]
+assert "archiv" not in _note.lower() and "snapshot" not in _note.lower(), _note
+assert "refused this cookie" in _note, _note
+
+# (a3) Album of the Year's refusal is REPORTED as a refusal, not "no data" —
+# and a refusal is NOT remembered as a 30-day negative, so pasting a fresh
+# cookie fixes it on the next run instead of a month later.
+clear()
+stub_rym({"rateyourmusic.com": RYM_CHALLENGE})
+stub_mb({"release-group/rg-1": {"genres": [{"name": "Progressive Rock"}]}})
+_real_aoty_last = intg.aoty.last_response
+try:
+    intg.aoty_page = lambda artist_name, album_name="", cfg=None, kind="album": None
+    intg.aoty.last_response = lambda: {
+        "ok": False, "challenge": True, "status": 403, "via": "none",
+        "url": "https://www.albumoftheyear.org/album/1-x.php",
+        "at": time.time()}
+    with contextlib.redirect_stdout(io.StringIO()):
+        got = chain(limit=6)
+    assert got["notes"]["albumoftheyear"].startswith(
+        "Album of the Year was challenged by Cloudflare"), got["notes"]
+    assert "albumoftheyear" not in got["per_source"], got["per_source"]
+    # Nothing was cached under this identity: the refusal did not become a
+    # negative answer, so an answer to come is still possible.
+    assert not any(k.startswith("album|albumoftheyear|")
+                   for k in intg._GENRE_CACHE), list(intg._GENRE_CACHE)
+finally:
+    intg.aoty.last_response = _real_aoty_last
 
 # (b) a host that raises (timeout / no route): the others still answer, and
 # the dead source is simply absent from the provenance.

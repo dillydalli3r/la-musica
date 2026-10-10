@@ -2417,24 +2417,19 @@ def genre_cascade(release, limit=None):
 # RYM_HEADERS and `_rym_headers`. None of it is a credential or a trick: it is
 # what a browser does before a page it is allowed to read.
 #
-# A cookie is the better route when there is one — a live page states the
-# artist's genres as they are today — but it is no longer the ONLY one. The
-# Wayback Machine keeps copies of these pages and serves them to an unattended
-# client, so a release RYM will not serve directly is read from its newest
-# archived snapshot instead (`_rym_archive_get`). That answer keeps
-# `rateyourmusic` as its source and says in the report that it came from an
-# archived snapshot, with the capture's date when the snapshot states one; the
-# route is only ever used when the live site could not answer (no cookie, a
-# latched refusal, or a refusal during this call). `rym_archive_fallback`
-# (Settings → Discovery, default ON) turns it off — off, a missing cookie means
-# exactly what it always did: the source contributes nothing and is reported as
-# skipped.
+# GENRES and RATINGS are read from the LIVE page only (the owner's rule): a
+# challenge is answered by the solver (`cf_solver_url`) or reported in the
+# source's own words, never filled from a stale capture. The Wayback Machine
+# (`_rym_archive_get`) is out of both chains — `rym_genres`/`rym_artist_genres`
+# take no archive route at all — and answers only the DISCOVER charts, whose
+# pages are read from a snapshot when the live site refuses.
+# `rym_archive_fallback` (Settings → Discovery, default ON) governs that one
+# consumer.
 #
 # Scraping is polite and cheap: one request per second, and a 30-day disk
 # cache under <music>/.mlo/data/rym_cache so repeat imports never re-fetch.
-# The archive route shares BOTH: it goes through the same throttle and the same
-# 30-day cache, so a fallback costs a couple of seconds once per album and
-# nothing on the next import.
+# The chart archive route shares the 30-day cache, so a fallback costs a couple
+# of seconds once per chart and nothing on the next run.
 # (Deezer and Apple, by contrast, are keyless public APIs and their advisory
 # routes are verified working — see ADVISORY_SOURCES.)
 #
@@ -2526,22 +2521,16 @@ RYM_ARCHIVE_TRIES = 3          # indexed captures tried after the newest one
 # web.archive.org is a shape no browser produces. The archive is a public
 # service that asks for nothing but a UA saying who is calling, and this is it.
 RYM_ARCHIVE_HEADERS = {
-    "User-Agent": USER_AGENT + " (genre fallback)",
+    "User-Agent": USER_AGENT + " (archive fallback)",
     "Accept": "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
 }
 # The archive is a DIFFERENT host from RYM and answers from a CDN, so its
 # requests do not wear RYM's 1 req/s etiquette — sharing that lock made the
-# fallback (the path a cookie-less install takes for EVERY album) the slowest
-# part of an import. Its own, lighter spacing and its own lock: four calls a
-# second to a public archive is still gentle, and archive fetches for several
-# albums can now overlap instead of queueing behind RYM's live-site pace.
+# chart fallback the slowest part of a Discover load. Its own, lighter spacing
+# and its own lock: four calls a second to a public archive is still gentle,
+# and archive fetches for several charts can overlap instead of queueing behind
+# RYM's live-site pace.
 RYM_ARCHIVE_MIN_INTERVAL = 0.25
-# How many release-page spellings the ARCHIVE walk tries. The live ladder can
-# afford four (`_rym_release_paths`) because a 404 is one cheap request; an
-# archive answer costs a snapshot fetch and — when the newest capture is not a
-# page — an index request behind it. The page MusicBrainz states (`album_url`)
-# already resolves the common case without guessing a slug at all.
-RYM_ARCHIVE_PATHS = 2
 _rym_lock = threading.Lock()
 _rym_last = 0.0
 # The archive's own pacing, kept OFF RYM's lock on purpose (see
@@ -2930,15 +2919,25 @@ def rym_last_response():
 
 
 def _rym_note(cfg=None, answered=False):
-    """RYM's line in the genre chain's report — "" when there is nothing to say.
+    """RYM's line in a source report — "" when there is nothing worth saying.
 
-    RYM is the one source with a SECOND route, so "no data" is never enough for
-    it: the user has to be able to tell "the archive answered, and this is a
-    snapshot captured 2021-03-25" from "neither route answered, and here is the
-    setting that fixes the live one". `answered` is the caller's own fact
-    (whether this source contributed anything); WHICH route answered comes from
-    `_rym_route`, written by the request that answered and cleared by the caller
-    before it asks.
+    `answered` is the caller's own fact (whether this source contributed
+    anything), and WHICH route replied comes from `_rym_route`, written by the
+    request that answered and cleared by the caller before it asks.
+
+    An answer read off that snapshot says so — which capture, and its date —
+    because RYM's own data from a stated date is a weaker claim than today's
+    page. The RYM CHART rows are the only caller that reads a snapshot; the
+    GENRE chain reads the LIVE page only (`rym_genres` takes no archive route —
+    the owner's rule), so nothing here may blame an archived snapshot for the
+    genre chain: there is no such route to blame, and naming one sends the user
+    to check a setting that was never in play.
+
+    Nothing answered: the genre chain is the only caller, and its own skip
+    sentence (`_genre_source_skip`) already names a refusal and the credential
+    that fixes it. This speaks only for the one case that sentence cannot cover
+    — no `rym_cookie` at all, which reaches here only with a solver configured
+    (otherwise the source is skipped before any request).
     """
     route = str(_rym_route.get("route") or "")
     if answered:
@@ -2949,15 +2948,12 @@ def _rym_note(cfg=None, answered=False):
                else "the live page refused this request")
         return ("from an archived snapshot%s on web.archive.org — %s"
                 % (f" captured {when}" if when else "", why))
-    if not _rym_archive_on(cfg):
-        return ""          # the skip/failure line for this source already fits
+    if route in ("live", "archive"):
+        return ""          # RYM answered; the page simply states nothing
     if not _rym_cookie(cfg):
-        return ("no rym_cookie in Settings → Discovery, and no archived "
-                "snapshot of this page answered (RateYourMusic refuses an "
-                "automated client without one)")
-    return ("RateYourMusic refused this cookie and no archived snapshot of "
-            "this page answered — set a fresh rym_cookie in Settings → "
-            "Discovery")
+        return ("no rym_cookie in Settings → Discovery — RateYourMusic refuses "
+                "an automated client without one")
+    return ""              # a refusal is the skip sentence's to report
 
 
 def _rym_unreachable(reason, cfg=None, status=None, challenge=False, url=""):
@@ -3255,9 +3251,9 @@ def _rym_archive_get(path, cfg=None, started=None):
 
     Every request here goes through `_rym_archive_http`, which paces calls to
     archive.org on the archive's OWN light interval (`RYM_ARCHIVE_MIN_INTERVAL`)
-    and does NOT take RYM's live-site lock — the fallback (the path a
-    cookie-less install takes for every album) must not queue behind RYM's
-    1 req/s, and archive fetches for several albums can overlap. `started` is
+    and does NOT take RYM's live-site lock — the chart fallback must not queue
+    behind RYM's 1 req/s, and archive fetches for several charts can overlap.
+    `started` is
     the caller's wall-clock budget (`_rym_expired`), checked between captures.
     Nothing here touches the refusal latch or records a refusal
     (`_rym_unreachable`) — archive.org is a different host, and a capture that
@@ -3547,7 +3543,7 @@ def _rym_path_from_url(url):
     return path if path.startswith("/release/") else ""
 
 
-def _rym_album_answer(html, url, archive=None):
+def _rym_album_answer(html, url):
     """The genre answer one RYM RELEASE page holds, or None.
 
     The track list is read first and then REMOVED: a row that states its own
@@ -3561,10 +3557,8 @@ def _rym_album_answer(html, url, archive=None):
     artist page, which can only say less, so `genres`/`descriptors` are empty in
     that case and the tracks carry the whole answer.
 
-    `archive` is the snapshot this page came from (see `_rym_archive_get`); it
-    is recorded in the answer, and the URL it reports is the snapshot's, because
-    a caller that shows the user where a genre came from must not point them at
-    a live page that refused to serve it.
+    The answer is always a LIVE page: the genre chain has no archive route (the
+    owner's rule), so no snapshot provenance is carried here.
 
     `rating` is the release's own community average — the same schema.org
     microdata the page publishes for the genres' readers
@@ -3595,19 +3589,14 @@ def _rym_album_answer(html, url, archive=None):
            "source_url": f"{RYM_BASE}{url}", "source": "rym"}
     if rating:
         out["rating"] = rating
-    if archive:
-        out["archive"] = dict(archive)
-        out["source_url"] = archive.get("url") or out["source_url"]
     return out
 
 
 def _rym_live_album_answer(artist, album, cfg, album_url=""):
     """The three LIVE routes of `rym_genres`, best first, or None.
 
-    Split out so the archived route can stand BESIDE this ladder instead of
-    inside it: `rym_genres` runs these when it has a credential to run them
-    with, and falls through to a snapshot when they cannot answer. The routes
-    themselves are unchanged — every one of them is VERIFIED before it is read
+    The genre chain's only routes: there is no archived fallback behind them
+    (the owner's rule). Every one is VERIFIED before it is read
     (`_rym_verified`: the answer must have stayed on the path that was asked
     for, and the page must state the artist AND the album — a genre list lifted
     from a same-named cover version is worse than no genres at all):
@@ -3674,63 +3663,16 @@ def _rym_live_album_answer(artist, album, cfg, album_url=""):
     return None
 
 
-def _rym_archived_answer(artist, album, cfg, album_url=""):
-    """The archived-snapshot route of `rym_genres`, or None.
-
-    The paths tried are the one MusicBrainz states first (an identity, no slug
-    guessed) and then RYM's own spellings — and only the first few: the live
-    ladder can afford four candidates because a 404 is one cheap request, while
-    an archive answer costs a snapshot fetch and, when the newest capture is not
-    a page, an index request behind it.
-
-    The search page is NOT read from the archive. Its hit list is the site's
-    answer to a QUERY — the one page whose content the site itself would answer
-    differently today — and a RYM genre is only ever read off a page confirmed
-    to BE this release.
-    """
-    started = time.time()
-    stated = _rym_path_from_url(album_url)
-    paths = ([stated] if stated else []) + \
-        [p for p in _rym_release_paths(artist, album) if p != stated]
-    for url in paths[:RYM_ARCHIVE_PATHS + (1 if stated else 0)]:
-        html, snapshot = _rym_archive_get(url, cfg, started)
-        if html and _rym_mentions(html, artist, album):
-            got = _rym_album_answer(html, url, archive=snapshot)
-            if got:
-                return got
-        if _rym_expired(started):
-            break
-    return None
-
-
-def rym_genres(artist, album, cfg=None, album_url="", archive=False):
+def rym_genres(artist, album, cfg=None, album_url=""):
     """RateYourMusic genres for an album, or None when RYM cannot answer.
 
-    Two routes decide it, and which one is asked is settled before a request
-    goes out: the LIVE release page (`_rym_live_album_answer` — the page
-    MusicBrainz states, then RYM's own slugs, then its search page), and the
-    ARCHIVED copy of that page (`_rym_archived_answer`).
-
-    The archive is a route the CALLER asks for, not a default of this function
-    (`archive=True` is what `_genre_source_answers` passes) — and the config may
-    still veto it: with `rym_archive_fallback` off, or in a cfg that omits the
-    key, an `archive=True` call behaves exactly like an `archive=False` one
-    (`_rym_archive_on`). Everything that is not a genre read leaves it False on
-    purpose: the link resolver has MusicBrainz's own route to each page, and a
-    Wayback request must never become what IT falls back to.
-
-    Without a `rym_cookie` the live site is a known refusal (see RYM_BASE), so a
-    genre read with the archive permitted does not ask it at all: the snapshot
-    answers instead, and the request, the second of throttle and the refusal
-    latch are all saved. With a cookie the live page is asked first and the
-    snapshot is what answers behind it — after a refusal, after a latch, or when
-    the live page is not this release.
-
-    An answer that came from a snapshot carries `"archive": {"snapshot", "url"}`
-    (the capture's timestamp and its Wayback URL) and its `source_url` is that
-    snapshot's URL, not the live page's. Everything else — `genres`,
-    `descriptors`, `level: "album"`, `tracks` — is exactly what a live page
-    would have produced, because it is parsed by the same scrapers.
+    The LIVE release page decides it (`_rym_live_album_answer` — the page
+    MusicBrainz states, then RYM's own slugs, then its search page). There is
+    no archived-snapshot route here: the Internet Archive is out of the genre
+    chain (the owner's rule), so `rym_archive_fallback` — which now scopes to
+    the Discover charts — cannot make a genre read read a snapshot. A challenge
+    is answered by the solver (`cf_solver_url`) or reported by the source's own
+    sentence, never filled from a capture.
 
     A user-initiated check (the Sources panel's Test) clears the refusal latch
     first — `_rym_clear_block` — so the saved cookie is really put to RYM
@@ -3740,29 +3682,17 @@ def rym_genres(artist, album, cfg=None, album_url="", archive=False):
     album = str(album or "").strip()
     if not artist or not album:
         return None
-    archive = bool(archive) and _rym_archive_on(cfg)
-    if bool(_rym_cookie(cfg)) or not archive:
-        got = _rym_live_album_answer(artist, album, cfg, album_url)
-        if got:
-            return got
-    if not archive:
-        return None
-    return _rym_archived_answer(artist, album, cfg, album_url)
+    return _rym_live_album_answer(artist, album, cfg, album_url)
 
 
-def rym_artist_genres(artist, cfg=None, archive=False):
+def rym_artist_genres(artist, cfg=None):
     """RateYourMusic genres for an artist (its /artist/ page), or None.
 
     Confirmed as that artist's page before its genres are read, exactly like
-    the album path — a label or another act's page must not supply them.
-
-    The archived copy of the page is the same fallback `rym_genres` has, asked
-    for the same way (`archive=True`, and `rym_archive_fallback` still vetoes
-    it) and under the same rule otherwise: with no credential the live site is
-    not asked at all when the archive may be used, so a default install still
-    reaches this tier instead of it silently not existing. An answer that came
-    from a snapshot carries `"archive": {"snapshot", "url"}` and reports the
-    snapshot's URL.
+    the album path — a label or another act's page must not supply them. Live
+    only, for the same reason `rym_genres` is: the archive is out of the genre
+    chain (the owner's rule), so a page RYM will not serve yields nothing
+    rather than an older capture.
 
     `cfg` is threaded through for the same reason `rym_genres` takes it: the
     refusal latch and the cookie are keyed to the CALLER's credential, and a
@@ -3773,22 +3703,11 @@ def rym_artist_genres(artist, cfg=None, archive=False):
     if not artist:
         return None
     url = f"/artist/{_rym_slug(artist)}"
-    archive = bool(archive) and _rym_archive_on(cfg)
-    html, snapshot = None, {}
-    if bool(_rym_cookie(cfg)) or not archive:
-        html = _rym_verified(url, cfg, artist)
-    if not html and archive:
-        html, snapshot = _rym_archive_get(url, cfg)
-        if html and not _rym_mentions(html, artist):
-            html = None
+    html = _rym_verified(url, cfg, artist)
     genres = _rym_genres_from(html or "")
     if not genres:
         return None
-    out = {"genres": genres, "source_url": f"{RYM_BASE}{url}"}
-    if snapshot:
-        out["archive"] = dict(snapshot)
-        out["source_url"] = snapshot.get("url") or out["source_url"]
-    return out
+    return {"genres": genres, "source_url": f"{RYM_BASE}{url}"}
 
 
 # --------------------------------------------------------------------------- #
@@ -4127,11 +4046,6 @@ def aoty_page(artist, album="", cfg=None, kind="album"):
             return None
         path = aoty.resolve("album", artist, album, cfg=cfg)
     return aoty.fetch(path, cfg=cfg) if path else None
-
-
-def aoty_album_page(artist, album, cfg=None):
-    """The AOTY album page's HTML for one album, or None (live — see above)."""
-    return aoty_page(artist, album, cfg=cfg, kind="album")
 
 
 def aoty_genres_from_html(html):
@@ -5077,6 +4991,12 @@ _GENRE_CACHE: dict = {}
 _GENRE_CACHE_LOCK = threading.Lock()
 _GENRE_CACHE_MAX = 5000
 _GENRE_MISS = object()
+# A producer's "this source refused TRANSIENTLY right now" (a Cloudflare
+# challenge, a dead connection) — the opposite of `_GENRE_MISS` above. A MISS
+# is "asked, and it has nothing", which is worth the full TTL; a refusal is a
+# state the user can change (paste the cookie), and remembering it as a MISS is
+# what kept a fresh credential from fixing a source for a month.
+_GENRE_TRANSIENT = object()
 
 
 def _genre_cache_file(ident):
@@ -5098,6 +5018,12 @@ def _genre_cached(kind, key, producer):
     `producer` must return JSON-serializable data or None and must never
     raise: a failing source is not allowed to take the chain down, and "no
     answer" is cached like any other answer so a rerun costs no request.
+
+    The ONE exception is `_GENRE_TRANSIENT`: a producer that returns it says
+    the source REFUSED this request (a challenge, a dead connection) rather
+    than having nothing — so it is passed through as None and NOT remembered,
+    because a refusal is the user's credential to change and a cached one would
+    outlive the fix.
     """
     ident = f"{kind}|{key}"
     with _GENRE_CACHE_LOCK:
@@ -5117,6 +5043,8 @@ def _genre_cached(kind, key, producer):
         except (OSError, ValueError):
             pass
     value = producer()
+    if value is _GENRE_TRANSIENT:
+        return None
     with _GENRE_CACHE_LOCK:
         if len(_GENRE_CACHE) >= _GENRE_CACHE_MAX:
             _GENRE_CACHE.clear()
@@ -5478,6 +5406,55 @@ def _release_artist_mbids(artist, album, release, cfg):
     return ids
 
 
+def _aoty_genre_page(kind, artist, album, cfg):
+    """One AOTY page for the genre chain — or `_GENRE_TRANSIENT` when refused.
+
+    `kind` is "album" or "artist", the two genre levels AOTY has. A page AOTY
+    will not serve THIS request (the Cloudflare challenge, a dead connection)
+    is not "AOTY has no genres": returning `_GENRE_TRANSIENT` keeps
+    `_genre_cached` from remembering it, so pasting a fresh `aoty_cookie` (or
+    setting `cf_solver_url`) lets the NEXT run read the page instead of getting
+    a 30-day-old negative back. A real MISS — a page AOTY served, with no
+    matching genre row — is an ordinary None and is cached as one.
+
+    The `at` guard keeps a stale refusal from a previous lookup from being read
+    as this one's: `aoty_page` returns None without any fetch when the identity
+    is empty, and then `last_response` still describes whatever ran before.
+    """
+    before = time.time()
+    html = aoty_page(artist, album, cfg=cfg, kind=kind)
+    if html is not None:
+        return html
+    info = aoty.last_response()
+    if info.get("at", 0) >= before and not info.get("ok", True):
+        return _GENRE_TRANSIENT
+    return None
+
+
+def _aoty_note(cfg=None, since=0.0):
+    """AOTY's line in the genre chain's report — "" when there is nothing to say.
+
+    AOTY has ONE route (live), so when it answered nothing the user has to be
+    able to tell "the site refused us" — a Cloudflare challenge, fixed by a
+    fresh `aoty_cookie` or `cf_solver_url` — from "AOTY simply carries no genre
+    row for this release". `since` is when the chain asked, so a refusal from
+    another release's lookup (or another source's) is not reported as this
+    one's; `aoty.last_response` carries the timestamp that makes that possible,
+    exactly like `rym_last_response` does for RYM.
+    """
+    info = aoty.last_response()
+    if not info.get("at") or info.get("at", 0) < since:
+        return ""
+    if info.get("ok"):
+        return ""          # AOTY answered; it just states no genres here
+    if info.get("challenge"):
+        return ("Album of the Year was challenged by Cloudflare — set a fresh "
+                "aoty_cookie in Settings → Discovery (or cf_solver_url)")
+    return ("Album of the Year did not answer — %s"
+            % (f"HTTP {info['status']}" if info.get("status")
+               else "no connection"))
+
+
 def _genre_source_answers(source, artist, album, release, cfg, tracks):
     """One source's answers: {key: {"level", "genres"[, "title"]}}.
 
@@ -5535,17 +5512,20 @@ def _genre_source_answers(source, artist, album, release, cfg, tracks):
         # album, and the artist page is the fallback when the album page states
         # no row. Both are read LIVE (cleared `aoty_cookie` or the solver) and
         # cached 30 days with the rest of this source's pages, so an album the
-        # chain asks about twice pays one fetch.
+        # chain asks about twice pays one fetch — but a REFUSAL (a challenge, a
+        # dead connection) is not cached at all (`_aoty_genre_page`): it is the
+        # user's cookie to fix, and a remembered refusal would keep answering
+        # "no data" for 30 days after they did.
         got = _genre_cached(
             "album",
             f"albumoftheyear|album|{_norm_compare(artist)}|{_norm_compare(album)}",
-            lambda: aoty_album_page(artist, album, cfg))
+            lambda: _aoty_genre_page("album", artist, album, cfg))
         parsed = aoty.parse_album(got) if got else None
         wide = _genre_row("album", (parsed or {}).get("genres") or [])
         if not wide:
             ap = _genre_cached(
                 "album", f"albumoftheyear|artist|{_norm_compare(artist)}",
-                lambda: aoty_page(artist, cfg=cfg, kind="artist"))
+                lambda: _aoty_genre_page("artist", artist, "", cfg))
             wide = _genre_row("artist",
                               (aoty.parse_artist(ap) or {}).get("genres") or [])
         return {_ALL_TRACKS: wide} if wide else {}
@@ -5866,6 +5846,7 @@ def genre_chain(artist="", album="", release=None, limit=None, sources=None,
             except Exception:
                 pass
         asked.append(source)
+        asked_at = time.time()
         try:
             answers = _genre_source_answers(source, artist, album, release,
                                             cfg, tracks) or {}
@@ -5876,10 +5857,18 @@ def genre_chain(artist="", album="", release=None, limit=None, sources=None,
             # A source that just refused itself says so instead of "no data":
             # RateYourMusic latches its refusal, so the same helper that skips
             # it up front now reports WHY, and the wizard shows the setting to
-            # fix rather than an empty answer. RYM's sentence is its own
-            # (`_rym_note`): it has a SECOND route — an archived snapshot — so
-            # the report says which of the two was tried and what came of it.
-            note = _rym_note(cfg) if source == "rateyourmusic" else ""
+            # fix rather than an empty answer. The genre chain reads RYM LIVE
+            # only (no archived route — the owner's rule), so `_rym_note` adds
+            # just the no-credential sentence; a refusal is the skip sentence's
+            # own, and neither one blames a snapshot this chain never asks.
+            # Album of the Year has the same need (`_aoty_note`): it has no
+            # latch, so a challenge this call met is spelled out here.
+            if source == "rateyourmusic":
+                note = _rym_note(cfg)
+            elif source == "albumoftheyear":
+                note = _aoty_note(cfg, asked_at)
+            else:
+                note = ""
             notes[source] = note or _genre_source_skip(source, cfg) or "no data"
             continue
         if source == "rateyourmusic":

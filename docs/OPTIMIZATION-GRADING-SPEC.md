@@ -6753,6 +6753,17 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   cleared cookie (`rym_cookie`/`aoty_cookie`) or the configured
   `cf_solver_url`; without one the source reports its refusal honestly and
   contributes nothing rather than filling the value from a stale capture.
+  "Honestly" is enforced: the genre chain has no archive route at all, so its
+  report never blames a snapshot for a refusal (a config carrying
+  `rym_archive_fallback` — True by default — used to make the note claim "no
+  archived snapshot answered" for a snapshot nobody asked for); a refusal is
+  named in the source's own words (RateYourMusic names `rym_cookie`, Album of
+  the Year names the challenge) rather than showing as "no data"; and a
+  transient refusal is NEVER remembered as the 30-day "no answer" a real miss
+  is — so pasting the cleared cookie fixes the source on the next run, not a
+  month later. Album of the Year has no refusal latch (RateYourMusic's is
+  `_rym_blocked`), so its challenge is re-reported each run until a credential
+  or a solver answers.
   MusicBrainz, keyless, is unaffected.
 - **R358d — a missing per-track web rating FAILS the grade, by default.** The
   public verdict is part of what a finished album carries, so `WEBRATING` joins

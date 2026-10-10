@@ -161,5 +161,46 @@ ok(intg._genre_source_skip("albumoftheyear",
                            {"cf_solver_url": "http://127.0.0.1:8191"}) is None,
    "a solver makes the source askable without a cookie")
 
+
+# --------------------------------------------------------------------------- #
+# `fetch`'s outcome record — the two answers a "no data" must not blur
+# --------------------------------------------------------------------------- #
+# `cfchallenge.fetch_page` is the seam `fetch` reads; stubbing it keeps this
+# offline. A CHALLENGE is not a page: `fetch` returns None AND `last_response`
+# says why, so the genre chain can report a refusal rather than "no data" and
+# can refuse to remember it as a 30-day negative.
+aoty._MIN_INTERVAL = 0.0
+_real_fetch_page = aoty.cfchallenge.fetch_page
+
+
+def _fetch_page_challenge(url, cfg=None, **kwargs):
+    return {"ok": False, "html": "", "status": 403, "challenge": True,
+            "via": "none"}
+
+
+def _fetch_page_ok(url, cfg=None, **kwargs):
+    return {"ok": True, "html": "<html>albumoftheyear.org</html>",
+            "status": 200, "challenge": False, "via": "http"}
+
+
+aoty.cfchallenge.fetch_page = _fetch_page_challenge
+try:
+    got = aoty.fetch("/album/970-radiohead-the-bends.php", cfg={})
+    info = aoty.last_response()
+    ok(got is None and info["challenge"] is True and info["ok"] is False,
+       f"a challenge is None with last_response.challenge True: {info}")
+    ok(bool(info.get("at_iso")), f"the outcome carries a timestamp: {info}")
+finally:
+    aoty.cfchallenge.fetch_page = _real_fetch_page
+
+aoty.cfchallenge.fetch_page = _fetch_page_ok
+try:
+    got = aoty.fetch("/album/970-radiohead-the-bends.php", cfg={})
+    info = aoty.last_response()
+    ok(got is not None and info["ok"] is True and info["challenge"] is False,
+       f"a served page is html with last_response.ok True: {info}")
+finally:
+    aoty.cfchallenge.fetch_page = _real_fetch_page
+
 print(f"aoty: {PASS} passed, {FAIL} failed")
 raise SystemExit(1 if FAIL else 0)
