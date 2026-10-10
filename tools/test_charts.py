@@ -28,8 +28,8 @@ What this pins:
     chart passed off as this week's;
   * RateYourMusic first for tracks, its refusal surfaced verbatim while the
     other sources still answer, its archived-snapshot answer saying so, and its
-    cookie/archive rule reused from the genre chain (neither cookie nor archive
-    skips it, naming the key to set);
+    live-only rule reused from the genre chain (no cookie and no solver skips
+    it before any request, naming the key to set);
   * the library marking: a chart row the library owns carries its path, one it
     does not offers the add action;
   * the route's validation and the exact set of paths it serves.
@@ -142,8 +142,9 @@ LIB = {"folder": "C:/Music", "artists": [
 discover._library = lambda cfg, lib=None: lib if lib is not None else LIB
 
 FULL_CFG = {"discovery_enabled": True, "rym_archive_fallback": True,
-            "lastfm_api_key": "key"}
-NO_KEY_CFG = {"discovery_enabled": True, "rym_archive_fallback": True}
+            "rym_cookie": "cf_clearance=test", "lastfm_api_key": "key"}
+NO_KEY_CFG = {"discovery_enabled": True, "rym_archive_fallback": True,
+              "rym_cookie": "cf_clearance=test"}
 NO_COOKIE_CFG = {"discovery_enabled": True}
 
 # --------------------------------------------------------------------------- #
@@ -311,7 +312,7 @@ ok({s["id"]: s for s in keyless["sources"]}["lastfm"]["missing"]
    == ["lastfm_api_key"],
    "while the source list still names what it needs")
 ok("rym" not in keyless["notes"],
-   "RYM IS asked — with the archive fallback on it has a route without a cookie")
+   "RYM IS asked — its own rym_cookie is set, so the live gate lets it through")
 
 # ── a source that refuses: the provider's own words, verbatim ───────────────
 def refuse_apple(url, params):
@@ -389,12 +390,12 @@ ok(archived["notes"]["rym"].startswith("answered from an archived snapshot"),
 ok([r["source"] for r in archived["items"]][:2] == ["rym", "rym"],
    "…and its rows still lead the tracks page")
 
-# ── RYM with neither a cookie nor the archive route ─────────────────────────
+# ── RYM with neither a cookie nor a solver ──────────────────────────────────
 fresh([("api.deezer.com/chart/0/tracks", DEEZER_TRACKS)])
 stub_rym()
 no_cookie = api_discover.charts_list(period="all", kind="tracks", cfg=NO_COOKIE_CFG)
 ok(no_cookie["notes"]["rym"].startswith("skipped: no rym_cookie"),
-   f"without a cookie and with the archive off, RYM is skipped by name "
+   f"without a cookie or a solver, RYM is skipped by name "
    f"({no_cookie['notes']['rym']})")
 ok([c for c in CALLS if c[0] == "rym"] == [],
    "…without spending a request on it")

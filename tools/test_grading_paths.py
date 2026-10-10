@@ -2167,18 +2167,27 @@ ok(row_line(lines_targeted, ALBUM_REL) is not None
                for r in (BARE_REL, HOLDER_REL, INNER_REL)),
    "the targeted run grades the album alone")
 
-# A music root holding NOTHING but empty folders: the folders are rows, the
-# root itself never is — an empty music folder is not a folder to clean up, and
-# reporting it would bury the real ones under a row for the library itself.
+# A music root holding NOTHING but a bare empty folder: NOTHING is a row. The
+# root's immediate children are the library's own structure level, and a bare
+# one (no audio, no file, no child that holds one) is scaffolding, not a broken
+# album — an empty library must not draw a phantom album named after the
+# folder, and the root itself is never a row either.
 only_empty = os.path.join(tmp, "OnlyEmpty", "Music")
 os.makedirs(os.path.join(only_empty, "Lonely"))
 stats_only, lines_only = graded(dict(EMPTY_CFG, music_folder=only_empty))
 _only_rows = [l for l in lines_only if l.startswith(("✓ ", "✕ "))]
-ok(stats_only["issue_counts"].get(EMPTY_FOLDER) == 1
-   and len(_only_rows) == 1
-   and row_line(lines_only, "Lonely") is not None,
-   f"the empty folder is the only row — the music folder root is not one "
-   f"({_only_rows})")
+ok(stats_only.get("issue_counts", {}).get(EMPTY_FOLDER) is None
+   and not _only_rows,
+   f"a bare folder directly under the root is not a row "
+   f"({stats_only.get('issue_counts')}, {_only_rows})")
+# …but the same bare folder NESTED one level down IS reported: that is where an
+# album's audio was, which is the sweep's purpose (see the shapes above).
+nested = os.path.join(only_empty, "Artist", "Lonely")
+os.makedirs(nested)
+stats_nested, lines_nested = graded(dict(EMPTY_CFG, music_folder=only_empty))
+ok(stats_nested["issue_counts"].get(EMPTY_FOLDER) == 1
+   and row_line(lines_nested, os.path.join("Artist", "Lonely")) is not None,
+   f"a nested empty folder is still a row ({lines_nested})")
 
 # ----------------------------------------------------------------------
 # expected release tracklist (grade_check_expected_tracks)

@@ -31,6 +31,14 @@ from . import httpclient  # noqa: F401
 # spelling them again, so a renamed tag fails loudly there instead of printing
 # an empty header (see IDENTITY_TAG_FIELDS).
 from . import tags_registry as _tags_registry
+# The Cloudflare layer the two scraped sources go through: challenge detection
+# and the optional FlareSolverr-compatible solver (`cfchallenge.fetch_page` /
+# `solve`). It imports nothing from here, so there is no cycle.
+from . import cfchallenge
+# Album of the Year's LIVE scraper (fetch + resolve + parse), shared by the
+# genre chain and the web-rating fetch. It imports only `cfchallenge` and
+# `mlo.config` lazily, so there is no cycle.
+from . import aoty
 
 from mlo import cover_choice as _cover_choice
 from mlo import release_choice
@@ -1728,17 +1736,44 @@ def merge_advisory(answers, fallback=None):
          first: see `mlo.advisory.decide_advisory`, and `advisory_fallback`
          for the last resort.
 
+    THE FALSE-EXPLICIT GUARD. Step 1 has ONE exception, added because a clean
+    track must never be written explicit off a loose match: when an IDENTITY
+    route states CLEAN (0) and the only 1 comes from a NAME-guess route, the
+    clean wins. An identity route matched the track by its own ISRC
+    (`deezer-isrc`, `spotify-isrc`) — the same recording, not a lookalike —
+    while `apple-album` (a name+track-number match, whose explicit EDITION is
+    preferred when one exists) and `itunes-song` (a title search) are guesses
+    the providers themselves get wrong: the owner's "Just" case is exactly a
+    track whose loose Apple match said explicit while Deezer's ISRC said
+    clean. `youtube-age` is video-level and never clears a track either way.
+    Two identity routes that disagree still take the rank above (1 wins), and
+    a 1 from an identity route is never overruled by a name-route 0.
+
     The same rank settles ONE source's several answers before this runs
     (`_strongest_advisory`, which `resolve_advisory_route` applies as each
     answer arrives): a source asked once per pressing states "explicit" for
     the same track its other answer calls clean, and ask order must not
     decide which of the two counts.
     """
-    values = {_advisory_int(v) for v in (answers or {}).values()}
+    answers = answers or {}
+    values = {_advisory_int(v) for v in answers.values()}
+    if 1 in values:
+        identity_clean = any(_advisory_int(answers.get(s)) == 0
+                             for s in _ADVISORY_IDENTITY_SOURCES)
+        identity_explicit = any(_advisory_int(answers.get(s)) == 1
+                                for s in _ADVISORY_IDENTITY_SOURCES)
+        if 0 in values and identity_clean and not identity_explicit:
+            return 0
     for value in (1, 0, 2):
         if value in values:
             return value
     return fallback
+
+
+# The advisory routes that match a track by IDENTITY (its own ISRC) rather
+# than by name — see `merge_advisory`'s guard. A name-guess route's explicit
+# cannot overrule one of these stating clean.
+_ADVISORY_IDENTITY_SOURCES = ("deezer-isrc", "spotify-isrc")
 
 
 def _strongest_advisory(current, answer):
@@ -3330,6 +3365,19 @@ def _rym_get(path, params=None, cfg=None, expect=None):
     if r is None:
         _rym_unreachable(reason, cfg, url=url)
         return None
+    # A challenge is not an answer. With a solver configured (`cf_solver_url`),
+    # ask it once for THIS url: the page it returns is RYM's live page — the
+    # same slugs, the same scrapers — and the clearance cookies it won are
+    # reused by later plain requests, so one solve buys many fast pages.
+    if cfchallenge.is_challenge(r.text or "", r.status_code):
+        solved = cfchallenge.solve(str(getattr(r, "url", "") or url), cfg)
+        if (solved and solved.get("html")
+                and not cfchallenge.is_challenge(solved["html"])):
+            _rym_record(200, url)
+            _rym_route.update({"route": "live", "cached": False, "url": url,
+                               "snapshot": "", "solved": True})
+            _rym_cache_write(key, solved["html"])
+            return solved["html"]
     if r.status_code != 200:
         # 404 is a slug that does not exist, not a blocked source: the caller
         # tries its next candidate instead of declaring RYM unreachable. The
@@ -3779,7 +3827,9 @@ def rym_album_rating(artist, album, cfg=None, album_url="", rg_mbid=""):
                          or "")
         except Exception:
             stated = ""
-    return rym_genres(artist, album, cfg, album_url or stated, archive=True)
+    # LIVE only for the rating chain (no archive): the release page is read
+    # from rateyourmusic.com, and `rym_genres` carries the rating off it.
+    return rym_genres(artist, album, cfg, album_url or stated)
 
 
 # A RYM RELEASE page publishes no per-track community average at all: the only
@@ -3973,12 +4023,11 @@ def rym_song_rating(artist, title, cfg=None):
     title = str(title or "").strip()
     if not artist or not title:
         return None
-    archive = _rym_archive_on(cfg)
-    page = None
-    if bool(_rym_cookie(cfg)) or not archive:
-        page = _rym_live_song_answer(artist, title, cfg)
-    if not page and archive:
-        page = _rym_archived_song_answer(artist, title, cfg)
+    # LIVE only — the song page is read from rateyourmusic.com (a cleared
+    # cookie or the solver); no archive route. The archived-snapshot reader
+    # (`_rym_archived_song_answer`) is kept for the chart/link paths that still
+    # use it, but the RATING chain never falls back to it.
+    page = _rym_live_song_answer(artist, title, cfg)
     if not page:
         return None
     from mlo.web_ratings import rym_rating_from_html
@@ -3986,25 +4035,6 @@ def rym_song_rating(artist, title, cfg=None):
     if not parsed or parsed.get("value") is None:
         return None
     return {"rating": {"value": parsed["value"], "count": parsed.get("count")}}
-
-
-def discogs_album_rating(artist, album, cfg=None):
-    """The Discogs release detail for an album, or None without a token.
-
-    Discogs' community rating lives on the release detail
-    (``community.rating = {"average": 4.72, "count": 3809}``, VERIFIED live on
-    release 1174296), which is the same document `server.discovery` already
-    fetches for the genre chain — one cached pair of requests, two readers.
-    Without a `discogs_token` it answers None and this source is skipped
-    cleanly, exactly like the genre chain's.
-    """
-    if not str((cfg or {}).get("discogs_token") or "").strip():
-        return None
-    if not (artist or album):
-        return None
-    from server import discovery
-
-    return discovery._discogs_release(artist, album, cfg=cfg)
 
 
 def web_rating_fetchers():
@@ -4016,188 +4046,104 @@ def web_rating_fetchers():
     the answer is that source's raw payload or None. Every branch is a
     best-effort call to machinery this module already has; a source with no
     identity to work with (no MBID, no names) answers None WITHOUT a request.
+
+    Album of the Year answers for the ALBUM and for each TRACK, and each of its
+    answers is the PARSED payload from `server/aoty.py` (a dict), because the
+    same live fetch serves both chains and parsing it twice would be a second
+    place to be wrong: ``{"kind", "rating", "genres", "tracks"}`` for an album,
+    ``{"kind": "track", "rating"}`` for a song, ``{"kind": "artist", ...}`` for
+    an artist.
     """
     def fetch(source, kind=None, ident=None, cfg=None):
         source = str(source or "").strip().lower()
         ident = ident or {}
         mbid = str(ident.get("mbid") or "").strip()
+        level = str(kind or "album")
         if source == "musicbrainz":
             if not mbid:
                 return None
-            if str(kind or "album") == "track":
+            if level == "track":
                 return _recording_with_work(mbid)
             return release_group_rating(mbid)
         if source == "rateyourmusic":
-            if str(kind or "album") == "track":
+            if level == "track":
                 return rym_song_rating(ident.get("artist"), ident.get("title"),
                                        cfg)
             return rym_album_rating(ident.get("artist"), ident.get("album"),
                                     cfg, str(ident.get("url") or ""), mbid)
         if source == "albumoftheyear":
-            if str(kind or "album") != "album":
-                return None
-            return aoty_album_page(ident.get("artist"), ident.get("album"), cfg)
-        if source == "discogs":
-            if str(kind or "album") != "album":
-                return None
-            return discogs_album_rating(ident.get("artist"), ident.get("album"),
-                                        cfg)
+            artist = ident.get("artist")
+            if level == "track":
+                html = aoty_page(artist, ident.get("title"), cfg=cfg,
+                                 kind="song")
+                return aoty.parse_song(html) if html else None
+            if level == "artist":
+                html = aoty_page(artist, cfg=cfg, kind="artist")
+                return aoty.parse_artist(html) if html else None
+            html = aoty_page(artist, ident.get("album"), cfg=cfg, kind="album")
+            return aoty.parse_album(html) if html else None
         return None
 
     return fetch
 
 
 # --------------------------------------------------------------------------- #
-# Album of the Year (scraped — no API, and Cloudflare refuses automated clients)
+# Album of the Year (scraped LIVE — no API, behind Cloudflare)
 # --------------------------------------------------------------------------- #
-# VERIFIED, 2026-10-01: albumoftheyear.org answers Cloudflare's JS challenge to
-# every automated client this project can run — 403 "Just a moment…" to a plain
-# HTTP client, the same to a HEADED Chromium (not just headless), and the same
-# through a reader proxy. The live page is therefore NOT asked: the source is
-# read from the newest ARCHIVED CAPTURE of the album's own page, through the
-# same Wayback machinery the RYM readers use (`_rym_archive_fetch`,
-# `_rym_archive_pack`), which also keeps one 1 req/s lock and one 30-day disk
-# cache for both readers.
-#
-# The page's URL is /album/<id>-<artist-slug>-<album-slug>.php, and the numeric
-# id is AOTY's own — it cannot be derived from the names, so the Wayback INDEX
-# resolves it: a CDX prefix query filtered to `.*-<artist-slug>-<album-slug>
-# \.php$` (VERIFIED: "Neko Case / Middle Cyclone" → /album/1-neko-case-middle-
-# cyclone.php, "Radiohead / In Rainbows" → /album/363-radiohead-in-rainbows
-# .php). The slug pair matching BOTH names is the identity check — the same
-# rule `_rym_verified` applies by name — so a capture of a namesake album
-# cannot answer for this one.
-AOTY_BASE = "https://www.albumoftheyear.org"
-# How many index rows to read when resolving a page. CDX lists ascending, so
-# the newest capture is the LAST of them (`limit=-N`).
-_AOTY_INDEX_ROWS = 5
-# The album's genre anchors, primary and secondary together: AOTY renders the
-# finer ones as `<a href="/genre/70-americana/"><div class="secondary">
-# Americana</div></a>` and the headline ones as plain anchor text. Both are
-# genres for tagging purposes, which is why both are read — the JSON-LD block
-# would give only the two headline ones.
-_AOTY_GENRE_RE = re.compile(
-    r'href="/genre/[^"]*"[^>]*>\s*(?:<div[^>]*>\s*)?([^<]+?)\s*<', re.I)
+# The scraper lives in `server/aoty.py` (fetch + resolve + parse) because BOTH
+# chains use it: the genre chain below and `mlo.web_ratings`' rating fetch.
+# Everything it does is live — a cleared `aoty_cookie` (or a solver,
+# `cf_solver_url`) reads the real page; the Wayback route this section used to
+# document is gone on the owner's instruction. The two names here are the thin
+# wrappers the genre chain calls, kept so each call site still reads as "ask
+# Album of the Year" rather than reaching into a module.
 
+def aoty_page(artist, album="", cfg=None, kind="album"):
+    """One AOTY page's HTML, resolved through the site's own search, or None.
 
-def _aoty_archive_on(cfg=None):
-    """Whether the archived-capture route may be used (`aoty_archive_fallback`).
-
-    The same contract as `_rym_archive_on`: the key ships True in
-    `mlo.config.DEFAULT_CONFIG`, is read live so unticking it takes effect on
-    the next run, and a cfg that OMITS it is read as OFF — such a caller can
-    only mean "ask the source and see", and for this source that would be a
-    request the site is known to refuse.
+    `kind` is "album", "song" or "artist". An album is resolved by artist +
+    album, a song by artist + title, an artist by name alone; the resolved page
+    is confirmed by its slug carrying every word (see `aoty.resolve`). Returns
+    None for a missing identity, a page the search cannot find, or a challenge
+    — never an archived copy, which no longer exists on this path.
     """
-    try:
-        if cfg is None:
-            from mlo.config import load_config
-            cfg = load_config()
-        return bool((cfg or {}).get("aoty_archive_fallback"))
-    except Exception:
-        return False
-
-
-def _aoty_index_rows(params):
-    """One CDX query -> its rows as dicts keyed by the column names it sends.
-
-    The index NAMES its columns in row 0 ("urlkey","timestamp","original",…),
-    so the fields are found by name instead of assumed to be positions — the
-    same rule `_rym_archive_captures` follows, and the reason a change in the
-    index's column order cannot silently make this read the wrong ones.
-    """
-    text, _final, answered = _rym_archive_fetch(RYM_ARCHIVE_INDEX, params)
-    if not text:
-        return [] if answered else None
-    try:
-        rows = json.loads(text) or []
-    except ValueError:
-        return None
-    if not rows:
-        return []
-    head = [str(c).strip().lower() for c in (rows[0] or [])]
-    out = []
-    for row in rows[1:]:
-        if len(row) < len(head):
-            continue
-        out.append(dict(zip(head, (str(c) for c in row))))
-    return out
+    from . import aoty
+    artist = str(artist or "").strip()
+    album = str(album or "").strip()
+    if kind == "artist":
+        if not artist:
+            return None
+        path = aoty.resolve("artist", artist, cfg=cfg)
+    elif kind == "song":
+        # An AOTY song URL is `/song/<id>-<title-slug>/` — the slug carries the
+        # TITLE, never the artist — so the artist disambiguates only the SEARCH
+        # (`term`), and the slug match is on the title alone. Passing the
+        # artist into the match would reject every real song page.
+        if not artist or not album:
+            return None
+        path = aoty.resolve("song", album, cfg=cfg)
+    else:
+        if not artist or not album:
+            return None
+        path = aoty.resolve("album", artist, album, cfg=cfg)
+    return aoty.fetch(path, cfg=cfg) if path else None
 
 
 def aoty_album_page(artist, album, cfg=None):
-    """The AOTY album page's HTML for one album, or None.
-
-    Resolved and read entirely from the Wayback Machine (see the section
-    note): the index finds the page's own URL, and the newest capture of it is
-    replayed in its original bytes. The answer is cached 30 days with the rest
-    of the archived pages, INCLUDING the negative — "the archive holds no such
-    page" is an answer that does not get truer by being asked again, and without
-    it every run of an album AOTY has no page for would cost two archive.org
-    requests and two seconds of the 1 req/s walk.
-
-    Returns None for an unconfigured (or empty) identity, for a cfg with the
-    route switched off, and for an album the archive holds no page for. It never
-    raises: this is a best-effort source beside the others.
-    """
-    artist = str(artist or "").strip()
-    album = str(album or "").strip()
-    if not artist or not album or not _aoty_archive_on(cfg):
-        return None
-    slug = f"{_rym_slug(artist)}-{_rym_slug(album)}"
-    key = "aoty-" + hashlib.sha1(slug.encode("utf-8")).hexdigest()
-    cached = _rym_cache_read(key, RYM_CACHE_TTL)
-    if cached is not None:
-        html, _archive = _rym_archive_unpack(cached)
-        return html or None
-    rows = _aoty_index_rows([
-        ("url", f"{AOTY_BASE}/album/"), ("matchType", "prefix"),
-        ("output", "json"), ("filter", "statuscode:200"),
-        ("filter", f"original:.*-{slug}\\.php$"),
-        ("limit", f"-{_AOTY_INDEX_ROWS}")])
-    html = ""
-    if rows:
-        newest = max(rows, key=lambda r: str(r.get("timestamp") or ""))
-        target = str(newest.get("original") or "")
-        stamp = str(newest.get("timestamp") or "")
-        if target and stamp:
-            text, _final, _answered = _rym_archive_fetch(
-                f"{RYM_ARCHIVE_BASE}/{stamp}id_/{target}")
-            # The slug already names both the artist and the album, and the
-            # capture itself must still state them (`_rym_mentions`, the same
-            # name check `_rym_verified` runs on a RYM page): a namesake album's
-            # capture can never answer for this one.
-            if text and _rym_mentions(text, artist, album):
-                html = text
-    _rym_cache_write(key, _rym_archive_pack(html, {}))
-    return html or None
+    """The AOTY album page's HTML for one album, or None (live — see above)."""
+    return aoty_page(artist, album, cfg=cfg, kind="album")
 
 
 def aoty_genres_from_html(html):
     """The album's genre names on an AOTY page, headline ones first, or [].
 
-    Scoped to the Details row that carries the `Genre` label (the page also
-    links genres nowhere else, but a window is cheaper to defend than a claim
-    about the whole page): the anchors inside it are read in the order AOTY
-    prints them, primary then `secondary`, and the anchor TEXT is the name —
-    "Alt-Country", "Singer-Songwriter", "Americana", … No name is invented for
-    an anchor whose text is empty.
+    Scoped to the Details row that carries the `Genre` label; the anchors are
+    read in the order AOTY prints them, primary then `secondary`, and the
+    anchor TEXT is the name. A thin re-export of the parser in `server/aoty.py`
+    so existing callers and fixtures keep one spelling.
     """
-    text = html or ""
-    if not text:
-        return []
-    marker = text.find("Genre</span>")
-    if marker < 0:
-        return []
-    window = text[max(0, marker - 2000):marker]
-    start = window.rfind('class="detailRow"')
-    if start >= 0:
-        window = window[start:]
-    names = []
-    for match in _AOTY_GENRE_RE.finditer(window):
-        name = _html.unescape(match.group(1)).strip()
-        if name and name not in names:
-            names.append(name)
-    return names
+    from . import aoty
+    return aoty.genres_from_html(html)
 
 
 # --------------------------------------------------------------------------- #
@@ -4958,51 +4904,30 @@ def bandcamp_album(artist="", album="", titles=None):
 # position of a source is what a track's genre picks look like and the ones
 # below it are the fallbacks, not a second opinion.
 # `mlo.config.DEFAULT_CONFIG["genre_sources"]` is this list and
-# `normalize_config` migrates both previously shipped
-# defaults into it (`tools/test_genres.py` asserts the two are equal).
+# `normalize_config` migrates the old shipped defaults into it, dropping every
+# id this build no longer knows (`tools/test_genres.py` asserts the two lists
+# are equal).
 #
-#   a. rateyourmusic  release page — per TRACK where the page states one, else
-#                     album, then the artist page. FIRST by the user's own
-#                     requirement: its curated genre + descriptor
-#                     classification is the one they want. Its pages are read
-#                     live when a `rym_cookie` is configured and from an
-#                     archived snapshot when it is not (`rym_archive_fallback`,
-#                     default ON), so this source answers on a default install
-#                     too; blocked or never archived, it reports exactly what
-#                     happened — see RYM_BASE and `_rym_note`.
-#   b. musicbrainz    recording → release → release group → artist. Curated
-#                     per recording, and the app's identity anchor. SECOND by
-#                     the user's own requirement — it sits above every other
-#                     keyless source, which is also what makes a default
-#                     install answer with open data when RYM has nothing.
-#   c. listenbrainz   recording tags → release-group → artist. Crowdsourced
-#                     PER RECORDING, free, no key, MBID-native (no title
-#                     guessing for a release MusicBrainz knows).
-#   d. itunes         per-track `primaryGenreName`. Free, keyless, and its
-#                     per-track genre is reliable for mainstream releases.
-#   e. lastfm         track.getTopTags → artist.getTopTags. Crowdsourced per
-#                     track and broad, but needs a free API key.
-#   f. theaudiodb     searchtrack.php per track → album genre/mood. Per-track
-#                     plus album metadata (biography, art), keyless.
-#   g. wikidata       P136 on the recording entity, then the release group /
-#                     searched entity. Curated but sparse, per recording where
-#                     one is stated.
-#   h. bandcamp       album page tags. Crowdsourced and strong for
-#                     indie/self-released records; ALBUM level (Bandcamp
-#                     states no per-track genre at all), keyless.
-#   i. discogs        release styles + genres. Curated, album level, needs a
-#                     token.
-#   j. deezer         album genres only — album level, keyless.
-#   k. spotify        ARTIST genres — artist level, needs client id+secret,
-#                     the last resort (the chain only ever adds a source's
-#                     answer, so the weakest one goes last).
+# These are the ONLY sources the app asks for genres — the owner's rule. Each
+# one answers at the FINEST level it has and falls back track → album → artist,
+# and every one of them is read LIVE (no Internet Archive):
 #
-# Every per-track source sits ABOVE every album-only one (bandcamp, discogs,
-# deezer, spotify), which is what keeps a track's own answer ahead of an
-# album-wide guess (`tools/test_genres.py` asserts that property of this list).
-GENRE_SOURCES = ["rateyourmusic", "musicbrainz", "listenbrainz", "itunes",
-                 "lastfm", "theaudiodb", "wikidata", "bandcamp", "discogs",
-                 "deezer", "spotify"]
+#   a. rateyourmusic  the release page — per TRACK where the page states one,
+#                     else album, then the artist page. FIRST by the owner's
+#                     own requirement: its curated genre + descriptor
+#                     classification is the one they want. Live pages sit
+#                     behind Cloudflare, so they need a cleared `rym_cookie`
+#                     (or a solver, `cf_solver_url`); a refused page is
+#                     reported honestly — see RYM_BASE and `_rym_note`.
+#   b. albumoftheyear the album page's genre row for the release, plus each
+#                     track's own genre from its AOTY song page, then the
+#                     artist page. SECOND by the owner's requirement. Also
+#                     Cloudflare-fronted: `aoty_cookie` (or the solver).
+#   c. musicbrainz    recording → work → release → release group → artist.
+#                     Curated, keyless, and the app's identity anchor. THIRD:
+#                     it is the floor that answers when the two scraped
+#                     sources cannot, and it never meets a challenge.
+GENRE_SOURCES = ["rateyourmusic", "albumoftheyear", "musicbrainz"]
 
 
 # The key an ALBUM- or ARTIST-wide answer is filed under: it applies to every
@@ -5067,37 +4992,28 @@ def _genre_source_skip(source, cfg):
     """
     cfg = cfg or {}
     if source == "rateyourmusic":
-        # No `rym_cookie` is no longer "contribute nothing". With the archive
-        # fallback on, the Wayback Machine holds copies of these same pages and
-        # serves them to an unattended client, so the source IS asked and what
-        # the archive did with the request is reported by `_rym_note` instead of
-        # a skip line: "try the archive, then say exactly what happened".
-        archive = _rym_archive_on(cfg)
-        # What is still skipped, because a request could only confirm it: RYM
-        # refuses a client with no credential outright (see RYM_BASE), and a
-        # refusal already latched this cookie off. Both cost a request and a
-        # second of throttle on EVERY import to learn what the config already
-        # said — which is only worth paying when no archive route exists.
-        if not _rym_cookie(cfg) and not archive:
+        # The genre chain reads the LIVE page only (no archive route — the
+        # owner's rule). A cleared cookie is what a live request needs, and a
+        # solver (`cf_solver_url`) can stand in for it. Without either there is
+        # nothing to ask with: RYM refuses an unattended client outright, so
+        # this is skipped BEFORE a request instead of paying one to confirm it.
+        if not _rym_cookie(cfg) and not cfchallenge.solver_url(cfg):
             return ("skipped: no rym_cookie in Settings → Discovery "
-                    "(RateYourMusic refuses an automated client without one)")
-        if _rym_blocked(cfg) and not archive:
-            return ("skipped: RateYourMusic refused this cookie — set a fresh "
-                    "rym_cookie in Settings → Discovery")
+                    "(RateYourMusic refuses an automated client without one; "
+                    "or set cf_solver_url)")
+        if _rym_blocked(cfg):
+            return ("skipped: RateYourMusic refused this cookie — paste a "
+                    "fresh one in Settings → Discovery")
         return None
-    if source == "albumoftheyear" and not _aoty_archive_on(cfg):
-        # The live site is a known refusal, so with the archived route switched
-        # off there is nothing left to ask: reported as a SKIP (a setting the
-        # user can turn on), never as "no data".
-        return ("skipped: aoty_archive_fallback is off — Album of the Year "
-                "refuses an automated client without it")
-    if source == "lastfm" and not str(cfg.get("lastfm_api_key") or "").strip():
-        return "skipped: no lastfm_api_key in Settings → Discovery"
-    if source == "discogs" and not str(cfg.get("discogs_token") or "").strip():
-        return "skipped: no discogs_token in Settings → Discovery"
-    if source == "spotify" and not _spotify_configured(cfg):
-        return ("skipped: no spotify_client_id/spotify_client_secret in "
-                "Settings → Discovery")
+    if source == "albumoftheyear":
+        # Same rule for AOTY: a cleared cookie, or a solver. Without either the
+        # site answers the challenge to every client this project can run, so
+        # the source is skipped rather than asked to fail.
+        if not aoty.cookie(cfg) and not cfchallenge.solver_url(cfg):
+            return ("skipped: no aoty_cookie in Settings → Discovery "
+                    "(Album of the Year refuses an automated client without "
+                    "one; or set cf_solver_url)")
+        return None
     return None
 
 
@@ -5132,18 +5048,18 @@ def _genre_complete(names, limit):
 
 
 def _genre_needs_ai(genres, limit, picks):
-    """Whether a track's merged list still wants the model (a tie-breaker).
+    """Whether the model is the LAST RESORT for a track — the owner's rule.
 
-    The sources are the first move: when they already fill every slot the
-    writer would write (see `_genre_complete`) and they tell ONE story, there
-    is nothing for the model to settle and it is not called. It IS called for
-    the two cases that need it — the sources disagree (`picks` is the first
-    genre of each contributing source, so two different names is a genuine
-    tie), or their answer cannot fill the slots at all (thin, or empty).
+    "AI should only be used as fallback when no provider responded with info."
+    The model is therefore asked exactly when the sources did not settle the
+    track at all (`_genre_complete` false): RYM, AOTY and MusicBrainz all came
+    up short of a usable list. A DISAGREEMENT between sources that already fill
+    the slots is not a reason to call it — the top-tier provider's answer is
+    what the owner asked for, and a second opinion would replace it. `picks` is
+    kept in the signature because the caller passes it, but it no longer
+    triggers a call.
     """
-    if not _genre_complete(genres, limit):
-        return True
-    return len(set(picks or [])) > 1
+    return not _genre_complete(genres, limit)
 
 
 # --------------------------------------------------------------------------- #
@@ -5546,32 +5462,6 @@ def release_credits(release_mbid):
     return tidy_credit_rows(rows)
 
 
-def _itunes_track_genres(artist, album, cfg=None):
-    """{"disc:position": [genre]} from Apple's per-track `primaryGenreName`.
-
-    Free and streaming-tier: the album's edition (explicit edition first — the
-    same resolution the advisory route uses) is looked up with `entity=song`,
-    and every row carries its own genre. Apple serves it per track, which is
-    why this source beats the album-level ones below it. {} when Apple holds
-    no such album.
-    """
-    editions = _apple_editions(artist, album, cfg=cfg)
-    cid = _advisory_int((editions[0] if editions else {}).get("collectionId"))
-    if not cid:
-        return {}
-    data = _apple_json("/lookup", {"id": cid, "entity": "song", "limit": 200,
-                                   "country": _apple_country(cfg)})
-    out = {}
-    for row in (data or {}).get("results") or []:
-        genre = str(row.get("primaryGenreName") or "").strip()
-        position = _advisory_int(row.get("trackNumber"))
-        if not genre or not position:
-            continue
-        key = _genre_track_key(_advisory_int(row.get("discNumber")) or 1, position)
-        out[key] = _genre_names((out.get(key) or []) + [genre])
-    return out
-
-
 def _release_artist_mbids(artist, album, release, cfg):
     """The release's artist MBIDs, resolved from the name when it has none."""
     from server import discovery
@@ -5597,6 +5487,11 @@ def _genre_source_answers(source, artist, album, release, cfg, tracks):
     level — a per-track source that cannot answer per track answers nothing
     rather than promoting an album guess to a track. Never raises: the chain
     wraps the call, and every network path inside returns "no answer".
+
+    Only three ids are handled — RateYourMusic, Album of the Year, MusicBrainz
+    — because those are the only genre sources this build knows
+    (`GENRE_SOURCES`). Any other id returns {} (a stale saved list entry),
+    never an album-wide guess.
     """
     from server import discovery
 
@@ -5608,18 +5503,17 @@ def _genre_source_answers(source, artist, album, release, cfg, tracks):
         _rym_route.clear()
         # MusicBrainz's own stated page first (step 1 of `rym_genres`): it is
         # an identity, it needs no slug guess, and MusicBrainz states it as a
-        # `url` relation, so learning the page costs no RYM request at all —
-        # `rym_genres` then reads that page, live or from an archived snapshot
-        # when there is no cookie to read the live one with.
+        # `url` relation, so learning the page costs no RYM request at all.
+        # The page is then read LIVE (no archive route — the owner's rule);
+        # a challenge is reported, never filled from a snapshot.
         stated = {}
         try:
             stated = _mb_rym_links(artist, album,
                                    (release or {}).get("release_group_id")) or {}
         except Exception:
             stated = {}
-        data = (rym_genres(artist, album, cfg, stated.get("album") or "",
-                           archive=True)
-                or rym_artist_genres(artist, cfg, archive=True))
+        data = (rym_genres(artist, album, cfg, stated.get("album") or "")
+                or rym_artist_genres(artist, cfg))
         if not data:
             return {}
         wide = _genre_row(data.get("level") or "artist",
@@ -5635,49 +5529,26 @@ def _genre_source_answers(source, artist, album, release, cfg, tracks):
         return answers
 
     if source == "albumoftheyear":
-        # Album-level, and honest about it: AOTY classifies the RELEASE, and
-        # its genre row (headline names + the `secondary` ones) applies to
-        # every track of it. The page is the archived capture — the site
-        # refuses automated clients (see its section note) — and the answer is
+        # AOTY classifies the RELEASE: an album page carries a genre row
+        # (headline names + the `secondary` ones) and a song page carries only
+        # the song's score, never a genre. So AOTY's finest GENRE level is the
+        # album, and the artist page is the fallback when the album page states
+        # no row. Both are read LIVE (cleared `aoty_cookie` or the solver) and
         # cached 30 days with the rest of this source's pages, so an album the
-        # chain asks about twice pays one archive lookup.
+        # chain asks about twice pays one fetch.
         got = _genre_cached(
-            "album", f"albumoftheyear|{_norm_compare(artist)}|{_norm_compare(album)}",
+            "album",
+            f"albumoftheyear|album|{_norm_compare(artist)}|{_norm_compare(album)}",
             lambda: aoty_album_page(artist, album, cfg))
-        row = _genre_row("album", aoty_genres_from_html(got or ""))
-        return {_ALL_TRACKS: row} if row else {}
-
-    if source == "listenbrainz":
-        answers = {}
-        for track in tracks:
-            recording = track.get("recording_mbid")
-            if not recording:
-                continue
-            got = _genre_cached(
-                "recording", f"listenbrainz|{recording}",
-                lambda r=recording: discovery.listenbrainz_genre_tags(r, "recording"))
-            row = _genre_row("track", ((got or {}).get("genres") or [])
-                             + ((got or {}).get("tags") or []))
-            if row:
-                answers[_genre_track_key(track.get("disc"), track.get("position"))] = row
-        rg_names = []
-        rg = (release or {}).get("release_group_id")
-        if rg:
-            got = _genre_cached(
-                "album", f"listenbrainz|release_group|{rg}",
-                lambda: discovery.listenbrainz_genre_tags(rg, "release_group"))
-            rg_names = ((got or {}).get("genres") or []) + ((got or {}).get("tags") or [])
-        artist_names = []
-        for mbid in _release_artist_mbids(artist, album, release, cfg):
-            got = _genre_cached(
-                "album", f"listenbrainz|artist|{mbid}",
-                lambda m=mbid: discovery.listenbrainz_genre_tags(m, "artist"))
-            artist_names += ((got or {}).get("genres") or []) + ((got or {}).get("tags") or [])
-            break
-        wide = _genre_row("album" if rg_names else "artist", rg_names + artist_names)
-        if wide:
-            answers[_ALL_TRACKS] = wide
-        return answers
+        parsed = aoty.parse_album(got) if got else None
+        wide = _genre_row("album", (parsed or {}).get("genres") or [])
+        if not wide:
+            ap = _genre_cached(
+                "album", f"albumoftheyear|artist|{_norm_compare(artist)}",
+                lambda: aoty_page(artist, cfg=cfg, kind="artist"))
+            wide = _genre_row("artist",
+                              (aoty.parse_artist(ap) or {}).get("genres") or [])
+        return {_ALL_TRACKS: wide} if wide else {}
 
     if source == "musicbrainz":
         answers = {}
@@ -5694,10 +5565,8 @@ def _genre_source_answers(source, artist, album, release, cfg, tracks):
             # work stated genres for 0 of 4 tracks while the recording stated
             # 5-9 for all 4, so on a mainstream album this tier changes nothing
             # and costs one extra MusicBrainz request per track (rate-limited
-            # to 1 req/s — the price is real and the owner asked for the
-            # measurement). The fallback order is what keeps that cost from
-            # ever READING as a loss: the recording's genres are merged, not
-            # replaced.
+            # to 1 req/s). The fallback order is what keeps that cost from ever
+            # READING as a loss: the recording's genres are merged, not replaced.
             recording = str(track.get("recording_mbid") or "").strip()
             names = []
             if recording:
@@ -5724,8 +5593,7 @@ def _genre_source_answers(source, artist, album, release, cfg, tracks):
                                       lambda r=rg: release_group_genres(r)) or []
             wide += list(release.get("genres") or [])
         else:
-            # No release in hand: the release group and the artist are what a
-            # genre cascade normally falls back on, resolved from the names.
+            # No release in hand: the release group is resolved from the names.
             rg = None
             try:
                 rg = discovery.resolve_release_group(artist, album, cfg)
@@ -5753,169 +5621,7 @@ def _genre_source_answers(source, artist, album, release, cfg, tracks):
             answers[_ALL_TRACKS] = row
         return answers
 
-    if source == "itunes":
-        def look():
-            per_track = _itunes_track_genres(artist, album, cfg)
-            if per_track:
-                return {"tracks": per_track}
-            # Apple's album search is the fallback when its per-track lookup
-            # has nothing: one primary genre for the album (still better than
-            # no answer, and the caller marks it album level).
-            names = _genre_names([r.get("genre") for r in
-                                  discovery.itunes_search_album(artist, album,
-                                                                limit=1)])
-            return {"album": names} if names else None
-
-        got = _genre_cached(
-            "album", f"itunes|album|{_norm_compare(artist)}|{_norm_compare(album)}",
-            look) or {}
-        answers = {}
-        for key, names in (got.get("tracks") or {}).items():
-            row = _genre_row("track", names)
-            if row:
-                answers[key] = row
-        row = _genre_row("album", got.get("album"))
-        if row:
-            answers[_ALL_TRACKS] = row
-        return answers
-
-    if source == "wikidata":
-        answers = {}
-        # The TRACK's own item first, and by identity: the recording's
-        # Wikidata relation when it has one, else the Wikidata item of the
-        # WORK that recording performs (see `_mb_recording_ids`). Both are
-        # `level: track` answers.
-        for track in tracks:
-            recording = str(track.get("recording_mbid") or "").strip()
-            title = str(track.get("title") or "").strip()
-            if not recording:
-                continue
-            ids = _genre_cached("recording", f"wikidata|recording|{recording}",
-                                lambda r=recording: _mb_recording_ids(r)) or {}
-            qid = str(ids.get("qid") or "")
-            work = str(ids.get("work") or "")
-            if not qid and work:
-                qid = _genre_cached("recording", f"wikidata|work|{work}",
-                                    lambda w=work: _mb_wikidata_qid(w, "work")) or ""
-            if not qid:
-                continue
-            got = _genre_cached("recording", f"wikidata|qid|{qid}",
-                                lambda q=qid: discovery.wikidata_genres(qid=q)) or {}
-            row = _genre_row("track", got.get("genres"), title)
-            if row:
-                answers[_genre_track_key(track.get("disc"),
-                                         track.get("position"))] = row
-        # Then the release group's own entity (or the searched "artist album"
-        # entity) as today — album level, the fallback tier.
-        rg = (release or {}).get("release_group_id") or ""
-        term = " ".join(t for t in (artist, album) if t)
-        got = _genre_cached(
-            "album", f"wikidata|{rg}|{_norm_compare(term)}",
-            lambda: discovery.wikidata_genres(qid=_mb_wikidata_qid(rg), term=term)) or {}
-        row = _genre_row("album", got.get("genres"))
-        if row:
-            answers[_ALL_TRACKS] = row
-        return answers
-
-    if source == "lastfm":
-        answers = {}
-        for track in tracks:
-            title = track.get("title")
-            if not title:
-                continue
-            names = _genre_cached(
-                "recording", f"lastfm|track|{_norm_compare(artist)}|{_norm_compare(title)}",
-                lambda t=title: discovery.lastfm_track_genres(artist, t, cfg)) or []
-            row = _genre_row("track", names)
-            if row:
-                answers[_genre_track_key(track.get("disc"), track.get("position"))] = row
-        names = _genre_cached("album", f"lastfm|artist|{_norm_compare(artist)}",
-                              lambda: discovery.lastfm_artist_genres(artist, cfg)) or []
-        row = _genre_row("artist", names)
-        if row:
-            answers[_ALL_TRACKS] = row
-        return answers
-
-    if source == "discogs":
-        names = _genre_cached("album", f"discogs|{_norm_compare(artist)}|{_norm_compare(album)}",
-                              lambda: discovery.discogs_album_genres(artist, album, cfg)) or []
-        row = _genre_row("album", names)
-        return {_ALL_TRACKS: row} if row else {}
-
-    if source == "theaudiodb":
-        answers = {}
-        # `searchtrack.php` first — TheAudioDB serves a track row (genre,
-        # style, mood) per track, and it is the source's per-track tier.
-        for track in tracks:
-            title = str(track.get("title") or "").strip()
-            if not title:
-                continue
-            names = _genre_cached(
-                "recording",
-                f"theaudiodb|track|{_norm_compare(artist)}|{_norm_compare(title)}",
-                lambda t=title: _audiodb_track_genre_names(artist, t)) or []
-            row = _genre_row("track", names, title)
-            if row:
-                answers[_genre_track_key(track.get("disc"),
-                                         track.get("position"))] = row
-        # The album row stays as the fallback tier for the tracks it did not
-        # answer for (and for a release whose tracks have no names yet).
-        names = _genre_cached("album", f"theaudiodb|{_norm_compare(artist)}|{_norm_compare(album)}",
-                              lambda: _audiodb_genre_names(artist, album)) or []
-        row = _genre_row("album", names)
-        if row:
-            answers[_ALL_TRACKS] = row
-        return answers
-
-    if source == "bandcamp":
-        # Album-level by nature (see the Bandcamp section above): its own
-        # track titles confirm the page is this release, and the tags are the
-        # album's. One request per album, cached 30 days like every source.
-        titles = [t.get("title") for t in tracks if str(t.get("title") or "").strip()]
-        got = _genre_cached(
-            "album", f"bandcamp|{_norm_compare(artist)}|{_norm_compare(album)}",
-            lambda: bandcamp_album(artist, album, titles)) or {}
-        row = _genre_row("album", got.get("genres"))
-        return {_ALL_TRACKS: row} if row else {}
-
-    if source == "deezer":
-        names = _genre_cached("album", f"deezer|{_norm_compare(artist)}|{_norm_compare(album)}",
-                              lambda: discovery.album_genres(artist, album, cfg=cfg)) or []
-        row = _genre_row("album", names)
-        return {_ALL_TRACKS: row} if row else {}
-
-    if source == "spotify":
-        # Artist-level, honest about it: Spotify states no per-track genre at
-        # all. Skipped entirely (no request) until its credentials are set.
-        if not _spotify_configured(cfg):
-            return {}
-        names = _genre_cached(
-            "album", f"spotify|artist|{_norm_compare(artist)}",
-            lambda: discovery.spotify_artist_genres(artist, cfg)) or []
-        row = _genre_row("artist", names)
-        return {_ALL_TRACKS: row} if row else {}
-
     return {}
-
-
-def _audiodb_genre_names(artist, album):
-    """TheAudioDB's album genre + mood (its two genre-ish fields)."""
-    from server import discovery
-
-    row = discovery.audiodb_album(artist, album) or {}
-    return [g for g in (row.get("genre"), row.get("mood")) if g]
-
-
-def _audiodb_track_genre_names(artist, title):
-    """TheAudioDB's genre + style for ONE track, [] when it states none.
-
-    `strMood` is a mood word ("Sad") and never a genre, so it is left out of
-    the per-track row exactly as ListenBrainz's mood tags are.
-    """
-    from server import discovery
-
-    row = discovery.audiodb_track(artist, title) or {}
-    return [g for g in (row.get("genre"), row.get("style")) if g]
 
 
 def _answer_by_title(answers, title):

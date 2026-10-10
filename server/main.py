@@ -71,6 +71,7 @@ from server import api_streaming
 from server import api_soulseek
 from server import api_youtube
 from server import api_rym
+from server import api_aoty
 from server import api_cookies
 from server import api_run
 from server import api_export
@@ -2984,6 +2985,7 @@ app.include_router(api_streaming.router)
 app.include_router(api_soulseek.router)
 app.include_router(api_youtube.router)
 app.include_router(api_rym.router)
+app.include_router(api_aoty.router)
 app.include_router(api_cookies.router)
 app.include_router(api_run.router)
 app.include_router(api_export.router)

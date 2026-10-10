@@ -33,13 +33,13 @@ What this pins:
     as the overflow, the family lands first, its return value is still "how
     many values were removed", and a list that is already canonical is never
     rewritten;
-  * `server.integrations.genre_chain` asks the AI only as a TIE-BREAKER: when
+  * `server.integrations.genre_chain` asks the AI only as a LAST RESORT: when
     the sources already fill every slot the writer would write, no model call
-    is spent; when they disagree or cannot fill the slots the call happens as
-    before and a usable answer REPLACES the merged source list —
-    canonicalized into the full specific/family list — names "ai" among the
-    path's contributing sources, and leaves every field alone when the setting
-    is off or the ranker raises.
+    is spent (a mere disagreement between them is not a reason to call it);
+    only when they cannot fill the slots does the call happen, and a usable
+    answer REPLACES the merged source list — canonicalized into the full
+    specific/family list — names "ai" among the path's contributing sources,
+    and leaves every field alone when the setting is off or the ranker raises.
 
 Run:  python tools/test_genre_format.py   (exit 0 = pass, 1 = failure)
 """
@@ -423,23 +423,26 @@ try:
     assert settled["per_track"][(1, 1)] == ["shoegaze", "dream pop"], settled["per_track"]
     assert settled["per_track_sources"][(1, 1)] == ["musicbrainz"], settled["per_track_sources"]
 
-    # (c) Two sources whose top genres DISAGREE (and whose merged list is
-    # complete all the same): that is the tie the model exists for, so it is
-    # asked again.
+    # (c) Two sources whose top genres DISAGREE, but whose merged list is
+    # complete: the owner's rule is that a filled list is SETTLED, so the
+    # model is not asked to second-guess it — the top-tier provider's answer is
+    # what the merge keeps.
     seen.clear()
 
     def two_sources(source, *a, **k):
-        rows = {"musicbrainz": ["shoegaze"], "itunes": ["dream pop"]}
+        rows = {"musicbrainz": ["shoegaze"], "albumoftheyear": ["dream pop"]}
         names = rows.get(source)
         return {intg._ALL_TRACKS: {"level": "album", "genres": names}} if names else {}
 
     intg._genre_source_answers = two_sources
     tie = intg.genre_chain(artist="Test Artist", album="Test Album",
                            release=RELEASE, files=[],
-                           cfg=dict(ON, genre_sources=["musicbrainz", "itunes"]))
-    assert seen, "a disagreement between the sources is the model's job"
-    assert seen[0][3] == ["shoegaze", "dream pop"], seen
-    assert tie["per_track_sources"][(1, 1)] == ["musicbrainz", "itunes", "ai"], \
+                           cfg=dict(ON, genre_sources=["musicbrainz",
+                                                       "albumoftheyear"],
+                                    aoty_cookie="cf_clearance=a"))
+    assert seen == [], "a filled list is settled — the sources' answer stands"
+    assert tie["per_track"][(1, 1)] == ["shoegaze", "dream pop"], tie["per_track"]
+    assert tie["per_track_sources"][(1, 1)] == ["musicbrainz", "albumoftheyear"], \
         tie["per_track_sources"]
 
     # The setting off: the ranker is not reached at all, and every field is

@@ -335,10 +335,13 @@ cap.route("GET", "/database/search",
           {"message": "You must authenticate to access this resource."},
           status=401)
 discovery.invalidate()
+# Discogs is no longer a GENRE source (the owner narrowed the chain to
+# RateYourMusic / Album of the Year / MusicBrainz), so its genre probe is an
+# honest "unknown source" — the refusal is owned by the credential row, which
+# the checks above already pin.
 st, detail = sh._probe_genre("discogs", DISCOGS_CFG)
-check("discogs: a refused token is not reported as 'this source has no genres'",
-      st == "fail" and "401" in detail and "authenticate" in detail,
-      f"{st}: {detail}")
+check("discogs: not a genre source any more — the probe says so",
+      st == "skipped" and "unknown source" in detail, f"{st}: {detail}")
 
 
 # --------------------------------------------------------------------------- #
@@ -390,9 +393,11 @@ check("lastfm: the credential row for a rejected key is a fail",
       st == "fail" and "Invalid API key" in detail, f"{st}: {detail}")
 cap.clear()
 cap.route("GET", "/2.0/", LASTFM_REFUSAL)
+# Last.fm is no longer a GENRE source either; its refusal is owned by the
+# credential and Discover rows asserted just above.
 st, detail = sh._probe_genre("lastfm", LASTFM_CFG)
-check("lastfm: the genre probe no longer reads as 'no Last.fm tags'",
-      st == "fail" and "Invalid API key" in detail, f"{st}: {detail}")
+check("lastfm: not a genre source any more — the probe says so",
+      st == "skipped" and "unknown source" in detail, f"{st}: {detail}")
 check("lastfm: the Discover probe says the same thing",
       "Invalid API key" in sh._probe_discover("lastfm", LASTFM_CFG)[1],
       sh._probe_discover("lastfm", LASTFM_CFG)[1])
@@ -721,8 +726,10 @@ try:
               r.status_code == 200 and row.get("kind") == "credentials"
               and row.get("status") == "fail" and "401" in row.get("detail", ""),
               f"{r.status_code} {row}")
-        check("route: the id that is ALSO a genre source resolves by kind",
-              client.get("/api/sources/health/discogs?kind=genre&probe=0")
+        # RateYourMusic is a genre source AND a links source: the same id
+        # resolves per kind (Discogs is a credential/Discover id only now).
+        check("route: an id that is BOTH a genre and a links source resolves by kind",
+              client.get("/api/sources/health/rateyourmusic?kind=genre&probe=0")
               .json().get("kind") == "genre")
         check("route: an unknown kind is a 400 naming the kinds",
               client.get("/api/sources/health?kind=nope").status_code == 400)

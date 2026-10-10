@@ -5211,6 +5211,16 @@ def _find_empty_folders(root, dirs_out):
             # between moving the audio out and writing it back, say): it is the
             # process's own half-written state, not a broken album.
             continue
+        if v == WALK_EMPTY and os.path.dirname(os.path.normpath(d)) == root_norm:
+            # A BARE directory directly under the music root — no audio, no
+            # file, no child that holds one. The root's immediate children are
+            # the library's own structure level (an artist folder, or a
+            # container of them), and one with nothing in it at all is
+            # scaffolding rather than a broken album: an empty library must not
+            # draw a phantom album row named after its folder. A bare folder
+            # DEEPER in the tree is still reported — that is where an album's
+            # audio was, which is the sweep's real purpose.
+            continue
         if v == WALK_FILES:
             # Files, but none of them audio: only a folder still holding part
             # of the album (the cover slot or a rip/lyrics sidecar) is a broken

@@ -876,15 +876,20 @@ rating.
   what a source said is worse) and is what `GENRE_VOCAB` reports.
 - **R39a — the source list ships complete, and the ask stops when a track is
   full.** `genre_sources` is a PRIORITY list: `GENRE_SOURCES`
-  (`server/integrations.py`) is the shipped order — RateYourMusic, MusicBrainz,
-  ListenBrainz, iTunes, Last.fm, TheAudioDB, Wikidata, Bandcamp, Discogs,
-  Deezer, Spotify — and `mlo.config.DEFAULT_CONFIG["genre_sources"]` IS that
-  list (`tools/test_genres.py` asserts the two are equal), and `normalize_config`
-  treats every order this app ever shipped as "never customized" — the four
-  older chains and the 11-source order that preceded the two-source one
-  (`LEGACY_DEFAULT_GENRE_SOURCES`, `LEGACY_GENRE_SOURCES`) — so an untouched
-  install follows the current default while a list the user edited is kept
-  exactly as saved. The sources are asked in that order until every track holds
+  (`server/integrations.py`) is the shipped order — RateYourMusic, Album of the
+  Year, MusicBrainz — and `mlo.config.DEFAULT_CONFIG["genre_sources"]` IS that
+  list (`tools/test_genres.py` asserts the two are equal). `normalize_config`
+  migrates every order this app ever shipped — the four older chains and the
+  11-source order that preceded them (`LEGACY_DEFAULT_GENRE_SOURCES`,
+  `LEGACY_GENRE_SOURCES`) — to the current default, and DROPS every id this
+  build no longer knows (`_GENRE_SOURCE_IDS`), so an untouched install follows
+  the current default, a list the user edited is kept exactly as saved once its
+  dead ids are gone, and a source the app cannot ask is never carried. With
+  `ai_genre_inference` on and an AI endpoint configured the model is a LAST
+  RESORT rather than the first move: it is handed the merged list only when the
+  three sources did not settle the track themselves (they disagree, or answer
+  nothing at all); otherwise every field is exactly what the sources produced.
+  The sources are asked in that order until every track holds
   what the writer would write (`_genre_complete` — the early stop): at
   `mb_genre_count = 2` one specific genre plus its derived family IS the track's
   answer, so the sources below the one that supplied it are never asked; a
@@ -946,17 +951,19 @@ rating.
   → artist, `_genre_source_answers`). Nothing is invented: an empty cascade is
   an empty answer, not a guessed genre.
 - **R93 — every source answers at the finest level it has.** The chain
-  (`integrations.genre_chain`, `mlo.config["genre_sources"]`) asks its sources
-  in the configured priority order and stops once the writer's policy can write
-  a COMPLETE list, so the entries below the answering one are fallbacks, not a
-  second opinion. Each source's own level is fixed and documented in
-  `GENRE_SOURCES`: rateyourmusic per track where its page states one, else
-  album, then artist; musicbrainz per recording, then release, then release
-  group, then artist; listenbrainz per recording, then release group, then
-  artist; itunes per-track `primaryGenreName`; lastfm
-  `track.getTopTags` → `artist.getTopTags`; theaudiodb per track;
-  wikidata on the recording entity; bandcamp, discogs and deezer at ALBUM level
-  (those services state no finer one) and spotify at ARTIST level. A source
+  (`integrations.genre_chain`, `mlo.config["genre_sources"]`) asks its three
+  sources in the configured priority order and stops once the writer's policy
+  can write a COMPLETE list, so the entries below the answering one are
+  fallbacks, not a second opinion. Each one answers at the FINEST level it has
+  and falls back track → album → artist, and each source's own level is fixed
+  and documented in `GENRE_SOURCES`: rateyourmusic per track where its release
+  page states one, else album, then artist; albumoftheyear at its finest GENRE
+  level — the album (its song pages carry only a score, never a genre), then the
+  artist page; musicbrainz per recording (with the work's genres behind it),
+  then the release group/release, then artist. RateYourMusic and Album of the
+  Year are read LIVE through Cloudflare — a challenge needs a cleared
+  `rym_cookie`/`aoty_cookie` or the configured `cf_solver_url` — while
+  MusicBrainz is the keyless, challenge-free floor under both. A source
   marked per-track that cannot answer per track answers nothing rather than
   passing an album's list off as a track's.
 
@@ -6566,8 +6573,8 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   "; "-joined list in the order the sources were asked. The two are separate
   facts and neither is invented from the other: a track whose recording has no
   rating keeps no `WEBRATING` even when the album has one. Every source is
-  normalised to 0–100 (MusicBrainz and Discogs are 1–5 and ×20; Album of the
-  Year is already 0–100) and the aggregate is a weighted mean over the sources
+  normalised to 0–100 (MusicBrainz is 1–5 and ×20; Album of the Year is already
+  0–100) and the aggregate is a weighted mean over the sources
   that ANSWERED, weighted by each source's own vote count — so 49,000 ratings
   outvote sixteen — rounded half-up. Nothing is folded in that a source did not
   state, and a miss writes nothing at all: absence is not a zero. Writing is
@@ -6577,22 +6584,22 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   `server/tags_registry.py`, `server/library.py`), and the whole family is
   gated by `web_ratings_enabled` (`SCRIPT_GATES[24]` and the write-gate family
   switch both read it, so an install with it off neither asks nor writes).
-- **R358a — RateYourMusic leads the shipped sources, and MusicBrainz stays on
-  as the fast, credential-free floor.** `web_ratings_sources` ships
-  `["rateyourmusic", "musicbrainz", "albumoftheyear", "discogs"]`. RYM leads
-  because it is the widest public verdict the app can read — one score from tens
-  of thousands of ratings — and its ALBUM rating rides the SAME page fetch its
-  genres already make (one request, one cache entry, one refusal latch); the
-  list's order is also the order the names appear in `WEBRATING_SOURCE`. RYM,
-  Album of the Year and Discogs are all ARCHIVE-backed when their live pages
-  refuse (RYM's live page needs a `cf_clearance` matching the configured
-  `rym_user_agent`), so an album costs seconds rather than milliseconds — cached
-  30 days, misses included, so it is a first-run cost per album rather than a
-  per-run one. Dropping MusicBrainz is a real choice with a real consequence: it
-  is the only source that needs no credential and no archive leg and the only
-  one whose track answer costs a single throttled request with no slug guess, so
-  it is the fast floor under every other answer. Discogs needs `discogs_token`
-  and skips cleanly without one.
+- **R358a — RateYourMusic leads the shipped sources, and all three are read
+  LIVE.** `web_ratings_sources` ships
+  `["rateyourmusic", "albumoftheyear", "musicbrainz"]` (`normalize_config`
+  migrates the previous four-source default that included Discogs to this list).
+  RYM leads because it is the widest public verdict the app can read — one score
+  from tens of thousands of ratings — and its ALBUM rating rides the SAME page
+  fetch its genres already make (one request, one cache entry, one refusal
+  latch); the list's order is also the order the names appear in
+  `WEBRATING_SOURCE`. All three answer per track and fall back to the album when
+  the track itself is unrated. RateYourMusic and Album of the Year are scraped
+  LIVE through Cloudflare — a cleared `rym_cookie`/`aoty_cookie` (or the
+  solver), with RYM's `cf_clearance` bound to the configured `rym_user_agent` —
+  cached 30 days, misses included, so an album costs seconds on the first run
+  rather than every run. MusicBrainz stays on as the fast floor: it is the only
+  source that needs no credential and the only one whose track answer costs a
+  single throttled request with no slug guess.
 - **R358b — every source is asked at the level it actually rates.** Verified
   against the sources themselves, not assumed:
   - **MusicBrainz** — a RELEASE GROUP for the album and a RECORDING for each
@@ -6606,19 +6613,26 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
     2026 capture). The release page does NOT publish per-track community
     averages: its `track_rating` markup is the personal rating control and
     per-reviewer scores. The song walk tries the bare title slug and, if
-    needed, one `-1` spelling; only the newest archive capture is tried per
-    spelling. A page is believed only when its own title and artist match the
-    asked track — a mismatch is a miss, never a guess. Measured end-to-end
-    with all four sources on a two-track OK Computer scratch album: **48.5 s**;
-    Paranoid Android was answered by RYM + MusicBrainz, Airbag fell back to
-    MusicBrainz. That first pass included archive misses; each miss is cached
-    for 30 days, so it is not paid on the next run.
-  - **Discogs** — the RELEASE only: `community.rating` (In Rainbows 4.72 from
-    3,812, read off the live API). Its tracklist carries no rating field at all.
-  - Consequence for the star field: a TRACK can now be rated by **two** sources
-    (MusicBrainz and RateYourMusic) and its `WEBRATING_SOURCE` reads e.g.
-    `RateYourMusic; MusicBrainz`; the album's score still comes from every
-    source that answered.
+    needed, one `-1` spelling, each read LIVE (no archive route — a refused
+    page is a miss, never filled from a snapshot). A page is believed only when
+    its own title and artist match the asked track — a mismatch is a miss,
+    never a guess. Measured end-to-end with all three sources on a two-track OK
+    Computer scratch album: **48.5 s**; Paranoid Android was answered by RYM +
+    MusicBrainz, Airbag fell back to MusicBrainz. That first pass included
+    misses; each miss is cached for 30 days, so it is not paid on the next run.
+  - Consequence for the star field: a TRACK is rated by every source that
+    states one of its own and its `WEBRATING_SOURCE` reads e.g.
+    `RateYourMusic; Album of the Year; MusicBrainz`; the album's score still
+    comes from every source that answered.
+- **R358c — the two scraped sources are read LIVE, and the Wayback routes are
+  gone.** RateYourMusic and Album of the Year — their genres and their ratings
+  alike — are fetched from the live pages; no Internet Archive snapshot stands
+  behind a refusal any more (the removed `aoty_archive_fallback` switch is
+  dropped from a saved config). A Cloudflare challenge therefore needs a
+  cleared cookie (`rym_cookie`/`aoty_cookie`) or the configured
+  `cf_solver_url`; without one the source reports its refusal honestly and
+  contributes nothing rather than filling the value from a stale capture.
+  MusicBrainz, keyless, is unaffected.
 - **R359 — the star field says which rating it is drawing.** `StarRating`
   renders the web value in its own tone only while the reader has rated
   nothing there, and reduces it to a readout beside the user's stars once
@@ -6659,10 +6673,10 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   have, and it is the same tiering R358a applies to ratings. The recording is
   never dropped in the work's favour: measured, works carry no genres at all
   for a mainstream album, so a work-first-without-fallback reading would have
-  LOST data the app already had. Album-of-the-Year is available as a genre
-  source on the same archive-only footing and is selected by adding
-  `albumoftheyear` to `genre_sources` (it is not in the shipped list, for the
-  cost reason in R358a).
+  LOST data the app already had. Album of the Year is a SHIPPED genre source —
+  one of the three in `GENRE_SOURCES` — read LIVE on the same footing as
+  RateYourMusic: its album page states the genre row, a challenge needs a
+  cleared `aoty_cookie` or the solver, and there is no archive route (R358c).
 
 - **R361 — the Library's batch bar runs the import pipeline, and MANY batches
   run at once.** With albums, artists or tracks selected, the selection toolbar
@@ -6755,7 +6769,7 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   so is the configured source ORDER — answers are parsed and aggregated in
   `provider_order`, and the writes visit the rows in sorted-name order, so a
   thread-pool completion order never reaches a tag. What changes is only the
-  waiting: a track's RYM/Wayback wait no longer blocks the next track's
+  waiting: a track's RYM wait no longer blocks the next track's
   MusicBrainz ask, because those two hosts have separate 1 req/s locks. One
   album is one lane and its tracks share that lane's slice of the shared budget
   — the policy `mlo.accurip.run_generate_accurip` documents for its transport —
@@ -6783,7 +6797,7 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
 - **R366 — politeness is per HOST, so providers stop queueing behind each
   other.** Script 13 walks several lyrics providers per track, each costing 1-2
   requests, and the 0.4 s spacing was one process-global timestamp: a
-  MusicBrainz or Wayback wait queued behind NetEase/Kugou/QQ/Kuwo, and a miss
+  MusicBrainz wait queued behind NetEase/Kugou/QQ/Kuwo, and a miss
   cost ten-odd serialised starts. The timestamp is now keyed by the request's
   hostname (`mlo/lyrics_providers._request`), so every host keeps exactly the
   spacing it had while two hosts never wait on each other; the request COUNT,
@@ -7113,7 +7127,7 @@ checks see or how they judge it.
 | `encoder_tags` | per-format map | which `ENCODER_*` markers `grade_check_encoder` requires and the skip checks compare (`ENCODER_QUALITY` — the LEVEL — on; `ENCODER_VERSION` and `ENCODER_PROGRAM` off, per format; see R329) |
 | `strip_unknown_tags` | ON | whether `grade_check_excess_tags` reports junk tags |
 | `mb_genre_count` | 2 (max 3) | `grade_check_genre_count` ceiling, and what script 8/10 trim to |
-| `genre_autofill` / `genre_sources` | ON / `[rateyourmusic, musicbrainz, listenbrainz, itunes, lastfm, theaudiodb, wikidata, bandcamp, discogs, deezer, spotify]` | which writers can satisfy the genre checks. The list is a PRIORITY list, asked in order and stopped as soon as a track's list is complete, and the shipped default is every source the app knows (R39a) |
+| `genre_autofill` / `genre_sources` | ON / `[rateyourmusic, albumoftheyear, musicbrainz]` | which writers can satisfy the genre checks. The list is a PRIORITY list, asked in order and stopped as soon as a track's list is complete, and the shipped default is the three sources the app knows (R39a) |
 | `mood_enabled` / `mood_source` | ON / `hybrid` | whether script 8/16 writes `MOOD`/`ENERGY` at all |
 | `ai_effort` / `ai_genre_effort` | `high` / `high` | the reasoning budget every AI call sends, and the genre ranking's own: `minimal` (no thinking field), `low`, `medium`, `high`, `max` — `max` reaches a provider's ceiling by ladder (`max` → `high` → no field, R62a) |
 | `naming_script` | the shipped pattern | what `grade_check_naming` / `grade_check_filename_case` compare against |

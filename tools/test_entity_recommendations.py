@@ -900,7 +900,10 @@ def rym_calls():
 
 
 fresh()
+# RYM is read LIVE: a cleared cookie (or a solver) is what asks it — without
+# either the app skips it before any request (`_genre_source_skip`).
 CFG["rym_archive_fallback"] = True
+CFG["rym_cookie"] = "cf_clearance=test"
 stub_rym()
 artist_tracks = seed_rows(seed_kind="artist", seed_mbid=ARTIST_SLOWDIVE,
                           seed_name="Slowdive", kind="tracks")
@@ -943,6 +946,7 @@ ok(rym_calls() == []
    f"an album page's track shelf states RYM's own limit as information "
    f"({album_tracks['not_applicable'][-1]['why']})")
 CFG.pop("rym_archive_fallback", None)
+CFG.pop("rym_cookie", None)
 
 # --------------------------------------------------------------------------- #
 # 7) The merge rule itself: an mbid is an identity, and a reason is never lost

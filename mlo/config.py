@@ -84,6 +84,32 @@ LEGACY_DEFAULT_GENRE_SOURCES = (
     [
         "rateyourmusic", "musicbrainz",
     ],
+    #   [4] the eleven-source chain, MusicBrainz before ListenBrainz — the
+    #       default until the owner narrowed the chain to the three sites they
+    #       want (see DEFAULT_CONFIG below), so an untouched install follows
+    #       the new one instead of being read as a choice.
+    [
+        "rateyourmusic", "musicbrainz", "listenbrainz", "itunes",
+        "lastfm", "theaudiodb", "wikidata", "bandcamp", "discogs", "deezer",
+        "spotify",
+    ],
+)
+
+# The ONLY genre sources this build asks. `server.integrations.GENRE_SOURCES`
+# is this same list (and `tools/test_genres.py` asserts the two are equal);
+# `normalize_config` drops any other id from a saved list.
+_GENRE_SOURCE_IDS = frozenset({"rateyourmusic", "albumoftheyear",
+                               "musicbrainz"})
+
+# The ONLY web-rating sources this build asks, same rule.
+_WEB_RATING_IDS = frozenset({"rateyourmusic", "albumoftheyear", "musicbrainz"})
+
+# The web-rating defaults this app shipped BEFORE the current three (Discogs
+# included, and MusicBrainz before Album of the Year). A config still holding
+# one was never a decision, so it follows the new default — a list the user
+# actually edited is kept.
+LEGACY_DEFAULT_WEB_RATING_SOURCES = (
+    ["rateyourmusic", "musicbrainz", "albumoftheyear", "discogs"],
 )
 
 # Genres-per-track defaults this app shipped BEFORE the current one (2: one
@@ -1575,19 +1601,19 @@ DEFAULT_CONFIG = {
     # music, not more (GENRE_COUNT_MAX), and a merged "Rock; Alternative Rock;
     # Indie; Shoegaze; Post-Rock" list helps no one.
     "mb_genre_count": 2,
-    # Genre sources, in priority order — EVERY source the app knows, in the
-    # order the user asked for: RateYourMusic first (what the release page
-    # itself says), then MusicBrainz (open data, keyless, the identity
-    # anchor), then the rest of the registry in its documented order. The
-    # chain is a priority list that STOPS once a track's list is complete
-    # (`_genre_complete`), so shipping all of them costs nothing on a release
-    # the first two can answer and is what makes a rare pressing still get a
-    # genre. Every position's rationale is documented above
-    # `server.integrations.GENRE_SOURCES`; `tools/test_genres.py` asserts the
-    # two lists are equal.
+    # Genre sources, in priority order. The owner narrowed this to three, and
+    # in THIS order: RateYourMusic (the release page's own curated genres),
+    # then Album of the Year, then MusicBrainz (open data, the identity
+    # anchor). These are the ONLY sources the app asks for genres — the
+    # registry `server.integrations.GENRE_SOURCES` is exactly this list, and
+    # `tools/test_genres.py` asserts the two are equal. The chain is a
+    # priority list that STOPS once a track's list is complete
+    # (`_genre_complete`), so AOTY and MusicBrainz are fallbacks: a release
+    # RYM can answer never pays for them, and RYM has the top tier whether it
+    # answers at track, album or artist level. Every position's rationale is
+    # above `server.integrations.GENRE_SOURCES`.
     "genre_sources": [
-        "rateyourmusic", "musicbrainz", "listenbrainz", "itunes", "lastfm",
-        "theaudiodb", "wikidata", "bandcamp", "discogs", "deezer", "spotify",
+        "rateyourmusic", "albumoftheyear", "musicbrainz",
     ],
     # Optional keys for the genre sources that need one. Left empty the source
     # is skipped instead of guessed (Discogs' search endpoint requires a
@@ -1616,17 +1642,27 @@ DEFAULT_CONFIG = {
     # value is written by the cookie routes, never by the settings form, which
     # is why no Settings row offers it (see HIDDEN_KEYS in configMeta.ts).
     "cookie_notes": "",
-    # Read RateYourMusic's genre pages from the Wayback Machine when the live
-    # site will not serve them: no `rym_cookie`, or one RYM refused to honour.
-    # An archived copy is RYM's OWN data — the same page, read by the same
-    # scrapers — so the answer still comes from that source, and the report
-    # says which snapshot answered and how old it is. Off, and with no cookie,
-    # RYM contributes nothing, exactly as it did before this key existed.
-    # Ships ON because it is the only route that works on an install nobody
-    # has pasted a cookie into, and it costs one politely throttled request per
-    # album (1 req/s, and cached for 30 days like every other RYM page) — the
-    # fallback is skipped entirely when the live page can answer.
+    # Read RateYourMusic chart pages from the Wayback Machine when the live
+    # site will not serve them. This is now scoped to the DISCOVER charts
+    # (`integrations.rym_charts`) — the GENRE and WEB-RATING chains read the
+    # live page only (the owner's rule: live info from each site), so this key
+    # no longer affects what genre or rating an import writes, and RYM's link
+    # resolution comes from MusicBrainz rather than the archive.
     "rym_archive_fallback": True,
+    # A FlareSolverr-compatible solver, e.g. "http://127.0.0.1:8191". Both
+    # scraped sources (RateYourMusic and Album of the Year) sit behind
+    # Cloudflare's challenge, which refuses every automated client this project
+    # can run (measured: plain HTTP, curl_cffi, headless Chromium and a headed
+    # Chrome all got the 403 interstitial). A solver keeps a real browser warm
+    # and solves the challenge once per host; the cookies it wins are reused
+    # for the plain fast path until they expire, so one solve buys many fast
+    # requests. Empty = no solver: the live page is then only reachable with a
+    # cleared session cookie (rym_cookie / aoty_cookie), and a refused page is
+    # reported as a challenge, never filled from somewhere else.
+    "cf_solver_url": "",
+    # How long the solver may spend on one page, in milliseconds (FlareSolverr's
+    # own budget). A hard challenge can take most of a minute.
+    "cf_solver_timeout": 60000,
     # Auto-resolve RateYourMusic album + artist links during import; off =
     # links are only ever set by hand in the link editor.
     "rym_links_auto": True,
@@ -1636,29 +1672,28 @@ DEFAULT_CONFIG = {
     # the chain skips the script (SCRIPT_GATES/_DISABLED) AND the WEBRATING tag
     # family refuses to write (should_write_audio_tag -> family_global).
     "web_ratings_enabled": True,
-    # The sources asked, in order — a PRIORITY list exactly like genre_sources:
-    # it fixes the asking order and therefore the order the names appear in
-    # WEBRATING_SOURCE / ALBUMWEBRATING_SOURCE. An empty list, or one naming
-    # nothing real, falls back to mlo.web_ratings.SOURCES (the same ids).
-    # RateYourMusic SHIPS FIRST: it is the widest public verdict the app can
-    # read (one score from tens of thousands of ratings) and it rides the SAME
-    # page fetch its genres already make — one request, one cache entry, one
-    # refusal latch. It is ARCHIVE-backed whenever the live page refuses (a
-    # rym_cookie without a matching cf_clearance is refused today), and so are
-    # albumoftheyear and Discogs, so an album costs ~23 s against ~1 s for
-    # MusicBrainz alone; the fetch is cached 30 days, so that is a first-run
-    # cost per album, not a per-run one. MusicBrainz stays ON because it is the
-    # only source that answers for a TRACK at all (the recording's rating, the
-    # work's as a fallback): with it off, a track gets no WEBRATING and only
-    # the album carries a score. Discogs skips cleanly without a
-    # discogs_token.
-    "web_ratings_sources": ["rateyourmusic", "musicbrainz", "albumoftheyear", "discogs"],
-    # Album of the Year refuses every automated client (measured — plain HTTP,
-    # headless and headed Chromium and a reader proxy all got Cloudflare 403),
-    # so its page is read from the newest ARCHIVED capture (Wayback), resolved
-    # through the same archive machinery the RYM readers use. OFF = the source
-    # contributes nothing and the chain reports it as skipped. Ships ON.
-    "aoty_archive_fallback": True,
+    # The sources asked, in order — a PRIORITY list exactly like genre_sources,
+    # and the SAME three sites in the SAME order: RateYourMusic, then Album of
+    # the Year, then MusicBrainz. Every one of them answers for the ALBUM and
+    # for each TRACK (RYM's song page, AOTY's track rating / song page, the
+    # MusicBrainz recording with its work as fallback), and every one falls
+    # back track → album → artist, so a track no source states a score for
+    # still takes its album's. RateYourMusic ships first (widest public
+    # verdict); MusicBrainz is the keyless floor and the only one that never
+    # meets Cloudflare. An empty list, or one naming nothing real, falls back
+    # to mlo.web_ratings.SOURCES (the same ids).
+    "web_ratings_sources": ["rateyourmusic", "albumoftheyear", "musicbrainz"],
+    # Album of the Year's own cleared session, exactly like `rym_cookie`: paste
+    # the Cookie header of a browser tab that has passed the challenge (it
+    # carries the `cf_clearance` pair bound to that browser's User-Agent and
+    # network). Empty = AOTY is asked through the solver (`cf_solver_url`) when
+    # one is set, and otherwise reports the challenge rather than an answer.
+    "aoty_cookie": "",
+    # The User-Agent AOTY's requests are sent with — Cloudflare binds
+    # `cf_clearance` to the exact UA that earned it, so a cookie pasted from
+    # another browser needs that browser's own UA here. Empty = the built-in
+    # Chrome UA (`integrations.AOTY_HEADERS`).
+    "aoty_user_agent": "",
     # Manual override for script 24: fill-only is the contract, so a value
     # already on the file survives every run unless this is set. Set by hand
     # (a config edit), never by a menu — the same shape script 13 has.
@@ -2369,18 +2404,41 @@ def normalize_config(user=None) -> dict:
     if not isinstance(v, (list, tuple)):
         v = []
     saved = [str(t).strip().lower() for t in v if str(t).strip()][:16]
-    # The shipped order used to be all eleven sources. A saved list that is
-    # byte-for-byte that old default was never a user decision, so it follows
-    # the new default (RateYourMusic + MusicBrainz); a list the user actually
-    # edited is kept exactly as saved.
+    # An untouched install holds a byte-for-byte copy of an old shipped default
+    # (the 11-source chain, or an older one), which was never a choice: it is
+    # detected BEFORE dead ids are dropped, so an old default maps to the NEW
+    # shipped order rather than to whatever survives the filter.
     if saved == LEGACY_GENRE_SOURCES:
         saved = []
-    # An untouched install holds a copy of one of the OLD shipped defaults,
-    # which is not a choice: swap it for the current one (a customised list is
-    # kept as written).
     if saved in LEGACY_DEFAULT_GENRE_SOURCES:
         saved = []
+    # The chain is now exactly three sources (see DEFAULT_CONFIG), so any id
+    # the app no longer knows is dropped: a saved list naming one is not a
+    # choice this build can honour, and leaving it would only make the chain
+    # carry a source that can never answer.
+    saved = [s for s in saved if s in _GENRE_SOURCE_IDS]
     cfg["genre_sources"] = saved or list(DEFAULT_CONFIG["genre_sources"])
+
+    # The web-rating sources follow the same rule: the three sites, in the
+    # shipped order, and the previous four-source default (which included
+    # Discogs) was never a decision.
+    wv = cfg.get("web_ratings_sources")
+    if isinstance(wv, str):
+        wv = [t for t in wv.replace("\n", ";").split(";") if t.strip()]
+    if not isinstance(wv, (list, tuple)):
+        wv = []
+    wsaved = [str(t).strip().lower() for t in wv if str(t).strip()][:16]
+    # Detected BEFORE dead ids are dropped, for the same reason as the genre
+    # list: the old four-source default must map to the NEW shipped order.
+    if wsaved in LEGACY_DEFAULT_WEB_RATING_SOURCES:
+        wsaved = []
+    wsaved = [s for s in wsaved if s in _WEB_RATING_IDS]
+    cfg["web_ratings_sources"] = (wsaved
+                                  or list(DEFAULT_CONFIG["web_ratings_sources"]))
+
+    # Album of the Year is read LIVE only now (no Wayback route at all), so a
+    # stored switch for the removed route is dropped rather than re-saved.
+    cfg.pop("aoty_archive_fallback", None)
 
     # An untouched install holds the old shipped genres-per-track count (see
     # LEGACY_DEFAULT_GENRE_COUNTS) and follows the new one.

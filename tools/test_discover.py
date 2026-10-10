@@ -197,8 +197,8 @@ ok(sources["rym"]["rec_kinds"] == ["tracks"]
    f"only — its chart filter is its genre browse and its artist shelf, and it "
    f"publishes no genre list ({sources['rym']})")
 ok(sources["rym"]["needs"] == [] and sources["rym"]["ready"] is True,
-   "…and declares no credential: with the archive route on it is asked "
-   "without a rym_cookie (its own gate says when that is impossible)")
+   "…and declares no registry credential: its own gate (`_genre_source_skip`) "
+   "is what asks it, on a rym_cookie or a solver")
 ok(all(spec["id"] in discover.BY_ID for spec in discover.SOURCES)
    and len(discover.SOURCES) == len(discover.BY_ID),
    "every registry id is unique and resolvable")
@@ -591,10 +591,11 @@ ok(empty_lib["items"] == [] and empty_lib["sources_asked"] == []
 # 4b) RateYourMusic — its OWN chart, narrowed by the genre seed
 # --------------------------------------------------------------------------- #
 print("== RateYourMusic as a recommendation source ==")
-# RYM's cookie is not its only route, so a cfg with the archive fallback on is
-# what actually ASKS it (the registry declares no credential — see above).
+# RYM is read LIVE, so a cleared `rym_cookie` (or a solver) is what actually
+# ASKS it: without either the app skips it before any request (the registry
+# declares no credential — see above; the gate lives in `_genre_source_skip`).
 RYM_CFG = {"music_folder": "C:/Music", "discovery_enabled": True,
-           "rym_archive_fallback": True}
+           "rym_archive_fallback": True, "rym_cookie": "cf_clearance=test"}
 # `integrations.rym_chart_rows`' own row shape, as the scrape states it. The
 # titles are NOT the library fixture's own tracks: a library-seeded shelf drops
 # what the library already holds, and these are the rows that must survive it.

@@ -812,19 +812,21 @@ for kwargs in ({"isrc": ISRC},
         assert route["source"] in route["answers"], route
 
 # --------------------------------------------------------------------------- #
-# 9) Cross-reference: explicit ANYWHERE wins, a clean statement is still heard,
-# and every source is asked even when the first one already answered
+# 9) Cross-reference: every source is asked even when the first one already
+# answered — and an IDENTITY route's clean beats a NAME-guess route's explicit
+# (the false-positive guard: the owner's "Just" case is exactly this shape)
 # --------------------------------------------------------------------------- #
 DZ_CLEAN = {"explicit_lyrics": False, "explicit_content_lyrics": 0}
 
-# Deezer says clean, Apple's explicit edition says explicit → 1, and BOTH
-# statements are in the provenance map
+# Deezer (the track's own ISRC) says clean; Apple's explicit EDITION says
+# explicit. The identity match wins → 0, and BOTH statements are still
+# recorded in the provenance map.
 clear()
 calls = stub_http(dict(apple_routes(), **{"api.deezer.com": DZ_CLEAN}))
 route = intg.resolve_advisory_route(isrc=ISRC, artist=ARTIST, album=APPLE_ALBUM,
                                     title="Boom!", disc=1, track=4,
                                     track_count=16, cfg=CFG)
-assert route["value"] == 1 and route["source"] == "apple-album", route
+assert route["value"] == 0 and route["source"] == "deezer-isrc", route
 assert route["answers"] == {"deezer-isrc": 0, "apple-album": 1}, route
 assert route["checked"] == ["deezer-isrc", "apple-album", "itunes-song"], route
 # the first source answering did NOT stop the others: Deezer was asked, and
@@ -842,7 +844,8 @@ calls = stub_http(dict(apple_routes(), **{
 route = intg.resolve_advisory_route(isrc=ISRC, artist=ARTIST, album=APPLE_ALBUM,
                                     title="Boom!", disc=1, track=4,
                                     track_count=16, cfg=SPOTIFY_CFG)
-assert route["value"] == 1, route
+# BOTH identity routes say clean, so Apple's name-guess explicit still loses.
+assert route["value"] == 0, route
 assert route["answers"] == {"deezer-isrc": 0, "spotify-isrc": 0,
                             "apple-album": 1}, route
 assert route["checked"] == ["deezer-isrc", "spotify-isrc", "apple-album",
@@ -873,6 +876,14 @@ assert intg.merge_advisory({"a": 2, "b": 1}) == 1      # explicit beats the edit
 # one source stating the track itself is not explicit settles it
 assert intg.merge_advisory({"a": 2, "b": 2, "c": 0}) == 0
 assert intg.merge_advisory({"a": 2, "b": 2}) == 2
+# THE FALSE-EXPLICIT GUARD. An IDENTITY route (the track's own ISRC) stating
+# clean overrules a 1 from a NAME-guess route; an identity 1 is never
+# overruled; two name-guess routes keep the normal rank (1 wins).
+assert intg.merge_advisory({"deezer-isrc": 0, "apple-album": 1}) == 0
+assert intg.merge_advisory({"deezer-isrc": 1, "apple-album": 0}) == 1
+assert intg.merge_advisory({"spotify-isrc": 0, "itunes-song": 1}) == 0
+assert intg.merge_advisory({"deezer-isrc": 1, "spotify-isrc": 0}) == 1
+assert intg.merge_advisory({"itunes-song": 1, "apple-album": 0}) == 1
 
 # ISRC completeness: with no ISRC tag, every ISRC MusicBrainz holds for the
 # recording feeds BOTH ISRC sources — Apple has no ISRC lookup at all

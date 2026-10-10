@@ -115,46 +115,44 @@ FORCE_KEY = "force_web_ratings"
 #                      FIRST because it is the score this app's owner already
 #                      reads, and because its album answer is the one the
 #                      genre chain also wants (one page read, two answers).
-#   b. musicbrainz     the release group's rating for the album, the
+#   b. albumoftheyear  the album page's user score (0-100) for the album and
+#                      EACH of its tracks (AOTY states a score per row), the
+#                      song page's own for a track looked up on its own.
+#   c. musicbrainz     the release group's rating for the album, the
 #                      recording's own for the track (a WORK's rating is the
 #                      fallback — see `parse_musicbrainz_track`).
-#   c. albumoftheyear  the album's user score.
-#   d. discogs         the release's `community.rating`, when a token is set.
-SOURCES = ["rateyourmusic", "musicbrainz", "albumoftheyear", "discogs"]
+SOURCES = ["rateyourmusic", "albumoftheyear", "musicbrainz"]
 
 SOURCE_LABELS = {
     "rateyourmusic": "RateYourMusic",
-    "musicbrainz": "MusicBrainz",
     "albumoftheyear": "Album of the Year",
-    "discogs": "Discogs",
+    "musicbrainz": "MusicBrainz",
 }
 
-# Which level each source can answer at. Two of them have a per-track
-# statement of their own — MusicBrainz rates the recording, and RateYourMusic
-# keeps a separate page (and a separate community average) per SONG — so both
-# may fill WEBRATING. Album of the Year and Discogs rate a RELEASE only: their
-# answers are album-level and are written to ALBUMWEBRATING, never promoted to
-# a track.
-ALBUM_SOURCES = ("rateyourmusic", "musicbrainz", "albumoftheyear", "discogs")
-TRACK_SOURCES = ("rateyourmusic", "musicbrainz")
+# Which level each source can answer at. ALL THREE have a per-track
+# statement of their own — RateYourMusic keeps a page (and a separate community
+# average) per SONG, MusicBrainz rates the recording, and AOTY states a score
+# per track row on the album page — so all three may fill WEBRATING. When a
+# source states nothing for the TRACK, its ALBUM answer is used for that track
+# (still attributed to the source); the album's own value is written to
+# ALBUMWEBRATING as before.
+ALBUM_SOURCES = ("rateyourmusic", "albumoftheyear", "musicbrainz")
+TRACK_SOURCES = ("rateyourmusic", "albumoftheyear", "musicbrainz")
 
 # One honest line per source for a settings list, exactly like the lyrics and
 # genre chains carry: the coverage it is good at, and the caveat it comes with.
 SOURCE_NOTES = {
     "rateyourmusic": "The release page's community average (0.5-5) and its "
                      "vote count for the album, the song page's own for the "
-                     "track. Live pages need a rym_cookie; without one the "
-                     "archived snapshot of the same page answers (when one "
-                     "exists).",
+                     "track. Live pages need a rym_cookie (or a solver, "
+                     "cf_solver_url).",
+    "albumoftheyear": "The album's user score (0-100) and each track's own, "
+                      "plus its genre list. Live pages need an aoty_cookie "
+                      "(or a solver, cf_solver_url) — the site refuses an "
+                      "automated client otherwise.",
     "musicbrainz": "Open data: the release group's community rating for the "
                    "album, the recording's own for the track. Free, no key, "
                    "MBID-native.",
-    "albumoftheyear": "The album's user score (0-100) and its genre list. Its "
-                      "site refuses every automated client this project can "
-                      "run, so the page is read from the newest archived "
-                      "capture of it (Wayback) — nothing is guessed.",
-    "discogs": "The release's community rating (0-5) and vote count. Needs a "
-               "discogs_token in Settings -> Discovery.",
 }
 
 
@@ -405,18 +403,31 @@ _AOTY_COUNT_RE = re.compile(
     r'Based on\s*<a[^>]*>\s*<strong>([0-9,]+)</strong>\s*&nbspratings', re.I)
 
 
-def parse_aoty(html):
-    """An AOTY album page -> its user score, on the app's own scale.
+def _aoty_pair(rating):
+    """AOTY's ``{"value", "count"}`` (0-100) as our triple, or None."""
+    if not isinstance(rating, dict):
+        return None
+    pair = _rating_pair(rating.get("value"), rating.get("count"), RATING_MAX)
+    if pair is None:
+        return None
+    return pair[0], pair[1], SOURCE_LABELS["albumoftheyear"]
 
-    The score is already 0-100, so this is the one source whose conversion is
-    the identity — it still goes through `_rating_pair` with an explicit
-    ``scale_max=100``, because "which scale is this" belongs to the parser and
-    a second conversion rule would be a second place to be wrong.
 
-    Returns None when the page states no user score at all (a page whose
-    ratings are hidden, or markup this parser does not know) — never a zero.
+def parse_aoty(payload):
+    """An AOTY album answer -> its user score, on the app's own scale.
+
+    Two shapes are accepted: the PARSED dict the live fetcher returns
+    (``server/aoty.parse_album`` — ``{"genres", "rating", "tracks"}``), and a
+    raw album page body (kept for fixtures and any caller holding HTML). The
+    score is already 0-100, so its conversion is the identity — it still goes
+    through `_rating_pair` with an explicit ``scale_max=100``, because "which
+    scale is this" belongs to the parser.
+
+    Returns None when the page states no user score at all — never a zero.
     """
-    text = html or ""
+    if isinstance(payload, dict):
+        return _aoty_pair(payload.get("rating"))
+    text = payload or ""
     if not text:
         return None
     match = _AOTY_USER_RE.search(text)
@@ -426,36 +437,23 @@ def parse_aoty(html):
     found = _AOTY_COUNT_RE.search(text)
     if found:
         count = int(found.group(1).replace(",", ""))
-    pair = _rating_pair(match.group(1) or match.group(2), count,
-                        RATING_MAX)
+    pair = _rating_pair(match.group(1) or match.group(2), count, RATING_MAX)
     if pair is None:
         return None
     return pair[0], pair[1], SOURCE_LABELS["albumoftheyear"]
 
 
-def parse_discogs(payload):
-    """A Discogs release detail -> its ``community.rating`` average.
+def parse_aoty_track(payload):
+    """An AOTY song answer -> that song's own score, or None.
 
-    VERIFIED live (2026-10-01, release 1174296 — Radiohead, In Rainbows):
-    ``"community": {"rating": {"count": 3809, "average": 4.72}}``. The scale
-    is 0-5. ``count`` is the number of people who rated the release, which is
-    also the release's weight. A release nobody rated carries
-    ``{"count": 0, "average": 0.0}`` — an average of zero with no votes is
-    "nobody rated this", and the value is dropped rather than written as 0.
+    The payload is the parsed dict from ``server/aoty.parse_song``
+    (``{"title", "rating"}``). AOTY rates each track on its album page and on
+    its own song page; either way the number is the song's, on AOTY's 0-100
+    scale.
     """
     if not isinstance(payload, dict):
         return None
-    community = payload.get("community") if isinstance(payload.get("community"), dict) else None
-    rating = (community or {}).get("rating")
-    if not isinstance(rating, dict):
-        return None
-    count = _to_int(rating.get("count")) or 0
-    if count <= 0:
-        return None
-    pair = _rating_pair(rating.get("average"), count)
-    if pair is None:
-        return None
-    return pair[0], pair[1], SOURCE_LABELS["discogs"]
+    return _aoty_pair(payload.get("rating"))
 
 
 # The one dispatch: source id -> parser. A source absent from here cannot
@@ -465,7 +463,6 @@ SOURCE_PARSERS = {
     "rateyourmusic": parse_rateyourmusic,
     "musicbrainz": parse_musicbrainz,
     "albumoftheyear": parse_aoty,
-    "discogs": parse_discogs,
 }
 
 
@@ -474,17 +471,20 @@ def parse_source(source, payload, kind="album"):
 
     The MUSICBRAINZ entry is level-aware: an album payload is a release-group
     node, a track payload is ``{"recording", "work"}`` (see
-    ``parse_musicbrainz_track``). RATEYOURMUSIC needs no branch here: the
-    fetcher already answers a track with the SONG page's own rating and an
-    album with the release page's, and ``parse_rateyourmusic`` reads both
-    shapes. Album of the Year and Discogs rate a release, so they answer at
-    album level only.
+    ``parse_musicbrainz_track``). ALBUM OF THE YEAR is level-aware too: a track
+    payload is the song's own score, an album payload the album's. RATEYOURMUSIC
+    needs no branch here: the fetcher already answers a track with the SONG
+    page's own rating and an album with the release page's, and
+    ``parse_rateyourmusic`` reads both shapes.
     """
-    parser = SOURCE_PARSERS.get(str(source or "").strip().lower())
+    source = str(source or "").strip().lower()
+    parser = SOURCE_PARSERS.get(source)
     if parser is None or payload is None:
         return None
-    if source == "musicbrainz" and kind == "track":
+    if kind == "track" and source == "musicbrainz":
         parser = parse_musicbrainz_track
+    elif kind == "track" and source == "albumoftheyear":
+        parser = parse_aoty_track
     try:
         return parser(payload)
     except Exception:
@@ -547,33 +547,52 @@ def provider_order(cfg=None):
 # --------------------------------------------------------------------------- #
 # One entity's rating — the sources, asked in the configured order
 # --------------------------------------------------------------------------- #
-def _rate(kind, ident, cfg, fetch):
+def _rate(kind, ident, cfg, fetch, album=None):
     """``{"value", "sources"}`` for one entity, or None when nobody answered.
 
     *fetch* is the injected callable (see the module docstring). It is called
     for every source in the configured order and its payload parsed by the one
     table above. It is allowed to raise — this is where a caller's fetcher
     meets a stranger's network — and a raise is that source's miss, counted in
-    ``answered``/``missed`` rather than thrown at the caller.
+    ``answered`` rather than thrown at the caller.
+
+    For a TRACK, a source that states nothing for the track itself falls back
+    to its ALBUM answer (`album` is that entity's identity, when the caller has
+    it) — the owner's rule: track, then album, then artist, per platform. The
+    level each source actually answered at is reported in ``levels``, so a
+    track whose value came from the album says so.
     """
     allowed = TRACK_SOURCES if kind == "track" else ALBUM_SOURCES
     order = [s for s in provider_order(cfg) if s in allowed]
-    answers, answered = [], []
+    answers, answered, levels = [], [], {}
     for source in order:
+        level = kind
         try:
             payload = fetch(source, kind, ident, cfg)
         except Exception:
             payload = None
         got = parse_source(source, payload, kind)
+        if got is None and kind == "track" and album is not None:
+            # This source cannot answer for the track: its ALBUM answer stands
+            # in — still this source's data, marked album level.
+            try:
+                payload = fetch(source, "album", album, cfg)
+            except Exception:
+                payload = None
+            got = parse_source(source, payload, "album")
+            if got is not None:
+                level = "album"
         if got is None:
             continue
         answers.append(got)
         answered.append(source)
+        levels[source] = level
     result = aggregate(answers)
     if result is None:
         return None
     result["asked"] = order
     result["answered"] = answered
+    result["levels"] = levels
     return result
 
 
@@ -590,17 +609,19 @@ def album_rating(artist, album, rg_mbid, cfg, fetch):
                  cfg, fetch)
 
 
-def track_rating(artist, title, recording_mbid, cfg, fetch):
+def track_rating(artist, title, recording_mbid, cfg, fetch, album=None):
     """The TRACK's aggregated web rating, or None.
 
-    Track-level sources only (MusicBrainz's recording rating and RYM's SONG
-    page): a release-wide score is an ALBUM answer and is never dressed up as
-    a track's (see the module docstring).
+    Every source is asked for the TRACK first (RYM's song page, AOTY's song
+    page, MusicBrainz's recording), and a source that states nothing for the
+    track falls back to its ALBUM answer — `album` is the album's identity
+    (``{"artist", "album", "mbid"}``) when the caller has it. The level each
+    source answered at is on the result's ``levels`` map.
     """
     return _rate("track", {"artist": str(artist or "").strip(),
                            "title": str(title or "").strip(),
                            "mbid": str(recording_mbid or "").strip()},
-                 cfg, fetch)
+                 cfg, fetch, album=album)
 
 
 # --------------------------------------------------------------------------- #
@@ -861,7 +882,9 @@ def run_web_ratings(config, fetch=None):
                 return None
             return track_rating(row["artist"] or row["albumartist"],
                                 row["title"], row["rec_mbid"],
-                                config, fetch)
+                                config, fetch,
+                                album={"artist": artist, "album": album,
+                                       "mbid": rg})
 
         def _album_answer():
             """The album's own ask, once for the folder — or no request at all

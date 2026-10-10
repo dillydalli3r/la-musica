@@ -9,10 +9,11 @@ APIs every time Settings opens. This pins:
   * a keyed source without its key is `skipped` + `configured: false`, and the
     row names the key to ask for,
   * an unconfigured source is never probed (no request, even with probe=1),
-  * UNLESS it has a second route: with `rym_archive_fallback` on (the shipped
-    default) RateYourMusic's rows are `ok` and ARE probed without a
-    `rym_cookie` — the cookie is still asked for, but its absence makes the
-    LIVE site unavailable, not the source (`optional_needs` says so),
+  * UNLESS it has a second route: with `cf_solver_url` set, the two scraped
+    genre sources (RateYourMusic, Album of the Year) are `ok` and ARE probed
+    without their cookie — the cookie is still asked for, but a solver reads
+    the LIVE page without one, so its absence does not sink the source
+    (`optional_needs` says so),
   * a probe that raises is a `fail` row with a detail, never an exception,
   * `probe=False` calls nothing at all,
   * every registered source appears exactly once, with the documented keys.
@@ -211,9 +212,8 @@ ok(len(sh.health_payload(cfg={})["sources"]) == len(rows),
 # --------------------------------------------------------------------------- #
 print("== configuration state ==")
 for sid, needs in (("spotify-isrc", ["spotify_client_id", "spotify_client_secret"]),
-                   ("lastfm", ["lastfm_api_key"]),
-                   ("discogs", ["discogs_token"]),
-                   ("rateyourmusic", ["rym_cookie"])):
+                   ("rateyourmusic", ["rym_cookie"]),
+                   ("albumoftheyear", ["aoty_cookie"])):
     r = row(health, sid)
     ok(r["needs"] == needs, f"{sid} names the config keys it needs ({r['needs']})")
     ok(r["configured"] is False and r["status"] == "skipped",
@@ -229,44 +229,48 @@ ok(all(row(health, sid)["detail"] == "configured" for sid in keyless),
    "and says exactly that")
 
 configured_cfg = {"spotify_client_id": "id", "spotify_client_secret": "secret",
-                  "discogs_token": "tok", "lastfm_api_key": "key",
-                  "rym_cookie": "cf=1"}
+                  "rym_cookie": "cf=1", "aoty_cookie": "cf=1"}
 keyed = sh.health_payload(cfg=configured_cfg)["sources"]
 ok(all(row({"sources": keyed}, sid)["configured"] is True
-       for sid in ("spotify-isrc", "lastfm", "discogs",
-                   "rateyourmusic")),
+       for sid in ("spotify-isrc", "rateyourmusic", "albumoftheyear")),
    "setting the keys flips every keyed source to configured")
 
 ok(all(r["id"] == "rateyourmusic" for r in rows if "optional_needs" in r),
-   "only RateYourMusic rows carry `optional_needs`")
+   "with no solver set, only the RYM link row carries `optional_needs`")
 
 # --------------------------------------------------------------------------- #
-# the one source with a SECOND route
+# the two sources with a SECOND route: a Cloudflare solver
 # --------------------------------------------------------------------------- #
-# cfg={} above omits `rym_archive_fallback`, which reads as the fallback OFF: a
-# caller that never went through the config layer has no second route, so the
-# cookie is required there and the row is `skipped`. The SHIPPED install holds
-# the key True, and then an empty `rym_cookie` makes the live site unavailable,
-# not the source: RYM's rows are runnable and ARE probed, while still asking
-# for the cookie (`needs`) — the panel's paste field and "cookie missing" chip
-# depend on that.
-archive_on = {"rym_archive_fallback": True}
-rym_on = row({"sources": sh.health_payload(cfg=archive_on, kind="genre")["sources"]},
+# cfg={} above has no `cf_solver_url`, so the two scraped genre sources have no
+# second route: the cookie is required there and the row is `skipped`. With a
+# solver set, an empty cookie makes the LIVE page unavailable to the plain
+# request, not the source: each row is runnable and IS probed through the
+# solver, while still asking for the cookie (`needs`) — the panel's paste field
+# and "cookie missing" chip depend on that.
+solver_on = {"cf_solver_url": "http://solver:8191"}
+rym_on = row({"sources": sh.health_payload(cfg=solver_on, kind="genre")["sources"]},
              "rateyourmusic")
 ok(rym_on["configured"] is False and rym_on["status"] == "ok"
    and rym_on["optional_needs"] == ["rym_cookie"]
-   and "archive" in rym_on["detail"],
-   f"archive fallback on: RYM runs without a cookie "
+   and "cf_solver_url" in rym_on["detail"],
+   f"solver set: RYM runs without a cookie "
    f"({rym_on['status']}: {rym_on['detail']})")
-link_on = sh.health_payload(cfg=archive_on, kind="links")["sources"][0]
+aoty_on = row({"sources": sh.health_payload(cfg=solver_on, kind="genre")["sources"]},
+              "albumoftheyear")
+ok(aoty_on["configured"] is False and aoty_on["status"] == "ok"
+   and aoty_on["optional_needs"] == ["aoty_cookie"]
+   and "cf_solver_url" in aoty_on["detail"],
+   f"solver set: AOTY runs without a cookie too "
+   f"({aoty_on['status']}: {aoty_on['detail']})")
+link_on = sh.health_payload(cfg={}, kind="links")["sources"][0]
 ok(link_on["configured"] is False and link_on["status"] == "ok"
    and link_on["optional_needs"] == ["rym_cookie"],
-   "…and its link row is runnable without the cookie too (MusicBrainz route)")
+   "…and the link row is runnable without the cookie too (MusicBrainz route)")
 rym_off = row({"sources": sh.health_payload(cfg={}, kind="genre")["sources"]},
               "rateyourmusic")
 ok(rym_off["status"] == "skipped" and "optional_needs" not in rym_off
    and rym_off["detail"] == "needs rym_cookie",
-   f"fallback off: the cookie is required again ({rym_off['detail']})")
+   f"no solver: the cookie is required again ({rym_off['detail']})")
 
 print("== probe=False is free ==")
 intg._advisory_json = stub("advisory_json", None)
@@ -276,6 +280,10 @@ intg._spotify_advisory = stub("spotify_advisory", None)
 intg._apple_album_advisory = stub("apple_advisory", None)
 intg._itunes_song_advisory = stub("itunes_advisory", None)
 intg.rym_genres = stub("rym_genres", None)
+# Album of the Year's live scraper: the same "no call leaves the machine"
+# guarantee as the RYM seam above, for the genre row and its `cf_solver_url`
+# probe.
+intg.aoty_page = stub("aoty_page", None)
 intg._audiodb_genre_names = stub("audiodb_genres", [])
 discovery._json = stub("discovery_json", None)
 discovery.deezer_artist = stub("deezer_artist", None)
@@ -334,15 +342,25 @@ ok(calls("deezer_artist") >= 1,
 ok(calls("credential_check") == 1,
    f"only the login credential was probed with an empty config "
    f"({calls('credential_check')} credential probes)")
-# …AND the one source with a second route IS asked with an empty cookie when
-# the archive fallback is on — that is what makes an unattended default
-# install import genres at all, and what the old "unconfigured ⇒ skipped"
+# …AND the two scraped sources with a second route ARE asked with an empty
+# cookie when a solver is set — that is what lets an install without a pasted
+# cookie still import genres live, and what the old "unconfigured ⇒ skipped"
 # rule was hiding.
 CALLS.clear()
-sh.health_payload(cfg={"rym_archive_fallback": True}, kind="genre", probe=True)
+sh.health_payload(cfg={"cf_solver_url": "http://solver:8191"}, kind="genre",
+                  probe=True)
 ok(calls("rym_genres") == 1,
-   f"archive fallback on: RYM IS probed without a cookie "
+   f"solver set: RYM IS probed without a cookie "
    f"({calls('rym_genres')} rym_genres calls)")
+ok(calls("aoty_page") == 1,
+   f"solver set: AOTY IS probed without a cookie "
+   f"({calls('aoty_page')} aoty_page calls)")
+
+# The sample genre probe for a scraped source with NO cookie and NO solver
+# reads `skipped` and names what to configure — it never spends a request.
+ok(sh._probe_genre("albumoftheyear", {}) ==
+   ("skipped", "no aoty_cookie in Settings → Discovery (or set cf_solver_url)"),
+   "an unconfigured AOTY genre probe is skipped without asking")
 
 print("== the RYM link probe ==")
 saved_rym_links, saved_failures = intg.rym_links, intg._rym_failures

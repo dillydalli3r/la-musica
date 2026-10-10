@@ -490,6 +490,13 @@ export interface RymCookiesSaveReply extends RymCookies {
   filtered: number;
 }
 
+/** The Album of the Year credential (`server/api_aoty.py`) is the same surface
+ *  as RYM's — one cookie header in a config value — so it answers the same
+ *  shape. `session` means the `cf_clearance` pair is present, which is what
+ *  answers Cloudflare here (AOTY has no signed-in cookie). */
+export type AotyCookies = RymCookies;
+export type AotyCookiesSaveReply = RymCookiesSaveReply;
+
 /** One cookie of a credential, as `GET /api/cookies/{source}` states it
  *  (`server/api_cookies.py`) — the row a user reads and writes against. There
  *  is NO value: a session cookie is a live credential. `expires_at` and
@@ -3852,18 +3859,30 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text }),
     }, 60000),
+  /** The stored Album of the Year credential: the cookie names it holds, in
+   *  the order they are sent, no values. */
+  aotyCookies: () => json<AotyCookies>(`${API}/aoty/cookies`),
+  /** Save the albumoftheyear.org cookies of a pasted or dropped cookies.txt
+   *  into `aoty_cookie`, mirroring `rymCookiesSave` — the `cf_clearance` pair
+   *  is what lets the site answer instead of challenging. */
+  aotyCookiesSave: (text: string) =>
+    json<AotyCookiesSaveReply>(`${API}/aoty/cookies`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    }, 60000),
   /** The cookies ONE cookie login stores, with each cookie's own comment —
    *  `GET /api/cookies/{source}` (server/api_cookies.py). The same shape for
-   *  the yt-dlp jar (`youtube`) and the RYM credential (`rym`), so one panel
-   *  draws both. Never carries a cookie value. */
-  cookieList: (source: "youtube" | "rym") =>
+   *  the yt-dlp jar (`youtube`) and the RYM (`rym`) and AOTY (`aoty`)
+   *  credentials, so one panel draws all three. Never carries a cookie value. */
+  cookieList: (source: "youtube" | "rym" | "aoty") =>
     json<CookieList>(`${API}/cookies/${source}`),
   /** Write (or, with an empty `comment`, clear) one cookie's comment. The
    *  cookie is named by its IDENTITY — domain, path, name — so the note follows
    *  the cookie across a re-import instead of the line it sat on. Answers with
    *  the fresh list. */
   cookieComment: (
-    source: "youtube" | "rym",
+    source: "youtube" | "rym" | "aoty",
     body: { domain: string; path: string; name: string; comment: string }
   ) =>
     json<CookieList>(`${API}/cookies/${source}/comments`, {

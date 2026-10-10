@@ -4,54 +4,43 @@
 What this pins, with every HTTP seam stubbed (no network at all):
 
   * the DEFAULT priority list is an explicit, documented promise:
-    rateyourmusic → musicbrainz → listenbrainz → itunes → lastfm →
-    theaudiodb → wikidata → bandcamp → discogs → deezer → spotify, equal to
-    `mlo.config.DEFAULT_CONFIG["genre_sources"]`, with every per-track source
-    ahead of every album-only one;
+    rateyourmusic → albumoftheyear → musicbrainz, equal to
+    `mlo.config.DEFAULT_CONFIG["genre_sources"]` — the only three genre sources
+    this build knows;
   * the sources are asked IN ORDER until every track is FULL: the writer's own
     policy decides that (`_genre_complete` — at `mb_genre_count = 2` one
     specific genre plus its derived family), a source below that point is never
     asked (`asked`/`stopped_after`), and a source that cannot answer is skipped
-    BEFORE any request — no credential (RateYourMusic's cookie, Discogs'
-    token, Last.fm's key, Spotify's id+secret), a RateYourMusic that already
-    refused this cookie — with the reason in `notes`/`skipped`;
-  * every source that IS asked answers at its best tier: the per-track tiers
-    answer per track where the source has one (MusicBrainz recording,
-    ListenBrainz recording, iTunes `primaryGenreName`, Last.fm
-    `track.getTopTags`, TheAudioDB `searchtrack.php`, Wikidata's recording
-    P136, RYM's own rows), and a source that cannot answer per track answers at
-    its album/artist tier, labelled `level: album`/`level: artist` — never
-    promoted to a track (`level_counts` totals those tiers);
+    BEFORE any request — no credential (RateYourMusic's `rym_cookie`,
+    Album of the Year's `aoty_cookie`, or a Cloudflare solver URL) — with the
+    reason in `notes`/`skipped`;
+  * every source that IS asked answers at its best tier: MusicBrainz answers
+    per track (recording genres, then the work's) and album-wide
+    (release group → release → artist), while RYM answers per track where its
+    page states one and Album of the Year answers album-wide — labelled
+    `level: album`/`level: artist` where that is what answered, never promoted
+    to a track (`level_counts` totals those tiers);
   * the merged order is `genre_sources` order, so a reversed list reverses the
-    result, and an album-only source never outranks a per-track one;
-  * ListenBrainz rows carrying a `genre_mbid` (recognised genres) beat the
-    free tags, and a free tag is kept only when it is agreed on (count >= 2)
-    and is not a mood word — a mood word and a count-1 tag are dropped;
-  * ListenBrainz's per-recording tags come before its release-group bucket,
-    which comes before its artist bucket;
+    result;
+  * the two scraped sources are read LIVE only — the genre chain has no
+    archive/Wayback route (`_rym_archive_on`/`_aoty_archive_on` belong to the
+    RYM links/charts features, not here);
   * the cap (`mb_genre_count`) is enforced PER TRACK, and a track's own
     recording genres stay ahead of the release-wide ones;
-  * TheAudioDB's track row is preferred over its album row, and the album row
-    is still the fallback for the tracks the track path did not answer;
-  * Wikidata asks the RECORDING's own P136 first (the recording's Wikidata
-    relation, then the "artist title" entity) and falls back to the release
-    group / searched entity;
-  * Bandcamp's album page is parsed for its tags (`data-tralbum` + the tag
-    block), junk tags are filtered like ListenBrainz free tags, a page that is
-    not this album is no answer, and the second run is served from the cache;
-  * Spotify is artist-level (`level: artist`), asked only when its credentials
-    are set, and last;
-  * a source that fails (a blocked RYM, a dead host, a raising adapter) or is
-    throttled removes only its own genres — the other sources still answer,
-    and the failure is reported in `notes`;
+  * a source that fails (a blocked RYM, a raising adapter) removes only its
+    own genres — the other sources still answer, and the failure is reported in
+    `notes`;
   * RateYourMusic's release page is mapped onto our tracks by position, then
     title, a row that states its own genre is `level: track`, and an
     album-level (genre or descriptor) fallback is applied to every track and
     marked `level: album`;
+  * Album of the Year is fetched through `intg.aoty_page` (monkeypatchable) and
+    parsed with `intg.aoty.parse_album`; its album page is the album-level
+    answer and its artist page the fallback;
   * both previously shipped default `genre_sources` lists migrate to the
     current default; a customised list is kept as written;
-  * Last.fm and Discogs are skipped without their key/token — no request is
-    made and they are reported in `notes`;
+  * an id this build no longer knows (a stale saved list entry) returns no
+    answer at all — never an album-wide guess;
   * `sources` names the contributing sources per path IN ORDER, and
     `levels` says which tier answered;
   * nothing is invented: every source empty yields no genres, no per-track
@@ -77,35 +66,24 @@ from server import integrations as intg
 # stubs — no politeness sleeps and no host throttling: the transport is
 # stubbed here, so the wait would only make the run slow.
 intg._data_cache_dir = lambda name: None
-intg._apple_cache_dir = lambda: None
-intg._APPLE_MIN_INTERVAL = 0.0
 intg.RYM_MIN_INTERVAL = 0.0
-intg.BANDCAMP_MIN_INTERVAL = 0.0
 discovery._HOST_WAIT.clear()
 
 # The priority list the module documents and ships (see the GENRE_SOURCES
 # comment in server/integrations.py), spelled out here so a silent reorder
 # fails the run instead of passing unnoticed.
-DOCUMENTED_SOURCES = ["rateyourmusic", "musicbrainz", "listenbrainz", "itunes",
-                      "lastfm", "theaudiodb", "wikidata", "bandcamp", "discogs",
-                      "deezer", "spotify"]
-# Which of them can ever state a TRACK's own genre, and which only know the
-# album or the artist. The chain's promise is that the first group sits above
-# the second (see the ordering test at the end).
-PER_TRACK_SOURCES = ["rateyourmusic", "listenbrainz", "musicbrainz", "itunes",
-                     "lastfm", "theaudiodb", "wikidata"]
-WIDE_SOURCES = ["bandcamp", "discogs", "deezer", "spotify"]
+DOCUMENTED_SOURCES = ["rateyourmusic", "albumoftheyear", "musicbrainz"]
 
 # The default configuration (no saved `genre_sources`): the chain must use the
 # module default. Every test below therefore runs the REAL priority list.
-# The cookie is what makes RateYourMusic an ASKED source at all: without one
+# A cookie is what makes a scraped source an ASKED source at all: without one
 # the chain skips it before any request (no credential = no page, see
 # `_genre_source_skip`), which is its own test in §5.
-CFG = {"mb_genre_count": 3, "rym_cookie": "cf_clearance=test"}
+CFG = {"mb_genre_count": 3, "rym_cookie": "cf_clearance=test",
+       "aoty_cookie": "cf_clearance=aoty"}
 # An explicit, hand-picked list — for the order-honouring tests (§1 reversed,
-# §6) where a shorter list keeps the expectation readable.
-ORDER = ["rateyourmusic", "listenbrainz", "musicbrainz", "itunes",
-         "wikidata", "lastfm", "discogs"]
+# §9) where a shorter list keeps the expectation readable.
+ORDER = ["rateyourmusic", "albumoftheyear", "musicbrainz"]
 
 FILE_ONE = "1-01 Track One.flac"
 FILE_TWO = "1-02 Track Two.flac"
@@ -161,12 +139,11 @@ RYM_DESCRIPTOR_PAGE = (
     '<tr class="tracklist_row"><td class="tracklist_track_num">1</td>'
     '<td class="tracklist_track_title">Track One</td></tr>'
     '</table></body></html>')
-# A release page in the markup RYM actually serves — an excerpt of an archived
+# A release page in the markup RYM actually serves — an excerpt of a live
 # capture, kept where it matters: the `+`-spaced genre slugs with RYM's own
-# capitals (web.archive.org/web/20210325091401/https://rateyourmusic.com/release/
-# album/grouper/dragging-a-dead-deer-up-a-hill/), the primary/secondary genre
-# blocks, and the `tracklist_line` / `tracklist_num` / `tracklist_title` row
-# shape a client without a logged-in cookie gets (the desktop table spells those
+# capitals, the primary/secondary genre blocks, and the `tracklist_line` /
+# `tracklist_num` / `tracklist_title` row shape a client without a logged-in
+# cookie gets (the desktop table spells those
 # `tracklist_row`/`tracklist_track_num`/`tracklist_track_title`, which the other
 # fixtures here cover). A lowercase-and-dash-only genre class drops every
 # multi-word genre on this page, which is most of RYM's value.
@@ -199,51 +176,18 @@ RYM_CHALLENGE = ("<html><head><title>Just a moment...</title></head>"
                  "<body>Checking your browser before accessing "
                  "rateyourmusic.com</body></html>")
 
-LB_ROWS = [
-    # a recognised genre — the row ListenBrainz matched to its taxonomy
-    {"tag": "Alternative Metal", "count": 7, "genre_mbid": "g-1"},
-    {"tag": "post-metal", "count": 2, "genre_mbid": "g-2"},
-    # free tags: agreed on (kept), a mood (dropped), and tag-spam (dropped)
-    {"tag": "Sludge Metal", "count": 4},
-    {"tag": "Melancholic", "count": 9},
-    {"tag": "Dreamy", "count": 12},
-    {"tag": "vyrzukhisuc-artiest", "count": 1},
-]
-
-# TheAudioDB's own answers: `searchtrack.php` answers per TRACK (its per-track
-# tier) and `searchalbum.php` the album row (the fallback tier). `strMood` is a
-# mood word, never a genre.
-AUDIODB_TRACKS = {
-    "Track One": {"strArtist": "Test Artist", "strTrack": "Track One",
-                  "strGenre": "Shoegaze", "strStyle": "Dream Pop",
-                  "strMood": "Dreamy"},
-}
-AUDIODB_ALBUM = {"strArtist": "Test Artist", "strGenre": "Post-Rock",
-                 "strMood": "Epic"}
-
-# A Bandcamp album page: the tags live in the tag block (`tralbum-tags`), the
-# album title and the per-track list in `data-tralbum` (HTML-escaped JSON, the
-# way Bandcamp serves it). The tag list deliberately carries the junk a real
-# page carries: a punctuation-duplicate of its own slug, and a mood word.
-BANDCAMP_PAGE = (
-    '<html><body>'
-    '<div class="tralbumData tralbum-tags tralbum-tags-nu hidden">'
-    '<h3><span class="tags-inline-label">Tags</span></h3>'
-    '<a class="tag" href="https://bandcamp.com/discover/doom-metal?from=tralbum"'
-    '                >doom metal</a>'
-    '<a class="tag" href="https://bandcamp.com/discover/doommetal?from=tralbum"'
-    '                >doommetal</a>'
-    '<a class="tag" href="https://bandcamp.com/discover/melancholic?from=tralbum"'
-    '                >melancholic</a>'
-    '<a class="tag" href="https://bandcamp.com/discover/stoner-rock?from=tralbum"'
-    '                >Stoner Rock</a>'
-    '</div>'
-    '<script data-tralbum="{&quot;current&quot;: {&quot;title&quot;: '
-    '&quot;Test Album&quot;}, &quot;trackinfo&quot;: ['
-    '{&quot;track_num&quot;: 1, &quot;title&quot;: &quot;Track One&quot;}, '
-    '{&quot;track_num&quot;: 2, &quot;title&quot;: &quot;Track Two&quot;}]}"'
-    ' data-other="1"></script>'
-    '</body></html>')
+# An Album of the Year album page: the genre row is `Genre`-labelled and the
+# genre links are read in the order AOTY prints them (headline names, then the
+# `secondary` ones). `aoty.parse_album` reads this into `{"genres", ...}`, and
+# the genre chain takes that album-level row as AOTY's answer.
+AOTY_ALBUM_PAGE = (
+    '<div class="detailRow"><a href="/genre/5-shoegaze/">Shoegaze</a>, '
+    '<a href="/genre/34-dream-pop/">Dream Pop</a> '
+    '<span>/&nbsp;Genre</span></div>')
+# The artist page, AOTY's fallback when an album page states no genre row.
+AOTY_ARTIST_PAGE = (
+    '<div class="detailRow"><a href="/genre/9-alternative-rock/">'
+    'Alternative Rock</a> <span>/&nbsp;Genre</span></div>')
 
 
 # --------------------------------------------------------------------------- #
@@ -300,17 +244,6 @@ def stub_json(router):
     return calls
 
 
-def stub_apple(router):
-    calls = []
-
-    def fake(path, params=None, timeout=None):
-        calls.append((path, dict(params or {})))
-        return router(path, dict(params or {}))
-
-    intg._apple_json = fake
-    return calls
-
-
 def stub_mb(payloads):
     calls = []
 
@@ -323,96 +256,23 @@ def stub_mb(payloads):
     return calls
 
 
-def lb_router(rows=None, rg_rows=None, artist_rows=None):
-    """ListenBrainz's three buckets of `/1/metadata/...` answers."""
-    rows = LB_ROWS if rows is None else rows
-    rg_rows = ([{"tag": "Progressive Rock", "count": 5, "genre_mbid": "g-3"}]
-               if rg_rows is None else rg_rows)
-    artist_rows = ([{"tag": "Art Rock", "count": 6, "genre_mbid": "g-4"},
-                    {"tag": "Dreamy", "count": 12}]
-                   if artist_rows is None else artist_rows)
+def stub_aoty(album=None, artist=None):
+    """Album of the Year's page seam (`integrations.aoty_page`).
 
-    def router(url, params):
-        if "metadata/recording/" in url:
-            return {params.get("recording_mbids"): {"tag": {"recording": rows}}}
-        if "metadata/release_group/" in url:
-            return {params.get("release_group_mbids"): {"tag": {"release_group": rg_rows}}}
-        if "metadata/artist/" in url:
-            return {params.get("artist_mbids"): {"tag": {"artist": artist_rows}}}
-        return None
-
-    return router
-
-
-def apple_router(songs):
-    def router(path, params):
-        if params.get("entity") == "musicArtist":
-            return {"results": [{"artistName": "Test Artist", "artistId": 555}]}
-        if params.get("entity") == "album":
-            return {"results": [{"collectionId": 999, "artistName": "Test Artist",
-                                 "collectionName": "Test Album", "trackCount": 2,
-                                 "collectionExplicitness": "notExplicit"}]}
-        if params.get("entity") == "song":
-            return {"results": [
-                {"trackName": "Track One", "discNumber": 1, "trackNumber": 1,
-                 "primaryGenreName": genre} for genre in songs.get("1:1", [])
-            ] + [
-                {"trackName": "Track Two", "discNumber": 1, "trackNumber": 2,
-                 "primaryGenreName": genre} for genre in songs.get("1:2", [])
-            ]}
-        return {"results": []}
-
-    return router
-
-
-def wikidata_router(labels=("Space Rock", "Art Rock"), per_qid=None):
-    """Wikidata's two calls: P136 claims by entity, labels by item id.
-
-    Every entity gets its own item ids, so `per_qid` (how the "recording
-    first, release group after" test tells the two tiers apart) cannot bleed
-    one entity's labels into the other's.
+    The genre chain reaches the scraped page through `aoty_page` (and its
+    `aoty_album_page` wrapper), so replacing that one function stubs the whole
+    source: `kind` says which page was asked for, and the return is the HTML
+    `aoty.parse_album` / `aoty.parse_artist` will read. Returns the call log
+    (list of `kind`s).
     """
-    labels_by_qid = {"Q202996": list(labels)}
-    labels_by_qid.update(per_qid or {})
-    claims, item_labels = {}, {}
-    for idx, (entity, names) in enumerate(labels_by_qid.items()):
-        ids = [f"Q{2000 + idx * 10 + i}" for i in range(len(names))]
-        item_labels.update(dict(zip(ids, names)))
-        claims[entity] = ids
+    calls = []
 
-    def router(url, params):
-        if "wikidata.org" not in url:
-            return None
-        if params.get("action") == "wbgetclaims":
-            ids = claims.get(params.get("entity"))
-            if ids is None:
-                return {"claims": {}}
-            return {"claims": {"P136": [
-                {"mainsnak": {"datavalue": {"value": {"id": item}}}}
-                for item in ids]}}
-        if params.get("action") == "wbgetentities":
-            wanted = [item for item in params.get("ids", "").split("|")
-                      if item in item_labels]
-            return {"entities": {item: {"labels": {"en": {"value": item_labels[item]}}}
-                                 for item in wanted}}
-        return None
+    def fake(artist_name, album_name="", cfg=None, kind="album"):
+        calls.append(kind)
+        return {"album": album, "artist": artist}.get(kind)
 
-    return router
-
-
-def audiodb_router(tracks=None, album=None):
-    """TheAudioDB's two calls: the track row (by title) and the album row."""
-    tracks = AUDIODB_TRACKS if tracks is None else tracks
-
-    def router(url, params):
-        if "searchtrack.php" in url:
-            row = tracks.get(params.get("t"))
-            return {"track": [row] if row else []}
-        if "searchalbum.php" in url:
-            return {"album": [album] if album else []}
-        return None
-
-    return router
+    intg.aoty_page = fake
+    return calls
 
 
 # MusicBrainz holds BOTH relations for one release group: the Wikidata link
@@ -436,35 +296,17 @@ def clear():
     intg._bandcamp_warned = False
 
 
-def both_router(*routers):
-    """First router that answers — the seams here are stubbed per host."""
-    def router(url, params):
-        for one in routers:
-            got = one(url, params)
-            if got is not None:
-                return got
-        return None
-
-    return router
-
-
 def full_stack(**overrides):
-    """Every source answering, with `overrides` replacing a router.
+    """Every source answering, with `overrides` replacing a page/router.
 
-    RateYourMusic, ListenBrainz, MusicBrainz, iTunes, TheAudioDB (per track
-    and album), Wikidata and Bandcamp all answer; Last.fm, Discogs and Spotify
-    are the keyed ones and stay silent without their credentials, which is
-    itself part of the contract (§5).
+    RateYourMusic (its live release page), Album of the Year (its album page)
+    and MusicBrainz all answer; a caller can silence any of them by passing
+    `rym`, `aoty_album`/`aoty_artist` or `mb`.
     """
-    stub_rym({"rateyourmusic.com": overrides.get("rym", RYM_PAGE),
-              "bandcamp.com/album/": overrides.get("bandcamp", BANDCAMP_PAGE)})
-    stub_json(overrides.get("json")
-              or both_router(lb_router(), wikidata_router(),
-                             audiodb_router(tracks=overrides.get("audiodb_tracks"),
-                                            album=overrides.get("audiodb_album",
-                                                                AUDIODB_ALBUM))))
-    stub_apple(overrides.get("apple") or apple_router({"1:1": ["Hard Rock"],
-                                                       "1:2": ["Nu Metal"]}))
+    stub_rym({"rateyourmusic.com": overrides.get("rym", RYM_PAGE)})
+    stub_aoty(overrides.get("aoty_album", AOTY_ALBUM_PAGE),
+              overrides.get("aoty_artist", AOTY_ARTIST_PAGE))
+    stub_json(lambda url, params: None)
     stub_mb(overrides.get("mb") or MB_DEFAULT)
 
 
@@ -481,53 +323,36 @@ clear()
 full_stack()
 got = chain(limit=20)
 
-# RateYourMusic's album genres first, then MusicBrainz's own per-recording
-# answer and its release-group/release/artist tiers, then ListenBrainz's
-# per-recording tags and its release-group / artist buckets, then iTunes,
-# TheAudioDB (its own per-track row, then the album row), Wikidata and
-# Bandcamp — the shipped order, source by source.
+# RateYourMusic's album genres first, then Album of the Year's album row, then
+# MusicBrainz's own per-recording answer and its release-group/release/artist
+# tiers — the shipped order, source by source.
 assert got["per_track"][(1, 1)] == [
     "Heavy Metal", "Groove Metal",                    # rateyourmusic (album)
+    "Shoegaze", "Dream Pop",                          # albumoftheyear (album)
     "Alternative Metal",                              # musicbrainz (recording)
     "Progressive Rock",                               # musicbrainz (release group)
     "Rock",                                           # musicbrainz (release)
     "Art Rock",                                       # musicbrainz (artist)
-    "post-metal", "sludge metal",                     # listenbrainz (recording)
-    "Hard Rock",                                      # itunes (per track)
-    "Shoegaze", "Dream Pop",                          # theaudiodb (per track)
-    "Post-Rock", "Epic",                              # theaudiodb (album)
-    "Space Rock",                                     # wikidata (P136)
-    "doom metal", "Stoner Rock",                      # bandcamp (album tags)
 ], got["per_track"][(1, 1)]
 # The source order holds across the whole merge: a source asked later can
-# never jump one asked earlier (MusicBrainz above ListenBrainz here, exactly
-# as the shipped list says).
-assert (got["per_track"][(1, 1)].index("Alternative Metal")
-        < got["per_track"][(1, 1)].index("post-metal"))
-# Mood words and tag-spam never become genres, at any level — the "melancholic"
-# tag Bandcamp's page carries is dropped here exactly like ListenBrainz's.
-for names in list(got["per_track"].values()) + list(got["per_source"].values()):
-    joined = " ".join(names).lower()
-    assert "melancholic" not in joined and "dreamy" not in joined, names
-    assert "vyrzukhisuc" not in joined, names
-    assert "doommetal" not in joined, names     # the slug duplicate of its own tag
-assert "sludge metal" in got["per_track"][(1, 1)]     # count 4 free tag kept
+# never jump one asked earlier.
+assert (got["per_track"][(1, 1)].index("Heavy Metal")
+        < got["per_track"][(1, 1)].index("Shoegaze"))
+assert (got["per_track"][(1, 1)].index("Shoegaze")
+        < got["per_track"][(1, 1)].index("Alternative Metal"))
 
 # Provenance: the contributing sources, in ask order, per PATH — and the
 # per-track map is keyed the same way the ONE writer (`_write_album_genres`)
-# looks its entries up, so the route can hand it straight over. Every source
-# that answered here answered per track (TheAudioDB's row is the exception,
-# and it is the source's own album row, which its track row precedes).
+# looks its entries up, so the route can hand it straight over.
 from server import imports
 
 assert imports._parse_trackno(FILE_ONE) in got["per_track"]
-assert got["sources"][FILE_ONE] == ["rateyourmusic", "musicbrainz",
-                                    "listenbrainz", "itunes", "theaudiodb",
-                                    "wikidata", "bandcamp"], got["sources"]
+assert got["sources"][FILE_ONE] == ["rateyourmusic", "albumoftheyear",
+                                    "musicbrainz"], got["sources"]
 assert got["per_track_sources"][(1, 1)] == got["sources"][FILE_ONE]
 # `levels` reports the MOST SPECIFIC tier that answered this track — with
-# ListenBrainz's recording tags and Apple's per-track genre in the list, that
-# is the track level (an album-only answer is "album", see §3).
+# MusicBrainz's per-recording genres in the list, that is the track level (an
+# album-only answer is "album", see §3).
 assert got["levels"][FILE_ONE] == "track", got["levels"]
 
 # Track 2 states its own genre on the RYM page, so that row answers it — and
@@ -535,9 +360,6 @@ assert got["levels"][FILE_ONE] == "track", got["levels"]
 assert got["per_track"][(1, 2)][0] == "Industrial Metal", got["per_track"][(1, 2)]
 assert got["levels"][FILE_TWO] == "track", got["levels"]
 assert got["sources"][FILE_TWO][0] == "rateyourmusic", got["sources"]
-# TheAudioDB had no row for this track, so its ALBUM row answered it instead —
-# and it is labelled as such in the provenance, not as a track answer.
-assert "Post-Rock" in got["per_track"][(1, 2)], got["per_track"][(1, 2)]
 
 # The chain follows `genre_sources`: reversing the order reverses the merge.
 clear()
@@ -546,11 +368,14 @@ reversed_got = intg.genre_chain(artist="Test Artist", album="Test Album",
                                 release=RELEASE, cfg=CFG, limit=6,
                                 sources=list(reversed(ORDER)),
                                 files=[FILE_ONE])
-assert reversed_got["per_track"][(1, 1)] == ["Space Rock", "Art Rock",
-                                             "Hard Rock", "Alternative Metal",
-                                             "Progressive Rock", "Rock"], \
+assert reversed_got["per_track"][(1, 1)] == ["Alternative Metal",
+                                             "Progressive Rock", "Rock",
+                                             "Art Rock", "Shoegaze",
+                                             "Dream Pop"], \
     reversed_got["per_track"][(1, 1)]
-assert reversed_got["sources"][FILE_ONE] == ["wikidata", "itunes", "musicbrainz"], \
+# MusicBrainz and Album of the Year together fill the 6-slot list, so the
+# chain stops before RateYourMusic — the early stop, honoured per the list.
+assert reversed_got["sources"][FILE_ONE] == ["musicbrainz", "albumoftheyear"], \
     reversed_got["sources"]
 
 # The cap is enforced PER TRACK, not across the album — and once every track
@@ -578,63 +403,40 @@ clear()
 full_stack()
 assert len(chain(limit=1)["per_track"][(1, 2)]) == 1
 
-# iTunes answers per TRACK (Apple's `primaryGenreName`), so its genre lands on
-# the track it belongs to and nowhere else.
-clear()
-stub_json(lb_router(rows=[], rg_rows=[], artist_rows=[]))
-stub_rym({"rateyourmusic.com": RYM_CHALLENGE})
-stub_apple(apple_router({"1:2": ["Nu Metal"]}))
-stub_mb({})
-got = chain(limit=6)
-assert got["per_track"] == {(1, 1): ["Alternative Metal", "Rock"],
-                            (1, 2): ["Nu Metal", "Rock"]}, got["per_track"]
-assert got["per_source"]["itunes"] == ["Nu Metal"], got["per_source"]
-assert "Nu Metal" not in got["per_track"][(1, 1)], got["per_track"]
-assert got["levels"][FILE_TWO] == "track", got["levels"]
-assert got["levels"][FILE_ONE] == "track", got["levels"]   # MB recording genres
-# A RYM that was ASKED and refused says so — the reason names the setting to
-# fix, instead of an empty answer that looks like "nothing there".
-assert got["notes"]["rateyourmusic"].startswith(
-    "skipped: RateYourMusic refused this cookie"), got["notes"]
-
 # --------------------------------------------------------------------------- #
 # 2) Reliability — one source failing never removes the others'
 # --------------------------------------------------------------------------- #
 # (a) blocked RYM, everything else answering: one log line, no exception.
 clear()
 stub_rym({"rateyourmusic.com": RYM_CHALLENGE})
-stub_json(lb_router())
-stub_apple(apple_router({"1:1": ["Hard Rock"]}))
+stub_aoty(AOTY_ALBUM_PAGE, AOTY_ARTIST_PAGE)
 stub_mb({"release-group/rg-1": {"genres": [{"name": "Progressive Rock"}]}})
 buf = io.StringIO()
 with contextlib.redirect_stdout(buf):
     got = chain(limit=6)
 assert got["notes"]["rateyourmusic"].startswith(
     "skipped: RateYourMusic refused this cookie"), got["notes"]
-# MusicBrainz is asked before ListenBrainz in the shipped order, so its
-# own spelling of the recording's genre is what leads the merged list.
-assert got["per_track"][(1, 1)][0] == "Alternative Metal", got["per_track"]
+# Album of the Year is asked before MusicBrainz in the shipped order, so its
+# own album answer is what leads the merged list.
+assert got["per_track"][(1, 1)][0] == "Shoegaze", got["per_track"]
 assert "rateyourmusic" not in got["sources"][FILE_ONE], got["sources"]
 assert buf.getvalue().count("rateyourmusic") == 1, buf.getvalue()
 
-# (b) a host that raises (timeout / no route): the others still answer.
+# (b) a host that raises (timeout / no route): the others still answer, and
+# the dead source is simply absent from the provenance.
 clear()
 stub_rym({"rateyourmusic.com": RYM_PAGE})
 
-def dead_lb(url, params):
-    if "listenbrainz" in url:
-        raise RuntimeError("connection reset")
-    return None
+def dead_aoty(artist, album="", cfg=None, kind="album"):
+    raise RuntimeError("connection reset")
 
-stub_json(dead_lb)
-stub_apple(apple_router({"1:1": ["Hard Rock"]}))
+intg.aoty_page = dead_aoty
 stub_mb({})
 got = chain(limit=6)
-assert got["notes"]["listenbrainz"].startswith(("no data", "failed:")), got["notes"]
-assert "listenbrainz" not in got["per_source"], got["per_source"]
+assert got["notes"]["albumoftheyear"].startswith("failed: "), got["notes"]
+assert "albumoftheyear" not in got["per_source"], got["per_source"]
 assert got["per_track"][(1, 1)][:2] == ["Heavy Metal", "Groove Metal"], got["per_track"]
-# The dead host is simply absent from the provenance; the others are intact.
-assert got["sources"][FILE_ONE] == ["rateyourmusic", "musicbrainz", "itunes"], got["sources"]
+assert got["sources"][FILE_ONE] == ["rateyourmusic", "musicbrainz"], got["sources"]
 
 # (c) a source that raises inside the module (a scrape that blew up) is
 # reported as failed, with the traceback message, and removes only itself.
@@ -647,9 +449,9 @@ try:
 finally:
     intg.rym_genres = _real_rym
 assert got["notes"]["rateyourmusic"].startswith("failed: "), got["notes"]
-# MusicBrainz is asked before ListenBrainz in the shipped order, so its
-# own spelling of the recording's genre is what leads the merged list.
-assert got["per_track"][(1, 1)][0] == "Alternative Metal", got["per_track"]
+# Album of the Year is asked before MusicBrainz in the shipped order, so its
+# own album answer is what leads the merged list.
+assert got["per_track"][(1, 1)][0] == "Shoegaze", got["per_track"]
 
 # --------------------------------------------------------------------------- #
 # 3) RateYourMusic — per-track rows, title mapping, album fallback
@@ -658,8 +460,7 @@ assert got["per_track"][(1, 1)][0] == "Alternative Metal", got["per_track"]
 # so the descriptors carry the album-level answer.
 clear()
 stub_rym({"rateyourmusic.com": RYM_DESCRIPTOR_PAGE})
-stub_json(lb_router(rows=[], rg_rows=[], artist_rows=[]))
-stub_apple(apple_router({}))
+stub_aoty(None, None)
 stub_mb({})
 got = chain(release=BARE_RELEASE)
 assert got["per_source"]["rateyourmusic"] == ["Concept Album"], got["per_source"]
@@ -672,8 +473,7 @@ assert got["sources"][FILE_TWO] == ["rateyourmusic"], got["sources"]
 clear()
 titled = RYM_PAGE.replace('tracklist_track_num">1<', 'tracklist_track_num">7<')
 stub_rym({"rateyourmusic.com": titled})
-stub_json(lb_router(rows=[], rg_rows=[], artist_rows=[]))
-stub_apple(apple_router({}))
+stub_aoty(None, None)
 stub_mb({})
 got = chain(limit=6, release=BARE_RELEASE)
 assert got["per_track"][(1, 2)] == ["Industrial Metal", "Heavy Metal",
@@ -737,8 +537,7 @@ assert intg._rym_ref(rows[1]["title"]) == \
 
 clear()
 fake = stub_rym({"rateyourmusic.com": RYM_LIVE_PAGE})
-stub_json(lb_router(rows=[], rg_rows=[], artist_rows=[]))
-stub_apple(apple_router({}))
+stub_aoty(None, None)
 stub_mb({})
 live_release = {"id": "rel-g", "release_group_id": "rg-g", "genres": [],
                 "artists": [{"name": "Grouper", "mbid": "art-g"}],
@@ -755,119 +554,83 @@ assert got["per_track"][(1, 1)] == [
 assert got["levels"][FILE_ONE] == "album", got["levels"]
 
 # --------------------------------------------------------------------------- #
-# 4) Wikidata — the release group's own relation, QIDs resolved to labels
+# 4) Album of the Year — album row parsed through `aoty_page`, artist fallback
 # --------------------------------------------------------------------------- #
+# The album page's `Genre` row is the album-level answer, applied to every
+# track and labelled `album` — AOTY classifies the release, not a track.
 clear()
-calls = stub_json(wikidata_router())
+aoty = stub_aoty(AOTY_ALBUM_PAGE, AOTY_ARTIST_PAGE)
 stub_rym({"rateyourmusic.com": RYM_CHALLENGE})
-stub_apple(apple_router({}))
-mb_calls = stub_mb({"release-group/rg-1": {
-    "relations": [{"type": "wikidata",
-                   "url": {"resource": "https://www.wikidata.org/wiki/Q202996"}}]}})
-got = chain(release=BARE_RELEASE)
-assert got["per_source"]["wikidata"] == ["Space Rock", "Art Rock"], got["per_source"]
-assert "release-group/rg-1" in mb_calls, mb_calls
-claims = [p for url, p in calls if p.get("action") == "wbgetclaims"]
-assert claims and claims[0]["entity"] == "Q202996", claims
+stub_mb({})
+got = chain(limit=6, release=BARE_RELEASE)
+assert got["per_source"]["albumoftheyear"] == ["Shoegaze", "Dream Pop"], got["per_source"]
+assert got["per_track"][(1, 1)] == ["Shoegaze", "Dream Pop"], got["per_track"]
 assert got["levels"] == {FILE_ONE: "album", FILE_TWO: "album"}, got["levels"]
-# No P136 statement → no Wikidata genre, and no label guessing.
+assert aoty.count("album") == 1, aoty
+
+# An album page with no genre row falls back to the ARTIST page — and the row
+# is labelled `artist`, never promoted to the album.
 clear()
-stub_json(lambda url, params: {} if "wikidata" in url else None)
+aoty = stub_aoty(None, AOTY_ARTIST_PAGE)
 stub_rym({"rateyourmusic.com": RYM_CHALLENGE})
-stub_apple(apple_router({}))
 stub_mb({})
-got = chain()
-assert "wikidata" not in got["per_source"] and got["notes"]["wikidata"] == "no data", got
+got = chain(limit=6, release=BARE_RELEASE)
+assert got["per_source"]["albumoftheyear"] == ["Alternative Rock"], got["per_source"]
+assert got["per_track"][(1, 1)] == ["Alternative Rock"], got["per_track"]
+assert got["levels"] == {FILE_ONE: "artist", FILE_TWO: "artist"}, got["levels"]
+assert aoty == ["album", "artist"], aoty
 
 # --------------------------------------------------------------------------- #
-# 5) Last.fm / Discogs — keyed sources are skipped, never guessed
+# 5) Scraped sources gated on their credentials; unknown ids never guessed
 # --------------------------------------------------------------------------- #
-clear()
-calls = stub_json(lb_router(rows=[], rg_rows=[], artist_rows=[]))
-stub_rym({"rateyourmusic.com": RYM_PAGE})
-stub_apple(apple_router({}))
-stub_mb({})
-got = chain(release=BARE_RELEASE)
-hosts = {url.split("/")[2] for url, _p in calls}
-assert "ws.audioscrobbler.com" not in hosts and "api.discogs.com" not in hosts, hosts
-# RYM answered both tracks here, so the chain stopped before either of them.
-assert got["per_track"][(1, 1)] == ["Heavy Metal", "Groove Metal"], got["per_track"]
-assert "lastfm" not in got["asked"] and "discogs" not in got["asked"], got["asked"]
-
-# A source without its key is skipped BEFORE any request, and the report names
-# the setting instead of reporting "no data" for something never asked.
-clear()
-calls = stub_json(lambda url, params: None)
-stub_rym({"rateyourmusic.com": RYM_CHALLENGE})
-stub_apple(apple_router({}))
-stub_mb({})
-got = intg.genre_chain(artist="Test Artist", album="Test Album",
-                       release=BARE_RELEASE, cfg=CFG, limit=6,
-                       files=[FILE_ONE, FILE_TWO],
-                       sources=["lastfm", "discogs", "deezer"])
-assert got["notes"]["lastfm"].startswith("skipped: no lastfm_api_key"), got["notes"]
-assert got["notes"]["discogs"].startswith("skipped: no discogs_token"), got["notes"]
-assert set(got["skipped"]) == {"lastfm", "discogs"}, got["skipped"]
-assert got["asked"] == ["deezer"], got["asked"]
-hosts = {url.split("/")[2] for url, _p in calls}
-assert "ws.audioscrobbler.com" not in hosts and "api.discogs.com" not in hosts, hosts
-
-# RateYourMusic is gated the same way, on its credential: no `rym_cookie` means
-# no page (RYM refuses an automated client), so the chain does not spend a
-# request and a second of throttle learning that.
+# RateYourMusic is gated on its credential: no `rym_cookie` means no page (RYM
+# refuses an automated client), so the chain does not spend a request and a
+# second of throttle learning that.
 clear()
 fake = stub_rym({"rateyourmusic.com": RYM_PAGE})
-stub_json(lambda url, params: None)
-stub_apple(apple_router({}))
+stub_aoty(None, None)
 stub_mb({})
 got = intg.genre_chain(artist="Test Artist", album="Test Album",
                        release=BARE_RELEASE, cfg={"mb_genre_count": 3},
                        limit=6, files=[FILE_ONE, FILE_TWO],
-                       sources=["rateyourmusic", "musicbrainz"])
+                       sources=["rateyourmusic", "albumoftheyear", "musicbrainz"])
 assert got["notes"]["rateyourmusic"].startswith("skipped: no rym_cookie"), got["notes"]
 assert "rateyourmusic" not in got["asked"], got["asked"]
 assert fake.calls == [], fake.calls          # not one request to RYM
 
-# With the keys set, Last.fm answers per TRACK (then artist) and Discogs
-# answers album-level.
+# Album of the Year is gated the same way, on `aoty_cookie` (or a solver).
 clear()
-keyed = dict(CFG, lastfm_api_key="lf-key", discogs_token="dc-token")
-
-def keyed_router(url, params):
-    if "audioscrobbler" in url and params.get("method") == "track.getTopTags":
-        return {"toptags": {"tag": [{"name": "Sludge Metal"}]}}
-    if "audioscrobbler" in url and params.get("method") == "artist.getTopTags":
-        return {"toptags": {"tag": [{"name": "Art Rock"}]}}
-    if "discogs.com/releases" in url:
-        return {"genres": ["Rock"], "styles": ["Stoner Rock"]}
-    if "discogs.com/database" in url:
-        return {"results": [{"id": 42}]}
-    return None
-
-calls = stub_json(keyed_router)
+aoty = stub_aoty(AOTY_ALBUM_PAGE, AOTY_ARTIST_PAGE)
 stub_rym({"rateyourmusic.com": RYM_CHALLENGE})
-stub_apple(apple_router({}))
 stub_mb({})
-got = intg.genre_chain(artist="Test Artist", album="Test Album", release=RELEASE,
-                       cfg=keyed, limit=6, files=[FILE_ONE, FILE_TWO])
-# MusicBrainz's recording genre, then the release's, then Last.fm's per-track
-# tag, its artist tags, and finally Discogs' styles.
-assert got["per_track"][(1, 1)] == ["Alternative Metal", "Rock", "Sludge Metal",
-                                    "Art Rock", "Stoner Rock"], got["per_track"]
-assert got["per_track"][(1, 2)] == ["Nu Metal", "Rock", "Sludge Metal",
-                                    "Art Rock", "Stoner Rock"], got["per_track"]
-assert got["levels"][FILE_ONE] == "track" and got["levels"][FILE_TWO] == "track"
-assert got["per_source"]["discogs"] == ["Rock", "Stoner Rock"], got["per_source"]
-methods = [p.get("method") for _u, p in calls if p.get("method")]
-assert methods.count("track.getTopTags") == 2, methods   # one call per track
+got = intg.genre_chain(artist="Test Artist", album="Test Album",
+                       release=BARE_RELEASE, cfg={"mb_genre_count": 3},
+                       limit=6, files=[FILE_ONE, FILE_TWO],
+                       sources=["albumoftheyear", "musicbrainz"])
+assert got["notes"]["albumoftheyear"].startswith("skipped: no aoty_cookie"), got["notes"]
+assert "albumoftheyear" not in got["asked"], got["asked"]
+assert aoty == [], aoty                       # not one page fetched
+
+# An id this build no longer knows (a stale saved list entry) is asked, gets
+# nothing, and is reported as "no data" — never an album-wide guess.
+clear()
+stub_rym({"rateyourmusic.com": RYM_CHALLENGE})
+stub_aoty(None, None)
+stub_mb({})
+got = intg.genre_chain(artist="Test Artist", album="Test Album",
+                       release=BARE_RELEASE, cfg=CFG, limit=6,
+                       files=[FILE_ONE, FILE_TWO],
+                       sources=["listenbrainz", "musicbrainz"])
+assert got["notes"]["listenbrainz"] == "no data", got["notes"]
+assert "listenbrainz" not in got["per_source"], got["per_source"]
+assert got["asked"] == ["listenbrainz", "musicbrainz"], got["asked"]
 
 # --------------------------------------------------------------------------- #
 # 6) Nothing invented when every source is empty
 # --------------------------------------------------------------------------- #
 clear()
-stub_json(lambda url, params: None)
 stub_rym({}, boom=True)
-stub_apple(apple_router({}))
+stub_aoty(None, None)
 stub_mb({})
 buf = io.StringIO()
 with contextlib.redirect_stdout(buf):
@@ -953,16 +716,15 @@ folder = tempfile.mkdtemp(prefix="mlo-genre-cache-")
 intg._data_cache_dir = lambda name: os.path.join(folder, name) if name else None
 try:
     rym = stub_rym({"rateyourmusic.com": RYM_PAGE})
-    calls = stub_json(both_router(lb_router(), wikidata_router()))
-    stub_apple(apple_router({"1:1": ["Hard Rock"], "1:2": ["Nu Metal"]}))
+    aoty = stub_aoty(AOTY_ALBUM_PAGE, AOTY_ARTIST_PAGE)
     stub_mb(MB_DEFAULT)
     first = chain(limit=12)
     assert first["per_track"][(1, 1)][0] == "Heavy Metal", first["per_track"]
-    rym_calls, json_calls = len(rym.calls), len(calls)
-    # The cap is what keeps the JSON sources in play: RateYourMusic and
-    # MusicBrainz alone fill a list of 6 under the shipped order, and a cache
-    # test with nothing cached beyond them would prove nothing about them.
-    assert rym_calls and json_calls, (rym_calls, json_calls)
+    rym_calls, aoty_calls = len(rym.calls), len(aoty)
+    # The cap is what keeps the other sources in play: RateYourMusic alone
+    # fills only a part of a list of 12, and a cache test with nothing cached
+    # beyond it would prove nothing about them.
+    assert rym_calls and aoty_calls, (rym_calls, aoty_calls)
 
     # Forget the in-process memos only: what answers now is the DISK cache.
     intg._GENRE_CACHE.clear()
@@ -971,7 +733,7 @@ try:
     assert again["per_track"] == first["per_track"], again["per_track"]
     assert again["sources"] == first["sources"], again["sources"]
     assert len(rym.calls) == rym_calls, rym.calls[rym_calls:]
-    assert len(calls) == json_calls, calls[json_calls:]
+    assert len(aoty) == aoty_calls, aoty[aoty_calls:]
 finally:
     intg._data_cache_dir = lambda name: None
 
@@ -985,16 +747,12 @@ assert list(intg.GENRE_SOURCES) == DOCUMENTED_SOURCES, intg.GENRE_SOURCES
 SHIPPED_DEFAULT = list(DOCUMENTED_SOURCES)
 assert list(mcfg.DEFAULT_CONFIG["genre_sources"]) == SHIPPED_DEFAULT, \
     mcfg.DEFAULT_CONFIG["genre_sources"]
-# Every per-track source sits above every album-only one, so a track's own
-# answer can never be outranked by an album-wide guess on a default install.
-assert (max(intg.GENRE_SOURCES.index(s) for s in PER_TRACK_SOURCES)
-        < min(intg.GENRE_SOURCES.index(s) for s in WIDE_SOURCES)), intg.GENRE_SOURCES
-# The two chains earlier releases shipped are not a choice the user made: both
+# The chains earlier releases shipped are not a choice the user made: both
 # are swapped for the current default. A list they actually edited is theirs.
 for legacy in list(mcfg.LEGACY_DEFAULT_GENRE_SOURCES) + [mcfg.LEGACY_GENRE_SOURCES]:
     assert list(mcfg.normalize_config(
         {"genre_sources": list(legacy)})["genre_sources"]) == SHIPPED_DEFAULT, legacy
-custom = ["musicbrainz", "itunes"]
+custom = ["albumoftheyear", "musicbrainz"]
 assert mcfg.normalize_config({"genre_sources": list(custom)})["genre_sources"] == custom
 # No saved list at all is the same "no choice" case.
 assert list(mcfg.normalize_config({})["genre_sources"]) == SHIPPED_DEFAULT
@@ -1003,186 +761,14 @@ assert list(mcfg.normalize_config({})["genre_sources"]) == SHIPPED_DEFAULT
 clear()
 full_stack()
 picked = intg.genre_chain(artist="Test Artist", album="Test Album",
-                          release=RELEASE, cfg={"mb_genre_count": 3,
-                                                "genre_sources": ["itunes", "musicbrainz"]},
+                          release=RELEASE,
+                          cfg=dict(CFG, genre_sources=["albumoftheyear",
+                                                       "musicbrainz"]),
                           limit=6, files=[FILE_ONE])
-assert picked["sources"][FILE_ONE] == ["itunes", "musicbrainz"], picked["sources"]
+assert picked["sources"][FILE_ONE] == ["albumoftheyear", "musicbrainz"], picked["sources"]
 
 # --------------------------------------------------------------------------- #
-# 10) TheAudioDB — its own track row first, its album row as the fallback
-# --------------------------------------------------------------------------- #
-clear()
-calls = stub_json(both_router(lb_router(rows=[], rg_rows=[], artist_rows=[]),
-                              audiodb_router(album=AUDIODB_ALBUM)))
-stub_rym({"rateyourmusic.com": RYM_CHALLENGE})
-stub_apple(apple_router({}))
-stub_mb({})
-got = chain(limit=8, release=BARE_RELEASE)
-# Track One has a track row: its genre+style, then the album row behind it.
-assert got["per_track"][(1, 1)] == ["Shoegaze", "Dream Pop", "Post-Rock", "Epic"], \
-    got["per_track"]
-# Track Two has none, so the album row answers it — and only it.
-assert got["per_track"][(1, 2)] == ["Post-Rock", "Epic"], got["per_track"]
-assert got["levels"] == {FILE_ONE: "track", FILE_TWO: "album"}, got["levels"]
-# Every track was asked about per track (one lookup per title), once each, and
-# the album call is one per album.
-assert [p.get("t") for url, p in calls if "searchtrack.php" in url] == \
-    ["Track One", "Track Two"], calls
-assert len([1 for url, _p in calls if "searchalbum.php" in url]) == 1, calls
-assert [p.get("s") for url, p in calls if "searchtrack.php" in url] == \
-    ["Test Artist", "Test Artist"], calls
-# TheAudioDB's mood field is a mood, not a genre.
-assert "Dreamy" not in got["per_source"]["theaudiodb"], got["per_source"]
-# `per_source` is the album summary: the release-wide row first, then the
-# per-track ones (the same order `genre_chain` merges a track in).
-assert got["per_source"]["theaudiodb"] == ["Post-Rock", "Epic", "Shoegaze",
-                                           "Dream Pop"], got["per_source"]
-# A row it holds for ANOTHER artist is that artist's answer, never ours.
-assert discovery.audiodb_track("Test Artist", "Somebody Else's Song") is None
-stub_json(audiodb_router(tracks={"Creep": {"strArtist": "Weezer",
-                                           "strGenre": "Power Pop"}}))
-assert discovery.audiodb_track("Test Artist", "Creep") is None
-assert discovery.audiodb_track("Weezer", "Creep")["genre"] == "Power Pop"
-
-# --------------------------------------------------------------------------- #
-# 11) Wikidata — the recording's own item first, then its WORK, then the
-#     release group
-# --------------------------------------------------------------------------- #
-clear()
-mb_calls = stub_mb({
-    # Track One's recording links Wikidata directly; Track Two's does not, but
-    # it performs a WORK that does (the practical route — see _mb_recording_ids).
-    "recording/rec-1": {"relations": [
-        {"type": "wikidata",
-         "url": {"resource": "https://www.wikidata.org/wiki/Q777"}}]},
-    "recording/rec-2": {"relations": [
-        {"type": "performance", "work": {"id": "work-2"}}]},
-    "work/work-2": {"relations": [
-        {"type": "wikidata",
-         "url": {"resource": "https://www.wikidata.org/wiki/Q888"}}]},
-    "release-group/rg-1": {"relations": [
-        {"type": "wikidata",
-         "url": {"resource": "https://www.wikidata.org/wiki/Q202996"}}]},
-})
-calls = stub_json(wikidata_router(per_qid={"Q777": ["Shoegaze"],
-                                           "Q888": ["Space Rock"]}))
-stub_rym({"rateyourmusic.com": RYM_CHALLENGE})
-stub_apple(apple_router({}))
-got = chain(limit=8, release=BARE_RELEASE)
-assert "recording/rec-1" in mb_calls and "work/work-2" in mb_calls, mb_calls
-# Both tracks answered per TRACK — one from its recording item, the other from
-# its work's item — and the release group's answer (Space Rock / Art Rock, with
-# the album's own "Space Rock" already spent) is the fallback behind them.
-assert got["per_track"][(1, 1)] == ["Shoegaze", "Space Rock", "Art Rock"], got["per_track"]
-assert got["per_track"][(1, 2)] == ["Space Rock", "Art Rock"], got["per_track"]
-assert got["levels"] == {FILE_ONE: "track", FILE_TWO: "track"}, got["levels"]
-assert [p.get("entity") for url, p in calls
-        if p.get("action") == "wbgetclaims"] == ["Q777", "Q888", "Q202996"], calls
-
-# --------------------------------------------------------------------------- #
-# 12) Bandcamp — album tags parsed, junk filtered, page verified, cached
-# --------------------------------------------------------------------------- #
-clear()
-fake = stub_rym({"rateyourmusic.com": RYM_CHALLENGE,
-                 "bandcamp.com/album/": BANDCAMP_PAGE})
-stub_json(both_router(lb_router(rows=[], rg_rows=[], artist_rows=[])))
-stub_apple(apple_router({}))
-stub_mb({})
-got = chain(limit=8, release=BARE_RELEASE)
-# Bandcamp states no per-track genre at all: its tags are the album's, and the
-# provenance says album — never track.
-assert got["per_source"]["bandcamp"] == ["doom metal", "Stoner Rock"], got["per_source"]
-assert got["per_track"][(1, 1)] == ["doom metal", "Stoner Rock"], got["per_track"]
-assert got["levels"] == {FILE_ONE: "album", FILE_TWO: "album"}, got["levels"]
-# One request per album; the second run is answered from the cache.
-pages = [u for u in fake.calls if "bandcamp.com/album/" in u]
-assert len(pages) == 1, fake.calls
-got = chain(limit=8, release=BARE_RELEASE)
-assert len([u for u in fake.calls if "bandcamp.com/album/" in u]) == 1, fake.calls
-assert got["per_source"]["bandcamp"] == ["doom metal", "Stoner Rock"], got
-# The parser itself: the slug duplicate ("doommetal") and the mood word are
-# dropped, and the page's own track list is read from `data-tralbum`.
-page = intg.bandcamp_album("Test Artist", "Test Album", ["Track One"])
-assert page["genres"] == ["doom metal", "Stoner Rock"], page
-assert [t["title"] for t in page["tracks"]] == ["Track One", "Track Two"], page
-# A page for a DIFFERENT album, or a page whose tracks are not ours, is NO
-# answer — never a same-named record's tags.
-assert intg.bandcamp_album("Test Artist", "Other Album", ["Track One"]) is None
-assert intg.bandcamp_album("Test Artist", "Test Album", ["Something Else"]) is None
-# The slug candidates are the artist's subdomain with and without separators.
-assert intg._bandcamp_subdomain_candidates("God Is An Astronaut") == \
-    ["godisanastronaut", "god-is-an-astronaut"]
-
-# --------------------------------------------------------------------------- #
-# 13) Spotify — artist level, credentials only, and last
-# --------------------------------------------------------------------------- #
-clear()
-calls = stub_json(both_router(
-    lb_router(rows=[], rg_rows=[], artist_rows=[]),
-    lambda url, params: ({"artists": {"items": [{"name": "Test Artist",
-                                                 "genres": ["Alternative Rock"]}]}}
-                         if "spotify" in url else None)))
-stub_rym({"rateyourmusic.com": RYM_CHALLENGE})
-stub_apple(apple_router({}))
-stub_mb({})
-_real_token = intg._spotify_token
-try:
-    # The credential gate is the config, not the token: without them Spotify is
-    # not even asked (the patched token proves the gate is what stopped it),
-    # and the report names the two settings rather than saying "no data".
-    intg._spotify_token = lambda cfg=None, timeout=None: "tok"
-    got = chain(limit=8, release=BARE_RELEASE)
-    assert got["notes"]["spotify"].startswith(
-        "skipped: no spotify_client_id/spotify_client_secret"), got["notes"]
-    assert "spotify" not in got["asked"], got["asked"]
-    assert not [u for u, _p in calls if "spotify" in u], calls
-    # With credentials it answers at the ARTIST tier, honestly labelled.
-    keyed = dict(CFG, spotify_client_id="id", spotify_client_secret="secret")
-    got = intg.genre_chain(artist="Test Artist", album="Test Album",
-                           release=BARE_RELEASE, cfg=keyed, limit=8,
-                           files=[FILE_ONE, FILE_TWO])
-    assert got["per_source"]["spotify"] == ["Alternative Rock"], got["per_source"]
-    assert got["per_track"][(1, 1)] == ["Alternative Rock"], got["per_track"]
-    assert got["levels"] == {FILE_ONE: "artist", FILE_TWO: "artist"}, got["levels"]
-    assert len([u for u, _p in calls if "spotify" in u]) == 1, calls
-    # A search hit whose own artist is somebody else is NO answer.
-    intg._GENRE_CACHE.clear()
-    calls = stub_json(lambda url, params: (
-        {"artists": {"items": [{"name": "Some Other Band", "genres": ["Pop"]}]}}
-        if "spotify" in url else None))
-    got = intg.genre_chain(artist="Test Artist", album="Test Album",
-                           release=BARE_RELEASE, cfg=keyed, limit=8,
-                           files=[FILE_ONE, FILE_TWO])
-    assert "spotify" not in got["per_source"], got["per_source"]
-    assert got["notes"]["spotify"] == "no data", got["notes"]
-finally:
-    intg._spotify_token = _real_token
-
-# --------------------------------------------------------------------------- #
-# 14) A failing NEW source loses only itself
-# --------------------------------------------------------------------------- #
-clear()
-full_stack()
-_real_bandcamp, _real_track = intg.bandcamp_album, discovery.audiodb_track
-intg.bandcamp_album = lambda *a, **k: 1 / 0
-discovery.audiodb_track = lambda *a, **k: 1 / 0
-try:
-    got = chain(limit=20)
-finally:
-    intg.bandcamp_album = _real_bandcamp
-    discovery.audiodb_track = _real_track
-assert got["notes"]["bandcamp"].startswith("failed: "), got["notes"]
-assert got["notes"]["theaudiodb"].startswith("failed: "), got["notes"]
-assert "bandcamp" not in got["per_source"], got["per_source"]
-assert "theaudiodb" not in got["per_source"], got["per_source"]
-# Everything else answered, in order, exactly as it did before the failure.
-assert got["sources"][FILE_ONE] == ["rateyourmusic", "musicbrainz",
-                                    "listenbrainz", "itunes", "wikidata"], got["sources"]
-assert got["per_track"][(1, 1)][0] == "Heavy Metal", got["per_track"]
-assert "Space Rock" in got["per_track"][(1, 1)], got["per_track"]
-
-# --------------------------------------------------------------------------- #
-# 15) The route surface — the background job, and the inline call it replaces
+# 10) The route surface — the background job, and the inline call it replaces
 # --------------------------------------------------------------------------- #
 # The chain is minutes of provider traffic, so the wizard starts it as a job
 # and polls. Everything below runs the REAL routes against a temp music folder
@@ -1191,8 +777,6 @@ assert "Space Rock" in got["per_track"][(1, 1)], got["per_track"]
 # chain's own answers are covered above.
 import shutil as _shutil
 import tempfile as _tempfile
-import threading as _threading
-import time as _time
 
 from fastapi.testclient import TestClient  # noqa: E402  (heavy import)
 
@@ -1224,7 +808,7 @@ mlo_main.load_config = lambda *a, **k: {"music_folder": JOB_MUSIC,
                                         "mb_genre_count": 3}
 _client = TestClient(mlo_main.app)   # no lifespan: no workers, no slskd boot
 
-JOB_SOURCES = ("rateyourmusic", "listenbrainz", "musicbrainz")
+JOB_SOURCES = ("rateyourmusic", "albumoftheyear", "musicbrainz")
 JOB_NOTES = {"rateyourmusic": "no data", "musicbrainz": "answered"}
 # The chain's report, in the shape `_run_genre_chain` passes through: per-source
 # counts, what was actually asked and where it stopped, what was skipped and
@@ -1234,7 +818,7 @@ JOB_RESULT = {"updated": 2, "genres": ["Shoegaze"],
               "per_track": {(1, 1): ["Shoegaze"]}, "sources": {}, "levels": {},
               "per_source_counts": {"musicbrainz": {"names": 1, "tracks": 2}},
               "asked": ["musicbrainz"], "stopped_after": "musicbrainz",
-              "order": ["rateyourmusic", "listenbrainz", "musicbrainz"],
+              "order": ["rateyourmusic", "albumoftheyear", "musicbrainz"],
               "skipped": {"rateyourmusic": "skipped: no rym_cookie"},
               "level_counts": {"track": 1, "album": 1, "artist": 0},
               # The chain keys this by (disc, position) TUPLES. A tuple key
@@ -1322,7 +906,7 @@ finally:
     _shutil.rmtree(JOB_OUTSIDE, ignore_errors=True)
 
 # --------------------------------------------------------------------------- #
-# 6) NO source answered: the MODEL is the fallback (the owner's ask)
+# 11) NO source answered: the MODEL is the fallback (the owner's ask)
 # --------------------------------------------------------------------------- #
 # The sources are the first move and the model is the second, and an empty
 # merged list is the case that made it unreachable: `genre_chain` used to skip
@@ -1355,8 +939,7 @@ def _silent_sources():
     cookie, so not even one request)."""
     clear()
     stub_rym({})
-    stub_json(lambda url, params: None)
-    stub_apple(apple_router({}))
+    stub_aoty(None, None)
     stub_mb({})
 
 
@@ -1368,7 +951,7 @@ try:
     got = intg.genre_chain(artist="Test Artist", album="Test Album",
                            release=BARE_RELEASE, cfg=dict(CFG, ai_genre_inference=True),
                            limit=3, files=[FILE_ONE, FILE_TWO],
-                           sources=["musicbrainz", "listenbrainz"])
+                           sources=["musicbrainz", "albumoftheyear"])
     assert _ai_calls, "the model was never asked about a track nothing answered for"
     assert got["per_track"][(1, 1)] and got["per_track"][(1, 2)], got["per_track"]
     assert "shoegaze" in [g.casefold() for g in got["per_track"][(1, 1)]], got["per_track"]
@@ -1385,7 +968,7 @@ try:
     off = intg.genre_chain(artist="Test Artist", album="Test Album",
                            release=BARE_RELEASE, cfg=dict(CFG, ai_genre_inference=False),
                            limit=3, files=[FILE_ONE, FILE_TWO],
-                           sources=["musicbrainz", "listenbrainz"])
+                           sources=["musicbrainz", "albumoftheyear"])
     assert off["per_track"] == {}, off["per_track"]
     assert _ai_calls == [], _ai_calls
 finally:

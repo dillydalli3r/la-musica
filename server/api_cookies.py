@@ -30,7 +30,7 @@ from typing import Callable, Dict, List
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from server import api_rym, api_youtube
+from server import api_aoty, api_rym, api_youtube
 
 router = APIRouter(tags=["cookies"])
 
@@ -63,6 +63,11 @@ SOURCES: Dict[str, dict] = {
         "hosts": [api_rym.RYM_HOST],
         "list": api_rym.cookie_list,
         "comment": api_rym.set_cookie_comment,
+    },
+    "aoty": {
+        "hosts": [api_aoty.AOTY_HOST],
+        "list": api_aoty.cookie_list,
+        "comment": api_aoty.set_cookie_comment,
     },
 }
 

@@ -91,16 +91,8 @@ _ADVISORY_PROVIDES = {
 # Genre source labels — the spellings the settings UI already shows.
 _GENRE_LABELS = {
     "rateyourmusic": "RateYourMusic",
-    "listenbrainz": "ListenBrainz",
+    "albumoftheyear": "Album of the Year",
     "musicbrainz": "MusicBrainz",
-    "itunes": "iTunes",
-    "wikidata": "Wikidata",
-    "lastfm": "Last.fm",
-    "discogs": "Discogs",
-    "theaudiodb": "TheAudioDB",
-    "bandcamp": "Bandcamp",
-    "deezer": "Deezer",
-    "spotify": "Spotify",
 }
 
 # What each genre source actually contributes — one line, the settings tray
@@ -111,26 +103,11 @@ _GENRE_LABELS = {
 # rows carry `rank` — the 1-based position — for the same reason.
 _GENRE_PROVIDES = {
     "rateyourmusic": "the release page's own curated genres, per track where "
-                     "the page states one",
+                     "the page states one — live, needs rym_cookie or a solver",
+    "albumoftheyear": "the album page's genre row, then the artist page — "
+                      "live, needs aoty_cookie or a solver",
     "musicbrainz": "recording genres, then release, release group and artist — "
                    "curated, and the app's identity anchor",
-    "listenbrainz": "crowdsourced recording tags, then release group and "
-                    "artist — free, MBID-native",
-    "itunes": "each track's own primaryGenreName — free and reliable for "
-              "mainstream releases",
-    "lastfm": "crowdsourced track tags, then artist tags — broad, needs a "
-              "free API key",
-    "theaudiodb": "per-track genres plus the album's own genre and mood — "
-                  "keyless",
-    "wikidata": "P136 on the recording, then the release group — curated but "
-                "sparse",
-    "bandcamp": "the album page's tags — strong for indie and self-released "
-                "records, album level only",
-    "discogs": "release styles and genres — curated, album level, needs a "
-               "token",
-    "deezer": "the album's genres only — album level, keyless",
-    "spotify": "artist-level genres — the last resort, needs a client id and "
-               "secret",
 }
 
 # What each credential row asks — one line, the check's own purpose, so the
@@ -279,7 +256,6 @@ def _rym_reason_since(started):
 
 
 def _probe_genre(pid, cfg):
-    from server import discovery
     from server import integrations as intg
 
     if pid == "rateyourmusic":
@@ -289,7 +265,7 @@ def _probe_genre(pid, cfg):
         # asked again with whatever cookie is saved now — otherwise the row
         # would report an earlier run's block however fresh the cookie is.
         intg._rym_clear_block()
-        data = intg.rym_genres(SAMPLE_ARTIST, SAMPLE_ALBUM, cfg, archive=True)
+        data = intg.rym_genres(SAMPLE_ARTIST, SAMPLE_ALBUM, cfg)
         if intg._rym_failures != before:
             # WHY RYM said no, in RYM's own recorded words: "403/challenge"
             # was one sentence for five different problems, and the fix for
@@ -302,16 +278,18 @@ def _probe_genre(pid, cfg):
         detail = _count_detail((data or {}).get("genres"))
         return ("ok", detail) if detail else ("fail", "no RYM genres for the sample")
 
-    if pid == "listenbrainz":
-        mbid = _artist_mbid(cfg)
-        if not mbid:
-            return "fail", "could not resolve the sample artist on MusicBrainz"
-        got = discovery.listenbrainz_genre_tags(mbid, "artist")
-        if not got:
-            return "fail", "no ListenBrainz tags for the sample artist"
-        names = (got.get("genres") or []) + (got.get("tags") or [])
-        detail = _count_detail(names)
-        return ("ok", detail) if detail else ("fail", "no ListenBrainz genres")
+    if pid == "albumoftheyear":
+        if not intg.aoty.cookie(cfg) and not intg.cfchallenge.solver_url(cfg):
+            return "skipped", ("no aoty_cookie in Settings → Discovery "
+                               "(or set cf_solver_url)")
+        html = intg.aoty_page(SAMPLE_ARTIST, SAMPLE_ALBUM, cfg=cfg,
+                              kind="album")
+        if not html:
+            return "fail", ("AOTY refused the request (Cloudflare challenge) "
+                            "or holds no page for the sample")
+        parsed = intg.aoty.parse_album(html) or {}
+        detail = _count_detail(parsed.get("genres"))
+        return ("ok", detail) if detail else ("fail", "no AOTY genres for the sample")
 
     if pid == "musicbrainz":
         mbid = _artist_mbid(cfg)
@@ -330,66 +308,6 @@ def _probe_genre(pid, cfg):
         detail = _count_detail(intg._genres(data or {}))
         return ("ok", detail) if detail \
             else ("fail", "no MusicBrainz genres for the sample artist")
-
-    if pid == "itunes":
-        rows = discovery.itunes_search_album(SAMPLE_ARTIST, SAMPLE_ALBUM, limit=1)
-        detail = _count_detail([r.get("genre") for r in (rows or [])])
-        return ("ok", detail) if detail else ("fail", "no iTunes album genre")
-
-    if pid == "wikidata":
-        # Wikidata is reached by a search TERM, and "artist album" is only one
-        # phrasing of it (the genre chain's). The album's own title is the
-        # second, cheapest try before calling the source dead.
-        detail = ""
-        for term in (" ".join((SAMPLE_ARTIST, SAMPLE_ALBUM)), SAMPLE_ALBUM):
-            got = discovery.wikidata_genres(term=term)
-            detail = _count_detail((got or {}).get("genres"))
-            if detail:
-                break
-        return ("ok", detail) if detail else ("fail", "no Wikidata genres")
-
-    if pid == "lastfm":
-        started = time.time()
-        detail = _count_detail(discovery.lastfm_artist_genres(SAMPLE_ARTIST, cfg))
-        if detail:
-            return "ok", detail
-        return "fail", _why("no Last.fm tags",
-                            discovery.lastfm_last_error(started))
-
-    if pid == "discogs":
-        started = time.time()
-        detail = _count_detail(discovery.discogs_album_genres(SAMPLE_ARTIST,
-                                                             SAMPLE_ALBUM, cfg))
-        if detail:
-            return "ok", detail
-        got = discovery.last_http_error("api.discogs.com")
-        reason = ""
-        if got and float(got.get("at") or 0) >= started and got.get("status"):
-            reason = f"Discogs answered HTTP {got['status']} {got['body']}".strip()
-        return "fail", _why("no Discogs genres", reason)
-
-    if pid == "theaudiodb":
-        detail = _count_detail(intg._audiodb_genre_names(SAMPLE_ARTIST,
-                                                         SAMPLE_ALBUM))
-        return ("ok", detail) if detail else ("fail", "no TheAudioDB genres")
-
-    if pid == "bandcamp":
-        detail = _count_detail((intg.bandcamp_album(SAMPLE_ARTIST,
-                                                    SAMPLE_ALBUM) or {}).get("genres"))
-        return ("ok", detail) if detail else ("fail", "no Bandcamp tags")
-
-    if pid == "spotify":
-        started = time.time()
-        detail = _count_detail(discovery.spotify_artist_genres(SAMPLE_ARTIST, cfg))
-        if detail:
-            return "ok", detail
-        return "fail", _why("no Spotify genres",
-                            intg.spotify_last_error(started))
-
-    if pid == "deezer":
-        detail = _count_detail(discovery.album_genres(SAMPLE_ARTIST, SAMPLE_ALBUM,
-                                                      cfg=cfg))
-        return ("ok", detail) if detail else ("fail", "no Deezer genres")
 
     return "skipped", "unknown source"
 
@@ -633,26 +551,25 @@ def _specs(kind=None):
     # `provides` is what that source contributes. Both come from this one
     # place, so a source reordered above GENRE_SOURCES renumbers itself here.
     for rank, pid in enumerate(intg.GENRE_SOURCES, 1):
-        needs = {"lastfm": ["lastfm_api_key"], "discogs": ["discogs_token"],
-                 "rateyourmusic": ["rym_cookie"],
-                 "spotify": ["spotify_client_id", "spotify_client_secret"],
+        # The two scraped sources now read LIVE only, so their cookie is what
+        # the source needs — a cloudflare solver (`cf_solver_url`) can stand in
+        # for either, which is why the key is "optional" under that gate.
+        needs = {"rateyourmusic": ["rym_cookie"],
+                 "albumoftheyear": ["aoty_cookie"],
                  }.get(pid, [])
         spec = {"id": pid, "kind": "genre", "rank": rank,
                 "provides": _GENRE_PROVIDES.get(pid, ""),
                 "label": _GENRE_LABELS.get(pid, pid), "needs": list(needs),
                 "probe": lambda cfg, p=pid: _probe_genre(p, cfg)}
-        if pid == "rateyourmusic":
-            # RYM is the one genre source with a SECOND route: with
-            # `rym_archive_fallback` on (the shipped default) the archived
-            # snapshot answers whether or not a cookie is set, so an empty
-            # `rym_cookie` makes the LIVE site unavailable, not the source.
-            # `_optional_keys` drops this when the fallback is off.
-            spec["optional"] = ["rym_cookie"]
-            spec["optional_gate"] = "rym_archive_fallback"
+        if pid in ("rateyourmusic", "albumoftheyear"):
+            # The cookie is required, but a solver reads the live page without
+            # one — `_optional_keys` drops this key when `cf_solver_url` is set.
+            spec["optional"] = list(needs)
+            spec["optional_gate"] = "cf_solver_url"
             spec["optional_detail"] = (
-                "runs without rym_cookie — RYM pages are read from the "
-                "archived snapshot (rym_archive_fallback); set the cookie to "
-                "read the live site")
+                "runs without a cookie when cf_solver_url is set — pages are "
+                "then read through the solver; paste the cookie to skip the "
+                "solve")
         specs.append(spec)
 
     for pid in discovery.IMAGE_SOURCES:

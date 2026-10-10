@@ -4,19 +4,20 @@
 What this pins, and what it refuses to guess:
 
   * the SCALE conversion: every source publishes on its own scale (MusicBrainz
-    0-5, RateYourMusic 0.5-5 whose maximum is what matters, Discogs 0-5) and
-    all of them land on the app's 0-100 Picard scale — the same one RATING
-    uses — through ONE helper, with halves rounded UP (a 4.125/5 that read 82
-    because the digit above it was even is not a rule anyone can predict from
-    the page).
+    0-5, RateYourMusic 0.5-5 whose maximum is what matters, Album of the Year
+    0-100) and all of them land on the app's 0-100 Picard scale — the same one
+    RATING uses — through ONE helper, with halves rounded UP (a 4.125/5 that
+    read 82 because the digit above it was even is not a rule anyone can
+    predict from the page).
   * the PARSERS, against payloads SAVED FROM THE LIVE SOURCES (nothing here
     touches the network): the MusicBrainz rating node as
     `release-group/<mbid>?inc=ratings` really answers it, the recording node
     with its work fallback, the RateYourMusic release page's schema.org
-    microdata (the exact markup of a real page), and Discogs' `community
-    .rating`. A payload that states no rating — MusicBrainz's
-    `{"value": null, "votes-count": 0}`, Discogs' `{"count": 0}` — is a MISS
-    and contributes nothing, never a zero.
+    microdata and its 2026 component (the exact markup of a real page), and
+    Album of the Year's user score as BOTH the parsed dict the live fetcher
+    returns and the saved page. A payload that states no rating —
+    MusicBrainz's `{"value": null, "votes-count": 0}`, an AOTY answer with no
+    user score — is a MISS and contributes nothing, never a zero.
   * the AGGREGATION: a vote-count-weighted mean over the sources that answered,
     a source with no count counting once, and None when nobody answered.
   * the WRITER: fill-only. A value already on the file survives a second run
@@ -24,9 +25,9 @@ What this pins, and what it refuses to guess:
     nothing. Proven on a REAL FLAC (tags read back off disk with mutagen) and
     on the runner itself.
   * the RUNNER (script 24): album-scoped, one album answer written to every
-    track of the folder, a track whose own sources said nothing keeping
-    ALBUMWEBRATING and no WEBRATING — nothing is invented from an album value.
-    Its network is an INJECTED fetcher, so this suite can prove the whole run
+    track of the folder, and a track whose own sources said nothing falling
+    back to a source's ALBUM answer (recorded at album level in `levels`). Its
+    network is an INJECTED fetcher, so this suite can prove the whole run
     without a socket.
 
 Run:  python tools/test_web_ratings.py   (exit 0 = pass, 1 = failure, 2 = skip)
@@ -191,15 +192,6 @@ RYM_SONG_PAGE_UNRATED = ('<title>Radiohead - Paranoid Android - Lyrics and '
                          'ratings - Rate Your Music</title>\n'
                          '<a href="/artist/radiohead">Radiohead</a>\n')
 
-# Discogs, `releases/1174296` (Radiohead, In Rainbows) — the live document.
-DISCOGS = {"id": 1174296, "title": "In Rainbows",
-           "genres": ["Electronic", "Rock"],
-           "styles": ["Alternative Rock", "Art Rock"],
-           "community": {"have": 38869, "want": 19012,
-                         "rating": {"count": 3809, "average": 4.72}}}
-DISCOGS_UNRATED = {"community": {"rating": {"count": 0, "average": 0.0}}}
-
-
 # Album of the Year, the album page of Neko Case's Middle Cyclone — the exact
 # markup of a real capture (the score box, and the Details row that carries the
 # genre anchors). The page states the user score twice: the exact average in
@@ -296,17 +288,38 @@ eq(wr.parse_rateyourmusic({"rating": {"value": 4.67, "count": 17654}}),
 eq(wr.parse_source("rateyourmusic", RYM_SONG_HTML, "track"),
    (93, 17654, "RateYourMusic"),
    "the one dispatch reads a TRACK's RYM payload (no level branch needed)")
-ok("rateyourmusic" in wr.TRACK_SOURCES, "RateYourMusic is a track-level source")
+eq(wr.SOURCES, ["rateyourmusic", "albumoftheyear", "musicbrainz"],
+   "the three shipped sources, in their built-in rank")
+eq(list(wr.ALBUM_SOURCES), ["rateyourmusic", "albumoftheyear", "musicbrainz"],
+   "all three answer for an album")
+eq(list(wr.TRACK_SOURCES), ["rateyourmusic", "albumoftheyear", "musicbrainz"],
+   "…and all three answer for a track (an album answer may stand in)")
 
-eq(wr.parse_discogs(DISCOGS), (94, 3809, "Discogs"),
-   "Discogs: 4.72/5 over 3 809 votes")
-eq(wr.parse_discogs(DISCOGS_UNRATED), None,
-   "a Discogs release nobody rated is a miss, never a 0")
 eq(wr.parse_aoty(AOTY_HTML), (77, 152, "Album of the Year"),
    "AOTY: the user score box, 0-100 as published, weighted by its ratings")
 eq(wr.parse_aoty(AOTY_CRITICS_ONLY), None,
    "…and the CRITIC score is never read as the user score")
 eq(wr.parse_aoty(""), None, "an empty page is a miss")
+# The LIVE shape the fetcher returns: the parsed dict from
+# `server/aoty.parse_album` ({"genres", "rating", "tracks"}) carries the same
+# user score as the saved page above.
+eq(wr.parse_aoty({"genres": ["Alt-Country"],
+                  "rating": {"value": 76.7, "count": 152},
+                  "tracks": []}),
+   (77, 152, "Album of the Year"),
+   "the parsed AOTY album dict -> the same 77 the page states")
+eq(wr.parse_aoty({"genres": ["Alt-Country"], "rating": None, "tracks": []}),
+   None, "an AOTY answer with no user score is a miss")
+eq(wr.parse_aoty_track({"title": "This Tornado Loves You",
+                        "rating": {"value": 81.2, "count": 40}}),
+   (81, 40, "Album of the Year"),
+   "an AOTY track dict reads that SONG's own score")
+eq(wr.parse_aoty_track({"title": "This Tornado Loves You", "rating": None}),
+   None, "…and a song with no score is a miss")
+eq(wr.parse_source("albumoftheyear",
+                   {"rating": {"value": 81.2, "count": 40}}, "track"),
+   (81, 40, "Album of the Year"),
+   "the one dispatch is level-aware for AOTY too")
 eq(wr.parse_source("musicbrainz", MB_ALBUM, "album"), (95, 105, "MusicBrainz"),
    "the one dispatch reads a MusicBrainz album payload")
 eq(wr.parse_source("musicbrainz", MB_TRACK_OWN, "track"), (84, 18, "MusicBrainz"),
@@ -434,62 +447,35 @@ eq(song_from({}, artist="", title="Paranoid Android"), None,
    "a track with no artist is a miss")
 eq(_served["asked"], [], "…with ZERO requests")
 
-# With the archive permitted and no `rym_cookie`, the live site is not asked at
-# all — the snapshot answers, under the same identity check. The REAL archive
-# leg runs (`_rym_archive_newest` included); only the two seams are replaced,
-# so this process reads and writes nothing outside itself.
+# The RATING chain has NO archive route: `rym_song_rating` reads the song page
+# LIVE, even when `rym_archive_fallback` is set — that key belongs to the links
+# and charts features (`discover.py`). So a live site that answers nothing is a
+# MISS, and the archived-snapshot reader is never reached.
 _ORIG_FETCH = intg._rym_archive_fetch
-_ORIG_READ, _ORIG_WRITE = intg._rym_cache_read, intg._rym_cache_write
-_arch_urls = []
+_arch_calls = []
+
+
+def _forbidden_archive_fetch(url, params=None):
+    """Any archive read is a contract violation on this path."""
+    _arch_calls.append(url)
+    return RYM_SONG_PAGE, url, True
+
+
+intg._rym_archive_fetch = _forbidden_archive_fetch
 _served.update(pages={}, asked=[], default=None)
 intg._rym_get = _fake_rym_get
-intg._rym_cache_read = lambda key, ttl: None
-intg._rym_cache_write = lambda key, text: None
-
-
-def _fake_archive_fetch(url, params=None):
-    """One Wayback request: the bare slug IS this song, nothing else is."""
-    _arch_urls.append(url)
-    if url.endswith("/song/radiohead/paranoid-android/"):
-        return RYM_SONG_PAGE, url.replace("/2id_/", "/20260814042836id_/"), True
-    return None, url, True
-
-
-intg._rym_archive_fetch = _fake_archive_fetch
 try:
-    archived = intg.rym_song_rating("Radiohead", "Paranoid Android",
-                                    {"rym_archive_fallback": True})
+    no_archive = intg.rym_song_rating("Radiohead", "Paranoid Android",
+                                      {"rym_archive_fallback": True})
 finally:
     intg._rym_archive_fetch = _ORIG_FETCH
-    intg._rym_cache_read, intg._rym_cache_write = _ORIG_READ, _ORIG_WRITE
     intg._rym_get = _ORIG_RYM_GET
-eq(archived, {"rating": {"value": 4.67, "count": 17654}},
-   "with no cookie the archived copy of the song page answers")
-eq(_served["asked"], [], "…and the live site is never asked")
-eq(_arch_urls, ["https://web.archive.org/web/2id_/https://rateyourmusic.com"
-                "/song/radiohead/paranoid-android/"],
-   "…ONE newest-capture request, for the bare slug")
-
-# A song RYM has no capture for is the common case on an album nobody rates
-# per track, so its cost is bounded deliberately: the two candidates, ONE
-# newest-capture request each — never the release readers' indexed-capture
-# ladder (the bare `2id_` URLs below are what pins that).
-_arch_urls = []
-intg._rym_archive_fetch = _fake_archive_fetch
-intg._rym_cache_read = lambda key, ttl: None
-intg._rym_cache_write = lambda key, text: None
-try:
-    missing = intg.rym_song_rating("Radiohead", "Airbag",
-                                   {"rym_archive_fallback": True})
-finally:
-    intg._rym_archive_fetch = _ORIG_FETCH
-    intg._rym_cache_read, intg._rym_cache_write = _ORIG_READ, _ORIG_WRITE
-eq(missing, None, "a song the archive holds no capture of is a miss")
-eq(_arch_urls, ["https://web.archive.org/web/2id_/https://rateyourmusic.com"
-                "/song/radiohead/airbag/",
-                "https://web.archive.org/web/2id_/https://rateyourmusic.com"
-                "/song/radiohead/airbag-1/"],
-   "…costing the bare slug and ONE numbered spelling, newest capture only")
+eq(no_archive, None, "with the live site unanswered the song is a MISS")
+eq(_arch_calls, [], "…and the rating chain never reaches for the archive")
+eq(_served["asked"],
+   ["/song/radiohead/paranoid-android/",
+    "/song/radiohead/paranoid-android-1/"],
+   "…after walking the two LIVE candidates, then giving up")
 
 print("== a track's aggregate over RYM and MusicBrainz ==")
 
@@ -509,6 +495,36 @@ eq(track["sources"], ["RateYourMusic", "MusicBrainz"],
    "a track's WEBRATING_SOURCE can now read RateYourMusic; MusicBrainz")
 eq(track["value"], 93,
    "…and the vote-weighted mean is RYM's own 93 (17 654 votes vs 18)")
+eq(track["levels"], {"rateyourmusic": "track", "musicbrainz": "track"},
+   "…and every source that answered did so at TRACK level")
+
+# A source that states NOTHING for the track itself falls back to its ALBUM
+# answer — still that source's data, marked `album` in `levels`. AOTY has no
+# track answer here, but its album payload answers, so it stays in the mean.
+def _album_fallback_fetch(source, kind, ident, cfg):
+    """RYM and MB answer the TRACK; AOTY only answers for the ALBUM."""
+    if source == "albumoftheyear":
+        if kind == "album":
+            return {"rating": {"value": 90, "count": 10}}
+        return None
+    if source == "rateyourmusic":
+        return {"rating": {"value": 4.67, "count": 17654}}   # the song page
+    if source == "musicbrainz":
+        return MB_TRACK_OWN                                  # 4.2/5, 18 votes
+    return None
+
+
+fb = wr.track_rating("Radiohead", "Paranoid Android", "rec-mbid", {},
+                     _album_fallback_fetch,
+                     album={"artist": "Radiohead", "album": "In Rainbows",
+                            "mbid": "rg-mbid"})
+eq(fb["sources"], ["RateYourMusic", "Album of the Year", "MusicBrainz"],
+   "a track source that missed but whose ALBUM payload answered is kept")
+eq(fb["levels"], {"rateyourmusic": "track", "albumoftheyear": "album",
+                  "musicbrainz": "track"},
+   "…and the level it answered at is reported as `album`")
+eq(fb["value"], 93,
+   "…its 90/10 album answer is weighted in with the two track answers")
 
 print("== aggregation ==")
 # 87 and 84 over 31 and 49 366 votes: the big one decides the number.
@@ -528,10 +544,12 @@ eq(wr.aggregate([(120, 1, "A"), (200, 1, "B")])["value"], 100,
 print("== the source order ==")
 eq(wr.provider_order({}), [s for s in wr.SOURCES if s in wr.SOURCE_PARSERS],
    "no saved list = the built-in rank (minus any source without a parser)")
-eq(wr.provider_order({"web_ratings_sources": ["discogs", "musicbrainz"]}),
-   ["discogs", "musicbrainz"], "a saved order wins, as written")
-eq(wr.provider_order({"web_ratings_sources": ["discogs", "bogus", "musicbrainz"]}),
-   ["discogs", "musicbrainz"], "an unknown id is dropped, not fatal")
+eq(wr.provider_order({"web_ratings_sources": ["albumoftheyear",
+                                              "musicbrainz"]}),
+   ["albumoftheyear", "musicbrainz"], "a saved order wins, as written")
+eq(wr.provider_order({"web_ratings_sources": ["albumoftheyear", "bogus",
+                                              "musicbrainz"]}),
+   ["albumoftheyear", "musicbrainz"], "an unknown id is dropped, not fatal")
 eq(wr.provider_order({"web_ratings_sources": ["bogus"]}),
    [s for s in wr.SOURCES if s in wr.SOURCE_PARSERS],
    "a list naming nothing real falls back to the built-in rank")
@@ -580,8 +598,8 @@ else:
        "…and its joined provenance")
 
     # A SECOND run must not touch a value the file already holds.
-    res = wr.write_ratings(track, album={"value": 10, "sources": ["Discogs"]},
-                           track={"value": 10, "sources": ["Discogs"]},
+    res = wr.write_ratings(track, album={"value": 10, "sources": ["MusicBrainz"]},
+                           track={"value": 10, "sources": ["MusicBrainz"]},
                            cfg={})
     ok(not res["wrote"], "a second run writes nothing")
     eq(res["skipped"].get("WEBRATING"), "already set",
@@ -593,13 +611,13 @@ else:
        "the provenance that belongs to the kept value is untouched too")
 
     # Forced, the same call replaces them.
-    res = wr.write_ratings(track, album={"value": 10, "sources": ["Discogs"]},
-                           track={"value": 10, "sources": ["Discogs"]},
+    res = wr.write_ratings(track, album={"value": 10, "sources": ["MusicBrainz"]},
+                           track={"value": 10, "sources": ["MusicBrainz"]},
                            cfg={}, force=True)
     eq(res["wrote"].get("WEBRATING"), 10, "a forced run replaces the value")
     f = FLAC(track)
     eq(f["WEBRATING"], ["10"], "…on disk")
-    eq(f["WEBRATING_SOURCE"], ["Discogs"], "…and its provenance")
+    eq(f["WEBRATING_SOURCE"], ["MusicBrainz"], "…and its provenance")
 
     # The feature switch is the family's master switch, and it really gates.
     res = wr.write_ratings(track, album=ALBUM_ANSWER, track=TRACK_ANSWER,
@@ -679,8 +697,10 @@ else:
     f = FLAC(os.path.join(album_dir, "02 Breathe.flac"))
     eq(f["ALBUMWEBRATING"], ["95"],
        "a track whose OWN sources said nothing still carries the album's")
-    ok("WEBRATING" not in f, "…and gets NO WEBRATING — nothing is invented")
-    ok("WEBRATING_SOURCE" not in f, "…and no provenance for a value it lacks")
+    eq(f["WEBRATING"], ["95"],
+       "…and its WEBRATING falls back to that same source's ALBUM answer")
+    eq(f["WEBRATING_SOURCE"], ["MusicBrainz"],
+       "…attributed to the source that answered, at album level")
 
     # A second run over the same library changes nothing (fill-only, end to
     # end), and a source that never answers costs nothing.

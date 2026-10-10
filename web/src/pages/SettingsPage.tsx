@@ -78,7 +78,7 @@ const TAG_FAMILIES = ["AUDIT", "LOG_GRADE", "REPLAYGAIN", "DYNAMIC_RANGE", "MEDI
  *  the same values when it loads the file) instead of an empty field. */
 const CFG_DEFAULTS: Record<string, unknown> = {
   mb_genre_count: 2,
-  genre_sources: ["rateyourmusic", "musicbrainz", "listenbrainz", "itunes", "lastfm", "theaudiodb", "wikidata", "bandcamp", "discogs", "deezer", "spotify"],
+  genre_sources: ["rateyourmusic", "albumoftheyear", "musicbrainz"],
   advisory_auto_fetch: true,
   metadata_auto_fetch: true,
   metadata_review: false,
@@ -98,17 +98,13 @@ const CFG_DEFAULTS: Record<string, unknown> = {
 
 type ProviderOption = { id: string; label: string; notes?: string; rank?: number };
 
-/** Genre sources that never answer for a single track — the chain files their
- *  answer under every track and marks it `level: "album"`/`"artist"`
- *  (server/integrations._genre_source_answers). Everything absent here is
- *  asked per track first, with its own album/artist answer as the fallback
- *  tier, so "per track" is what the picker says for them. */
+/** How each genre source answers, in the picker's own words: the level it
+ *  files its answer under when it has nothing per track (the picker says
+ *  "per track" for anything absent here). */
 const GENRE_LEVEL: Record<string, string> = {
-  rateyourmusic: "album, per track when its release page states one",
-  discogs: "album only",
-  bandcamp: "album only",
-  deezer: "album only",
-  spotify: "artist only",
+  rateyourmusic: "per track when its release page states one, else album, then artist",
+  albumoftheyear: "album + per-track scores, then artist",
+  musicbrainz: "per track, then release group, then artist",
 };
 
 /** Ordered provider picker for a `list` config key: the listed providers are
@@ -358,6 +354,13 @@ function YoutubeCookieJar() {
  */
 function RymCookieJar({ onStored }: { onStored: (value: string) => void }) {
   return <CookieJarPanel source="rym" onStored={onStored} />;
+}
+
+/** The Album of the Year cookie (Settings → Discovery): the same shared panel
+ *  for the AOTY credential, which lives in `aoty_cookie` the way RYM's lives
+ *  in `rym_cookie`. */
+function AotyCookieJar({ onStored }: { onStored: (value: string) => void }) {
+  return <CookieJarPanel source="aoty" onStored={onStored} />;
 }
 
 /** HH:MM:SS on the reader's own clock. The report is read next to the moment
@@ -1192,6 +1195,22 @@ export default function SettingsPage() {
           help: "Only needed when RYM answers with a challenge. Two ways in: the import panel below takes a cookies.txt in Netscape format — what a browser-extension exporter like \"Get cookies.txt\" writes — pasted into the box or dropped on it, and keeps only its rateyourmusic.com cookies; it also takes the other shapes that same credential arrives in — the whole `Cookie:` header, a devtools \"Copy as cURL\" dump, or a cookie editor's JSON export — so the paste that obviously holds the session is imported rather than refused. Or open the devtools route — sign in to rateyourmusic.com, press F12 → Network → reload → click any request to rateyourmusic.com → Headers → Request Headers → copy everything after \"Cookie:\" and paste it in the field above (newlines and the \"Cookie:\" label are handled for you). RYM's `session` cookie is HttpOnly, so a browser extension's export is the only way to get it out of a browser at all. It is a session credential — do not share it, and paste a fresh one when RYM starts refusing, since signing out or clearing cookies invalidates it. Blank = RYM is skipped like any other unavailable source; MusicBrainz still resolves RYM links for well-known releases. Test it with the Sources panel's Test button.",
         },
         {
+          k: "aoty_cookie", label: "Album of the Year cookie", type: "password",
+          help: "The albumoftheyear.org credential, imported by the cookie panel below (same cookies.txt / `Cookie:` header / cURL / JSON shapes as the RYM box, only its albumoftheyear.org cookies kept). Album of the Year answers every automated client with a Cloudflare challenge, so a signed-in browser's `cf_clearance` cookie is what lets the app read a release page directly — or set a solver below and let it pass the challenge instead. Blank = Album of the Year is skipped like any other unavailable source.",
+        },
+        {
+          k: "aoty_user_agent", label: "Album of the Year User-Agent", type: "text",
+          help: "The User-Agent Album of the Year requests are sent with. Cloudflare binds its `cf_clearance` cookie to the exact User-Agent (and network) that passed its challenge, so the stored cookie only counts when this matches the browser it came from — copy that browser's User-Agent (devtools → Network → any request → Request Headers → User-Agent) and paste it here. Blank = the built-in Chrome User-Agent the app already sends.",
+        },
+        {
+          k: "cf_solver_url", label: "FlareSolverr URL (Cloudflare solver)", type: "text",
+          help: "FlareSolverr-compatible solver, e.g. http://127.0.0.1:8191 — solves Cloudflare for RYM/AOTY; empty = cookie only.",
+        },
+        {
+          k: "cf_solver_timeout", label: "Cloudflare solver timeout (ms)", type: "number",
+          help: "How long the solver may take to answer a challenge before the request is given up on. Default 60000.",
+        },
+        {
           k: "rym_links_auto", label: "Auto-find RateYourMusic links", type: "bool",
           help: "Asks rateyourmusic.com for the album and artist pages during an import (and from the link editor's Auto-find button). An existing link is never overwritten, and when RYM refuses the request the import carries on untouched — the link is then left for you to paste by hand.",
         },
@@ -1302,20 +1321,15 @@ export default function SettingsPage() {
         {
           k: "web_ratings_sources", label: "Web rating sources — priority order, asked top to bottom", type: "multi",
           options: [
-            ["rateyourmusic", "RateYourMusic — answers for the album AND for each track (one song page per track); needs the cookie above, or an archived page"],
+            ["rateyourmusic", "RateYourMusic — answers for the album AND for each track (one song page per track); needs the RYM cookie above, or a solver"],
+            ["albumoftheyear", "Album of the Year — the album plus its per-track scores, then the artist; needs the AOTY cookie above, or a solver"],
             ["musicbrainz", "MusicBrainz — the release group for the album, the recording (then its work) for a track"],
-            ["albumoftheyear", "Album of the Year — the album only; the site publishes no track scores"],
-            ["discogs", "Discogs — the release only; needs the discogs token above"],
           ],
-          help: "Only these four ids are understood; anything else is ignored. All four ship, RateYourMusic first — it leads because it is the widest verdict the app can read (one score from tens of thousands of ratings) and it answers at BOTH levels: the release page for the album, and each track's own song page (found by slug and verified against the page's own title and artist before it is believed). MusicBrainz and RYM are the only two that rate a track; Album of the Year and Discogs are album-only. The archive-backed sources (RYM when its live page refuses, Album of the Year, Discogs) are cached 30 days, misses included, and RYM's per-track lookups are paced at one request per second, so a first pass over an album costs seconds rather than milliseconds — a first-run cost per album, not a per-run one. Each source's own vote count weights the average, so a score from 49,000 ratings counts for more than one from 16. A value is written only when at least one source answered, and the album's score and a track's are separate facts — neither is invented from the other.",
-        },
-        {
-          k: "aoty_archive_fallback", label: "Album of the Year: read archived pages", type: "bool",
-          help: "On (the default), albumoftheyear.org is read from its newest archived capture. The site answers every automated client with a Cloudflare 403 — plain HTTP, headless and headed browsers alike, all measured — so the archive is the only route that works. Off, the source contributes nothing.",
+          help: "Only these three ids are understood; anything else is ignored. All three ship, RateYourMusic first — it leads because it is the widest verdict the app can read (one score from tens of thousands of ratings) and it answers at BOTH levels: the release page for the album, and each track's own song page (found by slug and verified against the page's own title and artist before it is believed). All three rate a track: RYM and Album of the Year from their own track scores, MusicBrainz from the recording (then its work). RYM's per-track lookups are paced at one request per second, so a first pass over an album costs seconds rather than milliseconds — a first-run cost per album, not a per-run one. Each source's own vote count weights the average, so a score from 49,000 ratings counts for more than one from 16. A value is written only when at least one source answered, and the album's score and a track's are separate facts — neither is invented from the other.",
         },
         {
           k: "rym_archive_fallback", label: "RateYourMusic: fall back to archived pages", type: "bool",
-          help: "A release rateyourmusic.com will not serve — no cookie, or a refused request — is read from the Wayback Machine's snapshot of the SAME page and parsed the same way, so the genres still come from RYM; the import report names the snapshot and its date. Off, RateYourMusic contributes nothing without a cookie.",
+          help: "Applies to RateYourMusic LINKS and CHARTS only — genres and ratings come from the live site now (with the RYM cookie or a solver). A release page or chart rateyourmusic.com will not serve is read from the Wayback Machine's snapshot of the SAME page and parsed the same way; the import report names the snapshot and its date.",
         },
         {
           k: "ai_genre_inference", label: "Let a model rank the genres", type: "bool",
@@ -2653,7 +2667,12 @@ export default function SettingsPage() {
                 </div>
               )}
               {tab === "videos" && <YoutubeCookieJar />}
-              {tab === "discovery" && <RymCookieJar onStored={(v) => setCfg("rym_cookie", v)} />}
+              {tab === "discovery" && (
+                <div className="space-y-2">
+                  <RymCookieJar onStored={(v) => setCfg("rym_cookie", v)} />
+                  <AotyCookieJar onStored={(v) => setCfg("aoty_cookie", v)} />
+                </div>
+              )}
               {tab === "beets" && (
                 <div className="pt-2 border-t border-border space-y-2">
                   <div className="flex items-center gap-2 flex-wrap">
