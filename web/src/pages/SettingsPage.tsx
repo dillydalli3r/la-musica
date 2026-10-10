@@ -11,6 +11,7 @@ import SecurityPanel from "../components/SecurityPanel";
 import SolverCard from "../components/SolverCard";
 import AiTestButton from "../components/AiTestButton";
 import PageHeader from "../components/PageHeader";
+import Switch from "../components/ui/switch";
 import { toast } from "../store";
 import { applyAccent } from "../App";
 import { ACCENT_PRESETS, DEFAULT_ACCENT, accentHex, normalizeHex, parseHexColor, presetHex, resolveAccent } from "../lib/accent";
@@ -2007,16 +2008,16 @@ export default function SettingsPage() {
         <label key={f.k} className="flex items-center gap-2 text-[13px] text-zinc-300 cursor-pointer select-none">
           {f.type === "bool" ? (
             <div className="w-full">
-              <span className="flex items-center gap-2 w-full">
-                <input type="checkbox" checked={!!scriptCfg[f.k]} onChange={(e) => setCfg(f.k, e.target.checked)} />
-                {f.label}
-              </span>
+              <div className="flex items-center gap-2 w-full">
+                <span className="flex-1 min-w-0">{f.label}</span>
+                <Switch checked={!!scriptCfg[f.k]} onCheckedChange={(v) => setCfg(f.k, v)} />
+              </div>
               {f.help && <div className="text-[10px] text-zinc-600 mt-0.5">{f.help}</div>}
             </div>
           ) : f.type === "select" ? (
             <div className="w-full">
               <div className="flex items-center gap-2 w-full">
-                <span className="flex-1 min-w-0 truncate">{f.label}</span>
+                <span className="flex-1 min-w-0">{f.label}</span>
                 <select
                   className="input !w-32 !py-0.5 text-[11px] shrink-0 tap"
                   value={String(scriptCfg[f.k] ?? "")}
@@ -2032,7 +2033,7 @@ export default function SettingsPage() {
           ) : f.type === "text" ? (
             <div className="w-full">
               <div className="flex items-center gap-2 w-full">
-                <span className="flex-1 min-w-0 truncate">{f.label}</span>
+                <span className="flex-1 min-w-0">{f.label}</span>
                 <input
                   className="input !w-32 !py-0.5 text-[11px] shrink-0 tap"
                   value={
@@ -2048,7 +2049,7 @@ export default function SettingsPage() {
           ) : f.type === "password" ? (
             <div className="w-full">
               <div className="flex items-center gap-2 w-full">
-                <span className="flex-1 min-w-0 truncate">{f.label}</span>
+                <span className="flex-1 min-w-0">{f.label}</span>
                 <div className="relative shrink-0">
                   <input
                     className="input !w-32 !py-0.5 !pr-7 text-[11px] tap"
@@ -2078,7 +2079,7 @@ export default function SettingsPage() {
           ) : (
             <div className="w-full">
               <div className="flex items-center gap-2 w-full">
-                <span className="flex-1 min-w-0 truncate">{f.label}</span>
+                <span className="flex-1 min-w-0">{f.label}</span>
                 <input
                   className="input !w-20 !py-0.5 text-[11px] shrink-0 text-right tap"
                   type="number"
@@ -2199,11 +2200,11 @@ export default function SettingsPage() {
                 </select>
                 <span className="text-[11px] text-zinc-600 mt-1 block">{t("settings.language_help")}</span>
               </label>
-              <div className="flex flex-wrap gap-x-6 gap-y-1.5">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-2">
                 {GENERAL_TOGGLES.map((f) => (
                   <label key={f.k} className="flex items-center gap-2 text-xs text-zinc-300 cursor-pointer select-none">
-                    <input type="checkbox" checked={!!scriptCfg[f.k]} onChange={(e) => setCfg(f.k, e.target.checked)} />
-                    {f.label}
+                    <span className="flex-1 min-w-0">{f.label}</span>
+                    <Switch checked={!!scriptCfg[f.k]} onCheckedChange={(v) => setCfg(f.k, v)} />
                   </label>
                 ))}
               </div>
@@ -2463,7 +2464,7 @@ export default function SettingsPage() {
               </div>
               <div className="flex items-center gap-4 flex-wrap">
                 <label className="flex items-center gap-2 text-xs text-zinc-400 cursor-pointer select-none">
-                  <input type="checkbox" checked={shortFolderNames} onChange={(e) => setShortFolderNames(e.target.checked)} />
+                  <Switch checked={shortFolderNames} onCheckedChange={setShortFolderNames} />
                   Shorter folder names (truncate MusicBrainz IDs to 8 chars)
                 </label>
                 <button
@@ -2816,14 +2817,14 @@ export default function SettingsPage() {
                   of the per-kind ones: the master silences every "nice to
                   know" kind at once, and the outcome switch is the only one
                   that can silence the loud outcome kinds (it ships on). */}
-              <div className="flex flex-wrap gap-x-6 gap-y-1.5">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-2">
                 <label className="flex items-center gap-2 text-xs text-zinc-200 cursor-pointer select-none">
-                  <input type="checkbox" checked={!!scriptCfg.notify_enabled} onChange={(e) => setCfg("notify_enabled", e.target.checked)} />
-                  {t("settings.notify_master")}
+                  <span className="flex-1 min-w-0">{t("settings.notify_master")}</span>
+                  <Switch checked={!!scriptCfg.notify_enabled} onCheckedChange={(v) => setCfg("notify_enabled", v)} />
                 </label>
                 <label className="flex items-center gap-2 text-xs text-zinc-300 cursor-pointer select-none">
-                  <input type="checkbox" checked={!!scriptCfg.notify_outcomes} onChange={(e) => setCfg("notify_outcomes", e.target.checked)} />
-                  {t("settings.notify_outcomes")}
+                  <span className="flex-1 min-w-0">{t("settings.notify_outcomes")}</span>
+                  <Switch checked={!!scriptCfg.notify_outcomes} onCheckedChange={(v) => setCfg("notify_outcomes", v)} />
                 </label>
               </div>
               <div className="flex flex-wrap items-center gap-2">
@@ -2838,60 +2839,25 @@ export default function SettingsPage() {
                 >
                   <Bell className="h-3.5 w-3.5" /> {t("notify.enable")}
                 </button>
-                <span className="text-[11px] text-zinc-500">
-                  {notifyState === "granted"
-                    ? t("notify.title_granted")
-                    : notifyState === "denied"
-                    ? t("notify.blocked")
-                    : t("notify.enable")}
-                </span>
+                {/* Only a real answer is worth a line: the default states
+                    ("prompt"/"unsupported") already read as the button's own
+                    label, so echoing it here was the duplicate the owner saw. */}
+                {notifyState !== "prompt" && notifyState !== "unsupported" && (
+                  <span className="text-[11px] text-zinc-500">
+                    {notifyState === "granted" ? t("notify.title_granted") : t("notify.blocked")}
+                  </span>
+                )}
               </div>
-              <div className="flex flex-wrap gap-x-6 gap-y-1.5">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-2">
                 {NOTIFY_KEYS.map((f) => (
                   <label key={f.k} className="flex items-center gap-2 text-xs text-zinc-300 cursor-pointer select-none">
-                    <input type="checkbox" checked={!!scriptCfg[f.k]} onChange={(e) => setCfg(f.k, e.target.checked)} />
-                    {f.label}
+                    <span className="flex-1 min-w-0">{f.label}</span>
+                    <Switch checked={!!scriptCfg[f.k]} onCheckedChange={(v) => setCfg(f.k, v)} />
                   </label>
                 ))}
               </div>
             </div>
           )}
-
-          <div className="flex flex-wrap items-center gap-2">
-            <ConfirmButton
-              onConfirm={resetAllDefaults}
-              confirmLabel="Reset all"
-              disabled={!configDefaults}
-              title="Restore factory defaults for every setting (music folder and first-run flag are kept)"
-            >
-              <RotateCcw className="h-4 w-4" /> Reset to defaults
-            </ConfirmButton>
-            <ConfirmButton
-              onConfirm={resetUiLayout}
-              confirmLabel="Reset layout"
-              title="Clear this browser's UI preferences — accent, sidebar, grid sizes, column layouts and widths, custom columns, viewer options — and reload"
-            >
-              <LayoutGrid className="h-4 w-4" /> Reset UI & layout
-            </ConfirmButton>
-            <button
-              className="btn-primary min-h-10 md:min-h-0"
-              onClick={save}
-              // The form is seeded FROM the config; saving before it loaded
-              // posts empty strings over live values (an empty music_folder
-              // survives the server's merge and costs the library root).
-              disabled={!loaded}
-              title={loaded ? "Write these settings to the config" : "Waiting for the current configuration to load"}
-            >
-              <Save className="h-4 w-4" /> Save all settings
-            </button>
-            {(configError || !loaded) && (
-              <span className="text-xs text-amber-400/90 self-center">
-                {configError
-                  ? "Could not load the configuration — saving is disabled so a failed load cannot overwrite it. Retry by reloading the page."
-                  : "Loading the current configuration…"}
-              </span>
-            )}
-          </div>
 
           <details className="panel">
             <summary className="text-sm font-semibold cursor-pointer">Credits & open-source licenses</summary>
@@ -2941,6 +2907,48 @@ export default function SettingsPage() {
               </span>
             </div>
           </details>
+
+          {/* The action bar is the LAST thing in the column and `sticky
+              bottom-3`, so Save and both Resets stay reachable on a long tab
+              instead of living at the end of a scroll — the owner's "I don't
+              feel there is an easy way to reset". It floats on the page's own
+              `bg` with `z-20`, so fields scroll UNDER it rather than behind a
+              gap. */}
+          <div className="sticky bottom-3 z-20 flex flex-wrap items-center gap-2 rounded-xl border border-border bg-bg/95 px-3 py-2 backdrop-blur">
+            <ConfirmButton
+              onConfirm={resetAllDefaults}
+              confirmLabel="Reset all"
+              disabled={!configDefaults}
+              title="Restore factory defaults for every setting (music folder and first-run flag are kept)"
+            >
+              <RotateCcw className="h-4 w-4" /> Reset to defaults
+            </ConfirmButton>
+            <ConfirmButton
+              onConfirm={resetUiLayout}
+              confirmLabel="Reset layout"
+              title="Clear this browser's UI preferences — accent, sidebar, grid sizes, column layouts and widths, custom columns, viewer options — and reload"
+            >
+              <LayoutGrid className="h-4 w-4" /> Reset UI & layout
+            </ConfirmButton>
+            <button
+              className="btn-primary min-h-10 md:min-h-0"
+              onClick={save}
+              // The form is seeded FROM the config; saving before it loaded
+              // posts empty strings over live values (an empty music_folder
+              // survives the server's merge and costs the library root).
+              disabled={!loaded}
+              title={loaded ? "Write these settings to the config" : "Waiting for the current configuration to load"}
+            >
+              <Save className="h-4 w-4" /> Save all settings
+            </button>
+            {(configError || !loaded) && (
+              <span className="text-xs text-amber-400/90 self-center">
+                {configError
+                  ? "Could not load the configuration — saving is disabled so a failed load cannot overwrite it. Retry by reloading the page."
+                  : "Loading the current configuration…"}
+              </span>
+            )}
+          </div>
         </div>
       </div>
       {picker && (

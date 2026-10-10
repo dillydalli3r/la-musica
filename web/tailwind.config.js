@@ -11,6 +11,10 @@ export default {
         border: "#26262c",
         accent: "rgb(var(--accent) / <alpha-value>)",
         "accent-soft": "rgb(var(--accent-soft) / <alpha-value>)",
+        // The ink drawn ON an accent fill (the switch thumb, the play button):
+        // a real token so `bg-accent-fg` is a utility instead of an arbitrary
+        // `[background:rgb(var(--accent-fg))]` at every call site.
+        "accent-fg": "rgb(var(--accent-fg) / <alpha-value>)",
       },
       transitionDuration: {
         "motion-fast": "150ms",
