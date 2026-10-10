@@ -377,6 +377,7 @@ export default function SourcesPanel({ only, askKeys }: { only?: SourceKind | So
         <div className="text-[10px] uppercase tracking-widest text-zinc-500">{t("cookies.sectionTitle")}</div>
         <CookieJarPanel source="youtube" compact />
         <CookieJarPanel source="rym" compact />
+        <CookieJarPanel source="aoty" compact />
       </div>
 
       {groups.map(([kind, list]) => (

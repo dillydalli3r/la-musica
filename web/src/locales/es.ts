@@ -489,6 +489,8 @@ export default {
   "cookies.session": "sesión",
   "cookies.expired": "caducado",
   "cookies.keptHosts": "Solo se conservan las cookies de {hosts}: todo lo demás del export se descarta.",
+  "cookies.importedAt": "Importado {when} — {count} cookie(s)",
+  "cookies.keptCount": "{count} cookie(s) conservadas",
 
   "cookies.sectionTitle": "Inicios de sesión con cookies — importar un cookies.txt",
 

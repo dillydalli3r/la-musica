@@ -458,6 +458,25 @@ def _probe_metadata(pid, cfg):
         return ("ok", _image_detail("lead image", url)) if url \
             else ("fail", "no Wikipedia lead image")
 
+    if pid == "wikidata":
+        url = discovery.wikidata_artist_image(SAMPLE_ARTIST, cfg=cfg)
+        return ("ok", _image_detail("P18 image, Wikimedia Commons", url)) if url \
+            else ("fail", "no Wikidata image (P18) for the sample artist")
+
+    if pid == "discogs":
+        if not str((cfg or {}).get("discogs_token") or "").strip():
+            return "skipped", "needs a Discogs token (Settings → Sources)"
+        url = discovery.discogs_artist_image(SAMPLE_ARTIST, cfg=cfg)
+        return ("ok", _image_detail("artist image", url)) if url \
+            else ("fail", "no Discogs artist image")
+
+    if pid == "lastfm":
+        if not str((cfg or {}).get("lastfm_api_key") or "").strip():
+            return "skipped", "needs a Last.fm API key (Settings → Sources)"
+        url = discovery.lastfm_artist_image(SAMPLE_ARTIST, cfg=cfg)
+        return ("ok", _image_detail("artist photo", url)) if url \
+            else ("fail", "no Last.fm artist photo")
+
     return "skipped", "unknown source"
 
 
@@ -575,7 +594,11 @@ def _specs(kind=None):
     for pid in discovery.IMAGE_SOURCES:
         specs.append({"id": pid, "kind": "metadata",
                       "label": discovery.SOURCE_LABELS.get(pid, pid),
-                      "needs": [],
+                      # The two keyed providers say what they need, so the
+                      # Sources panel prompts for the credential instead of
+                      # showing a source that always fails.
+                      "needs": (["lastfm_api_key"] if pid == "lastfm"
+                                else ["discogs_token"] if pid == "discogs" else []),
                       "provides": discovery.SOURCE_NOTES.get(pid, ""),
                       "probe": lambda cfg, p=pid: _probe_metadata(p, cfg)})
 

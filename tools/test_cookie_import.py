@@ -343,8 +343,18 @@ try:
     assert row(state, "session", "rateyourmusic.com")["comment"] == "", state
     assert row(state, "session", "rateyourmusic.com")["expiry"] == "1893456000", state
     notes = json.loads(cfgmod.load_config()["cookie_notes"])
-    assert notes["rym"]["rateyourmusic.com\t/\tsession"] == {"expiry": "1893456000"}, notes
-    assert notes["rym"]["rateyourmusic.com\t/\tcf_clearance"] == {"expiry": "1893456000"}, notes
+    # The import also stamps WHEN the file arrived (`imported_at`, shared by
+    # every cookie of one import) — the panel groups the rows of one import
+    # under one dated section with it. Value not pinned here: it is "now".
+    _rym_note = dict(notes["rym"]["rateyourmusic.com\t/\tsession"])
+    assert _rym_note.pop("expiry", None) == "1893456000", notes
+    assert _rym_note.pop("imported_at", ""), notes
+    assert _rym_note == {}, notes
+    _cf_note = dict(notes["rym"]["rateyourmusic.com\t/\tcf_clearance"])
+    assert _cf_note.get("expiry") == "1893456000" and _cf_note.get("imported_at"), notes
+    assert notes["rym"]["rateyourmusic.com\t/\tsession"]["imported_at"] == \
+        notes["rym"]["rateyourmusic.com\t/\tcf_clearance"]["imported_at"], \
+        "one import, one stamp — the panel groups on it"
     # …and the yt-dlp jar's notes are a different slice of the same store, with
     # the comment the user wrote and no expiry of their own to remember.
     assert notes["youtube"]["youtube.com\t/\tSID"] == {"comment": "the main one"}, notes

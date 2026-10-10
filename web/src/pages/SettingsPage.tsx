@@ -861,7 +861,7 @@ export default function SettingsPage() {
     {
       title: "Release tracklist (script 15)",
       fields: [
-        { k: "force_tracklist", label: "Force rewrite of an existing .mlo_expected.json", type: "bool" },
+        { k: "force_tracklist", label: "Force rewrite of an existing .mb_expected", type: "bool" },
       ],
     },
     {
@@ -1418,6 +1418,8 @@ export default function SettingsPage() {
     { k: "grade_check_mood", label: "Mood tag present", type: "bool" },
     { k: "grade_check_energy", label: "Energy tag present (0-100, with MOOD)", type: "bool" },
     { k: "grade_check_genre", label: "Genre tag present", type: "bool" },
+    { k: "grade_check_web_rating", label: "Web rating present (WEBRATING, per track)", type: "bool" },
+    { k: "grade_check_sidecar_format", label: "Sidecar text files canonically formatted (.mb_expected, descriptions)", type: "bool" },
     {
       k: "grade_check_genre_count", label: "Genre count per track (at most mb_genre_count)", type: "bool",
       help: "A track may hold at most the 'Genres per track' value — only an overflow fails (issue code GENRE_COUNT). There is no lower bound and no quota; keep the two in step.",

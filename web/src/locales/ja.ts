@@ -488,6 +488,8 @@ export default {
   "cookies.session": "セッション",
   "cookies.expired": "期限切れ",
   "cookies.keptHosts": "{hosts} の Cookie のみ保持します — エクスポートの残りは保存されません。",
+  "cookies.importedAt": "{when} にインポート — Cookie {count} 件",
+  "cookies.keptCount": "Cookie {count} 件を保持",
 
   "cookies.sectionTitle": "Cookie ログイン — cookies.txt を取り込む",
 

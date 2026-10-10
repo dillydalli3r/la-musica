@@ -38,7 +38,9 @@ TEMP_SUFFIX = ".tmp"
 TEMP_PREFIXES = (
     TEMP_PREFIX,          # this module (new writers)
     ".mlo_covers_",       # mlo.paths.save_track_covers
-    ".mlo_expected_",     # mlo.paths.save_expected_tracks
+    ".mb_expected_",      # mlo.paths.save_expected_tracks
+    ".mlo_expected" + "_",  # the same file, before the rename — a library the
+                            # old build left a temp file in still recovers
     ".mlo_pending_",      # mlo.paths.save_pending
     ".mlo_importing_",    # mlo.paths.save_importing
     ".mlo_config_",       # mlo.config.save_config

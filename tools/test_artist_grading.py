@@ -122,8 +122,10 @@ ok(all(c.get("description") for c in ARTIST_CHECKS),
 
 res = grade_artist(ART)
 ok(res["path"] == ART, "the result carries the folder it graded")
-ok((res["checks"], res["pass_count"], res["failed_checks"]) == (2, 2, 0),
-   f"image + description grade 2/2 ({res['pass_count']}/{res['checks']})")
+# Three checks: ARTIST_CHECKS' two plus `grade_check_sidecar_format`, which
+# grades the artist's description.txt on its BYTES (see mlo.grader).
+ok((res["checks"], res["pass_count"], res["failed_checks"]) == (3, 3, 0),
+   f"image + description + sidecar format grade 3/3 ({res['pass_count']}/{res['checks']})")
 ok(res["pct"] == 100.0 and res["pass"] is True and res["issues"] == [],
    f"a complete artist folder passes ({res})")
 ok(res["artwork"] == {"image": True, "image_file": IMAGE, "description": True},
@@ -132,14 +134,15 @@ ok(res["artwork"] == {"image": True, "image_file": IMAGE, "description": True},
 # each artefact missing fails only its own check
 os.remove(IMAGE)
 res = grade_artist(ART, {})
-ok(res["checks"] == 2 and res["failed_checks"] == 1 and res["pass"] is False,
+ok(res["checks"] == 3 and res["failed_checks"] == 1 and res["pass"] is False,
    f"a missing artist image fails exactly one check ({res['pass_count']}/{res['checks']})")
 ok([i["code"] for i in res["issues"]] == ["ARTIST_IMAGE_MISSING"],
    f"only ARTIST_IMAGE_MISSING is raised ({res['issues']})")
 ok(res["issues"][0]["label"] == "Artist image"
    and res["issues"][0]["where"] == "Artist",
    f"the issue names the check and the folder ({res['issues'][0]})")
-ok(res["pct"] == 50.0, f"pct follows the graded checks ({res['pct']})")
+ok(res["pct"] == round(100.0 * 2 / 3, 6) or abs(res["pct"] - 66.666) < 0.01,
+   f"pct follows the graded checks ({res['pct']})")
 ok(res["artwork"]["image"] is False and res["artwork"]["image_file"] is None
    and res["artwork"]["description"] is True,
    "artwork says which half is missing")
@@ -153,24 +156,27 @@ ok(res["artwork"]["image"] is True
    and res["artwork"]["image_file"].endswith("artist.png"),
    f"artist.png counts as the artist image ({res['artwork']})")
 
-# one toggle off: that artefact is neither required nor counted
+# one toggle off: that artefact is neither required nor counted (the
+# sidecar-format check still grades the artist's description.txt, and a folder
+# with no description has nothing for it to judge)
 res = grade_artist(ART, {"grade_check_artist_description": False})
-ok(res["checks"] == 1 and res["pass_count"] == 1 and res["pass"] is True,
-   "a disabled check is not counted (1/1)")
+ok(res["checks"] == 2 and res["pass_count"] == 2 and res["pass"] is True,
+   f"a disabled check is not counted (2/2) ({res['pass_count']}/{res['checks']})")
 res = grade_artist(ART, {"grade_check_artist_image": False})
 ok([i["code"] for i in res["issues"]] == ["ARTIST_DESCRIPTION_MISSING"]
-   and res["pct"] == 0.0,
+   and res["pct"] == 50.0,
    f"the other toggle still grades its own artefact ({res})")
 
-# both off: nothing graded is nothing failed — and nothing graded is 100%, not
-# 0%: the album rule (format_grade_report) reads the same state as a full
-# score, so a passing artist folder must not display an empty one.
+# both ARTIST_CHECKS off: nothing they grade is required — the sidecar-format
+# check still runs (there is no description to judge, so it passes), and
+# nothing graded is nothing failed, read as 100% rather than 0% (the album
+# rule, format_grade_report, reads the same state as a full score).
 res = grade_artist(ART, {"grade_check_artist_image": False,
                          "grade_check_artist_description": False})
 ok((res["checks"], res["pass_count"], res["failed_checks"], res["pct"],
     res["pass"], res["issues"])
-   == (0, 0, 0, 100.0, True, []),
-   f"both checks disabled → checks=0, pct=100, pass=True ({res})")
+   == (1, 1, 0, 100.0, True, []),
+   f"both artefact checks disabled → 1 check (sidecar format), 100%, pass ({res})")
 
 # a folder that is not there must not raise
 missing = os.path.join(MF, "Artists", "Nobody")
@@ -206,7 +212,7 @@ ok(res["artwork"]["image"] is True and res["artwork"]["description"] is True,
 # the album's own problems are the album grader's to report, not this one's.
 write(os.path.join(solo, "Album (2020)", "01 - Song.flac"))
 res = grade_artist(solo, {})
-ok(res["issues"] == [] and res["pass"] is True and res["checks"] == 2,
+ok(res["issues"] == [] and res["pass"] is True and res["checks"] == 3,
    f"an album folder clears it ({res['pass_count']}/{res['checks']})")
 
 # --------------------------------------------------------------------------- #

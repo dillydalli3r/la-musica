@@ -202,17 +202,23 @@ DEFAULT_SOURCE_ORDER = ("qobuz", "applemusic", "tidal", "bandcamp", "deezer",
 # can win; the remaining tiers decide the difference between two otherwise
 # comparable images. A new rule is added to all three tuple/dict pairs at once.
 _TIER_NAMES = ("release", "identity", "kind", "size", "source", "format",
-               "square", "quality", "rank", "appearance")
+               "square", "quality", "rank", "appearance", "reference")
 _TIER_WEIGHTS = {
-    "appearance": 0.22,
-    "size": 0.20,
-    "release": 0.14,
-    "identity": 0.12,
-    "quality": 0.08,
-    "source": 0.07,
-    "kind": 0.06,
-    "format": 0.05,
-    "square": 0.05,
+    # The REFERENCE term is the biggest single weight on purpose: when the
+    # album's own MusicBrainz front is among the candidates, the pick must be
+    # the image that looks like it. Measured live (Plastic Beach, 2026-10-10):
+    # the release group's own front was among the rows, a store's re-issue art
+    # was picked instead — the images were never compared, only described.
+    "reference": 0.18,
+    "appearance": 0.17,
+    "size": 0.17,
+    "release": 0.11,
+    "identity": 0.10,
+    "quality": 0.07,
+    "source": 0.06,
+    "kind": 0.05,
+    "format": 0.04,
+    "square": 0.04,
     "rank": 0.01,
 }
 # How many buckets the provider's own order is quantised into: its first answer
@@ -231,6 +237,8 @@ _TIER_LABELS = {
     "quality": "the thumbnail/upscale check",
     "rank": "the provider's own order",
     "appearance": "the image's own cover-likeness",
+    "reference": "the match against the album's own MusicBrainz artwork "
+                 "(compared image to image, by perceptual hash)",
 }
 
 # The container ladder: the library re-encodes every cover to JPEG at
@@ -289,6 +297,12 @@ _RULES = (
     "a candidate below the cover target (the minimum server.api_cover._cover_metrics "
     "reports and the grader enforces) is rejected, not silently ranked last — "
     "and so is one whose size was never measured while that minimum is set",
+    "the image is COMPARED, pixel to pixel, against the album's own MusicBrainz "
+    "front cover — a perceptual hash of each candidate against the reference's "
+    "(the biggest single weight): a store's re-issue sleeve is a different "
+    "picture and ranks below the art that matches, however big it is. With no "
+    "reference among the candidates the term is neutral, so a search that "
+    "never reached MusicBrainz behaves exactly as it did before",
 )
 
 
@@ -470,6 +484,14 @@ class _Context:
     # median measured looks, so being unmeasured (the probe is bounded) is
     # neither an advantage nor a penalty. 0.5 when nothing was measured.
     look_default: float = 0.5
+    # The perceptual hash of the album's OWN art — the release group's front
+    # cover among the rows, when the search reached the Cover Art Archive —
+    # and the level a row is scored at when there is no reference to compare
+    # against (or no hash for the row): neutral, exactly like `look_default`,
+    # so a search that never reached MusicBrainz ranks exactly as it always
+    # did. See `_reference_level`.
+    reference_phash: Optional[int] = None
+    reference_default: float = 0.5
     # The album being covered, as `identity=` handed it over: what the rows are
     # checked against (rule 2). All three may be unknown — an album with no
     # tags and no marker is searched for by whatever it has, and nothing is
@@ -641,6 +663,116 @@ def _rejection(row, url, side, ctx, identity="same", identity_why=""):
                     f"{ctx.minimum} — nothing is ever upscaled, so it can never "
                     f"reach the cover target")
     return ""
+
+
+def _is_front(row):
+    """Whether *row* is labelled the front cover (its `front` flag, else its
+    `kind`) — the test `_kind_level` and the reference picker share."""
+    front = row.get("front")
+    kind = str(row.get("kind") or "").strip().lower()
+    if front is None and kind:
+        front = kind == "front"
+    return bool(front)
+
+
+def _reference_row(rows):
+    """The row that IS the album's own art, or None.
+
+    Rule 1's order, exactly: the release GROUP's front cover first (the CAA
+    read that answers `release_cover` False), then the matched RELEASE's own
+    front (`release_cover` True). A row that states no such origin (a store row
+    found by name) is never the reference — it is what the reference is used to
+    judge.
+    """
+    group = released = None
+    for row in rows or ():
+        if not isinstance(row, Mapping) or not _is_front(row):
+            continue
+        if row.get("release_cover") is False and group is None:
+            group = row
+        elif row.get("release_cover") is True and released is None:
+            released = row
+    return group if group is not None else released
+
+
+def _reference_phash(rows):
+    """The perceptual hash of the album's own art, or None when the search
+    produced no reference (or its image was never hashed — the probe is
+    bounded, and an unhashed reference leaves the term neutral)."""
+    ref = _reference_row(rows)
+    if ref is None:
+        return None
+    got = ref.get("phash")
+    if isinstance(got, bool) or not isinstance(got, int):
+        return None
+    return got
+
+
+def _reference_level(row, ctx):
+    """(level, reason) for rule 11 — the image against the album's own art.
+
+    The reference is the album's own MusicBrainz front (`_reference_row`): the
+    row's perceptual hash is compared with the reference's, bit by bit, and the
+    level is the fraction of bits that agree — 1.0 is the same picture, ~0.5 is
+    unrelated. The owner's report was a pick that did NOT match the reference
+    the finder showed beside it, so this is the term that decides.
+
+    Neutral (``reference_default``) when there is nothing to compare: no
+    reference row, or either image unhashed (the probe is bounded). A search
+    that never reached MusicBrainz is therefore ranked exactly as it was before
+    this rule existed — the term can never invent a preference.
+    """
+    ref = ctx.reference_phash
+    own = row.get("phash")
+    if isinstance(own, bool) or not isinstance(own, int) or ref is None:
+        return ctx.reference_default, ""
+    if row is not None and row.get("release_cover") is False and _is_front(row):
+        return 1.0, ("the release group's front cover — the reference this "
+                     "album's own art is compared against")
+    try:
+        distance = bin(int(ref) ^ int(own)).count("1")
+    except (TypeError, ValueError):
+        return ctx.reference_default, ""
+    level = max(0.0, 1.0 - distance / 64.0)
+    return level, (f"matches the album's MusicBrainz artwork at "
+                   f"{int(round(level * 100))}% — the two images compared "
+                   f"pixel by pixel (perceptual hash)")
+
+
+def _reference_default(rows, ref):
+    """The level an UNMEASURED (unhashed) row is scored at in the reference
+    tier: the median match the MEASURED rows achieve against the reference.
+
+    0.5 when nothing could be measured, or when there is no reference at all —
+    the same principle as `_look_default`: a row nobody could hash (a host that
+    could not be asked, the bounded probe) is not thereby a worse picture, so
+    being unmeasured must never move it behind one that WAS measured. Measured
+    live on the parity fixture: a fixed 0.5 default made the one unmeasurable
+    row lose the tier to every measurable row, which is the opposite of what
+    the tier is for.
+    """
+    if ref is None:
+        return 0.5
+    levels = []
+    for row in rows or ():
+        if not isinstance(row, Mapping):
+            continue
+        own = row.get("phash")
+        if isinstance(own, bool) or not isinstance(own, int):
+            continue
+        if row.get("release_cover") is False and _is_front(row):
+            levels.append(1.0)          # the reference itself
+            continue
+        try:
+            levels.append(max(0.0, 1.0 - bin(int(ref) ^ int(own)).count("1") / 64.0))
+        except (TypeError, ValueError):
+            continue
+    if not levels:
+        return 0.5
+    levels.sort()
+    mid = len(levels) // 2
+    return (levels[mid] if len(levels) % 2
+            else round((levels[mid - 1] + levels[mid]) / 2, 4))
 
 
 def _release_level(row):
@@ -894,6 +1026,9 @@ def _evaluate(row, ctx, index):
     reasons.append(why)
     level_appearance, why = _appearance_level(row, ctx)
     reasons.append(why)
+    level_reference, why = _reference_level(row, ctx)
+    if why:
+        reasons.append(why)
 
     cand = Candidate(
         source=source, url=url, small=str(row.get("small") or ""),
@@ -906,7 +1041,7 @@ def _evaluate(row, ctx, index):
         cover_blank=row.get("cover_blank"), reasons=tuple(reasons))
     return ((level_release, level_identity, level_kind, level_size, level_source,
              level_format, level_square, level_quality, level_rank,
-             level_appearance), cand)
+             level_appearance, level_reference), cand)
 
 
 def _score(levels):
@@ -999,7 +1134,10 @@ def rank_covers(rows, cfg=None, *, identity=None):
     then by the order the candidates arrived in, so identical inputs always
     rank identically.
     """
-    ctx = _context(cfg, identity, look_default=_look_default(rows))
+    ref_hash = _reference_phash(rows)
+    ctx = _context(cfg, identity, look_default=_look_default(rows),
+                   reference_phash=ref_hash,
+                   reference_default=_reference_default(rows, ref_hash))
     scored, rejected = [], []
     for i, row in enumerate(rows or []):
         if not isinstance(row, Mapping):
@@ -1027,7 +1165,8 @@ def rank_covers(rows, cfg=None, *, identity=None):
     return out
 
 
-def _context(cfg=None, identity=None, *, look_default=0.5):
+def _context(cfg=None, identity=None, *, look_default=0.5,
+             reference_phash=None, reference_default=0.5):
     conf = policy_config(cfg)
     ident = identity if isinstance(identity, Mapping) else {}
     return _Context(order=tuple(conf["cover_sources"]),
@@ -1036,6 +1175,8 @@ def _context(cfg=None, identity=None, *, look_default=0.5):
                     square_threshold=float(conf["cover_square_threshold"] or 0.0),
                     enforce_square=bool(conf["cover_enforce_square"]),
                     look_default=float(look_default),
+                    reference_phash=reference_phash,
+                    reference_default=float(reference_default),
                     artist=str(ident.get("artist") or "").strip(),
                     album=str(ident.get("album") or "").strip(),
                     tracks=_int(ident.get("tracks")))

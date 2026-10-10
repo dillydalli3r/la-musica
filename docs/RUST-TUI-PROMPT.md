@@ -132,7 +132,7 @@ Rules that must hold:
 | `*.cue` | CD layout, written in one canonical form |
 | `*.log` | rip log (EAC/XLD), graded and checksummed |
 | `*.accurip` | AccurateRip evidence |
-| `.mlo_expected.json` | release tracklist manifest (missing/extra tracks) |
+| `.mb_expected` | release tracklist manifest (missing/extra tracks) |
 
 A numbered copy of a sidecar (`description (2).txt`) is its own finding: renamed
 when the canonical name is absent, moved to Trash when it is present.
@@ -701,7 +701,7 @@ one empty album, one artist folder with no albums, one `.mlo_data` leftover.
 | 12 | Key & BPM | musical key + tempo tags |
 | 13 | Fetch lyrics | synced then plain |
 | 14 | Beets tagging | MusicBrainz release tagging (native here) |
-| 15 | Release tracklist | `.mlo_expected.json` manifests |
+| 15 | Release tracklist | `.mb_expected` manifests |
 | 16 | Mood & Energy | `MOOD`/`ENERGY` from the track's audio |
 | 17 | Lyrics transliterate | `TRANSLITERATION`/`TRANSLATION` + sidecars |
 | 19 | Optimize artist images | crop/resize artist artwork to policy |

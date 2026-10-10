@@ -26,7 +26,8 @@ from mlo import (
 from mlo import stats as mlo_stats
 from mlo.loudness import run_calc_dr_replaygain
 from mlo.paths import (SKIP_DIRS, library_root, load_expected_tracks,
-                       prune_empty_dirs, save_expected_tracks)
+                       normalize_expected_tracks, prune_empty_dirs,
+                       save_expected_tracks)
 from mlo.ui import Color, c, log, print_header
 from server import job_locks
 
@@ -44,7 +45,7 @@ def _optional(module, name):
 
 
 # --------------------------------------------------------------------------- #
-# Script 15 — Release tracklist (.mlo_expected.json)
+# Script 15 — Release tracklist (.mb_expected)
 # --------------------------------------------------------------------------- #
 # Album-level identity tags are uniform across an album's tracks, so a handful
 # of files settle it and one unreadable file cannot cost the album its
@@ -79,7 +80,7 @@ def _album_release_id(album_dir):
 def run_release_tracklist(config):
     """Script 15 — write each album's release tracklist manifest.
 
-    Grading REQUIRES ``.mlo_expected.json`` (grade_check_expected_tracks): the
+    Grading REQUIRES ``.mb_expected`` (grade_check_expected_tracks): the
     files on disk only describe themselves, so nothing else can say whether a
     partially imported album was meant to hold more tracks. An import records
     the manifest from the release it imported; an album that arrived any other
@@ -99,7 +100,7 @@ def run_release_tracklist(config):
 
     config = config or {}
     stats = mlo_stats.new_stats()
-    print_header("Release tracklist (.mlo_expected.json)")
+    print_header("Release tracklist (.mb_expected)")
 
     folder = str(config.get("music_folder") or "")
     force = bool(config.get("force_tracklist", False))
@@ -123,8 +124,20 @@ def run_release_tracklist(config):
     for album in albums:
         rel = _relpath_guard(album, folder or album)
         if not force and load_expected_tracks(album)["tracks"]:
-            stats["skipped_count"] += 1
-            mlo_stats._pbar_skip(pbar, counts)
+            # The manifest is already there, so nothing is fetched — but its
+            # BYTES are still this script's to put right: a library imported by
+            # an older build holds one written in text mode (CRLF endings, no
+            # final newline), and the grade fails exactly that. Rewriting it
+            # costs no request and is what makes this script the fix the grade
+            # names (`normalize_expected_tracks`).
+            if normalize_expected_tracks(album):
+                stats["skipped_count"] += 1
+                mlo_stats._pbar_skip(pbar, counts)
+                continue
+            log(f"{rel}: the manifest could not be rewritten — the folder is "
+                f"not writable")
+            stats["error_count"] += 1
+            mlo_stats._pbar_fail(pbar, counts)
             continue
 
         mbid = _album_release_id(album)

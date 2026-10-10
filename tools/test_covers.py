@@ -315,10 +315,42 @@ def _solid(w=256, h=256):
     return buf.getvalue()
 
 
+def _striped_png(w=256, h=256):
+    """The SAME picture as `_striped`, in the other container — the hash must
+    not move with the encoding, only with the picture."""
+    img = _PILImage.new("RGB", (w, h), (0, 0, 0))
+    draw = _PILDraw.Draw(img)
+    for x in range(0, w, 32):
+        draw.rectangle([x, 0, x + 15, h - 1], fill=(255, 255, 255))
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    return buf.getvalue()
+
+
+def _barred(w=256, h=256):
+    """A DIFFERENT picture of the same kind (horizontal bars, same size, same
+    detail) — the hash must tell the two apart."""
+    img = _PILImage.new("RGB", (w, h), (0, 0, 0))
+    draw = _PILDraw.Draw(img)
+    for y in range(0, h, 32):
+        draw.rectangle([0, y, w - 1, y + 15], fill=(255, 255, 255))
+    buf = io.BytesIO()
+    img.save(buf, "JPEG", quality=90)
+    return buf.getvalue()
+
+
 STRIPES, SOLID = _striped(), _solid()
 assert intg._image_look(STRIPES)["blank"] is False, intg._image_look(STRIPES)
 assert intg._image_look(STRIPES)["likeness"] > 0.5, intg._image_look(STRIPES)
-assert intg._image_look(SOLID) == {"likeness": 0.0, "blank": True}, intg._image_look(SOLID)
+assert intg._image_look(SOLID) == {"likeness": 0.0, "blank": True, "phash": 0}, \
+    intg._image_look(SOLID)
+# The perceptual hash is the term the cover policy compares a candidate with
+# the album's own MusicBrainz front: the same artwork hashes the same whatever
+# container a store re-encoded it into, and a different picture does not.
+_stripes = intg._image_look(STRIPES)
+assert _stripes["phash"] == intg._image_look(_striped_png())["phash"], _stripes
+_other = intg._image_look(_barred())
+assert _other["blank"] is False and _stripes["phash"] != _other["phash"], _other
 # Bytes that are not a readable image are UNKNOWN, never called blank — a
 # truncated fetch or an error page must not condemn a candidate.
 assert intg._image_look(png(10, 10)) is None       # a header, no pixel data
@@ -1387,6 +1419,45 @@ assert lp.provider_order({"lyrics_sources": ["youtube"]}) == ["youtube"]
 assert lp.provider_order({"lyrics_sources": ["nope", "kugou"]}) == ["kugou"]
 # rank describes the DEFAULT chain, so a user order does not renumber it
 assert [s["rank"] for s in lp.available_sources()][:2] == [1, 2]
+
+# ---------------------------------------------------------------------------
+# The cover VERSION token (server.tagcache.cover_token): what the album and
+# track payloads carry so a REPLACED cover — including one written by the
+# server itself (the import's cover step, script 5), which leaves no response
+# for the UI to learn a token from — is a different URL, and the thumbnail
+# cannot keep painting the previous image.
+# ---------------------------------------------------------------------------
+from server import tagcache as _tagcache                                # noqa: E402
+
+_cover_dir = os.path.join(_TMP, "covertoken")
+os.makedirs(_cover_dir, exist_ok=True)
+assert _tagcache.cover_token(_cover_dir) == "", "no cover file, no token"
+with open(os.path.join(_cover_dir, "cover.jpg"), "wb") as fh:
+    fh.write(b"a" * 1000)
+_first = _tagcache.cover_token(_cover_dir)
+assert _first, "a cover file has a token"
+with open(os.path.join(_cover_dir, "cover.jpg"), "wb") as fh:
+    fh.write(b"b" * 2000)          # different bytes (and size) — a new version
+_second = _tagcache.cover_token(_cover_dir)
+assert _second and _second != _first, (_first, _second)
+# A track whose own sidecar is gone resolves to the album's cover, and its
+# token is that file's — the two must never disagree about which file a URL
+# describes.
+assert _tagcache.cover_token(_cover_dir, "gone.jpg") == _second
+
+# The probe's target list: the album's own art is measured however far down the
+# rows it sits. The Cover Art Archive rows are appended AFTER the meta-search's,
+# so the old `rows[:COVER_PROBE_LIMIT]` slice left the reference unmeasured —
+# and an unmeasured row is rejected while a cover minimum is set, which is how
+# the album's own cover became unpickable on a release with 24+ name-search
+# rows (measured live on Plastic Beach).
+_plain = [{"source": "applemusic", "big": f"https://x/{i}.jpg"} for i in range(30)]
+_identity = {"source": "musicbrainz", "big": "https://x/ref.jpg",
+             "release_cover": False, "front": True}
+_targets = intg._probe_targets(_plain + [_identity], intg.COVER_PROBE_LIMIT)
+assert _identity in _targets, "the release-group front is always measured"
+assert _plain[25] not in _targets, "a plain row past the limit is still bounded"
+assert _plain[0] in _targets, "the first rows are measured as before"
 
 print("covers + lyrics ranking: all checks passed")
 

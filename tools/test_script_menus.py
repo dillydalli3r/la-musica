@@ -39,7 +39,7 @@ EXPECTED_SCRIPTS = {
     13: "Fetch Lyrics",
     14: "Beets Tagging",
     # 15 took over the id the removed lyrics xlit/translate script had — it
-    # writes each album's .mlo_expected.json release tracklist.
+    # writes each album's .mb_expected release tracklist.
     15: "Release tracklist",
     # 16 is the mood/energy classifier on its own — script 8 runs the same
     # code as one of its stages.

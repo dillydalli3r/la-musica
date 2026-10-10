@@ -137,12 +137,14 @@ TAG_FAMILY = {
     "RATING": "opinion",
     # The PUBLIC score for the track and its album (mlo.web_ratings, script
     # 24), grouped with the listener's stars because it is the same kind of
-    # fact: a rating nobody grades, nobody recomputes and no pass overwrites
-    # (the writer fills only). It is NOT the listener's own opinion, which is
-    # why its label says "web" — but a separate family would put a second
-    # rating group in the (registry-driven) tag editor for one tag pair, and
-    # the family's own rule is what makes the grouping right: a rating is an
-    # opinion, and nothing here grades it.
+    # fact: a rating, which no pass overwrites (the writer fills only). It is
+    # NOT the listener's own opinion, which is why its label says "web" — but
+    # a separate family would put a second rating group in the
+    # (registry-driven) tag editor for one tag pair, and the family's own rule
+    # is what makes the grouping right: a rating is an opinion. The family is
+    # about WHAT the tag is, not what grades it — WEBRATING's presence is
+    # graded per track (`grade_check_web_rating`, see `_graded_by` below), the
+    # same way RATING's divergence from the app's store is.
     "WEBRATING": "opinion",
     "WEBRATING_SOURCE": "opinion",
     "ALBUMWEBRATING": "opinion",
@@ -303,7 +305,9 @@ TAG_INFO = {
                                 "score thousands of people rated outweighs one with a handful of "
                                 "votes; the sources that answered are named in WEBRATING_SOURCE. "
                                 "Album-wide scores are never copied here — they live in "
-                                "ALBUMWEBRATING."),
+                                "ALBUMWEBRATING. Required per track by the grader while web "
+                                "ratings are on (issue code WEBRATING_MISSING); a video is never "
+                                "graded for it."),
     "WEBRATING_SOURCE": ("Web rating sources", "A LIST: the \"; \"-joined names of the sources that "
                                                "contributed to WEBRATING (MusicBrainz, RateYourMusic, …), "
                                                "the convention RELEASECOUNTRY uses."),
@@ -591,6 +595,8 @@ CHECK_LABELS = {
     "grade_check_genre_count": "Genre count per track",
     "grade_check_genre_order": "Genre order (family first)",
     "grade_check_genre_vocab": "Genre vocabulary",
+    "grade_check_web_rating": "Web rating present (per track)",
+    "grade_check_sidecar_format": "Sidecar text files canonically formatted",
     "grade_check_replaygain": "ReplayGain tags present",
     "grade_check_encoder": "Encoder identity",
     "grade_check_naming": "Naming script match",

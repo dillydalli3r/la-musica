@@ -87,12 +87,20 @@ export function useCoverRetry(url: string | null): {
 export default function CoverImg({
   albumPath,
   coverFile,
+  token,
   staged = false,
   w,
   wrapperClass = "h-9 w-9 rounded bg-raise overflow-hidden shrink-0",
 }: {
   albumPath: string;
   coverFile?: string | null;
+  /** The cover file's SERVER version token (`cover_token` on the album and
+   *  track payloads — mtime + size). It is what makes a replaced cover a new
+   *  URL for the browser's cache and the offline blob even when the write was
+   *  the SERVER's own (the import's cover step, script 5's re-encode), which
+   *  leaves no response to learn a token from — the reason a track row could
+   *  keep drawing the previous cover after an import had replaced it. */
+  token?: string | null;
   /** The width the surface DRAWS, so the server can serve a thumbnail instead
    *  of the 1200-3000 px master (see `api.coverUrl`'s `w`). Omitted, the
    *  master is served — which is right for a surface that really draws it
@@ -114,7 +122,7 @@ export default function CoverImg({
   // lib/invalidate): a different src is what re-fetches it, and the retry
   // state is keyed on the URL, so it clears a remembered failure too — a cover
   // that was missing and then uploaded loads without a reload.
-  const networkUrl = coverFile ? api.coverUrl(albumPath, coverFile, { staged, w }) : null;
+  const networkUrl = coverFile ? api.coverUrl(albumPath, coverFile, { staged, w, token }) : null;
   const cover = useCoverRetry(networkUrl);
   const [offlineUrl, setOfflineUrl] = useState<string | null>(null);
   // Answered from the cached-track snapshot (lib/mediaCache), never by opening
@@ -217,7 +225,9 @@ export default function CoverImg({
 export function TrackCover({
   albumPath,
   trackCover,
+  trackToken,
   albumCover,
+  albumToken,
   albumFallback = true,
   staged = false,
   w = ROW_COVER_W,
@@ -225,7 +235,12 @@ export function TrackCover({
 }: {
   albumPath: string;
   trackCover?: string | null;
+  /** The token of `trackCover`'s own file (`track.cover_token`). */
+  trackToken?: string | null;
   albumCover?: string | null;
+  /** The token of the ALBUM's cover file (`album.cover_token`) — the one a row
+   *  falls back to when it has no sidecar of its own. */
+  albumToken?: string | null;
   albumFallback?: boolean;
   /** See CoverImg — the wizard's staged album. */
   staged?: boolean;
@@ -236,8 +251,11 @@ export function TrackCover({
   wrapperClass?: string;
 }) {
   const file = trackCover ?? (albumFallback ? albumCover ?? undefined : undefined);
+  const token = trackCover ? trackToken : albumToken;
   if (!trackCover && !albumFallback) {
     return <div className={wrapperClass} aria-hidden style={{ visibility: "hidden" }} />;
   }
-  return <CoverImg albumPath={albumPath} coverFile={file} staged={staged} w={w} wrapperClass={wrapperClass} />;
+  return (
+    <CoverImg albumPath={albumPath} coverFile={file} token={token} staged={staged} w={w} wrapperClass={wrapperClass} />
+  );
 }

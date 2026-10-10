@@ -5682,15 +5682,14 @@ def genre_chain(artist="", album="", release=None, limit=None, sources=None,
     The sources are asked IN ORDER until every track is full, and no further:
     the default order (`GENRE_SOURCES`, and the shipped
     `mlo.config.DEFAULT_CONFIG["genre_sources"]`) is RateYourMusic (per track
-    where its page states one, else album) → MusicBrainz (recording → release
-    → release group → artist) → ListenBrainz (recording → release group →
-    artist) → iTunes (`primaryGenreName`, per track) → Last.fm (track →
-    artist) → TheAudioDB (`searchtrack.php` per track → album) → Wikidata (the
-    recording's P136 → release group/entity) → Bandcamp (album tags) → Discogs
-    (release styles) → Deezer (album genres) → Spotify (artist genres).
-    `mlo.config` migrates every previously shipped default list onto this one,
-    so an install that never chose an order gets it; a customised list is
-    honoured as written.
+    where its page states one, else album → artist) → Album of the Year (album
+    → artist; the site publishes no per-track genre) → MusicBrainz (recording →
+    work → release → release group → artist). With `ai_genre_inference` on and
+    an endpoint configured, the model is the LAST RESORT once the three have
+    not settled a track — see `_genre_ai_rank`, whose answer is restricted to
+    published genre names. `mlo.config` migrates every previously shipped
+    default list onto this one, so an install that never chose an order gets
+    it; a customised list is honoured as written.
 
     "Full" is the WRITER's own policy applied to the merged list
     (`_genre_complete`): at `mb_genre_count = 2` one good specific genre plus
@@ -8042,18 +8041,42 @@ def image_dimensions(url, timeout=10.0):
     return got if isinstance(got, dict) else None
 
 
+def _probe_targets(rows, limit):
+    """The rows a probe must measure: the first *limit*, PLUS every row that
+    carries the album's own art.
+
+    The bound exists so a search does not become an image downloader — but the
+    IDENTITY rows (the Cover Art Archive's release-group and release fronts)
+    are appended AFTER the meta-search's rows, so a plain ``rows[:limit]``
+    slice left them unmeasured — and an unmeasured row is REJECTED while a
+    cover minimum is set, which made the album's own art unpickable on any
+    album whose name search returned 24+ rows (measured live 2026-10-10:
+    Plastic Beach, 52 rows, the release group's front rejected unmeasured and a
+    store's re-issue sleeve picked instead). They are a handful of rows, so
+    they are always measured.
+    """
+    out = []
+    for i, row in enumerate(rows or ()):
+        if not isinstance(row, dict):
+            continue
+        if i < limit or row.get("release_cover") is not None or row.get("front"):
+            out.append(row)
+    return out
+
+
 def _attach_dimensions(rows, limit=COVER_PROBE_LIMIT, timeout=10.0):
     """Fill what each row's own image says: size, container, byte count.
 
-    The first *limit* rows, probed in a small pool — these are 20+ different
-    CDNs, and a search that waits on them one at a time is a search that hangs
-    on one slow host. A row COV already sized is probed only when its CONTAINER
-    is still unknown (the format tier of the cover policy reads it, and a row
-    whose size came from COV's own line has no format yet); a row that answers
-    nothing at all keeps `bytes: 0`, which is the one thing the policy must be
-    able to tell apart from "never asked".
+    The rows `_probe_targets` names — the first *limit*, plus the identity rows
+    — probed in a small pool — these are 20+ different CDNs, and a search that
+    waits on them one at a time is a search that hangs on one slow host. A row
+    COV already sized is probed only when its CONTAINER is still unknown (the
+    format tier of the cover policy reads it, and a row whose size came from
+    COV's own line has no format yet); a row that answers nothing at all keeps
+    `bytes: 0`, which is the one thing the policy must be able to tell apart
+    from "never asked".
     """
-    todo = [r for r in rows[:limit]
+    todo = [r for r in _probe_targets(rows, limit)
             if r.get("width") is None or r.get("format") is None]
     if not todo:
         return
@@ -8079,8 +8102,8 @@ def _attach_dimensions(rows, limit=COVER_PROBE_LIMIT, timeout=10.0):
 
 
 def _image_look(data):
-    """``{"likeness", "blank"}`` for image *data*, or None when it cannot be
-    read.
+    """``{"likeness", "blank", "phash"}`` for image *data*, or None when it
+    cannot be read.
 
     The metric `mlo.cover_choice`'s appearance tier is: decode the bytes with
     Pillow, convert to grayscale, downscale to `COVER_LOOK_SIZE`, and read the
@@ -8089,6 +8112,15 @@ def _image_look(data):
     solid colour card, not artwork — and the image is flagged blank (the
     policy's hard rejection). Otherwise the level is that detail against
     `COVER_LOOK_DETAIL_REF`, capped at 1.0.
+
+    ``phash`` is a 64-bit dHash of the same image (an 8×8 grid of
+    left-to-right brightness comparisons, the classic difference hash): two
+    encodings of the SAME artwork agree on nearly every bit and two different
+    pictures do not, which is what lets `mlo.cover_choice`'s reference tier
+    compare a candidate against the album's own MusicBrainz front cover — the
+    owner's report was a pick that did not match the reference the finder
+    showed beside it. 0 for a flat image (every comparison equal), which the
+    blank flag already rejects.
 
     Bytes this cannot decode (a truncated fetch, an HTML error page, an exotic
     format) are UNKNOWN, not blank: nothing here may claim an image is a colour
@@ -8100,6 +8132,8 @@ def _image_look(data):
         with Image.open(io.BytesIO(data)) as img:
             img.load()
             gray = img.convert("L").resize((COVER_LOOK_SIZE, COVER_LOOK_SIZE))
+            # 9×8, so each of the 8 rows yields 8 neighbouring-pixel compares.
+            grad = list(img.convert("L").resize((9, 8)).getdata())
         w, h = gray.size
         if w < 2 or h < 2:
             return None
@@ -8109,10 +8143,15 @@ def _image_look(data):
         dy = sum(abs(px[i] - px[i + w])
                  for i in range((h - 1) * w)) / float((h - 1) * w)
         detail = (dx + dy) / 2.0
+        bits = 0
+        for row in range(8):
+            base = row * 9
+            for i in range(8):
+                bits = (bits << 1) | (1 if grad[base + i] > grad[base + i + 1] else 0)
         if detail < COVER_LOOK_MIN_DETAIL:
-            return {"likeness": 0.0, "blank": True}
+            return {"likeness": 0.0, "blank": True, "phash": bits}
         return {"likeness": round(min(1.0, detail / COVER_LOOK_DETAIL_REF), 4),
-                "blank": False}
+                "blank": False, "phash": bits}
     except Exception:
         return None
 
@@ -8161,15 +8200,18 @@ def _row_look(row, timeout=10.0):
 
 
 def _attach_looks(rows, limit=COVER_PROBE_LIMIT, timeout=10.0):
-    """Fill each row's own cover-likeness: the image's real detail.
+    """Fill each row's own cover-likeness and perceptual hash.
 
-    The first *limit* rows, in the same small pool as `_attach_dimensions` —
-    the same bound and the same reason: a search must not become an image
-    downloader. A row nobody measured keeps `cover_likeness` None, and
-    `mlo.cover_choice` scores it at the set's median looks rather than blaming
-    it. A near-solid image gets `cover_blank`, which the policy rejects.
+    The rows `_probe_targets` names (the first *limit*, plus the identity rows
+    — see that function for why the reference rows may not be skipped), in the
+    same small pool as `_attach_dimensions`: the same bound and the same
+    reason: a search must not become an image downloader. A row nobody measured
+    keeps `cover_likeness` None, and `mlo.cover_choice` scores it at the set's
+    median looks rather than blaming it. A near-solid image gets `cover_blank`,
+    which the policy rejects. `phash` is the row's 64-bit dHash, the term the
+    policy's reference tier compares with the album's own art.
     """
-    todo = [r for r in rows[:limit]
+    todo = [r for r in _probe_targets(rows, limit)
             if r.get("cover_likeness") is None and not r.get("cover_blank")]
     if not todo:
         return
@@ -8182,6 +8224,8 @@ def _attach_looks(rows, limit=COVER_PROBE_LIMIT, timeout=10.0):
         row["cover_likeness"] = got.get("likeness")
         if got.get("blank"):
             row["cover_blank"] = True
+        if isinstance(got.get("phash"), int) and not isinstance(got.get("phash"), bool):
+            row["phash"] = got["phash"]
 
 
 # --------------------------------------------------------------------------- #

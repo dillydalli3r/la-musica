@@ -545,7 +545,7 @@ DEFAULT_CONFIG = {
     # when a file already looks canonical.
     "force_lyrics": False,
     "force_cue": False,
-    # 15 rewrites an .mlo_expected.json that is already there (see the script
+    # 15 rewrites an .mb_expected that is already there (see the script
     # 15 runner); without the flag an existing manifest is left alone.
     "force_tracklist": False,
 
@@ -660,7 +660,7 @@ DEFAULT_CONFIG = {
     # import or a stale folder would never show up as a problem.
     "grade_check_empty_folders": True,
     # Every album must carry the MusicBrainz release's own tracklist
-    # (.mlo_expected.json, written by the import and by script 15). Files on
+    # (.mb_expected, written by the import and by script 15). Files on
     # disk only describe themselves, so without the manifest a partially
     # imported album (3 of 12 tracks) is indistinguishable from a complete
     # one and would grade PASS — the release's tracklist is the only source
@@ -704,6 +704,20 @@ DEFAULT_CONFIG = {
     "grade_check_mood": True,
     "grade_check_energy": True,   # ENERGY (0-100), written next to MOOD by script 8
     "grade_check_genre": True,
+    # The PUBLIC verdict (script 24, WEBRATING 0-100) is required per track,
+    # like the genre beside it: an album the app has finished should carry the
+    # public score on every track, and the grader is what says so. Off makes
+    # the check a no-op; the tags are still written. The feature switch
+    # (`web_ratings_enabled`) gates it too — with the script off nothing
+    # gathers a rating, so nothing is failed for the absence.
+    "grade_check_web_rating": True,
+    # The app's own text sidecars (the release manifest `.mb_expected` and the
+    # artist/album `description.txt`) must be in the exact form its writers
+    # produce: UTF-8, LF endings, no trailing whitespace, one final newline.
+    # Graded on BYTES because every writer already stores that form, so a file
+    # that differs is one this app did not write (a CRLF copy from another
+    # tool, a hand edit) — and the fix is the same writer, run again.
+    "grade_check_sidecar_format": True,
     # Genre COUNT per track: a track may hold AT MOST mb_genre_count values,
     # the same cap the import and the trimming scripts apply (mb_genre_count,
     # Settings → Import). Only an overflow fails — a track with one specific

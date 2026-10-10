@@ -383,13 +383,13 @@ check(os.path.isdir(folder_album) and os.path.isdir(archive_album),
 eq(sorted(os.listdir(archive_album)), sorted(os.listdir(folder_album)),
    "the archive's album holds what the folder's album holds")
 eq(sorted(os.listdir(archive_album)),
-   [".mlo_expected.json", "01 - One.wav", "02 - Two.wav", "rip.cue", "rip.log"],
+   [".mb_expected", "01 - One.wav", "02 - Two.wav", "rip.cue", "rip.log"],
    "…the tracks AND the rip's own .cue/.log")
 
 for label, album in (("the folder", folder_album), ("the archive", archive_album)):
     # Both were handed a rip whose sheets name FOUR tracks and whose audio is
     # two of them: the album has to say so, from the sidecar alone.
-    with open(os.path.join(album, ".mlo_expected.json"), encoding="utf-8") as fh:
+    with open(os.path.join(album, ".mb_expected"), encoding="utf-8") as fh:
         manifest = json.load(fh)
     rows = manifest.get("tracks") or []
     eq(len(rows), 4, f"{label}'s album is marked against the 4 tracks its cue sheet names")

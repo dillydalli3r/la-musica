@@ -285,5 +285,111 @@ check("neither answer: the REST summary answers",
       fallback and fallback.get("text") == SUMMARY_TEXT
       and fallback.get("source") == "wikipedia", fallback)
 
+# --------------------------------------------------------------------------- #
+# The providers added beside the originals: Wikidata (keyless image), Last.fm
+# and Discogs (keyed), Bandcamp (keyless album text). Every fetch is stubbed.
+# --------------------------------------------------------------------------- #
+print()
+print("== the added providers ==")
+
+LF_BIO = ('A band from Aberdeen.<br/><br/>Second paragraph. '
+          '<a href="x">Read more on Last.fm</a>')
+LF_WIKI = "A debut album's own wiki text."
+
+
+def new_routes(url, params):
+    if "wikidata.org" in url:
+        if params.get("action") == "wbsearchentities":
+            return {"search": [{"id": "Q11649"}]}
+        if params.get("props") == "claims":
+            return {"entities": {"Q11649": {"claims": {"P18": [
+                {"mainsnak": {"datavalue": {"value": "Nirvana band photo.jpg"}}}]}}}}
+        return {"entities": {}}          # no sitelinks → the Wikipedia path fails
+    if "audioscrobbler" in url:
+        if params.get("method") == "artist.getinfo":
+            return {"artist": {
+                "image": [{"#text": "http://img/small.jpg", "size": "small"},
+                          {"#text": "http://img/mega.jpg", "size": "mega"}],
+                "bio": {"content": LF_BIO}}}
+        if params.get("method") == "album.getinfo":
+            return {"album": {"wiki": {"content": LF_WIKI}}}
+        return {}
+    if "api.discogs.com" in url:
+        if "/database/search" in url:
+            return {"results": [{"id": 6378}]}
+        if "/artists/" in url:
+            return {"id": 6378, "name": "Nirvana", "profile": "A band profile.",
+                    "images": [{"uri": "https://img.discogs.com/a.jpg"}]}
+        if "/releases/" in url:
+            return {"id": 5, "title": "Nevermind", "notes": "A release note.",
+                    "genres": [], "styles": []}
+        return {}
+    return None
+
+
+stub_json(new_routes)
+intg._mb_wikidata_qid = lambda mbid, entity="release-group": "Q11649" if mbid else None
+intg._bandcamp_subdomain_candidates = lambda artist: ["band"]
+intg._bandcamp_slug = lambda name, sep="-": str(name).lower().replace(" ", sep)
+intg._bandcamp_get = lambda url: (
+    '<div class="tralbumData tralbum-about">From the page&#39;s own block.</div>')
+intg._bandcamp_tralbum = lambda page: {"current": {"title": "Esja"}, "about": ""}
+intg._bandcamp_is_album = lambda tralbum, name, titles=None: True
+
+_wd = discovery.wikidata_artist_image("Nirvana", MBID)
+check("Wikidata image: P18 → a 1200px Commons URL",
+      _wd == ("https://commons.wikimedia.org/wiki/Special:FilePath/"
+              "Nirvana_band_photo.jpg?width=1200"), _wd)
+check("Wikidata image joins the image chain when it is the configured source",
+      (discovery.artist_image("Nirvana", MBID,
+                              cfg={"artist_image_sources": ["wikidata"]}) or {}
+       ).get("source") == "wikidata")
+
+check("no API key → Last.fm answers nothing (never a guess)",
+      discovery.lastfm_artist_description("Nirvana", cfg={}) is None)
+_lf = discovery.lastfm_artist_description("Nirvana", cfg={"lastfm_api_key": "k"})
+check("Last.fm bio: prose, entities/breaks handled, trailer dropped",
+      _lf and "A band from Aberdeen." in _lf["text"]
+      and "Read more on Last.fm" not in _lf["text"]
+      and "\n\n" in _lf["text"], _lf)
+check("Last.fm image: the LARGEST entry, not the first",
+      discovery.lastfm_artist_image("Nirvana", cfg={"lastfm_api_key": "k"})
+      == "http://img/mega.jpg")
+check("Last.fm joins the description chain when configured",
+      (discovery.artist_description("Nirvana",
+                                    cfg={"description_sources": ["lastfm"],
+                                         "lastfm_api_key": "k"}) or {}
+       ).get("source") == "lastfm")
+check("Last.fm album wiki answers the album chain",
+      (discovery.album_description("Nirvana", "Nevermind",
+                                   cfg={"description_sources": ["lastfm"],
+                                        "lastfm_api_key": "k"}) or {}
+       ).get("source") == "lastfm")
+
+check("no Discogs token → nothing asked",
+      discovery.discogs_artist_image("Nirvana", cfg={}) is None)
+check("Discogs artist image from the artist detail",
+      discovery.discogs_artist_image("Nirvana", cfg={"discogs_token": "t"})
+      == "https://img.discogs.com/a.jpg")
+check("Discogs profile answers the artist chain",
+      (discovery.artist_description("Nirvana",
+                                    cfg={"description_sources": ["discogs"],
+                                         "discogs_token": "t"}) or {}
+       ).get("text") == "A band profile.")
+check("Discogs release notes answer the album chain",
+      (discovery.album_description("Nirvana", "Nevermind",
+                                   cfg={"description_sources": ["discogs"],
+                                        "discogs_token": "t"}) or {}
+       ).get("text") == "A release note.")
+
+_bc = discovery.bandcamp_album_description("Nirvana", "Esja")
+check("Bandcamp album: the page's own about block, entities decoded",
+      _bc and _bc["text"] == "From the page's own block."
+      and _bc["source_url"].endswith("/album/esja"), _bc)
+check("Bandcamp answers the album chain when configured",
+      (discovery.album_description("Nirvana", "Esja",
+                                   cfg={"description_sources": ["bandcamp"]}) or {}
+       ).get("source") == "bandcamp")
+
 print(f"\n{'FAILURES: ' + ', '.join(FAILS) if FAILS else 'all checks passed'}")
 raise SystemExit(1 if FAILS else 0)

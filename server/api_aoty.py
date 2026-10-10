@@ -39,6 +39,7 @@ a live credential, so the settings panel is told names, counts and sentences.
 
 Mounted by server/main.py (``include_router``); this module never imports it.
 """
+from datetime import datetime, timezone
 from typing import List, Tuple
 
 from fastapi import APIRouter, HTTPException
@@ -332,13 +333,18 @@ def aoty_cookies_post(req: CookieUpload):
     cfg = load_config()
     notes = _note_text(cfg)
     kept = []
+    # One stamp for the whole import, so the panel shows the file as ONE dated
+    # event ("Imported …") rather than a wall of rows with no date at all. The
+    # yt-dlp jar's own `saved_at` is the same shape (ISO 8601 UTC), so the one
+    # panel formats a date the one way whichever credential it is showing.
+    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
     for record in records:
         if not (_is_aoty_host(record.domain) and record.name):
             continue
         kept.append(record)
         notes = set_note(notes, SOURCE,
                          cookie_key(AOTY_HOST, "/", record.name),
-                         expiry=record.expiry)
+                         expiry=record.expiry, imported_at=stamp)
     _save_notes(cfg, notes)
     state = cookie_state()
     state["stored"] = len(pairs)

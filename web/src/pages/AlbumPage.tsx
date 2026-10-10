@@ -658,6 +658,7 @@ export default function AlbumPage() {
         <CoverImg
           albumPath={data.path}
           coverFile={data.cover_file}
+          token={data.cover_token}
           wrapperClass="w-full h-full blur-[90px] opacity-25 scale-125"
         />
         <div className="absolute inset-0 bg-bg/50" />
@@ -685,6 +686,7 @@ export default function AlbumPage() {
               <CoverImg
                 albumPath={data.path}
                 coverFile={data.cover_file}
+                token={data.cover_token}
                 wrapperClass="h-40 w-40 sm:h-56 sm:w-56 rounded-xl bg-raise overflow-hidden shadow-2xl"
               />
               <input
@@ -1567,7 +1569,9 @@ export default function AlbumPage() {
                     <TrackCover
                       albumPath={data.path}
                       trackCover={tr.cover_file}
+                      trackToken={tr.cover_token}
                       albumCover={data.cover_file}
+                      albumToken={data.cover_token}
                       wrapperClass="h-8 w-8 rounded bg-raise overflow-hidden shrink-0"
                     />
                   </td>

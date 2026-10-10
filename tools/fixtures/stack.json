@@ -203,7 +203,7 @@
   {
    "id": 15,
    "label": "Release tracklist",
-   "description": ".mlo_expected.json manifests",
+   "description": ".mb_expected manifests",
    "in_order": true,
    "enabled": true,
    "order": 3,

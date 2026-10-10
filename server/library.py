@@ -213,6 +213,12 @@ def _enrich_track(tr, album_dir, cover_for=None):
         tr["cover_file"] = os.path.basename(sc) if sc else None
     except Exception:
         tr["cover_file"] = None
+    # The version token of the file this row actually draws (its own sidecar,
+    # else the album's cover): the UI puts it in the thumbnail URL, so a cover
+    # replaced on disk — by an import's cover step or by script 5, neither of
+    # which produces a write response to learn a token from — is a DIFFERENT
+    # url and the row cannot keep showing the previous image.
+    tr["cover_token"] = tagcache.cover_token(album_dir, tr["cover_file"]) or None
     # Numeric disc/track numbers for correct ordering ("1-10" must not
     # sort before "1-2"). Tags first, filename stem as fallback.
     tags_obj = tr.get("tags") or {}
@@ -492,6 +498,11 @@ def _build_album(album_dir, cfg, light=False):
             tr["log_grade"] = None
             tr["grade_pass"] = True
     res["artwork"] = _album_artwork(album_dir, light=light)
+    # The ALBUM cover's version token, the same one each track row carries for
+    # its own file: the page's own cover and every thumbnail fallback put it in
+    # the URL, so a cover written on disk is never served from a cache that
+    # still holds the previous bytes.
+    res["cover_token"] = tagcache.cover_token(album_dir) or None
     tc = res.get("total_checks", 0)
     # Printed, so it obeys the one rule (mlo.grader.printed_pct): a Fail badge
     # can never read "100% of checks passed".
@@ -624,6 +635,9 @@ def _pending_album_row(folder, root):
     cover = info.get("cover") or {}
     row["cover_file"] = str(cover.get("file") or "")
     row["cover_ok"] = bool(row["cover_file"])
+    # The placeholder cover's version token, so the framework album's art
+    # behaves like any other (see `tagcache.cover_token`).
+    row["cover_token"] = tagcache.cover_token(folder) or None
     row["cover_detail"] = ("release-group cover (placeholder)"
                            if row["cover_file"] else "")
     row["album_artist"] = str(info.get("artist") or "")

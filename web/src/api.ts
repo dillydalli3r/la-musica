@@ -514,6 +514,10 @@ export interface CookieEntry {
   expired: boolean;
   /** the user's own note for this cookie ("" when none). */
   comment: string;
+  /** when the cookies.txt this row came from was imported, ISO 8601 UTC — ""
+   *  when the credential predates the stamp. One value per import, so the
+   *  panel groups the rows of one import under one dated section. */
+  imported_at: string;
 }
 
 /** The per-cookie view of one cookie login: what it stores, and the hosts its
@@ -2733,17 +2737,24 @@ export const api = {
    *  app's own writes still refetch immediately), and two surfaces that ask
    *  for the same width share ONE request. Omitted, the master is served
    *  exactly as it always was — the offline warm (mediaCache.artworkUrls) and
-   *  anything that needs full resolution keep it. */
+   *  anything that needs full resolution keep it.
+   *
+   *  `v` comes from the write that replaced the cover, in this order: the
+   *  token a cover write's RESPONSE just gave this file (`rememberCoverVersion`
+   *  — the freshest fact a write can leave behind), then `opts.token`, the
+   *  version the SERVER put in the payload (`cover_token`, mtime + size). The
+   *  second is what keeps a server-side write honest: the import's cover step
+   *  and script 5's re-encode have no response to learn a token from, and
+   *  without one a replaced cover kept the same URL and the row kept drawing
+   *  the previous image. */
   coverUrl: (
     albumPath: string,
     coverFile?: string | null,
     opts?: { token?: string | null; staged?: boolean; w?: number }
   ) => {
-    const v = opts && "token" in opts
-      ? opts.token
-      : coverFile
-        ? coverVersion(albumPath, coverFile)
-        : null;
+    const v = coverFile
+      ? coverVersion(albumPath, coverFile) ?? opts?.token ?? null
+      : opts?.token ?? null;
     return media(
       `${API}/cover?album=${encodeURIComponent(albumPath)}` +
         (coverFile ? `&file=${encodeURIComponent(coverFile)}` : "") +

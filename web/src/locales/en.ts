@@ -531,6 +531,8 @@ export default {
   "cookies.session": "session",
   "cookies.expired": "expired",
   "cookies.keptHosts": "Only cookies for {hosts} are kept — everything else in the export is left out.",
+  "cookies.importedAt": "Imported {when} — {count} cookie(s)",
+  "cookies.keptCount": "{count} cookie(s) kept",
 
   "cookies.sectionTitle": "Cookie logins — import a cookies.txt",
 

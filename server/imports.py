@@ -2623,6 +2623,12 @@ def fetch_artist_description(folder, artist, cfg=None, force=False):
     if not folder or not artist or not cfg.get("artist_description_enabled", True):
         return out
     if not force and artistdata.has_description(folder):
+        # Nothing is fetched — but the stored file's BYTES are still a fetch
+        # step's to put right: a description that arrived from outside (a hand
+        # edit, a CRLF copy, an older build's write) differs from what this
+        # app's own writer produces, and the grade fails exactly that. Rewriting
+        # it costs no request and is why this script is named as the fix.
+        artistdata.normalize_description_file(folder, cfg=cfg, kind="artist")
         out["status"] = "skipped"
         return out
     try:
@@ -2675,18 +2681,24 @@ def apply_metadata(album_dir, cfg=None):
         res = fetch_artist_description(folder, artist, cfg)
         out["artist_description"] = res["path"]
 
-    if (album and cfg.get("album_description_enabled", True)
-            and not artistdata.has_description(album_dir)):
-        from server import discovery
-        found = discovery.album_description(artist, album, cfg=cfg)
-        if found and str(found.get("text") or "").strip():
-            out["album_description"] = artistdata.write_description(
-                album_dir, found["text"], cfg=cfg, source=found.get("source"),
-                source_url=found.get("source_url"), kind="album")
-            artistdata.write_provenance(album_dir, {
-                "description_source": found.get("source"),
-                "description_source_url": found.get("source_url"),
-                "description_title": found.get("title")}, kind="album", cfg=cfg)
+    if album and cfg.get("album_description_enabled", True):
+        if artistdata.has_description(album_dir):
+            # Already stored: nothing is fetched, but a file whose bytes are not
+            # what `write_description` produces (CRLF, trailing spaces, no final
+            # newline) is repaired here — the album's half of the sidecar-format
+            # grade, and the same rule the artist fetch above follows.
+            artistdata.normalize_description_file(album_dir, cfg=cfg, kind="album")
+        else:
+            from server import discovery
+            found = discovery.album_description(artist, album, cfg=cfg)
+            if found and str(found.get("text") or "").strip():
+                out["album_description"] = artistdata.write_description(
+                    album_dir, found["text"], cfg=cfg, source=found.get("source"),
+                    source_url=found.get("source_url"), kind="album")
+                artistdata.write_provenance(album_dir, {
+                    "description_source": found.get("source"),
+                    "description_source_url": found.get("source_url"),
+                    "description_title": found.get("title")}, kind="album", cfg=cfg)
 
     if any(out.values()):
         # The album it wrote, and the artist folder when it filled one: the
@@ -2737,7 +2749,15 @@ def run_metadata_step(album_dir, cfg=None):
 # Both are asked when both are known: the meta-search carries the big store
 # artwork, the identity carries the release's own front cover, and
 # `mlo.cover_choice` (the ONE cover policy) decides between them.
-COVER_FETCH_TIMEOUT = 30.0
+# The ONE search timeout for every surface that asks (`server.integrations`'
+# own default is this constant): the finder's route and the unattended import
+# ask the SAME question, and a timeout is part of it — a source that answers at
+# 35 s contributes to one caller's rows and not the other's, and the two then
+# rank different candidate sets for the same album. Measured live: the CAA
+# identity reads answer in ~2-11 s, so the wider bound costs a slow source's
+# wait only when a source is actually slow, and it is what keeps a pick and a
+# "Best Pick" the same pick.
+COVER_FETCH_TIMEOUT = 60.0
 
 # How many candidates the finder is asked for. A review hands the user a
 # screenful to pick from; the unattended path ranks the SAME set and writes the

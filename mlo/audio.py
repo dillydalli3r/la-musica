@@ -212,8 +212,13 @@ TAG_MAP = {
     # its album (mlo.web_ratings, script 24), stored on the SAME 0-100 Picard
     # scale RATING uses so a player showing the listener's stars beside the
     # public score reads one number twice. Same freeform/TXXX shape as RATING,
-    # and — like RATING — an OPINION rather than a measured fact: nothing
-    # grades it. ALBUMWEBRATING is written to EVERY track of the album, the
+    # and — like RATING — an OPINION rather than a measured fact; unlike
+    # RATING it IS graded: WEBRATING's presence is required per track while
+    # the feature is on (`grade_check_web_rating`, default on), because the
+    # app's own answer to "is this album finished?" includes the public
+    # verdict. The four tags are gated by `web_ratings_enabled`; video
+    # containers are never failed for them (mlo.grader.VIDEO_SKIP_TAGS).
+    # ALBUMWEBRATING is written to EVERY track of the album, the
     # app's established way to carry an album-level value (see
     # ALBUMITUNESADVISORY); the _SOURCE twins hold the "; "-joined names of
     # the sources that contributed, the convention RELEASECOUNTRY uses.

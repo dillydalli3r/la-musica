@@ -772,14 +772,29 @@ export default function PlayerBar() {
   });
   // One Map per payload; track changes are O(1) lookups.
   const coverByPath = useMemo(() => {
-    const m = new Map<string, { track: string | null; album: string | null }>();
+    const m = new Map<string, { track: string | null; album: string | null; trackToken: string | null; albumToken: string | null }>();
     for (const a of lib?.artists ?? [])
       for (const al of a.albums)
-        for (const t of al.tracks) m.set(t.path, { track: t.cover_file ?? null, album: al.cover_file ?? null });
+        for (const t of al.tracks)
+          m.set(t.path, {
+            track: t.cover_file ?? null,
+            album: al.cover_file ?? null,
+            trackToken: t.cover_token ?? null,
+            albumToken: al.cover_token ?? null,
+          });
     return m;
   }, [lib]);
   const libCover = current && !current.coverFile && !current.albumCover ? (coverByPath.get(current.path) ?? null) : null;
   const coverFile = current?.coverFile ?? libCover?.track ?? current?.albumCover ?? libCover?.album ?? null;
+  // The token that belongs to the file `coverFile` resolved to: the bar must
+  // never send one file's version for another's URL.
+  const coverToken = current?.coverFile
+    ? current.coverToken ?? null
+    : libCover?.track
+      ? libCover.trackToken
+      : current?.albumCover
+        ? current.albumToken ?? null
+        : libCover?.albumToken ?? null;
   const coverAlbumPath = current?.albumPath ?? "";
   // Whether the art's ADDRESS is known at all: a row that carries its own
   // cover filenames answers on the spot, while an album card's queue rows
@@ -788,7 +803,7 @@ export default function PlayerBar() {
   // own record exists to collapse into one paint (see lib/nowPlaying).
   const coverNamed = !current || !!(current.coverFile || current.albumCover) || !!lib;
   const blockCoverUrl =
-    current && coverNamed && coverFile ? api.coverUrl(coverAlbumPath, coverFile, { w: ROW_COVER_W }) : null;
+    current && coverNamed && coverFile ? api.coverUrl(coverAlbumPath, coverFile, { w: ROW_COVER_W, token: coverToken }) : null;
 
   // The NEXT track's cover, resolved by the same rule as the current one (a
   // queue row carries its own filenames; a playlist/.m3u8 row gets them from
@@ -802,7 +817,14 @@ export default function PlayerBar() {
     if (!nx || !nx.albumPath) return null;
     const row = coverByPath.get(nx.path) ?? null;
     const file = nx.coverFile ?? row?.track ?? nx.albumCover ?? row?.album ?? null;
-    return file ? api.coverUrl(nx.albumPath, file, { w: ROW_COVER_W }) : null;
+    const token = nx.coverFile
+      ? nx.coverToken ?? null
+      : row?.track
+        ? row.trackToken
+        : nx.albumCover
+          ? nx.albumToken ?? null
+          : row?.albumToken ?? null;
+    return file ? api.coverUrl(nx.albumPath, file, { w: ROW_COVER_W, token }) : null;
   }, [queue, index, coverByPath]);
   const warmedCover = useRef<string | null>(null);
   useEffect(() => {

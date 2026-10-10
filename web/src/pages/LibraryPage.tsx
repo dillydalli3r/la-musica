@@ -1880,6 +1880,7 @@ export default function LibraryPage() {
                     <CoverImg
                       albumPath={al.path}
                       coverFile={al.cover_file}
+                      token={al.cover_token}
                       wrapperClass="h-9 w-9 rounded bg-raise overflow-hidden shrink-0"
                     />
                   </Link>
@@ -1977,7 +1978,9 @@ export default function LibraryPage() {
                           <TrackCover
                             albumPath={al.path}
                             trackCover={t.cover_file}
+                            trackToken={t.cover_token}
                             albumCover={al.cover_file}
+                            albumToken={al.cover_token}
                             wrapperClass="h-8 w-8 rounded bg-raise overflow-hidden shrink-0"
                           />
                           <TrackTitleCell
@@ -2761,6 +2764,9 @@ function AlbumRowGroup({
                               <TrackCover
                                 albumPath={album.path}
                                 trackCover={t.cover_file}
+                                trackToken={t.cover_token}
+                                albumCover={album.cover_file}
+                                albumToken={album.cover_token}
                                 wrapperClass="h-8 w-8 rounded bg-raise overflow-hidden shrink-0"
                               />
                             </td>

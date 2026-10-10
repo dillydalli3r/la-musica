@@ -746,8 +746,9 @@ def save_track_covers(album_dir, mapping):
     except OSError:
         return False
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump({"version": 1, "tracks": mapping}, fh, indent=1, sort_keys=True)
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(canonical_json_text({"version": 1, "tracks": mapping},
+                                         sort_keys=True))
             fh.flush()
             os.fsync(fh.fileno())
         _replace_atomic(tmp, dest)
@@ -766,11 +767,66 @@ def save_track_covers(album_dir, mapping):
 # missing — the files on disk only describe themselves. Same dotfile
 # treatment as the covers manifest: grading ignores hidden names, so this is
 # never read as library content or as stray artwork.
-EXPECTED_TRACKS_FILE = ".mlo_expected.json"
+EXPECTED_TRACKS_FILE = ".mb_expected"
+
+# The name this manifest carried before the rename. A library imported by an
+# older build still holds one, and it is the release's own tracklist — the ONE
+# thing an album cannot rebuild from its files — so a reader that finds it
+# RENAMES it to the canonical name rather than leaving it invisible beside a
+# name the app no longer looks for (the same treatment the layout scan gives a
+# numbered sidecar copy). See `_expected_tracks_path`.
+# Spelled in two pieces on purpose: this is the OLD name, and a future bulk
+# rename of the new one must not rewrite the string this migration matches on.
+LEGACY_EXPECTED_TRACKS_FILE = ".mlo_expected" + ".json"
+
+
+def canonical_json_text(data, *, indent=1, sort_keys=False) -> str:
+    """The ONE text an app-written JSON sidecar has on disk.
+
+    * UTF-8, LF endings. The files used to be written through a text-mode
+      handle, which turned every newline into CRLF on Windows — an invisible
+      ``\\r`` on the end of every line, and the reason the owner reported the
+      manifest as "extra spaces on each line". (The caller must still open the
+      file with ``newline="\\n"``: this function states the bytes, the handle
+      decides whether they survive.)
+    * No trailing whitespace on any line — ``json.dumps`` never emits any.
+    * Exactly ONE final newline. A dump on its own ends at the last ``}``,
+      which is not a text file; ``mlo.cue``, ``mlo.accurip`` and
+      ``mlo.artistdata`` already end their text that way, so the JSON sidecars
+      match them.
+    * ``ensure_ascii=False``: a title with "é" or "坂本" is written as itself,
+      not as six escapes — the file is UTF-8 and says so.
+    """
+    return json.dumps(data, ensure_ascii=False, indent=indent,
+                      sort_keys=sort_keys) + "\n"
+
+
+def expected_tracks_text(release_id, tracks) -> str:
+    """The canonical text of a release tracklist (see `canonical_json_text`)."""
+    return canonical_json_text({
+        "version": 1,
+        "release_id": str(release_id or "") or None,
+        "tracks": _clean_expected(tracks),
+    })
 
 
 def _expected_tracks_path(album_dir):
-    return os.path.join(album_dir, EXPECTED_TRACKS_FILE)
+    """The manifest's path, renaming a pre-rename `.mb_expected` on the
+    way (see LEGACY_EXPECTED_TRACKS_FILE).
+
+    A rename that fails (a read-only folder, a file locked by another program)
+    leaves the file where it was and is still READ: a library must never lose
+    its tracklist because a folder could not be written, and the next reader
+    tries again.
+    """
+    dest = os.path.join(album_dir, EXPECTED_TRACKS_FILE)
+    legacy = os.path.join(album_dir, LEGACY_EXPECTED_TRACKS_FILE)
+    if not os.path.exists(dest) and os.path.isfile(legacy):
+        try:
+            os.replace(legacy, dest)
+        except OSError:
+            return legacy
+    return dest
 
 
 def _clean_expected(tracks):
@@ -908,8 +964,9 @@ def load_expected_tracks(album_dir):
 
 
 def save_expected_tracks(album_dir, release_id, tracks):
-    """Atomically write the release tracklist; an empty list removes the
-    file, so a fully-present album with no manifest leaves nothing behind."""
+    """Atomically write the release tracklist in its canonical form; an empty
+    list removes the file, so a fully-present album with no manifest leaves
+    nothing behind (see `canonical_json_text` for what "canonical" is)."""
     rows = _clean_expected(tracks)
     dest = _expected_tracks_path(album_dir)
     if not rows:
@@ -920,14 +977,14 @@ def save_expected_tracks(album_dir, release_id, tracks):
         except OSError:
             return False
         return True
+    body = expected_tracks_text(release_id, rows)
     try:
-        fd, tmp = tempfile.mkstemp(prefix=".mlo_expected_", suffix=".tmp", dir=album_dir)
+        fd, tmp = tempfile.mkstemp(prefix=".mb_expected_", suffix=".tmp", dir=album_dir)
     except OSError:
         return False
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump({"version": 1, "release_id": str(release_id or "") or None,
-                       "tracks": rows}, fh, indent=1)
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(body)
             fh.flush()
             os.fsync(fh.fileno())
         _replace_atomic(tmp, dest)
@@ -939,6 +996,64 @@ def save_expected_tracks(album_dir, release_id, tracks):
         except OSError:
             pass
         return False
+
+
+def expected_tracks_format_issue(album_dir) -> str:
+    """Why an album's manifest is not in its canonical form, or "".
+
+    The question is BYTES, not content: `load_expected_tracks` reads a CRLF
+    file, an escaped-unicode file and a re-indented file perfectly well, so a
+    manifest can be complete, correct and still be a file this app would never
+    write. `normalize_expected_tracks` is the fix and Release tracklist (15)
+    runs it, which is what makes this a graded defect rather than a style
+    opinion.
+    """
+    path = _expected_tracks_path(album_dir)
+    try:
+        with open(path, "r", encoding="utf-8", newline="") as fh:
+            raw = fh.read()
+    except OSError:
+        return ""
+    if not raw.strip():
+        return ""
+    if "\r" in raw:
+        return ("the file has CRLF line endings — this app writes LF (re-run "
+                "Release tracklist, script 15)")
+    if not raw.endswith("\n"):
+        return ("the file does not end with a newline (re-run Release "
+                "tracklist, script 15)")
+    data = load_expected_tracks(album_dir)
+    if raw != expected_tracks_text(data.get("release_id"), data.get("tracks")):
+        return ("the file is not in this app's canonical form (indentation, "
+                "key order or escaped characters — re-run Release tracklist, "
+                "script 15)")
+    return ""
+
+
+def normalize_expected_tracks(album_dir) -> bool:
+    """Rewrite an album's manifest into its canonical form when the bytes on
+    disk differ. True when it is canonical now, or when there is nothing to
+    normalize (no manifest).
+
+    What Release tracklist (15) and the import already do by WRITING (both go
+    through `save_expected_tracks`), offered on its own so a library imported
+    by an older build — whose manifest was written in text mode, with CRLF and
+    no final newline — is repaired without a MusicBrainz round trip. Never
+    fails a caller: a read-only album folder returns False and keeps its file.
+    """
+    path = _expected_tracks_path(album_dir)
+    try:
+        with open(path, "r", encoding="utf-8", newline="") as fh:
+            raw = fh.read()
+    except OSError:
+        return True
+    if not raw.strip():
+        return True
+    data = load_expected_tracks(album_dir)
+    if raw == expected_tracks_text(data.get("release_id"), data.get("tracks")):
+        return True
+    return save_expected_tracks(album_dir, data.get("release_id"),
+                               data.get("tracks"))
 
 
 # A FRAMEWORK album: the folder "Add to library" creates the moment the user
@@ -974,8 +1089,8 @@ def save_pending(album_dir, info):
     except OSError:
         return False
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(dict(info, version=1), fh, indent=1)
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(canonical_json_text(dict(info, version=1)))
             fh.flush()
             os.fsync(fh.fileno())
         _replace_atomic(tmp, _pending_path(album_dir))
@@ -1038,8 +1153,8 @@ def save_importing(album_dir, info):
     except OSError:
         return False
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(dict(info, version=1), fh, indent=1)
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(canonical_json_text(dict(info, version=1)))
             fh.flush()
             os.fsync(fh.fileno())
         _replace_atomic(tmp, _importing_path(album_dir))

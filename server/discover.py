@@ -248,6 +248,18 @@ SOURCES = (
             "captured says so. Tracks only; no month or week chart exists.",
             ("tracks",), rec_kinds=("tracks",), entity_kinds=("tracks",),
             charts=("tracks",), chart_periods=("all", "year")),
+    # Album of the Year, registered for what it actually publishes: the
+    # genres and the user score of a NAMED artist/album/track, read by the
+    # genre and web-rating chains (`server.aoty`, `integrations._genre_source_answers`).
+    # It has no keyless list or chart feed this app reads, and its pages sit
+    # behind Cloudflare (a cleared `aoty_cookie`, or the solver), so it is a
+    # metadata source here — never a chart — and it says what it needs.
+    _source("aoty", "Album of the Year",
+            "States an artist's and an album's genres and its user score (and "
+            "each track's own score), which the genre and rating chains read. "
+            "No keyless list or chart feed is read from it, so it is a metadata "
+            "source, never a chart.",
+            needs=("aoty_cookie",)),
 )
 BY_ID = {spec["id"]: spec for spec in SOURCES}
 SOURCE_LABELS = {spec["id"]: spec["label"] for spec in SOURCES}

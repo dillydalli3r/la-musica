@@ -696,6 +696,8 @@ export const CONFIG_GROUPS: CfgGroup[] = [
         { k: "grade_check_mood", label: "Mood tag present", type: "bool" },
         { k: "grade_check_energy", label: "Energy tag present (0-100, with MOOD)", type: "bool" },
         { k: "grade_check_genre", label: "Genre tag present", type: "bool" },
+        { k: "grade_check_web_rating", label: "Web rating present (WEBRATING, per track)", type: "bool" },
+        { k: "grade_check_sidecar_format", label: "Sidecar text files canonically formatted (.mb_expected, descriptions)", type: "bool" },
         { k: "grade_check_genre_count", label: "Genre count per track (at most mb_genre_count)", type: "bool", help: "A track may hold at most the 'Genres per track' value — only an overflow fails (issue code GENRE_COUNT). There is no lower bound and no quota; keep the two in step." },
         { k: "grade_check_genre_order", label: "Genre order (the family, if present, comes first)", type: "bool", help: "The family must be the FIRST genre, e.g. Rock / Shoegaze (issue code GENRE_ORDER). A family in a later slot, or a genre repeated, fails. The names themselves are graded by the vocabulary check below." },
         { k: "grade_check_genre_vocab", label: "Genre vocabulary (MusicBrainz)", type: "bool", help: "Every GENRE name must be one MusicBrainz publishes (shoegaze, dream pop, …); an unknown name fails with issue code GENRE_VOCAB and is named in the report. Grading never rewrites the tag — run Auto tagging (8) or Format all (10) to canonicalize." },
@@ -860,11 +862,11 @@ export const SETUP_STEPS: SetupStep[] = [
     groups: ["Dependencies"],
   },
   {
-    label: "Keys",
-    title: "Sources & API keys",
+    label: "Keys & cookies",
+    title: "Sources, keys & cookie logins",
     blurb:
       "What the app uses for lyrics, genres, ratings and artwork. The credentials below are the only thing a first run has to paste, and every one of them is optional — a source without its key is simply skipped, saved keys are re-tested as you save them, and all of it is editable later in Settings → Sources (where the provider rows, their orders and the live status of each one live too). " +
-      "The one program in this step is yt-dlp — installed from the Tools step, it is what searches, fetches and captions YouTube (scripts 11 and 18) — and it takes its cookies the same way RateYourMusic does: a cookies.txt in Netscape format, what a browser-extension exporter like \"Get cookies.txt\" writes, imported on Settings' Videos tab for yt-dlp and its Discovery tab for RYM.",
+      "The COOKIE LOGINS below are the biggest lever on what scraping gets: RateYourMusic and Album of the Year both sit behind Cloudflare and are read with a cookies.txt exported from a browser that has passed the challenge (signed in, for RYM's session cookie), so paste that file here and the genre and rating chains work from the first import. yt-dlp — installed from the Tools step — takes its own jar the same way, for age-gated, members-only and throttled videos (scripts 11 and 18). Every box takes the Netscape file a browser-extension exporter like \"Get cookies.txt\" writes, and an import only ever replaces the one credential it belongs to.",
     panel: "sources",
   },
   {

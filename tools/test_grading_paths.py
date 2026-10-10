@@ -120,7 +120,7 @@ def album_path(root, tags, release_type=None, shorter=False):
 ISO_CFG = {
     "music_folder": "",
     "grade_check_naming": True,
-    # No .mlo_expected.json in these fixtures: the expected-tracklist check is
+    # No .mb_expected in these fixtures: the expected-tracklist check is
     # its own area (see grade_check_expected_tracks) and would fail every
     # synthetic album here for a reason this file never set up.
     "grade_check_expected_tracks": False,
@@ -151,6 +151,10 @@ ISO_CFG = {
     # shipped default is 2 while every fixture here carries one genre: off
     # for these cases and switched on in its own block below.
     "grade_check_genre_count": False,
+    # WEBRATING presence is its own default-on check (script 24's tags); no
+    # fixture here carries one, so it is off for these cases and switched on
+    # in its own block below.
+    "grade_check_web_rating": False,
     "grade_check_replaygain": False,
     "grade_check_acoustid": False,
     "grade_check_album_description": False,
@@ -541,6 +545,49 @@ res = _grade_album(album, "EMBEDDED", dict(mood_cfg, grade_check_mood=False))
 ok("GENRE_MISSING" in res["tracks"][0]["issues"]
    and "MOOD_MISSING" not in res["tracks"][0]["issues"],
    "the two toggles are independent (genre on, mood off)")
+set_tags(flac, dict(NO_MOOD, MOOD="melancholic"))
+
+# ----------------------------------------------------------------------
+# Web rating presence (grade_check_web_rating) — a per-track FAIL by default
+# ----------------------------------------------------------------------
+print("== web rating presence ==")
+# The public verdict script 24 writes (WEBRATING, 0-100). Required per track
+# while the check and the feature are both on: an album the app has finished
+# carries it, like the genre beside it.
+web_cfg = dict(cfg, grade_check_mood=True, grade_check_genre=True,
+               grade_check_web_rating=True)
+del_tags(flac, ["WEBRATING"])
+res = _grade_album(album, "EMBEDDED", web_cfg)
+ok(res["tracks"][0]["issues"] == ["WEBRATING_MISSING"],
+   f"a track with no WEBRATING fails with its own code "
+   f"(got {res['tracks'][0]['issues']})")
+ok("Missing WEBRATING" in res["issues"],
+   f"the album issue names the tag (got {res['issues']})")
+ok(res["total_checks"] - res["pass_count"] == 1,
+   f"the missing WEBRATING costs exactly one grade point "
+   f"({res['pass_count']}/{res['total_checks']})")
+
+with_rating = _grade_album(album, "EMBEDDED", web_cfg)
+set_tags(flac, dict(NO_MOOD, MOOD="melancholic", WEBRATING="77"))
+res = _grade_album(album, "EMBEDDED", web_cfg)
+ok(res["pass_count"] == res["total_checks"],
+   f"a WEBRATING clears the check ({res['pass_count']}/{res['total_checks']})")
+ok(res["total_checks"] == with_rating["total_checks"],
+   "the check is still COUNTED when the tag is present")
+
+del_tags(flac, ["WEBRATING"])
+res = _grade_album(album, "EMBEDDED", dict(web_cfg, grade_check_web_rating=False))
+ok("WEBRATING_MISSING" not in res["tracks"][0]["issues"]
+   and res["pass_count"] == res["total_checks"]
+   and res["total_checks"] == with_rating["total_checks"] - 1,
+   "grade_check_web_rating=False stops grading AND counting it")
+
+res = _grade_album(album, "EMBEDDED", dict(web_cfg, web_ratings_enabled=False))
+ok("WEBRATING_MISSING" not in res["tracks"][0]["issues"]
+   and res["pass_count"] == res["total_checks"],
+   "web_ratings_enabled=False stands the check down: nothing gathered a "
+   "rating, so nothing is failed for its absence")
+
 set_tags(flac, dict(NO_MOOD, MOOD="melancholic"))
 
 # ----------------------------------------------------------------------
@@ -2271,7 +2318,7 @@ ok(stats_man_whole["grade_dist"] == {"PASS": 1, "FAIL": 0},
 
 # Key OFF: the same album (manifest deleted again) is not graded on it at all
 # — no issue, no row change, no extra check in the denominator.
-os.remove(os.path.join(mn_dir, ".mlo_expected.json"))
+os.remove(os.path.join(mn_dir, ".mb_expected"))
 stats_man_off, lines_man_off = graded(dict(MAN_CFG,
                                            grade_check_expected_tracks=False))
 ok(EXPECTED_TRACKS_MISSING not in stats_man_off["issue_counts"],
@@ -2521,6 +2568,102 @@ _rt_res2 = _grade_album(rt_album, "EMBEDDED", dict(RT_CFG))
 _rt_issues2 = {k: v for k, v in _rt_res2["issues"].items() if "RATING" in k}
 ok(not _rt_issues2,
    f"with no store row nothing RATING-related fails ({_rt_issues2})")
+
+# ----------------------------------------------------------------------
+# Sidecar FORMAT (grade_check_sidecar_format) — the app's own text files,
+# graded on their bytes: the release manifest and the album/artist
+# description.txt must be exactly what this app's writers produce.
+# ----------------------------------------------------------------------
+print("== sidecar format ==")
+from mlo import paths as _paths                                        # noqa: E402
+from mlo import artistdata as _ad                                       # noqa: E402
+
+_fmt_album = os.path.join(music, "Artists", "Fmt Artist", "Album (2021)")
+os.makedirs(_fmt_album, exist_ok=True)
+_fmt_flac = os.path.join(_fmt_album, "1-01 One.flac")
+make_flac(_fmt_flac)
+set_tags(_fmt_flac, dict(BASE_TAGS, TITLE="One", ALBUM="Album",
+                         MUSICBRAINZ_ALBUMID=_MBID,
+                         INITIALKEY="A min", BPM="120"))
+fmt_cfg = dict(cfg, grade_check_web_rating=False, grade_check_sidecar_format=True,
+               grade_check_mood=True, grade_check_genre=True,
+               grade_check_naming=False, grade_check_album_description=True,
+               grade_check_artist_description=True)
+
+# A canonical manifest + a canonical description pass.
+_paths.save_expected_tracks(_fmt_album, _MBID,
+                            [{"disc": 1, "position": 1, "title": "One"}])
+_ad.write_description(_fmt_album, "A paragraph.\n\nAnother.\n")
+res = _grade_album(_fmt_album, "EMBEDDED", fmt_cfg)
+ok(not [k for k in res["issues"] if "sidecar" in k.lower()],
+   f"a canonical manifest and description pass ({res['issues']})")
+_manifest_path = os.path.join(_fmt_album, _paths.EXPECTED_TRACKS_FILE)
+
+# A manifest written the OLD way (CRLF, no final newline) fails the check —
+# and the issue names the ending, not "something looks off".
+_canon = open(_manifest_path, "r", encoding="utf-8", newline="").read()
+with open(_manifest_path, "w", encoding="utf-8", newline="") as _fh:
+    _fh.write(_canon.replace("\n", "\r\n").rstrip("\r\n"))
+ok(_paths.expected_tracks_format_issue(_fmt_album) != "",
+   "a CRLF manifest is reported as not canonical")
+res = _grade_album(_fmt_album, "EMBEDDED", fmt_cfg)
+_hits = [k for k in res["issues"] if _paths.EXPECTED_TRACKS_FILE in k]
+ok(_hits and "CRLF" in _hits[0],
+   f"the grade fails it and names the CRLF ending ({_hits})")
+
+# The fix a script runs: normalizing rewrites it canonically, and the check
+# passes again without a MusicBrainz round trip.
+ok(_paths.normalize_expected_tracks(_fmt_album),
+   "normalize_expected_tracks repairs the file")
+ok(_paths.expected_tracks_format_issue(_fmt_album) == "",
+   "and the file is canonical afterwards")
+ok(open(_manifest_path, "rb").read().endswith(b"}\n")
+   and b"\r" not in open(_manifest_path, "rb").read(),
+   "the repaired manifest is LF-only and ends with one newline")
+res = _grade_album(_fmt_album, "EMBEDDED", fmt_cfg)
+ok(not [k for k in res["issues"] if _paths.EXPECTED_TRACKS_FILE in k],
+   f"the grade passes it again ({res['issues']})")
+
+# A description that arrived from outside (trailing spaces) fails the same
+# check, and the normalizer repairs it.
+_desc = _ad.description_path(_fmt_album)
+with open(_desc, "w", encoding="utf-8", newline="") as _fh:
+    _fh.write("Line one.   \nLine two.\n\n\n")
+ok(_ad.description_format_issue(_fmt_album) != "",
+   "a description with trailing spaces / blank-line run is reported")
+res = _grade_album(_fmt_album, "EMBEDDED", fmt_cfg)
+ok(any("description" in k for k in res["issues"]),
+   f"the grade fails it ({res['issues']})")
+ok(_ad.normalize_description_file(_fmt_album),
+   "normalize_description_file repairs it")
+ok(_ad.description_format_issue(_fmt_album) == "",
+   "and the description is canonical afterwards")
+ok(open(_desc, "rb").read() == b"Line one.\nLine two.\n",
+   f"the repaired text is trimmed ({open(_desc, 'rb').read()!r})")
+
+# The toggle is real: off, neither the manifest nor the description is graded.
+with open(_manifest_path, "a", encoding="utf-8", newline="") as _fh:
+    _fh.write("\r\n")
+res = _grade_album(_fmt_album, "EMBEDDED",
+                   dict(fmt_cfg, grade_check_sidecar_format=False))
+ok(not [k for k in res["issues"] if _paths.EXPECTED_TRACKS_FILE in k
+        or "description" in k],
+   f"grade_check_sidecar_format=False stops grading them ({res['issues']})")
+_paths.normalize_expected_tracks(_fmt_album)
+
+# The rename: a library imported by an older build holds `.mlo_expected.json`,
+# and the first reader renames it rather than losing the release's tracklist.
+_old_album = os.path.join(music, "Artists", "Old Artist", "Album (2019)")
+os.makedirs(_old_album, exist_ok=True)
+with open(os.path.join(_old_album, _paths.LEGACY_EXPECTED_TRACKS_FILE), "w",
+          encoding="utf-8") as _fh:
+    _fh.write(_canon)
+_loaded = _paths.load_expected_tracks(_old_album)
+ok(len(_loaded["tracks"]) == 1,
+   f"the pre-rename manifest is read as this album's tracklist ({_loaded})")
+ok(os.path.isfile(os.path.join(_old_album, _paths.EXPECTED_TRACKS_FILE))
+   and not os.path.isfile(os.path.join(_old_album, _paths.LEGACY_EXPECTED_TRACKS_FILE)),
+   "and the file was renamed to .mb_expected")
 
 print(f"\nAll {passed} checks passed.")
 shutil.rmtree(tmp, ignore_errors=True)

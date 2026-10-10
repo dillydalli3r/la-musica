@@ -236,6 +236,10 @@ PER_TRACK_TAGS = [
     "GENRE",
     "MOOD",
     "ENERGY",
+    # The public verdict, written next to the listener's own RATING by script 24
+    # (see TAG_PRESENCE_CHECKS): a per-track fact this app is expected to have,
+    # so a track that carries none fails while the feature is on.
+    "WEBRATING",
     "ITUNESADVISORY",
     "REPLAYGAIN_TRACK_GAIN",
     "REPLAYGAIN_TRACK_PEAK",
@@ -247,13 +251,22 @@ PER_TRACK_TAGS = [
 
 # Tags whose PRESENCE is graded by a toggle of its own instead of the
 # generic grade_check_missing_tags sweep, so one feature can be required
-# without the whole sweep: mood/genre/energy are auto-filled by script 8
-# (and the grader is what says a track may not ship without them),
-# ReplayGain is the opt-in loudness family (see REPLAYGAIN_TAGS).
-# Value: (config key, per-track issue code). Every entry defaults ON.
+# without the whole sweep: mood/genre/energy are auto-filled by script 8,
+# WEBRATING by script 24 (the public verdict), and the grader is what says a
+# track may not ship without them; ReplayGain is the opt-in loudness family
+# (see REPLAYGAIN_TAGS). Value: (config key, per-track issue code). Every
+# entry defaults ON.
 TAG_PRESENCE_CHECKS = {
     "GENRE": ("grade_check_genre", "GENRE_MISSING"),
     "MOOD": ("grade_check_mood", "MOOD_MISSING"),
+    # WEBRATING — the aggregated public score (0-100) script 24 writes per
+    # track. Required per track, like the genre above, because the app's own
+    # answer to "is this album complete?" includes the public verdict; the
+    # check is additionally gated by `web_ratings_enabled` through
+    # `should_write_audio_tag` (WEBRATING answers to that switch), so an
+    # install with the feature off is never failed for a tag it does not
+    # gather, and neither is a video container (VIDEO_SKIP_TAGS).
+    "WEBRATING": ("grade_check_web_rating", "WEBRATING_MISSING"),
     # ENERGY (0-100, written next to MOOD by script 8). Readable/writable on
     # every graded container including video, which the mood writer covers.
     "ENERGY": ("grade_check_energy", "ENERGY_MISSING"),
@@ -285,6 +298,11 @@ VIDEO_SKIP_TAGS = {
     "REPLAYGAIN_TRACK_GAIN", "REPLAYGAIN_TRACK_PEAK",
     "REPLAYGAIN_ALBUM_GAIN", "REPLAYGAIN_ALBUM_PEAK",
     "DYNAMIC RANGE",
+    # WEBRATING: script 24's carrier tags are the AUDIO shapes in
+    # `mlo.audio.TAG_MAP` (FLAC/MP3/MP4), so a music-video container is never
+    # written one — grading it would fail every video for a tag nothing puts
+    # there (the same reason the loudness family is above).
+    "WEBRATING",
 }
 
 
@@ -4551,6 +4569,31 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
             add_issue("Album description missing — fetch one on the album page",
                       "album")
 
+    # SIDECAR FORMAT (grade_check_sidecar_format): the app's own text sidecars
+    # are graded on their BYTES. The release manifest and the two description
+    # files are files this app writes, so a file that differs from the form its
+    # writer produces is a file it did not write — a CRLF copy, a hand-edited
+    # note with trailing spaces, a manifest an older build wrote through a
+    # text-mode handle (which turned every newline into CRLF and left no final
+    # newline: exactly what the owner reported). One check covers the album's
+    # pair; `grade_artist` grades the artist's description the same way.
+    if cfg.get("grade_check_sidecar_format", True):
+        from .paths import (expected_tracks_format_issue as _exp_fmt,
+                            EXPECTED_TRACKS_FILE as _exp_name)
+        from .artistdata import description_format_issue as _desc_fmt
+        total_checks += 1
+        bad = []
+        why = _exp_fmt(album_dir)
+        if why:
+            bad.append(f"{_exp_name}: {why}")
+        why = _desc_fmt(album_dir)
+        if why:
+            bad.append(f"description.txt (album): {why}")
+        if bad:
+            failed_checks += 1
+            add_issue("Album text sidecar not canonically formatted — "
+                      + "; ".join(bad), "album")
+
     # File extensions must be lowercase ("01 - Song.FLAC" fails). organize
     # lowercases every extension it touches.
     if cfg.get("grade_check_ext_case", True):
@@ -4610,7 +4653,7 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                       f"(script 3 converts them to {_src_target})", "album")
 
     # Every album must carry the MusicBrainz release's own tracklist manifest
-    # (.mlo_expected.json, written at import and by script 15) AND hold every
+    # (.mb_expected, written at import and by script 15) AND hold every
     # row of it. The files on disk only describe themselves, so without the
     # manifest a PARTIAL import (3 tracks of 12) is indistinguishable from a
     # complete album and grades PASS. An album that carries one is diffed
@@ -4994,6 +5037,21 @@ def grade_artist(artist_dir, cfg=None) -> dict:
             out["failed_checks"] += 1
             out["issues"].extend(found)
 
+    # The artist's own description is graded on its BYTES too: a file whose
+    # text is not what `write_description` would store (CRLF, trailing spaces,
+    # no final newline) is one this app did not write — see the album-level
+    # half of `grade_check_sidecar_format`.
+    if cfg.get("grade_check_sidecar_format", True):
+        from .artistdata import description_format_issue as _desc_fmt
+        out["checks"] += 1
+        why = _desc_fmt(folder)
+        if why:
+            out["failed_checks"] += 1
+            out["issues"].append({
+                "code": "DESCRIPTION_FORMAT", "label": "Description formatting",
+                "where": where, "reason": f"description.txt (artist): {why}",
+            })
+
     out["pass_count"] = out["checks"] - out["failed_checks"]
     # Nothing graded is nothing failed, exactly like an album with every check
     # switched off (format_grade_report reads it as 100%): a 0 here contradicted
@@ -5151,7 +5209,7 @@ EMPTY_FOLDER = "EMPTY_FOLDER"
 # label the UI shows is "Unreadable folder".
 UNREADABLE_FOLDER = "UNREADABLE_FOLDER"
 
-# Issue code for an album folder with no .mlo_expected.json: the release's own
+# Issue code for an album folder with no .mb_expected: the release's own
 # tracklist is missing, so nothing can say whether the album is complete.
 # Album-wide like the other album checks (see grade_check_expected_tracks).
 EXPECTED_TRACKS_MISSING = "EXPECTED_TRACKS_MISSING"

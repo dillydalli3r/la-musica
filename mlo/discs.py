@@ -446,7 +446,7 @@ def parse_log_skip_zero_checksums(text):
 # .accurip). Those know what the file alone cannot: which album the track is
 # part of, which position it occupies, and whether its samples are the ones
 # that were ripped. The readers below turn them into the running order the
-# import records as .mlo_expected.json — the same rows the wizard writes from
+# import records as .mb_expected — the same rows the wizard writes from
 # a MusicBrainz release, so a partial album reads as partial either way.
 # --------------------------------------------------------------------------- #
 

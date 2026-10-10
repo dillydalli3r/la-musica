@@ -145,6 +145,9 @@ export interface Track {
    *  `server.library._enrich_track`. */
   disambiguation?: string | null;
   cover_file?: string | null;
+  /** The version token (mtime + size) of the file `cover_file` names — what
+   *  `api.coverUrl` must carry so a cover replaced on disk is a new URL. */
+  cover_token?: string | null;
   sidecar_cover?: boolean;
   sidecar_cover_file?: string | null;
   /** Music-video container (MKV/MP4/VOB/…) — plays with <video>. */
@@ -235,6 +238,9 @@ export interface Album {
   track_count: number;
   audit_summary: "REAL" | "FAKE" | "Mix" | null;
   cover_file: string | null;
+  /** The version token (mtime + size) of the album's cover file, read by the
+   *  server's own stat — the same `&v=` the track rows carry. */
+  cover_token?: string | null;
   has_log: boolean;
   has_cue: boolean;
   checksum_status: string;

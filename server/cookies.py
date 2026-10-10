@@ -659,13 +659,16 @@ def expiry_date(cookie: Cookie) -> str:
 
 
 def cookie_row(domain: str, path: str, name: str, expiry: str = "",
-               comment: str = "") -> dict:
+               comment: str = "", imported_at: str = "") -> dict:
     """One cookie as the per-cookie view states it (GET /api/cookies/{source}).
 
     The columns the UI shows and edits: where the cookie goes, what it is
     called, when its own expiry column says it dies (``expires_at``/``expired``
     are computed here, so the browser is not asked to do date arithmetic on a
-    timestamp the server already knows), and the comment the user attached.
+    timestamp the server already knows), the comment the user attached, and
+    when the file it came from was imported (``imported_at``, epoch seconds —
+    the UI groups the rows of ONE import under one dated section, so a fresh
+    cookies.txt reads as one event rather than a wall of new rows).
 
     There is NO VALUE: a session cookie is a live credential, and this payload
     is read by a browser.
@@ -678,6 +681,7 @@ def cookie_row(domain: str, path: str, name: str, expiry: str = "",
         "expires_at": expiry_date_of(expiry),
         "expired": is_expired_at(expiry),
         "comment": comment or "",
+        "imported_at": str(imported_at or ""),
     }
 
 
@@ -705,12 +709,15 @@ def expired_warning(cookies: Sequence[Cookie], provider: str,
 #
 #     {"youtube": {"youtube.com\t/\tSID": {"comment": "my main account"}},
 #      "rym":     {"rateyourmusic.com\t/\tsession": {"comment": "…",
-#                                                   "expiry": "1893456000"}}}
+#                                                   "expiry": "1893456000",
+#                                                   "imported_at": "1760000000"}}}
 #
 # `comment` is what the user typed, `expiry` is what the import's file stated
 # for that cookie (the RYM credential is a bare `Cookie` header, which has
-# nowhere to carry an expiry — the jar file keeps its own). Both are optional;
-# an entry with neither is dropped.
+# nowhere to carry an expiry — the jar file keeps its own), and `imported_at`
+# is when the file it arrived in was imported (epoch seconds, refreshed on
+# every import — the UI groups one import's rows under one dated section). All
+# are optional; an entry with none is dropped.
 # --------------------------------------------------------------------------- #
 def _load_notes(raw: str) -> Dict[str, Dict[str, dict]]:
     """The store as a dict; anything unreadable is simply empty."""
@@ -735,6 +742,9 @@ def _load_notes(raw: str) -> Dict[str, Dict[str, dict]]:
             expiry = str(value.get("expiry") or "").strip()
             if expiry:
                 note["expiry"] = expiry
+            imported_at = str(value.get("imported_at") or "").strip()
+            if imported_at:
+                note["imported_at"] = imported_at
             if note:
                 notes[str(key)] = note
         if notes:
@@ -754,14 +764,15 @@ def comments_of(raw: str, source: str) -> Dict[str, str]:
 
 
 def set_note(raw: str, source: str, key: str, comment: Optional[str] = None,
-             expiry: Optional[str] = None) -> str:
+             expiry: Optional[str] = None,
+             imported_at: Optional[str] = None) -> str:
     """The updated store text with one cookie's note changed.
 
-    ``comment``/``expiry`` are set when given (an empty string CLEARS that
-    half), and left alone when None — which is what makes the two edits
-    independent: importing a jar refreshes the expiries the file stated
-    WITHOUT touching the comments the user wrote, and editing a comment never
-    forgets where the cookie came from.
+    ``comment``/``expiry``/``imported_at`` are set when given (an empty string
+    CLEARS that half), and left alone when None — which is what makes the
+    edits independent: importing a jar refreshes the expiries and the import
+    time the file stated WITHOUT touching the comments the user wrote, and
+    editing a comment never forgets where the cookie came from.
     """
     data = _load_notes(raw)
     section = data.setdefault(str(source), {})
@@ -778,6 +789,12 @@ def set_note(raw: str, source: str, key: str, comment: Optional[str] = None,
             note["expiry"] = stated
         else:
             note.pop("expiry", None)
+    if imported_at is not None:
+        stamp = str(imported_at).strip()
+        if stamp:
+            note["imported_at"] = stamp
+        else:
+            note.pop("imported_at", None)
     if note:
         section[key] = note
     else:

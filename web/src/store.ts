@@ -14,6 +14,12 @@ export interface QueueTrack {
   coverFile?: string | null;
   /** Album cover filename fallback when the track has no own cover. */
   albumCover?: string | null;
+  /** Version tokens for those two files (`cover_token`, mtime + size): the
+   *  player's artwork URL carries the one that matches the file it draws, so a
+   *  cover replaced on disk — by an import or a script, with no write response
+   *  to learn a token from — is a new URL rather than the previous image. */
+  coverToken?: string | null;
+  albumToken?: string | null;
   /** ITUNESADVISORY as the row that queued the track knew it ("1" explicit,
    *  "2" clean edition). Carried in the entry so the E/C mark paints on the
    *  same frame as the title: the title, the mark and the art are committed as

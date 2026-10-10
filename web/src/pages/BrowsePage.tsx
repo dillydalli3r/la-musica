@@ -129,8 +129,12 @@ interface TrackMeta {
   album: string;
   albumPath: string;
   albumCover: string | null;
+  /** The cover files' version tokens, so a row's thumbnail URL changes when
+   *  the file does (`api.coverUrl`'s `v`). */
+  albumToken: string | null;
   title: string;
   coverFile: string | null;
+  coverToken: string | null;
   advisory: string | null;
   dur: number;
 }
@@ -149,8 +153,10 @@ function trackMetaOf(lib: Library | undefined): Map<string, TrackMeta> {
           album: al.meta?.ALBUM || al.path.split("/").pop() || "",
           albumPath: al.path,
           albumCover: al.cover_file,
+          albumToken: al.cover_token ?? null,
           title: t.tags.TITLE ?? t.file,
           coverFile: t.cover_file ?? null,
+          coverToken: t.cover_token ?? null,
           advisory: t.tags.ITUNESADVISORY ?? null,
           dur: t.tech?.length ?? 0,
         });
@@ -171,6 +177,8 @@ function queueEntry(meta: TrackMeta | undefined, path: string): QueueTrack {
     title: meta?.title,
     coverFile: meta?.coverFile ?? null,
     albumCover: meta?.albumCover ?? null,
+    coverToken: meta?.coverToken ?? null,
+    albumToken: meta?.albumToken ?? null,
     advisory: meta?.advisory ?? null,
   };
 }
@@ -416,7 +424,9 @@ export default function BrowsePage() {
           <TrackCover
             albumPath={m?.albumPath ?? tr.path.split("/").slice(0, -1).join("/")}
             trackCover={tr.cover_file}
+            trackToken={tr.cover_token}
             albumCover={m?.albumCover}
+            albumToken={m?.albumToken}
             wrapperClass="h-9 w-9 rounded bg-raise overflow-hidden shrink-0"
           />
         </td>

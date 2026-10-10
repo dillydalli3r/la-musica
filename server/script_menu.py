@@ -100,7 +100,7 @@ SCOPES: Dict[int, str] = {
                   # file and its sidecar.
     14: "folder", # server/beetscfg.py: only FOLDER targets are accepted
                   # (os.path.isdir) — beets imports album by album.
-    15: "folder", # server/script_runners.py: one .mlo_expected.json per ALBUM
+    15: "folder", # server/script_runners.py: one .mb_expected per ALBUM
                   # folder, from the release the album's identity tags name.
     16: "file",   # mlo/moods.py: per-file MOOD/ENERGY from that track's audio.
     17: "file",   # mlo/lyrics_xlit.py: per-file transforms — the

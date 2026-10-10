@@ -274,41 +274,73 @@ export default function CookieJarPanel({
   // reading the server's code: the hosts this credential is actually sent to,
   // and nothing else from a browser profile's export.
   const cookies = list?.cookies ?? [];
+  // ONE SECTION PER IMPORT. Every row the same cookies.txt produced carries
+  // the same `imported_at`, so an import reads as the event it was — the
+  // header "Imported 09/10/2026, 23:35 · 27 cookies" — instead of 27 loose
+  // rows that say nothing about when they arrived. The section is closed
+  // until asked, so a fresh import is one line, not a wall; the per-cookie
+  // notes are still there inside it. Newest import first; a credential that
+  // predates the stamp (so no row carries one) keeps its older grouping.
+  const groups: { at: string; rows: CookieEntry[] }[] = [];
+  for (const c of cookies) {
+    const at = c.imported_at || "";
+    const last = groups[groups.length - 1];
+    if (last && last.at === at) last.rows.push(c);
+    else groups.push({ at, rows: [c] });
+  }
+  groups.sort((a, b) => (a.at === b.at ? 0 : a.at < b.at ? 1 : -1));
   const kept = cookies.length > 0 && (
-    <div className="space-y-1">
+    <div className="space-y-1.5">
       <div className="text-[10px] text-zinc-600">
         {t("cookies.keptHosts", { hosts: (list?.hosts ?? []).join(", ") })}
       </div>
-      {cookies.map((c) => {
-        const key = identity(c);
-        const draft = drafts[key] ?? c.comment;
-        return (
-          <div key={key} className="flex items-center gap-2 flex-wrap">
-            <span className="chip border-border bg-zinc-900 text-zinc-400">
-              {c.domain}
-              {c.path !== "/" ? c.path : ""}
-            </span>
-            <span className="text-[10px] font-mono text-zinc-300">{c.name}</span>
-            <span className={`text-[10px] ${c.expired ? "text-amber-400/90" : "text-zinc-600"}`}>
-              {c.expires_at || t("cookies.session")}
-              {c.expired ? ` · ${t("cookies.expired")}` : ""}
-            </span>
-            <input
-              className="input !py-0.5 text-[10px] flex-1 min-w-[140px] tap"
-              value={draft}
-              placeholder={t("cookies.commentPlaceholder")}
-              aria-label={t("cookies.commentFor", { name: c.name })}
-              spellCheck={false}
-              disabled={busy || saving === key}
-              onChange={(e) => setDrafts((d) => ({ ...d, [key]: e.target.value }))}
-              onBlur={(e) => void saveComment(c, e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-              }}
-            />
+      {groups.map((g) => (
+        <details
+          key={g.at || "undated"}
+          className="rounded border border-border/60 bg-zinc-950/30 px-2 py-1"
+        >
+          <summary className="text-[10px] uppercase tracking-wider text-zinc-500 cursor-pointer select-none">
+            {g.at
+              ? t("cookies.importedAt", {
+                  when: new Date(g.at).toLocaleString(),
+                  count: g.rows.length,
+                })
+              : t("cookies.keptCount", { count: g.rows.length })}
+          </summary>
+          <div className="space-y-1 mt-1.5">
+            {g.rows.map((c) => {
+              const key = identity(c);
+              const draft = drafts[key] ?? c.comment;
+              return (
+                <div key={key} className="flex items-center gap-2 flex-wrap">
+                  <span className="chip border-border bg-zinc-900 text-zinc-400">
+                    {c.domain}
+                    {c.path !== "/" ? c.path : ""}
+                  </span>
+                  <span className="text-[10px] font-mono text-zinc-300">{c.name}</span>
+                  <span className={`text-[10px] ${c.expired ? "text-amber-400/90" : "text-zinc-600"}`}>
+                    {c.expires_at || t("cookies.session")}
+                    {c.expired ? ` · ${t("cookies.expired")}` : ""}
+                  </span>
+                  <input
+                    className="input !py-0.5 text-[10px] flex-1 min-w-[140px] tap"
+                    value={draft}
+                    placeholder={t("cookies.commentPlaceholder")}
+                    aria-label={t("cookies.commentFor", { name: c.name })}
+                    spellCheck={false}
+                    disabled={busy || saving === key}
+                    onChange={(e) => setDrafts((d) => ({ ...d, [key]: e.target.value }))}
+                    onBlur={(e) => void saveComment(c, e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+                    }}
+                  />
+                </div>
+              );
+            })}
           </div>
-        );
-      })}
+        </details>
+      ))}
     </div>
   );
 

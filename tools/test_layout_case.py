@@ -352,7 +352,10 @@ g = grade_artist(SOLO, {})
 ok([i["code"] for i in g["issues"]] == ["ARTIST_EMPTY"] and g["pass"] is False,
    f"grade_artist fails it with ARTIST_EMPTY ({g['issues']})")
 g2 = grade_artist(os.path.join(MF, "Artists", "Good"), {})
-ok("ARTIST_EMPTY" not in [i["code"] for i in g2["issues"]] and g2["checks"] == 2,
+# Three checks now: the image, the description, and the sidecar-format check
+# (`grade_check_sidecar_format`, which grades the artist's description.txt on
+# its BYTES — see mlo.grader).
+ok("ARTIST_EMPTY" not in [i["code"] for i in g2["issues"]] and g2["checks"] == 3,
    f"and an artist that holds an album is graded on its own artefacts, not "
    f"failed for the folder ({g2['checks']} checks, {[i['code'] for i in g2['issues']]})")
 
@@ -700,7 +703,7 @@ CARRY_SRC = os.path.join(MF, "Artists", "CarrySrc")
 CARRY_DST = os.path.join(MF, "Artists", "CarryDst")
 for rel, blob in (("cover.jpg", b"the album's cover"),
                   ("description.txt", b"the album's description"),
-                  (".mlo_expected.json", b"{}"),
+                  (".mb_expected", b"{}"),
                   ("Scans/notes.txt", b"inner"),
                   ("Disc 1/1-01 Song.flac", b"fLaC" + b"\0" * 32)):
     p = os.path.join(CARRY_SRC, rel)
@@ -712,11 +715,11 @@ with open(os.path.join(CARRY_DST, "cover.jpg"), "wb") as f:
     f.write(b"a DIFFERENT cover already in the album folder")
 
 moved, left = layoutmod.carry_album_files(CARRY_SRC, CARRY_DST, music_folder=MF)
-ok(sorted(moved) == [".mlo_expected.json", "Scans", "description.txt"],
+ok(sorted(moved) == [".mb_expected", "Scans", "description.txt"],
    f"an emptied album folder's own files travel to it ({sorted(moved)})")
 ok(left == ["cover.jpg"] and os.path.isfile(os.path.join(CARRY_SRC, "cover.jpg")),
    f"a name the album folder already holds is left where it is, never overwritten ({left})")
-ok(os.path.isfile(os.path.join(CARRY_DST, ".mlo_expected.json"))
+ok(os.path.isfile(os.path.join(CARRY_DST, ".mb_expected"))
    and os.path.isfile(os.path.join(CARRY_DST, "Scans", "notes.txt")),
    "…and a subfolder the mover did not touch is carried whole")
 ok(os.path.isdir(os.path.join(CARRY_SRC, "Disc 1")),

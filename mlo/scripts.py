@@ -29,7 +29,7 @@ SCRIPTS = (
     (12, "Key & BPM", "musical key + tempo tags"),
     (13, "Fetch lyrics", "LRCLIB synced/plain"),
     (14, "Beets tagging", "MusicBrainz via beets"),
-    (15, "Release tracklist", ".mlo_expected.json manifests"),
+    (15, "Release tracklist", ".mb_expected manifests"),
     (16, "Mood & Energy", "MOOD/ENERGY from the track's audio"),
     (17, "Lyrics transliterate (AI)", "TRANSLITERATION/TRANSLATION tags + sidecars"),
     (19, "Optimize artist images", "crop/resize artist artwork to the configured aspect and size"),

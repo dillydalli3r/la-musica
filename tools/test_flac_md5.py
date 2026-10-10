@@ -874,6 +874,10 @@ def grade_cfg(lib, **over):
         "grade_check_mood": False,
         "grade_check_energy": False,
         "grade_check_genre": False,
+        # WEBRATING is its own default-on presence check (script 24's tag);
+        # no fixture here carries one, and this suite grades for the FLAC
+        # stream MD5 — off, like the other checks it does not set up.
+        "grade_check_web_rating": False,
         "grade_check_genre_count": False,
         "grade_check_genre_order": False,
         "grade_check_replaygain": False,

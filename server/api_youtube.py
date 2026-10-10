@@ -199,13 +199,19 @@ def cookie_list(cfg=None) -> List[dict]:
     leaves alone (see ``set_cookie_comment``).
     """
     cfg = cfg if cfg is not None else load_config()
-    cookies, _error = parse_cookies(_jar_text(youtube.cookies_path()))
+    path = youtube.cookies_path()
+    cookies, _error = parse_cookies(_jar_text(path))
     notes = notes_for(_note_text(cfg), SOURCE)
+    # The jar carries no per-cookie import time of its own (the notes store
+    # does for the two header credentials), so the jar's own write time is the
+    # import time: one value for every row, which is what the panel groups on.
+    saved_at = _saved_at(path) or ""
     return [cookie_row(
         cookie.domain, cookie.path, cookie.name, cookie.expiry,
         str(notes.get(
             cookie_key(cookie.domain, cookie.path, cookie.name),
-            {}).get("comment") or ""))
+            {}).get("comment") or ""),
+        saved_at)
         for cookie in cookies]
 
 

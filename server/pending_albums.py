@@ -2,7 +2,7 @@
 
 "Add to library" on a MusicBrainz entity calls :func:`create`, which writes the
 album ON DISK at the path the naming script will put it at, fills it with the
-release's own tracklist (``.mlo_expected.json``, written by mlo.paths' own
+release's own tracklist (``.mb_expected``, written by mlo.paths' own
 writer) and the release-group cover, and drops a ``.mlo_pending.json`` marker.
 The album is therefore in the library the second it is asked for — the library
 scan lists it as PENDING with its track list, and its tracks are not playable

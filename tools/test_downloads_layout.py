@@ -2,7 +2,7 @@
 """Verify the .mlo/downloads manager and the library-layout scanner.
 
 Covers GET /api/downloads + POST /api/downloads/{delete,import} and
-GET /api/library/layout, plus the .mlo_expected.json sidecar that makes a
+GET /api/library/layout, plus the .mb_expected sidecar that makes a
 PARTIAL import visible on the album page.
 
 Two throwaway music folders are used, one per concern, so the downloads tests

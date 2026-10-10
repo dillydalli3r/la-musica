@@ -1305,7 +1305,7 @@ def _fill_release_tags(info, config, album_dir):
     number, country, type, both DATES, medium + the release's own ids) are
     written to EVERY file of the album; the per-track ones (recording id, and
     the credited artist id) come from a POSITION match — the album's own
-    `.mlo_expected.json` manifest first (it records the release the wizard
+    `.mb_expected` manifest first (it records the release the wizard
     matched), then the release payload's tracklist. A track with no
     counterpart is left alone and counted.
 

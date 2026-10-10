@@ -39,6 +39,7 @@ a live credential, so the settings panel is told names, counts and sentences.
 
 Mounted by server/main.py (``include_router``); this module never imports it.
 """
+from datetime import datetime, timezone
 from typing import List, Tuple
 
 from fastapi import APIRouter, HTTPException
@@ -216,10 +217,10 @@ def cookie_list(cfg=None) -> List[dict]:
     """The stored cookies, one row per pair — the per-cookie view.
 
     The identity is the one this credential HAS: the host the header is sent to,
-    the path a `Cookie` header implies (`/`), and the name. The expiry and the
-    comment come from the shared notes store — the file stated the expiry at
-    import time (`rym_cookies_post`), and the comment is the user's own. No
-    VALUE is ever here.
+    the path a `Cookie` header implies (`/`), and the name. The expiry, the
+    comment and the import time come from the shared notes store — the file
+    stated the expiry and `rym_cookies_post` stamped `imported_at` when it
+    arrived, and the comment is the user's own. No VALUE is ever here.
     """
     cfg = cfg if cfg is not None else load_config()
     notes = notes_for(_note_text(cfg), SOURCE)
@@ -228,7 +229,8 @@ def cookie_list(cfg=None) -> List[dict]:
         note = notes.get(cookie_key(RYM_HOST, "/", name), {})
         out.append(cookie_row(RYM_HOST, "/", name,
                               str(note.get("expiry") or ""),
-                              str(note.get("comment") or "")))
+                              str(note.get("comment") or ""),
+                              str(note.get("imported_at") or "")))
     return out
 
 
@@ -345,13 +347,18 @@ def rym_cookies_post(req: CookieUpload):
     cfg = load_config()
     notes = _note_text(cfg)
     kept = []
+    # One stamp for the whole import, so the panel shows the file as ONE dated
+    # event ("Imported …") rather than a wall of rows with no date at all. The
+    # yt-dlp jar's own `saved_at` is the same shape (ISO 8601 UTC), so the one
+    # panel formats a date the one way whichever credential it is showing.
+    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
     for record in records:
         if not (_is_rym_host(record.domain) and record.name):
             continue
         kept.append(record)
         notes = set_note(notes, SOURCE,
                          cookie_key(RYM_HOST, "/", record.name),
-                         expiry=record.expiry)
+                         expiry=record.expiry, imported_at=stamp)
     _save_notes(cfg, notes)
     state = cookie_state()
     state["stored"] = len(pairs)

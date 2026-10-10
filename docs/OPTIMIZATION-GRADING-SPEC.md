@@ -65,6 +65,43 @@ Grade script (4) over an album and reading the report.
   checks switched off an artist that DOES hold an album reports 100 % and
   `pass: true` (nothing graded is nothing failed). An absent artist folder is
   `ARTIST_FOLDER_MISSING`.
+- **R7b — artist images and the two descriptions have FOUR more providers, and
+  the keyless ones come first.** `server.discovery`'s registry (`SOURCES`,
+  `SOURCE_LABELS`, `SOURCE_NOTES`) gained `wikidata`, `bandcamp`, `lastfm` and
+  `discogs`, and both built-in orders were extended:
+  - **`IMAGE_SOURCES`** = Deezer → TheAudioDB → **Wikidata** → **Discogs** →
+    **Last.fm** → iTunes → Wikipedia → Bandcamp. Wikidata's P18 (`P18` on the
+    artist's item, reached EXACTLY through the MusicBrainz `wikidata` relation
+    when the folder states an MBID, else by Wikidata's own name search) is a
+    real photo of the artist and needs no key, served from Wikimedia Commons at
+    any width — measured live: Gorillaz by MBID and Hania Rani by name both
+    answered a Commons `Special:FilePath/…?width=1200` URL. Discogs answers
+    from the artist detail (`images[].uri`, needs `discogs_token`) and Last.fm
+    from `artist.getinfo`'s image array (the LARGEST entry, and its one
+    no-image placeholder is never stored; needs `lastfm_api_key`).
+  - **`DESCRIPTION_SOURCES`** = Wikipedia → TheAudioDB → **Last.fm** →
+    **Discogs** → **Bandcamp** → MusicBrainz. Last.fm is `artist.getinfo`'s
+    `bio` and `album.getinfo`'s `wiki` (HTML stripped, its own "Read more on
+    Last.fm" trailer dropped); Discogs is the artist detail's `profile` and the
+    release's `notes`; **Bandcamp is the album page's own
+    `div.tralbumData.tralbum-about`** (falling back to the `data-tralbum`
+    JSON's `about`), read through the SAME keyless page fetch the genre chain
+    already makes — measured live: Hania Rani's *Esja* answered 6,163
+    characters with no credential at all.
+  - **Gating is the app's own rule**: a keyed provider returns None without its
+    credential and says so in the Sources panel (`needs: ["lastfm_api_key"]` /
+    `["discogs_token"]` in `server.sources_health._specs`, whose probe row
+    reports "needs a … (Settings → Sources)" rather than a failure), and every
+    provider is listed in `/api/discovery/sources` where the picker offers it.
+  - **Album of the Year is registered in the DISCOVER registry too**
+    (`server/discover.py`), as a metadata source: it states genres and user
+    scores (read by the genre and rating chains) and publishes no keyless list
+    or chart feed this app reads, so it is never a chart and its row names the
+    `aoty_cookie` it needs.
+  Pinned by `tools/test_description_identity.py` (all four providers, their
+  chains, the keyless/keyed gating and the Last.fm placeholder rule, stubbed
+  offline) and verified live for the two keyless ones.
+
 - **R7a — the artist image is judged on its decoded pixels**, never on its name
   or suffix: Pillow reads the stored file, and every issue names the numbers it
   judged. OVERSIZED fails (`image_policy()`'s ceiling: `artist_image_target_size`,
@@ -183,7 +220,7 @@ publishes, including the ones that write nothing until they do.
 | 12 | Key & BPM | librosa key/tempo analysis (every file it analyses is counted as scanned, changed or not) | `INITIALKEY`, `BPM` | no | no |
 | 13 | Fetch lyrics | The configured synced-lyrics chain into `lyrics_format` | `LYRICS`/`UNSYNCEDLYRICS`, `.lrc` | no | **yes** |
 | 14 | Beets tagging | Managed beets import with the naming script, work/movement tags | identity/release tags, file paths | **yes** (moves/renames, overwrites identity tags) | **yes** (MusicBrainz) |
-| 15 | Release tracklist | Writes `.mlo_expected.json` from the release's own tracklist | adds a manifest file | no | **yes** (MusicBrainz) |
+| 15 | Release tracklist | Writes `.mb_expected` from the release's own tracklist | adds a manifest file | no | **yes** (MusicBrainz) |
 | 16 | Mood & Energy | The mood classifier alone | `MOOD`, `ENERGY` | no | no |
 | 17 | Lyrics transliterate (AI) | Romanization/translation tags and sidecars, re-synced at `lrc_sync_level`; the per-track work runs through the worker pool (one track's chunk requests used to be paid one after another) | `TRANSLITERATION-*`, `TRANSLATION-*`, sidecars | no | **yes** (configured AI endpoint) |
 | 19 | Optimize artist images | Re-fits `Artists/<Artist>/artist.*` to `artist_image_aspect` / `artist_image_target_size`, re-encodes as `artist.jpg`/`artist.png` | the artist image in place (only when it has to move) | re-encodes in place; never deletes | no |
@@ -424,7 +461,7 @@ group still renders (section *Other checks*).
 | Check id | Label | Default | Asserts |
 | --- | --- | --- | --- |
 | `grade_check_unreadable` | Unreadable files | ON | every audio file opens and decodes (`UNREADABLE`) |
-| `grade_check_missing_tags` | Required tags | ON | every `PER_TRACK_TAGS` entry is present and non-empty: `TITLE`, `ARTIST`, `ALBUM`, `ALBUMARTIST`, `DATE`, `TRACKNUMBER`, `DISCNUMBER` (only when the album really has several discs), `GENRE`, `MOOD`, `ENERGY`, `ITUNESADVISORY`, `DYNAMIC RANGE`, `INSTRUMENTAL` (ReplayGain is graded by its own opt-in check) |
+| `grade_check_missing_tags` | Required tags | ON | every `PER_TRACK_TAGS` entry is present and non-empty: `TITLE`, `ARTIST`, `ALBUM`, `ALBUMARTIST`, `DATE`, `TRACKNUMBER`, `DISCNUMBER` (only when the album really has several discs), `GENRE`, `MOOD`, `ENERGY`, `ITUNESADVISORY`, `DYNAMIC RANGE`, `INSTRUMENTAL` (ReplayGain and `WEBRATING` are graded by their own checks) |
 | `grade_check_album_tags` | Album-level tags | ON | `ALBUMITUNESADVISORY` and `ALBUM DYNAMIC RANGE` are present |
 | `grade_check_mood` | Mood tag present | ON | `MOOD` exists (`MOOD_MISSING`) |
 | `grade_check_energy` | Energy tag present | ON | `ENERGY` (0-100) exists (`ENERGY_MISSING`) |
@@ -432,6 +469,7 @@ group still renders (section *Other checks*).
 | `grade_check_genre_count` | Genre count per track | ON | at most `mb_genre_count` genres (default 2, max 3) — a ceiling, never a quota (`GENRE_COUNT`) |
 | `grade_check_genre_order` | Genre order (family first) | ON | the family slot, if present, is FIRST and no genre repeats (`GENRE_ORDER`) |
 | `grade_check_genre_vocab` | Genre vocabulary | ON | every name is one MusicBrainz publishes (`GENRE_VOCAB`); grading never rewrites the tag |
+| `grade_check_web_rating` | Web rating present | ON | `WEBRATING` (0-100) exists on every audio track (`WEBRATING_MISSING`) — the public verdict script 24 gathers, required per track like the genre beside it. The check **stands down** with `web_ratings_enabled` off (nothing gathers a rating, so nothing is failed for its absence) and never applies to a music-video container, which carries no `WEBRATING` tag |
 | `grade_check_replaygain` | ReplayGain tags present | ON | opt-in per file: any `REPLAYGAIN_*` tag means all four must exist |
 | `grade_check_acoustid` | AcoustID tags required | ON | every audio track carries the `ACOUSTID_ID` + `ACOUSTID_FINGERPRINT` pair — neither half stored fails naming both, a half pair fails naming the missing one (`ACOUSTID_ID` / `ACOUSTID_FINGERPRINT`). `acoustid_api_key` is NOT needed (script 21 takes the fingerprint locally with fpcalc and reads the recording id off the file); the check stands down while `acoustid_enabled` is off, since then script 21 does nothing |
 | `grade_check_alias_needed` | Locale alias for names the locale cannot read | ON | a `TITLE` / `ARTIST` / `ALBUM` written in a script the configured `locale` does not read needs its alias tag — `TITLEALIAS` / `ARTISTALIAS` / `ALBUMALIAS`, in a spelling the app writes (`mlo.audio.alias_spelling_ok`: the bare tag, or the configured locale's own suffix). The rule is `server.integrations.alias_required` (the SAME answer the writers, the import's stamp and script 8's prescan ask), built on `mlo.lyrics_xlit`'s script reading (`non_latin_ratio` ≥ `_LATIN_THRESHOLD` and `dominant_script` ≠ latin) plus the locale's own script, so a Latin name — and a name in the locale's own script — is never graded or counted |
@@ -448,7 +486,7 @@ group still renders (section *Other checks*).
 | `grade_check_disallowed` | Disallowed file types | ON | no file whose category is switched off in `grade_include_*` |
 | `grade_check_extra_images` | Stray images | ON | no image that is neither `cover.*` nor a per-track sidecar |
 | `grade_check_empty_folders` | Empty folders | ON | no audio-less folder (`EMPTY_FOLDER`) |
-| `grade_check_expected_tracks` | Whole release present | ON | an album carrying a MusicBrainz release id has a non-empty `.mlo_expected.json` (`EXPECTED_TRACKS_MISSING`), **and** every row of a manifest the album does carry is on disk (`EXPECTED_TRACKS_INCOMPLETE` — 14 of a CD's 15 tracks fails) |
+| `grade_check_expected_tracks` | Whole release present | ON | an album carrying a MusicBrainz release id has a non-empty `.mb_expected` (`EXPECTED_TRACKS_MISSING`), **and** every row of a manifest the album does carry is on disk (`EXPECTED_TRACKS_INCOMPLETE` — 14 of a CD's 15 tracks fails) |
 | `grade_check_album_description` | Album description stored | ON | `<album>/description.txt` exists and is non-blank |
 | `grade_check_raw_video` | Raw videos | ON | no un-remuxed video container (`.vob`/`.avi`/`.wmv`/`.ts`…) |
 | `grade_check_lossless_source` | Lossless sources | ON | no uncompressed lossless source (`.wav`/`.aif`/`.aiff`/`.ape`/`.wv`/`.shn`/`.tta`) is left in the library. The check **stands down** (adds no check at all) when the conversion pass would never touch one: the target is itself one of those containers (`library_codec` = `wav`/`aiff`) or nothing is converted (`library_codec`/`library_codec_optimize` = `keep`). The issue names the target: *"… (script 3 converts them to FLAC)"* |
@@ -751,6 +789,7 @@ The default writer of everything else is *Beets tagging (14) · import*.
 | `GENRE` | identity | Auto tagging (8) · genre import · Format all (10) trims | `grade_check_genre`, `_genre_count`, `_genre_order`, `_genre_vocab` |
 | `MEDIA`, `SOURCE` | release | Format lyrics (1) · media/source normalization | `grade_check_media`, `grade_check_source` |
 | `ITUNESADVISORY` | identity | Auto tagging (8) · advisory fetch | `grade_check_missing_tags` |
+| `WEBRATING`, `WEBRATING_SOURCE`, `ALBUMWEBRATING`, `ALBUMWEBRATING_SOURCE` | opinion | Web ratings (24) | `grade_check_web_rating` (the per-track `WEBRATING`; the album-level pair is carried, never graded) |
 | `ALBUMITUNESADVISORY` | release | Auto tagging (8) · advisory fetch | `grade_check_album_tags` |
 | `INSTRUMENTAL` | identity | Auto tagging (8) · instrumental fetch | `grade_check_missing_tags`, `grade_check_instrumental` |
 | `MOOD`, `ENERGY` | audio | Auto tagging (8) · Mood & Energy (16) | `grade_check_mood`, `grade_check_energy` |
@@ -1434,11 +1473,13 @@ rating.
 - **R56g — the cover score is a WEIGHTED MIX, not a positional order.** The
   policy's tiers no longer decide lexicographically: each contributes its level
   in [0, 1] times a weight (`mlo.cover_choice._TIER_WEIGHTS`, summing to 1.0 —
-  appearance 0.22, size 0.20, release 0.14, identity 0.12, quality 0.08,
-  source 0.07, kind 0.06, format 0.05, square 0.05, rank 0.01), and the score
-  is their sum. The two biggest weights are image size and **cover-likeness**,
-  so a slightly smaller but clearly better-looking cover can win; the rest
-  decide the difference between two otherwise comparable images. Cover-likeness
+  reference 0.18, appearance 0.17, size 0.17, release 0.11, identity 0.10,
+  quality 0.07, source 0.06, kind 0.05, format 0.04, square 0.04, rank 0.01),
+  and the score is their sum. The biggest weight is the REFERENCE term — the
+  candidate compared, image to image, with the album's own MusicBrainz front
+  (R56i) — and image size and **cover-likeness** come next, so a slightly
+  smaller but clearly better-looking cover can win; the rest decide the
+  difference between two otherwise comparable images. Cover-likeness
   is measured from the image's own bytes in the SHARED search layer
   (`server.integrations._attach_looks`, memoized 30 days like
   `image_dimensions`), so the dialog and the unattended import rank identically:
@@ -1446,8 +1487,10 @@ rating.
   (256 KB), decoded with Pillow, converted to grayscale, downscaled to 64×64,
   and scored on its mean neighbour difference (edge energy). A near-solid/blank
   image (detail below `COVER_LOOK_MIN_DETAIL`) is REJECTED as not cover art; any
-  other measured image carries a 0..1 `cover_likeness` on its row. Only the
-  first `COVER_PROBE_LIMIT` rows are measured, and a row nobody measured is
+  other measured image carries a 0..1 `cover_likeness` on its row, and the
+  same probe stores the row's 64-bit dHash (`phash`, R56i). The first
+  `COVER_PROBE_LIMIT` rows are measured — plus every row carrying the album's
+  own art, which is never skipped (R56i) — and a row nobody measured is
   neither rewarded nor blamed — it scores the candidate set's own MEDIAN
   measured cover-likeness. The tier the winner actually won on (the biggest
   weighted advantage over the runner-up) is the one the deciding sentence names.
@@ -1470,6 +1513,52 @@ rating.
   nor blames them (an identity read is not a store source; rule 1 carries it).
   Pinned by `tools/test_cover_choice.py`, `tools/test_covers.py` and
   `tools/test_artcache.py`.
+- **R56i — the candidates are COMPARED with the album's own MusicBrainz art,
+  and the reference is never left unmeasured.** Two facts the owner's report
+  turned on (Plastic Beach, 2026-10-10):
+  - **Measured, always.** The CAA identity reads are appended AFTER the
+    meta-search's rows, so the old `rows[:COVER_PROBE_LIMIT]` slice left the
+    release-group front unmeasured on any release with 24+ name-search rows —
+    and an unmeasured row is REJECTED while a cover minimum is set, which made
+    the album's own art unpickable and handed the album a store's re-issue
+    sleeve. `integrations._probe_targets` now names the rows both probes
+    measure: the first `COVER_PROBE_LIMIT`, PLUS every row carrying
+    `release_cover`/`front` (rule 1's candidates). Verified live: the release
+    group's own front was rejected unmeasured before, and won the pick after
+    (0.9364, above a 1418px store row at 0.8076 that matched the reference at
+    only 59%).
+  - **Compared, image to image.** The same probe stores each row's 64-bit
+    dHash (`phash`: an 8×8 grid of left-to-right grayscale comparisons, from
+    the `small` thumbnail it already downloaded for cover-likeness), and the
+    `reference` tier scores a row by how many bits it shares with the album's
+    own art (`mlo.cover_choice._reference_row` — the release group's front
+    first, then the matched release's; `_reference_level`). An unmeasured or
+    unhashed row — the bounded probe, a host that could not be asked — scores
+    the MEDIAN match of the measured rows (`_reference_default`), exactly as
+    the appearance tier treats an unmeasured look: being unmeasured is never a
+    penalty. With NO reference among the rows the term is neutral, so a search
+    that never reached MusicBrainz ranks exactly as it did before this rule.
+  Pinned by `tools/test_cover_choice.py` (the tier's weights and order, a
+  bigger mismatched picture losing to the album's own art, and the term being
+  inert when nothing is hashed) and `tools/test_covers.py` (the dHash from
+  real bytes, and `_probe_targets` keeping the identity rows measured).
+- **R56j — a cover's VERSION travels with its payload, so a server-side write
+  cannot leave a stale thumbnail.** The sized thumbnail is cacheable for
+  minutes and the offline blob is painted in preference to the network image,
+  so only a changed URL can replace a cover the browser has already seen.
+  `&v=` used to come from a write's RESPONSE alone (`rememberCoverVersion`) —
+  which the server-side writers never produce (the import's cover step, script
+  5's re-encode and rename), so `server.tagcache.cover_token(album, file)`
+  (mtime + size, the same string `api_cover._cover_token` builds from a path)
+  now rides the payload: `Album.cover_token` and every `Track.cover_token`
+  (the track's own sidecar, else the album's cover — the file that row's URL
+  will resolve to), read by `CoverImg`/`TrackCover`, the player bar and the
+  album page. `api.coverUrl` prefers the session write token, then this one.
+  The offline lookup keeps the version-exact rule ONLINE (a replaced cover is
+  never resurrected from the warmed blob) and falls back to the version-less
+  warmed master only while the browser is OFFLINE, where a cover one version
+  old beats a blank disc. Pinned by `tools/test_covers.py` (the token changes
+  with the bytes, and a track with no sidecar resolves to the album's).
 - **R163 — the autonomous fetch asks the release group and ranks by that
   reference, and it derives the group id when only the release is tagged.** What
   R56b promises is only true if the query actually carries the group:
@@ -2836,7 +2925,7 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   fetched BEFORE the chain ran, the description beside it (`run_metadata_step`)
   and the expected-tracklist manifest (script 15). Measured on the real import:
   the album landed in its canonical folder holding only the FLACs while
-  `cover.jpg`/`description.txt`/`.mlo_expected.json` stayed in the staging
+  `cover.jpg`/`description.txt`/`.mb_expected` stayed in the staging
   folder, the grade reported COVER on an album the import had just fetched
   artwork for, and the import was parked for a person (R160's one failure mode).
   One rule, one implementation: `mlo.layout.carry_album_files` moves every
@@ -3361,7 +3450,7 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   `.cue` is the tracklist when one is there (it names titles AND files), the
   `.log`'s TOC otherwise, and a log that names no file has its rows placed by
   the evidence left — the file's own track number, then its playtime against
-  the log's (`match_disc_row`). The manifest written is the `.mlo_expected.json`
+  the log's (`match_disc_row`). The manifest written is the `.mb_expected`
   the wizard writes from a MusicBrainz release, so a partial album is partial
   the way every other surface already understands — the library page's *partial*
   flag, the missing-rows list, and the grade. Three guards keep it honest: the
@@ -3407,6 +3496,38 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
     count rides `partial_reason`. This is the one thing a partial album cannot
     do: it is graded on the evidence it HAS (the bullets above) and it fails on
     what it does not have.
+
+- **R286a — the release manifest is `.mb_expected`, and the app's own text
+  files are graded on their BYTES.** Two halves of one report:
+  - **The name.** `mlo.paths.EXPECTED_TRACKS_FILE` is `.mb_expected` (was
+    `.mlo_expected.json`). A library imported by an older build still holds one,
+    and it IS the release's own tracklist — the one thing an album cannot
+    rebuild from its files — so the first reader RENAMES it rather than leaving
+    it invisible beside a name nothing looks for (`_expected_tracks_path` +
+    `LEGACY_EXPECTED_TRACKS_FILE`, whose literal is spelled in two pieces so a
+    future bulk rename cannot rewrite the string the migration matches on; a
+    folder that cannot be written still READS the old file).
+  - **The bytes.** `mlo.paths.canonical_json_text` is the ONE form an
+    app-written JSON sidecar has: UTF-8, LF endings, no trailing whitespace on
+    any line, exactly one final newline, `ensure_ascii=False`. LF is the fix for
+    the owner's report: the sidecar writers opened their temp file in TEXT mode,
+    so on Windows every newline became CRLF and the file ended at its last `}` —
+    an invisible `\r` on every line. `save_expected_tracks`, `save_track_covers`
+    and the pending/importing markers all write through it now (the description
+    writers already stored LF + one final newline through
+    `mlo.artistdata.normalize_description`).
+  - **The grade**: `grade_check_sidecar_format` (default ON) charges one check
+    per album (`.mb_expected` + the album's `description.txt`) and one per
+    artist folder (its `description.txt`), failing a file that differs from what
+    this app's writers produce, in BYTES — CRLF endings, a missing final newline,
+    trailing spaces or a run of blank lines — with the issue naming the repair.
+  - **The repair is a script, not a hand edit**: `paths.normalize_expected_tracks`
+    (Release tracklist, script 15, which now runs it even for the manifests it
+    would otherwise SKIP: the bytes are still its job) and
+    `artistdata.normalize_description_file` (artist descriptions, script 26, and
+    the album-description fetch — both run it on the stored file they would
+    otherwise leave alone). Neither costs a network round trip, and both report
+    False rather than failing on a read-only folder.
 
 - **R287 — a release-driven import writes the album's OWN identity, and the
   album entry reads it while the audio is still arriving.** The owner's report:
@@ -4925,7 +5046,7 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
 
 ### 7.43 The Import tab takes archives, folders and single files
 
-- **R259 — an archive imports like the folder it contains, and unpacking it is treated as the untrusted input it is.** A dropped or picked archive (`.zip`, `.tar`, `.tar.gz`/`.tgz`, `.tar.bz2`/`.tbz2`, `.tar.xz`/`.txz`, `.7z`, `.rar` — `mlo.archives.ARCHIVE_FORMATS`, mirrored by the wizard's `accept=`) is unpacked into a staging folder and then goes through the *existing* album detection, partial marking and sidecar rules: a rip in a zip and the same rip as a folder produce the same album folder and the same `.mlo_expected.json`, so a `.cue`/`.log`/`.accurip` inside an archive is used exactly as one on disk. Extraction refuses, **before writing anything**, a member with an absolute path, a `..` segment, a drive/UNC prefix, a symlink/hardlink, a device, a fifo or an unknown type, and the refusal names the member; a format with no available extractor (`.7z`/`.rar` without 7-Zip) is refused in those words rather than silently skipped. A nested archive is not unpacked and does not become an import file. The wizard states what it took in (albums, tracks, refusals) before the user commits.
+- **R259 — an archive imports like the folder it contains, and unpacking it is treated as the untrusted input it is.** A dropped or picked archive (`.zip`, `.tar`, `.tar.gz`/`.tgz`, `.tar.bz2`/`.tbz2`, `.tar.xz`/`.txz`, `.7z`, `.rar` — `mlo.archives.ARCHIVE_FORMATS`, mirrored by the wizard's `accept=`) is unpacked into a staging folder and then goes through the *existing* album detection, partial marking and sidecar rules: a rip in a zip and the same rip as a folder produce the same album folder and the same `.mb_expected`, so a `.cue`/`.log`/`.accurip` inside an archive is used exactly as one on disk. Extraction refuses, **before writing anything**, a member with an absolute path, a `..` segment, a drive/UNC prefix, a symlink/hardlink, a device, a fifo or an unknown type, and the refusal names the member; a format with no available extractor (`.7z`/`.rar` without 7-Zip) is refused in those words rather than silently skipped. A nested archive is not unpacked and does not become an import file. The wizard states what it took in (albums, tracks, refusals) before the user commits.
 - **R260 — a drop takes files, nested folders and archives, and a single file is a first-class pick.** The picker and the drop path accept one file, several files, a folder (walked recursively), an archive, or a mix of them in one gesture; in the desktop shell an OS drop that yields a server-side path resolves through the scan path, and a client that cannot read the server's filesystem (a phone) says so instead of doing nothing. One audio file imported on its own lands by the rule in R247 — in the album that rip is, or as its own album when it genuinely is one.
 
 ### 7.44 The library says which kind the lyrics are
@@ -6633,6 +6754,22 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   `cf_solver_url`; without one the source reports its refusal honestly and
   contributes nothing rather than filling the value from a stale capture.
   MusicBrainz, keyless, is unaffected.
+- **R358d — a missing per-track web rating FAILS the grade, by default.** The
+  public verdict is part of what a finished album carries, so `WEBRATING` joins
+  `GENRE`/`MOOD`/`ENERGY` in `mlo.grader.TAG_PRESENCE_CHECKS`:
+  `grade_check_web_rating` (default ON) fails a track that carries none
+  (issue code `WEBRATING_MISSING`, "Missing WEBRATING"), exactly as the genre
+  check fails a track with no genre. Three things keep it honest. The whole
+  check **stands down** with `web_ratings_enabled` off — nothing gathered a
+  rating, so nothing may be failed for its absence (the tag also answers that
+  switch through `should_write_audio_tag`, so it is not even counted). It
+  never applies to a music-video container: script 24 writes `WEBRATING` only
+  in the audio shapes `mlo.audio.TAG_MAP` declares, so `VIDEO_SKIP_TAGS`
+  excludes it rather than failing every video for a tag nothing put there. And
+  it is a PRESENCE check only — R358 still holds, absence is not a zero and
+  nothing is invented to satisfy it; the report names the track and the fix is
+  to run script 24 (Web ratings). The album-level `ALBUMWEBRATING` is carried,
+  never graded.
 - **R359 — the star field says which rating it is drawing.** `StarRating`
   renders the web value in its own tone only while the reader has rated
   nothing there, and reduces it to a readout beside the user's stars once

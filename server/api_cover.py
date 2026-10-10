@@ -436,6 +436,11 @@ def _cover_token(path: str):
     REPLACED cover is a different URL: a new image written over cover.jpg
     keeps the same album, the same file name and therefore the same URL, so
     neither the rendered <img> nor any HTTP cache would ever ask for it again.
+
+    The same string in its album/file shape is `server.tagcache.cover_token`,
+    which the library payload carries so a SERVER-side write (the import's
+    cover step, script 5's re-encode) changes the URL too — no write response
+    exists there to learn a token from.
     """
     try:
         st = os.stat(path)

@@ -762,26 +762,30 @@ export async function offlineArtworkUrl(url: string): Promise<string | null> {
     const key = cacheKey(absolute(url));
     // A URL carrying a cover version (`&v=`) names a SPECIFIC image, and the
     // warmed entry is whatever the download stored — possibly an earlier
-    // version of the same file. It is therefore only consulted as itself: no
-    // entry means the network URL paints, which is the fresh one. Matching it
-    // against the version-less key would resurrect the image the write just
-    // replaced.
+    // version of the same file. Online it is therefore only consulted as
+    // itself: no entry means the network URL paints, which is the fresh one,
+    // and matching it against the version-less key would resurrect the image a
+    // write just replaced. OFFLINE the warmed master is the only art there is,
+    // so it is consulted last — a cover one version old beats a blank disc.
     const versioned = key.includes("&v=");
     // Otherwise the warmed key is the plain `?album=` the download wrote (see
     // artworkUrls), while what is rendered may add `&file=` (a track's own
-    // art), `&staged=` or `&w=` (a surface drawing a thumbnail — the warm
-    // stores the MASTER, which is the right bytes to fall back to offline:
-    // the browser scales it down for the 74 px bar just as it did before
-    // thumbnails existed) — none of which the cache knows. Cut at the FIRST
-    // of them rather than `searchParams.delete`: re-serializing would rewrite
-    // `%20` as `+` and never match the warmed key for an album path with a
-    // space in it.
+    // art), `&v=` (the version just described), `&staged=` or `&w=` (a surface
+    // drawing a thumbnail — the warm stores the MASTER, which is the right
+    // bytes to fall back to offline: the browser scales it down for the 74 px
+    // bar just as it did before thumbnails existed) — none of which the cache
+    // knows. Cut at the FIRST of them rather than `searchParams.delete`:
+    // re-serializing would rewrite `%20` as `+` and never match the warmed key
+    // for an album path with a space in it.
     let cut = -1;
-    for (const part of ["&file=", "&staged=", "&w="]) {
+    for (const part of ["&file=", "&v=", "&staged=", "&w="]) {
       const at = key.indexOf(part);
       if (at > 0 && (cut < 0 || at < cut)) cut = at;
     }
-    const keys = versioned || cut < 0 ? [key] : [key, key.slice(0, cut)];
+    const offline = typeof navigator !== "undefined" && navigator.onLine === false;
+    const keys = !versioned || offline
+      ? (cut < 0 ? [key] : [key, key.slice(0, cut)])
+      : [key];
     const c = await cache();
     for (const k of keys) {
       const hit = await c.match(k);

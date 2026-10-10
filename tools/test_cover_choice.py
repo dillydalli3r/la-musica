@@ -98,14 +98,19 @@ eq(report["sources"], list(cc.DEFAULT_SOURCE_ORDER),
    "an empty cover_sources means the shipped default order")
 ok(len(report["rules"]) >= 8, "the policy reports its rules in prose", report["rules"])
 # The score is a weighted mix with one weight per tier, summing to 1.0, and the
-# two biggest terms are image size and cover-likeness — that is what lets a
-# slightly smaller but clearly better-looking cover win.
+# biggest is the REFERENCE term — the candidate compared against the album's
+# own MusicBrainz front cover, image to image (the owner's report: a pick that
+# did not match the reference the finder showed beside it). Size and
+# cover-likeness are next, so a slightly smaller but clearly better-looking
+# cover can still win.
 eq(set(cc._TIER_WEIGHTS), set(cc._TIER_NAMES),
    "every tier has exactly one weight")
 eq(round(sum(cc._TIER_WEIGHTS.values()), 6), 1.0, "the weights sum to 1.0")
+eq(max(cc._TIER_WEIGHTS, key=cc._TIER_WEIGHTS.get), "reference",
+   "the reference term is the biggest weight")
 eq(set(sorted(cc._TIER_WEIGHTS, key=cc._TIER_WEIGHTS.get,
-              reverse=True)[:2]), {"size", "appearance"},
-   "size and appearance are the two biggest weights")
+              reverse=True)[1:3]), {"size", "appearance"},
+   "size and appearance follow the reference as the next biggest weights")
 ok(cc._TIER_WEIGHTS["appearance"] > cc._TIER_WEIGHTS["release"],
    "and appearance outweighs every lower trait", cc._TIER_WEIGHTS)
 eq(report["weights"], dict(cc._TIER_WEIGHTS),
@@ -559,6 +564,55 @@ ok("minimum" in payload["policy"] and "rules" in payload["policy"],
 
 again = cc.cover_payload([huge, at_target, tiny], CFG, sources=sources, provider="cov")
 eq(again, payload, "the same candidates and config always rank identically")
+
+# ---------------------------------------------------------------------------
+# The REFERENCE tier (rule 11): the album's own MusicBrainz art, compared
+# image to image. The owner's report was a pick that did not match the
+# reference the finder showed beside it, so this term is the biggest weight.
+# ---------------------------------------------------------------------------
+print()
+print("== the reference tier ==")
+
+
+def _crow(url, *, source="applemusic", width=1200, phash=None, rc=None,
+          front=None, rank=0):
+    row = {"source": source, "big": url, "small": f"{url}-500.jpg",
+           "width": width, "height": width, "format": "jpeg", "bytes": 900000,
+           "release_cover": rc, "front": front, "rank": rank,
+           "cover_likeness": 0.9}
+    if phash is not None:
+        row["phash"] = phash
+    return row
+
+
+REF = 0xAAAA_AAAA_AAAA_AAAA
+OPPOSITE = REF ^ ((1 << 64) - 1)
+rows = [
+    # the album's own art (the release group's front) — the reference itself
+    _crow("https://x/ref.jpg", source="musicbrainz", phash=REF, rc=False,
+          front=True),
+    # a BIGGER store row of a DIFFERENT picture: it must not win on size alone
+    _crow("https://x/other-art.jpg", width=1500, phash=OPPOSITE),
+    # a smaller store row that IS the same picture
+    _crow("https://x/same-art.jpg", width=1400, phash=REF, rank=1),
+]
+ranked = cc.rank_covers(rows, CFG)
+ok(ranked[0].url in ("https://x/ref.jpg", "https://x/same-art.jpg"),
+   f"a row that matches the album's own art wins ({ranked[0].url})")
+eq(ranked[-1].url, "https://x/other-art.jpg",
+   "and the bigger row showing a DIFFERENT picture ranks last of the three")
+ok(any("perceptual hash" in r for r in ranked[-1].reasons),
+   f"the loser's reasons name the image comparison ({ranked[-1].reasons})")
+ok(any("perceptual hash" in r for r in ranked[1].reasons)
+   or any("percent" in r for r in ranked[1].reasons),
+   f"a compared row states how closely it matched ({ranked[1].reasons})")
+
+# Unmeasured rows (no hash) are neither rewarded nor blamed: with no phash
+# anywhere the term is neutral, so the policy's older ordering is untouched.
+plain = cc.rank_covers(
+    [_crow("https://x/a.jpg"), _crow("https://x/b.jpg", width=1500)], CFG)
+ok(plain[0].url == "https://x/a.jpg",
+   f"with nothing hashed the size rule still decides ({plain[0].url})")
 
 print()
 if FAILED:

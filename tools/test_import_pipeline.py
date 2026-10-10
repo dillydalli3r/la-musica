@@ -1464,7 +1464,7 @@ for _i in (1, 2):
 # what the steps BEFORE the chain (and the chain's own earlier scripts) leave in
 # the album folder: the cover the autonomous step fetched, the description
 # beside it, the expected-tracklist manifest
-for _name in ("cover.jpg", "description.txt", ".mlo_expected.json"):
+for _name in ("cover.jpg", "description.txt", ".mb_expected"):
     with open(os.path.join(MOVE_STAGING, _name), "w", encoding="utf-8") as _f:
         _f.write(_name)
 
@@ -1529,7 +1529,7 @@ assert [os.path.normcase(p) for p in _after_14[0]] == [os.path.normcase(ORGANIZE
 assert "no audio left" not in _move_log.getvalue(), _move_log.getvalue()
 # the album's own files travelled with it — cover, description, manifest
 assert sorted(os.listdir(ORGANIZED)) == [
-    ".mlo_expected.json", "1-01 - track.wav", "1-02 - track.wav", "cover.jpg",
+    ".mb_expected", "1-01 - track.wav", "1-02 - track.wav", "cover.jpg",
     "description.txt"], sorted(os.listdir(ORGANIZED))
 # …and the staging folder is gone, not an audio-less shell holding somebody's
 # cover art (which is what the scan reports as a broken album)

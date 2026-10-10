@@ -33,12 +33,15 @@ import os
 import re
 
 from server import ai as ai_client
+from mlo.genre_vocab import FAMILIES
 from mlo.genres import (DEFAULT_GENRE_COUNT, GENRE_COUNT_MAX, canonical,
                         is_parent)
 
 SYSTEM = (
     "You are a music taxonomist naming the genres a release is filed under. "
-    "You answer ONLY with the JSON object asked for."
+    "You answer ONLY with the JSON object asked for. The names you use are the "
+    "real, published genres RateYourMusic and MusicBrainz keep — never a name "
+    "you made up."
 )
 
 # The shape the answer must have, spelled out in full: the model answers with
@@ -56,6 +59,13 @@ _SLOTS = (
     "Do NOT name a broad family (Rock, Pop, Electronic, Hip Hop, Jazz, "
     "Classical, Folk, Metal…) in any slot: the app derives the family from the "
     "specific genre and appends it itself, so a family here is discarded.\n"
+    "Every name must be a genre RateYourMusic or MusicBrainz actually "
+    "PUBLISHES, in a spelling one of them uses — the kind their own genre "
+    "pages list. Never invent a name, a compound of two genres, or a "
+    "hyphenation neither taxonomy uses: the app stores published names only, "
+    "and one it cannot resolve is thrown away. Be specific rather than broad "
+    "when the record earns it (a real subgenre beats its family) and never "
+    "pad the answer — one correct name is better than two vague ones.\n"
     "Every name must be a MusicBrainz genre, or one of the fetched genres "
     "above; they must be distinct (never the same word twice, not even with "
     "different capitalisation)."
@@ -71,6 +81,20 @@ _RESEARCH_OFF = (
     "Re-rank ONLY the fetched genres below: every genre you answer with must "
     "appear in that list (you may correct its spelling and its order, never "
     "add a genre it does not contain)."
+)
+
+# The app's own taxonomy, in the prompt so a "detailed" answer lands INSIDE the
+# space the app stores (mlo.genre_vocab's FAMILIES) instead of beside it: a
+# model asked for a subgenre with no idea which heads exist answers with names
+# from whatever taxonomy it has seen, and the ones the app cannot resolve are
+# thrown away. 28 names, one line — the same line for every call, so it costs
+# a prompt's worth of tokens once and tells the model exactly how specific it
+# may be.
+_TAXONOMY = (
+    "The app files every genre under one of these broad families: "
+    + ", ".join(FAMILIES)
+    + ". Name the SPECIFIC genre that sits under one of them (do not answer "
+      "with a family itself)."
 )
 
 
@@ -99,6 +123,8 @@ def _prompt(artist, album, title, track_path, candidates, count, extra, research
     lines = [f"Release: {artist or 'unknown artist'} — {album or 'unknown album'}"]
     if title:
         lines.append(f"Track: {title}")
+        lines.append("The genres are for THIS track as it appears on that "
+                     "release, not for the artist's whole catalogue.")
     if track_path:
         lines.append(f"File: {track_path}")
     for key, value in sorted((extra or {}).items()):
@@ -111,6 +137,8 @@ def _prompt(artist, album, title, track_path, candidates, count, extra, research
         lines.extend(f"- {n}" for n in names)
     lines.append("")
     lines.append(_RESEARCH_ON if research else _RESEARCH_OFF)
+    lines.append("")
+    lines.append(_TAXONOMY)
     lines.append("")
     lines.append(_SLOTS.format(count=count))
     return "\n".join(lines)
@@ -212,8 +240,12 @@ def _specifics(names, candidates, limit):
     A name that IS a family is dropped rather than returned: the app derives
     and appends the family itself (mlo.genres.normalize_genres), so a family
     here would either duplicate the derived slot or take a specific genre's
-    place. Nothing else is filtered — junk the model invented that is neither
-    a genre nor a fetched candidate is what the vocabulary grade flags.
+    place. A name the app cannot resolve — neither a published MusicBrainz/
+    RateYourMusic genre nor one of the fetched candidates — is DROPPED too:
+    the model was told to use published names only, and storing an invented
+    one would put a genre in the file that no source publishes and that
+    `grade_check_genre_vocab` then fails. The answer is then whatever
+    published, specific genres survive, in the model's own ranking order.
     """
     allowed = {str(c).strip().casefold() for c in (candidates or []) if str(c).strip()}
     out, seen = [], set()

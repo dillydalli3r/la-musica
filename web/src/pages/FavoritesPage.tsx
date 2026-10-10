@@ -378,6 +378,8 @@ function LikedTracks({ selectMode, picked, onPick }: {
           tech: track.tech,
           coverFile: track.cover_file ?? null,
           albumCover: album.cover_file ?? null,
+          coverToken: track.cover_token ?? null,
+          albumToken: album.cover_token ?? null,
           queue: {
             path: track.path,
             file: track.file,
@@ -387,6 +389,8 @@ function LikedTracks({ selectMode, picked, onPick }: {
             title: track.tags.TITLE || undefined,
             coverFile: track.cover_file ?? null,
             albumCover: album.cover_file ?? null,
+            coverToken: track.cover_token ?? null,
+            albumToken: album.cover_token ?? null,
             advisory: track.tags.ITUNESADVISORY ?? null,
           },
         };
@@ -516,7 +520,9 @@ function LikedTracks({ selectMode, picked, onPick }: {
                     <TrackCover
                       albumPath={r.albumPath}
                       trackCover={r.coverFile}
+                      trackToken={r.coverToken}
                       albumCover={r.albumCover}
+                      albumToken={r.albumToken}
                       wrapperClass="h-9 w-9 rounded bg-raise overflow-hidden shrink-0"
                     />
                   ) : null}
@@ -735,6 +741,7 @@ function FavArtists({ selectMode, picked, onPick }: TabSelectProps) {
                 path: t.path, file: t.file, albumPath: al.path,
                 artist: displayArtist(al, a), album: al.meta?.ALBUM ?? undefined, title: t.tags.TITLE || undefined,
                 coverFile: t.cover_file ?? null, albumCover: al.cover_file ?? null,
+                coverToken: t.cover_token ?? null, albumToken: al.cover_token ?? null,
               }))
             );
             return (
@@ -835,6 +842,8 @@ function FavPlaylists({ selectMode, picked, onPick }: TabSelectProps) {
               title: hit.track.tags.TITLE || undefined,
               coverFile: hit.track.cover_file ?? null,
               albumCover: hit.album.cover_file ?? null,
+              coverToken: hit.track.cover_token ?? null,
+              albumToken: hit.album.cover_token ?? null,
             }
           : { path, file: path.split("/").pop() ?? path, albumPath: path.split("/").slice(0, -1).join("/") };
       });

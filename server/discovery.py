@@ -63,7 +63,8 @@ BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
 # Provider ids, in the built-in order per feature. Every "sources" config key
 # (discovery_rec_sources, discovery_search_sources, artist_image_sources,
 # description_sources) is a subset of these, in the user's preferred order.
-SOURCES = ["deezer", "listenbrainz", "itunes", "audiodb", "wikipedia", "musicbrainz"]
+SOURCES = ["deezer", "listenbrainz", "itunes", "audiodb", "wikipedia", "musicbrainz",
+           "wikidata", "bandcamp", "lastfm", "discogs"]
 SOURCE_LABELS = {
     "deezer": "Deezer",
     "listenbrainz": "ListenBrainz",
@@ -71,6 +72,10 @@ SOURCE_LABELS = {
     "audiodb": "TheAudioDB",
     "wikipedia": "Wikipedia",
     "musicbrainz": "MusicBrainz",
+    "wikidata": "Wikidata",
+    "bandcamp": "Bandcamp",
+    "lastfm": "Last.fm",
+    "discogs": "Discogs",
 }
 SOURCE_NOTES = {
     "deezer": "Popularity-ranked catalogue and 1000px artist photos.",
@@ -79,9 +84,23 @@ SOURCE_NOTES = {
     "audiodb": "Artist biographies, album notes and press photos.",
     "wikipedia": "Artist and album descriptions from Wikipedia summaries.",
     "musicbrainz": "The identity anchor: release-group MBIDs, used as the final fallback.",
+    # The four added with the keyless-first rule: Wikidata and Bandcamp need
+    # nothing, and Last.fm / Discogs wake up the moment their key is pasted
+    # (they are skipped, with the reason, until then).
+    "wikidata": "The artist's own image (P18) from Wikimedia Commons — keyless, "
+                "reached through the artist's MusicBrainz link.",
+    "bandcamp": "The album's own \u201cabout\u201d text from its Bandcamp page — keyless.",
+    "lastfm": "Artist biographies and album wiki summaries (needs an API key).",
+    "discogs": "Artist profiles, release notes and press images (needs a token).",
 }
-IMAGE_SOURCES = ["deezer", "audiodb", "itunes", "wikipedia"]
-DESCRIPTION_SOURCES = ["wikipedia", "audiodb", "musicbrainz"]
+# The built-in orders, best first. Keyless providers come before the keyed ones
+# so a fresh install still gets an image and a description; the keyed ones are
+# asked the moment their credential is saved (see `_lastfm_json` /
+# `_discogs_release`, which return None and say so when it is missing).
+IMAGE_SOURCES = ["deezer", "audiodb", "wikidata", "discogs", "lastfm", "itunes",
+                 "wikipedia", "bandcamp"]
+DESCRIPTION_SOURCES = ["wikipedia", "audiodb", "lastfm", "discogs", "bandcamp",
+                       "musicbrainz"]
 
 # --------------------------------------------------------------------------- #
 # Cached, throttled JSON transport
@@ -1838,6 +1857,238 @@ def audiodb_artist_mbid(mbid, timeout=None):
     }
 
 
+def _plain_text(markup):
+    """Prose from an HTML fragment: tags dropped, entities decoded, paragraph
+    breaks kept (the app's own `normalize_description` trims and collapses them
+    when it stores the text)."""
+    import html as _html
+    text = re.sub(r"<br\s*/?>", "\n", str(markup or ""), flags=re.I)
+    text = re.sub(r"</(?:p|div|li)\s*>", "\n\n", text, flags=re.I)
+    text = re.sub(r"<[^>]+>", "", text)
+    lines = [ln.rstrip() for ln in _html.unescape(text)
+             .replace("\r\n", "\n").replace("\r", "\n").split("\n")]
+    return "\n".join(lines).strip()
+
+
+# --------------------------------------------------------------------------- #
+# The four providers added beside the originals
+# --------------------------------------------------------------------------- #
+# Keyless first, so a fresh install still gets an image and a description:
+# Wikidata's P18 and a Bandcamp album's own "about" text need nothing, while
+# Last.fm and Discogs return None (and say why in the sources report) until
+# their key/token is pasted into Settings.
+WIKIDATA_API = "https://www.wikidata.org/w/api.php"
+COMMONS_FILE = "https://commons.wikimedia.org/wiki/Special:FilePath"
+
+
+def _wikidata_qid_for_artist(name, mbid=None):
+    """The artist's Wikidata QID: exact from an MBID, else the top name hit.
+
+    MusicBrainz states the artist's Wikidata item as a URL relation, so an MBID
+    gives the QID with no guessing at all (the relation reader is
+    `integrations._mb_wikidata_qid`, the same one the genre chain uses). Without
+    one, Wikidata's own search answers for the name — as good as every other
+    name-based provider, and only ever used for an image.
+    """
+    if mbid:
+        try:
+            qid = integrations._mb_wikidata_qid(str(mbid), entity="artist")
+            if qid:
+                return str(qid)
+        except Exception:
+            pass
+    if not name:
+        return None
+    data = _json(WIKIDATA_API, {"action": "wbsearchentities", "search": str(name),
+                                "language": "en", "uselang": "en", "type": "item",
+                                "limit": 1, "format": "json"},
+                 host="www.wikidata.org")
+    hits = (data or {}).get("search") or []
+    return str(hits[0].get("id")) if hits and hits[0].get("id") else None
+
+
+def wikidata_artist_image(name, mbid=None, cfg=None):
+    """The artist's own picture (Wikidata P18) as a Commons URL, or None.
+
+    P18 is the image Wikipedia's own infobox uses — a photo of the artist, not
+    an album sleeve — and Commons serves it at any width, so this is the one
+    keyless source that answers "what do they look like" without a store in
+    between. Skipped entirely while discovery is off (see `source_order`).
+    """
+    qid = _wikidata_qid_for_artist(name, mbid)
+    if not qid:
+        return None
+    data = _json(WIKIDATA_API, {"action": "wbgetentities", "ids": qid,
+                                "props": "claims", "format": "json"},
+                 host="www.wikidata.org")
+    entity = ((data or {}).get("entities") or {}).get(qid) or {}
+    for claim in ((entity.get("claims") or {}).get("P18") or []):
+        value = ((claim or {}).get("mainsnak") or {}).get("datavalue") or {}
+        filename = value.get("value")
+        if filename:
+            return (f"{COMMONS_FILE}/{quote(str(filename).replace(' ', '_'))}"
+                    f"?width=1200")
+    return None
+
+
+# Last.fm answers "no image" with this one placeholder file, which must never
+# be stored as an artist's photo.
+_LASTFM_PLACEHOLDER = "2a96cbd8b46e442fc41c2b86b821562f"
+
+
+def _lastfm_image_url(images):
+    """The largest real URL in a Last.fm `image` array, or "".
+
+    The array is ordered smallest first and its entries are
+    ``{"#text": url, "size": "small"|"medium"|"large"|"extralarge"|"mega"}``,
+    so the last non-empty, non-placeholder entry is the biggest one.
+    """
+    for row in reversed(list(images or ())):
+        url = str((row or {}).get("#text") or "").strip()
+        if url and _LASTFM_PLACEHOLDER not in url:
+            return url
+    return ""
+
+
+def _lastfm_prose(node, url):
+    """A `{text, source, source_url, title}` description from a Last.fm
+    bio/wiki node, or None — `content` when it states one, else `summary`,
+    with Last.fm's own "Read more on Last.fm" trailer dropped."""
+    if not isinstance(node, dict):
+        return None
+    raw = node.get("content") or node.get("summary") or ""
+    text = _plain_text(raw)
+    text = re.sub(r"Read more on Last\.fm.*$", "", text, flags=re.I | re.S).strip()
+    if not text:
+        return None
+    return {"text": text, "title": None, "source": "lastfm", "source_url": url}
+
+
+def lastfm_artist_image(name, cfg=None):
+    """The artist's Last.fm photo, or None (no key → None, never a guess)."""
+    if not name:
+        return None
+    data = _lastfm_json("artist.getinfo", {"artist": str(name)}, cfg=cfg)
+    images = (((data or {}).get("artist") or {}).get("image") or [])
+    return _lastfm_image_url(images) or None
+
+
+def lastfm_artist_description(name, cfg=None):
+    """The artist's Last.fm biography, or None."""
+    if not name:
+        return None
+    data = _lastfm_json("artist.getinfo", {"artist": str(name)}, cfg=cfg)
+    node = ((data or {}).get("artist") or {}).get("bio") or {}
+    return _lastfm_prose(node, f"https://www.last.fm/music/{quote(str(name))}")
+
+
+def lastfm_album_description(artist, album, cfg=None):
+    """The album's Last.fm wiki summary, or None."""
+    if not (artist and album):
+        return None
+    data = _lastfm_json("album.getinfo", {"artist": str(artist), "album": str(album)},
+                        cfg=cfg)
+    node = ((data or {}).get("album") or {}).get("wiki") or {}
+    return _lastfm_prose(
+        node, f"https://www.last.fm/music/{quote(str(artist))}/{quote(str(album))}")
+
+
+def _discogs_artist_detail(name, cfg=None, timeout=None):
+    """The Discogs artist detail (profile, images) for *name*, or None.
+
+    Discogs authenticates its search endpoint, so this is skipped (never
+    guessed) until `discogs_token` is set — the same rule
+    `_discogs_release` follows for releases, one search + one detail request.
+    """
+    token = str((cfg or {}).get("discogs_token") or "").strip()
+    if not token or not name:
+        return None
+    data = _json(f"{DISCOGS_BASE}/database/search",
+                 {"q": str(name), "type": "artist", "token": token, "per_page": 3},
+                 timeout=timeout, host="api.discogs.com")
+    results = (data or {}).get("results") or []
+    if not results:
+        return None
+    aid = results[0].get("id")
+    if not aid:
+        return None
+    return _json(f"{DISCOGS_BASE}/artists/{aid}", {"token": token},
+                 timeout=timeout, host="api.discogs.com")
+
+
+def discogs_artist_image(name, cfg=None):
+    """The artist's Discogs image (usually the largest), or None."""
+    if not name:
+        return None
+    detail = _discogs_artist_detail(name, cfg=cfg) or {}
+    for row in detail.get("images") or ():
+        url = str((row or {}).get("uri") or "").strip()
+        if url:
+            return url
+    return None
+
+
+def discogs_artist_description(name, cfg=None):
+    """The artist's Discogs profile, or None."""
+    if not name:
+        return None
+    detail = _discogs_artist_detail(name, cfg=cfg) or {}
+    text = _plain_text(detail.get("profile") or "")
+    if not text:
+        return None
+    aid = detail.get("id")
+    return {"text": text, "title": detail.get("name") or None, "source": "discogs",
+            "source_url": f"https://www.discogs.com/artist/{aid}" if aid else None}
+
+
+def discogs_album_description(artist, album, cfg=None):
+    """The release's Discogs notes, or None (see `_discogs_release`)."""
+    detail = _discogs_release(artist, album, cfg=cfg) or {}
+    text = _plain_text(detail.get("notes") or "")
+    if not text:
+        return None
+    rid = detail.get("id")
+    return {"text": text, "title": detail.get("title") or album, "source": "discogs",
+            "source_url": f"https://www.discogs.com/release/{rid}" if rid else None}
+
+
+_BANDCAMP_ABOUT_RE = re.compile(
+    r'class="tralbumData tralbum-about"[^>]*>(.*?)</div>', re.S)
+
+
+def bandcamp_album_description(artist, album):
+    """The album's own "about" text from its Bandcamp page, or None.
+
+    Keyless, and the SAME page fetch the genre reader makes
+    (`integrations.bandcamp_album` reaches the artist's subdomain and the
+    album's slug): Bandcamp renders the record's description in
+    `div.tralbumData.tralbum-about`, and its own `data-tralbum` JSON states it
+    too when the uploader wrote one. The page must BE this release — the same
+    confirmation the genre path uses — so a same-named record by another band
+    can never donate its text.
+    """
+    name = str(album or "").strip()
+    if not name:
+        return None
+    for sub in integrations._bandcamp_subdomain_candidates(artist):
+        url = f"https://{sub}.bandcamp.com/album/{integrations._bandcamp_slug(name, '-')}"
+        page = integrations._bandcamp_get(url)
+        if not page:
+            continue
+        tralbum = integrations._bandcamp_tralbum(page)
+        if not tralbum or not integrations._bandcamp_is_album(tralbum, name):
+            continue
+        text = str(tralbum.get("about") or "").strip()
+        if not text:
+            m = _BANDCAMP_ABOUT_RE.search(page)
+            text = _plain_text(m.group(1)) if m else ""
+        if text:
+            title = (tralbum.get("current") or {}).get("title") or album
+            return {"text": text, "title": str(title), "source": "bandcamp",
+                    "source_url": url}
+    return None
+
+
 def artist_image(name, mbid=None, cfg=None):
     """Best available artist photo, walking the configured image sources.
 
@@ -1875,6 +2126,22 @@ def artist_image(name, mbid=None, cfg=None):
                     if row.get(key):
                         return {"url": row[key], "source": "audiodb",
                                 "label": label, "kind": "photo" if key == "thumb" else "wide"}
+        elif source == "wikidata":
+            url = wikidata_artist_image(name, mbid, cfg=cfg)
+            if url:
+                return {"url": url, "source": "wikidata",
+                        "label": "Wikidata image (P18, Wikimedia Commons)",
+                        "kind": "photo"}
+        elif source == "discogs":
+            url = discogs_artist_image(name, cfg=cfg)
+            if url:
+                return {"url": url, "source": "discogs",
+                        "label": "Discogs artist image", "kind": "photo"}
+        elif source == "lastfm":
+            url = lastfm_artist_image(name, cfg=cfg)
+            if url:
+                return {"url": url, "source": "lastfm",
+                        "label": "Last.fm artist photo", "kind": "photo"}
         elif source == "itunes":
             url = itunes_artist_artwork(name)
             if url:
@@ -2020,6 +2287,14 @@ def artist_description(name, mbid=None, cfg=None):
                     "text": row["bio"], "title": row.get("name") or name,
                     "source": "audiodb",
                     "source_url": f"{AUDIODB_BASE}/{AUDIODB_KEY}/search.php?s={quote(name)}"})
+        elif source == "lastfm":
+            found_lf = lastfm_artist_description(name, cfg=cfg)
+            if found_lf:
+                return _described(found_lf)
+        elif source == "discogs":
+            found_dg = discogs_artist_description(name, cfg=cfg)
+            if found_dg:
+                return _described(found_dg)
         elif source == "musicbrainz":
             artist_mbid = mbid or resolve_artist_mbid(name)
             if not artist_mbid:
@@ -2055,6 +2330,18 @@ def album_description(artist, album, mbid=None, cfg=None):
                 return _described({
                     "text": row["description"], "title": row.get("title") or album,
                     "source": "audiodb", "source_url": None})
+        elif source == "lastfm":
+            found_lf = lastfm_album_description(artist, album, cfg=cfg)
+            if found_lf:
+                return _described(found_lf)
+        elif source == "discogs":
+            found_dg = discogs_album_description(artist, album, cfg=cfg)
+            if found_dg:
+                return _described(found_dg)
+        elif source == "bandcamp":
+            found_bc = bandcamp_album_description(artist, album)
+            if found_bc:
+                return _described(found_bc)
         elif source == "musicbrainz":
             rg = None
             if mbid:
@@ -2078,14 +2365,16 @@ def album_description(artist, album, mbid=None, cfg=None):
     return None
 
 
-def metadata_candidates(artist, album="", cfg=None):
+def metadata_candidates(artist, album="", cfg=None, mbid=None):
     """Image + description candidates for an artist (and their album).
 
     One composition point for the reliable providers: the configured image
     chain's own best pick plus every individual provider's images (Deezer
-    photo, TheAudioDB thumb/banner/wide/fanart, Apple artwork, Wikipedia lead
-    image) and the first artist/album description from the configured
-    description chain. Nothing is written here — callers save through
+    photo, TheAudioDB thumb/banner/wide/fanart, Wikidata P18, Discogs, Last.fm,
+    Apple artwork, Wikipedia lead image) and the first artist/album description
+    from the configured description chain. `mbid`, when the caller knows it,
+    makes the identity-based reads exact (Wikidata's item, TheAudioDB's
+    record). Nothing is written here — callers save through
     `mlo.artistdata` (see server.imports.apply_metadata).
 
     Returns {"images": [{url, source, label, kind}], "artist_description":
@@ -2102,7 +2391,7 @@ def metadata_candidates(artist, album="", cfg=None):
             images.append({"url": url, "source": source, "label": label, "kind": kind})
 
     if artist:
-        auto = artist_image(artist, cfg=cfg)
+        auto = artist_image(artist, mbid, cfg=cfg)
         if auto:
             add(auto.get("url"), auto.get("source"),
                 auto.get("label") or "Automatic pick", auto.get("kind") or "photo")
@@ -2121,6 +2410,18 @@ def metadata_candidates(artist, album="", cfg=None):
         summary = wikipedia_summary(artist)
         if summary:
             add(summary.get("image"), "wikipedia", "Wikipedia lead image", "photo")
+        # The providers added beside the originals: Wikidata needs nothing (and
+        # is exact when the caller knows the artist's MBID), Discogs and
+        # Last.fm answer once their credential is saved.
+        wd = wikidata_artist_image(artist, mbid, cfg=cfg)
+        if wd:
+            add(wd, "wikidata", "Wikidata image (P18, Wikimedia Commons)", "photo")
+        dg = discogs_artist_image(artist, cfg=cfg)
+        if dg:
+            add(dg, "discogs", "Discogs artist image", "photo")
+        lf = lastfm_artist_image(artist, cfg=cfg)
+        if lf:
+            add(lf, "lastfm", "Last.fm artist photo", "photo")
     return {
         "images": images,
         "artist_description": artist_description(artist, cfg=cfg) if artist else None,

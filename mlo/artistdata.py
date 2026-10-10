@@ -960,6 +960,73 @@ def normalize_description(text) -> str:
     return "\n".join(out) + "\n" if out else ""
 
 
+def description_format_issue(folder) -> str:
+    """Why a folder's ``description.txt`` is not in this app's canonical form,
+    or "" (nothing stored, or already canonical).
+
+    The question is BYTES: `normalize_description` is what every writer runs
+    before it stores text, so a file that differs from its own normalization is
+    a file this app did not write — a hand-edited note with trailing spaces, a
+    CRLF export, or text that ends without a newline. The fix is
+    `normalize_description_file` (and the description fetch scripts run it), so
+    this is a graded defect rather than a style opinion.
+    """
+    text = read_description(folder)
+    if not text.strip():
+        return ""
+    if "\r" in text:
+        return ("description.txt has CRLF line endings — this app writes LF "
+                "(re-fetch the description: the album page's fetch, or Artist "
+                "descriptions, script 26)")
+    if not text.endswith("\n"):
+        return ("description.txt does not end with a newline (re-fetch the "
+                "description: the album page's fetch, or Artist descriptions, "
+                "script 26)")
+    if text != normalize_description(text):
+        return ("description.txt is not in this app's canonical form — "
+                "trailing spaces or a run of blank lines (re-fetch the "
+                "description: the album page's fetch, or Artist descriptions, "
+                "script 26)")
+    return ""
+
+
+def normalize_description_file(folder, cfg=None, kind="artist") -> bool:
+    """Rewrite *folder*'s ``description.txt`` in canonical form when the bytes
+    on disk differ. True when there is nothing to do (absent, or canonical).
+
+    The description writers (`write_description`) already store the canonical
+    text; this repairs a file that arrived from outside — a hand edit, a
+    copy-paste with CRLF, a description an older build wrote — without a
+    network round trip. A read-only folder keeps its file and reports False.
+    """
+    path = description_path(folder)
+    try:
+        with open(path, "r", encoding="utf-8", newline="") as fh:
+            raw = fh.read()
+    except OSError:
+        return True
+    if not raw.strip():
+        return True
+    body = normalize_description(raw)
+    if raw == body:
+        return True
+    try:
+        fd, tmp = tempfile.mkstemp(prefix=".description_", suffix=".tmp", dir=folder)
+    except OSError:
+        return False
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(body)
+        replace_locked(tmp, path)
+    except OSError:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        return False
+    return True
+
+
 def write_description(folder, text, cfg=None, source=None, source_url=None,
                       kind="artist") -> str:
     """Atomically store *text* as *folder*'s description; "" when rejected.

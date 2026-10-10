@@ -741,6 +741,14 @@ finally:
 # 9) The default priority list is the documented one, both old defaults migrate
 # --------------------------------------------------------------------------- #
 assert list(intg.GENRE_SOURCES) == DOCUMENTED_SOURCES, intg.GENRE_SOURCES
+# RATINGS walk the SAME hierarchy: the user asked for one order (RYM → AOTY →
+# MusicBrainz) across both, so the two chains' source lists are the same ids in
+# the same order — one place to change them, and no way for a genre chain and a
+# rating chain to disagree about who is asked first.
+from mlo import web_ratings as _wr                                      # noqa: E402
+assert list(_wr.SOURCES) == list(intg.GENRE_SOURCES), (_wr.SOURCES, intg.GENRE_SOURCES)
+assert list(mcfg.DEFAULT_CONFIG["web_ratings_sources"]) == list(intg.GENRE_SOURCES), \
+    mcfg.DEFAULT_CONFIG["web_ratings_sources"]
 # The registry and the SHIPPED default are the same list: every source is both
 # selectable in Settings → Discovery / listed in Sources health AND asked by
 # default, because the chain stops as soon as a track's list is complete.
@@ -973,5 +981,44 @@ try:
     assert _ai_calls == [], _ai_calls
 finally:
     _ai_mod.ai_configured, _genre_ai.infer_genres = _real_ai_configured, _real_infer
+
+# ---------------------------------------------------------------------------
+# The AI fallback's OWN terms (server.genre_ai): what it accepts from a model,
+# and what it tells the model to answer with. No model call — the gate and the
+# prompt are pure functions.
+# ---------------------------------------------------------------------------
+print()
+print("== AI genre fallback: published names only ==")
+from server import genre_ai as _ga                                    # noqa: E402
+
+# A published, specific name survives (resolved to the published spelling); a
+# FAMILY is dropped (the app derives and appends it); an invented compound is
+# dropped however plausible it reads; case-duplicates collapse; the limit is
+# the ask.
+_got = _ga._specifics(["Shoegaze", "rock", "neon-gaze fusion", "shoegaze"],
+                      [], 2)
+assert _got == ["shoegaze"], _got
+
+# A genre a SOURCE stated is accepted in the source's own spelling even when
+# the app's vocabulary does not know the name — dropping what a source said
+# would be worse than storing it (the vocable grade reports it instead).
+assert _ga.canonical("funeral doom") is None, "fixture: MB does not list it"
+assert _ga._specifics(["Funeral Doom"], ["Funeral Doom"], 1) == ["Funeral Doom"]
+
+# One slot belongs to the derived family, so there is nothing to ask for.
+assert _ga.infer_genres(artist="a", album="b", count=1) is None
+
+# The prompt states the taxonomy the names must come from, the heads the app
+# files them under (so a detailed answer lands INSIDE that space), and the
+# track the answer is for — the model must not answer for the artist. The
+# system message is what forbids an invented name.
+_p = _ga._prompt("Gorillaz", "Plastic Beach", "Stylo", "", [], 2, None, True)
+for _needle in ("RateYourMusic", "actually PUBLISHES",
+                "The app files every genre under one of these broad families",
+                "rock", "electronic", "for THIS track", "Stylo"):
+    assert _needle in _p, (_needle, _p)
+assert "never a name you made up" in _ga.SYSTEM, _ga.SYSTEM
+
+print("genre_ai: published-name gate and prompt assertions passed")
 
 print("genres: all assertions passed")

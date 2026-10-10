@@ -491,6 +491,33 @@ _COVER_TYPES = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png"
                 ".jxl": "image/jxl", ".webp": "image/webp", ".bmp": "image/bmp"}
 
 
+def cover_token(album, file=None):
+    """The VERSION token of the cover file an album (or one track) serves:
+    ``<mtime_ns>-<size>``, or "" when there is no cover to serve.
+
+    The UI puts it in the cover URL (`&v=`), because a replaced cover keeps
+    the same album, the same file name and therefore the same URL — without a
+    token neither the browser's HTTP cache (the sized thumb is cacheable for
+    minutes) nor the offline blob would ever ask for the new bytes. The album
+    page's token rides the payload itself rather than a write RESPONSE, which
+    the server-side writers (the import's cover step, script 5's re-encode and
+    rename) never produce: that is what left a track row showing the previous
+    cover after an import had already replaced it on disk.
+
+    The token is one stat of the file the request would resolve
+    (`cover_path`'s own rule), so a track whose sidecar has gone falls back to
+    the album's cover and says so with the right token.
+    """
+    path = cover_path(album, file)
+    if not path:
+        return ""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return ""
+    return f"{st.st_mtime_ns}-{st.st_size}"
+
+
 def cover_path(album, file=None):
     """The cover image FILE an album serves: *file* when it is really in the
     folder, else the first of the standard names that exists, else None.
