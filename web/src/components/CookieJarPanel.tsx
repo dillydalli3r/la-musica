@@ -1,6 +1,6 @@
 import { useState, type DragEvent, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Check, Loader2, Trash2, X } from "lucide-react";
+import { Check, Globe, Loader2, Trash2, X } from "lucide-react";
 // RymCookiesSaveReply and AotyCookiesSaveReply are the same shape (one cookie
 // header in a config value), so the rym type covers both credential branches.
 import { api, type CookieEntry, type RymCookiesSaveReply, type YoutubeCookiesSaveReply } from "../api";
@@ -86,6 +86,12 @@ export default function CookieJarPanel({
     retry: false,
   });
   const active = isYoutube ? yt.data : cred.data;
+  const browsers = useQuery({
+    queryKey: ["cookieBrowsers"],
+    queryFn: api.cookieBrowsers,
+    retry: false,
+    enabled: !isYoutube,
+  });
   const present = active?.present ?? false;
   const lines = active?.lines ?? 0;
   const maxBytes = active?.max_bytes ?? 524288;
@@ -175,6 +181,33 @@ export default function CookieJarPanel({
         qc.invalidateQueries({ queryKey: [summaryKey] });
         qc.invalidateQueries({ queryKey: ["config"] });
       }
+      qc.invalidateQueries({ queryKey: ["cookieList", source] });
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /** Take the credential out of a browser the user is ALREADY signed in to.
+   *
+   *  The whole export-and-paste dance, one click: the server asks the yt-dlp
+   *  it ships for that browser's cookies, keeps only this source's, stores
+   *  them AND that browser's own User-Agent (Cloudflare binds a `cf_clearance`
+   *  to the UA that earned it — the same jar answers 200 with Firefox's UA and
+   *  403 with the built-in Chrome one). Measured 2026-10-10: RateYourMusic
+   *  serves `503` to an anonymous client on every release page, so without a
+   *  session read from somewhere the source cannot answer at all. */
+  const fromBrowser = async (browser: string, label: string) => {
+    setBusy(true);
+    try {
+      const r = await api.cookiesFromBrowser(source as "rym" | "aoty", browser);
+      toast.success(t("cookies.fromBrowserDone", { count: r.stored, browser: label }));
+      const fresh = await api.config();
+      onStored?.(String(fresh[configKey] ?? ""));
+      for (const w of r.warnings ?? []) toast(w);
+      qc.invalidateQueries({ queryKey: [summaryKey] });
+      qc.invalidateQueries({ queryKey: ["config"] });
       qc.invalidateQueries({ queryKey: ["cookieList", source] });
     } catch (e) {
       toast.error(String(e));
@@ -347,6 +380,34 @@ export default function CookieJarPanel({
   const sampleHost = isYoutube ? ".youtube.com" : `.${host}`;
   const sampleName = isYoutube ? "LOGIN_INFO" : isAoty ? "cf_clearance" : "session";
 
+  /** The one-click alternative to the box below: read the session out of a
+   *  browser this machine already has, signed in. Hidden for the yt-dlp jar,
+   *  which has browsers of its own to choose from in Settings. */
+  const browserRow: ReactNode = !isYoutube ? (
+    <div className="flex items-center gap-2 flex-wrap">
+      <span className="text-[11px] text-zinc-600">
+        {t("cookies.fromBrowserHint", { host })}
+      </span>
+      {(browsers.data?.browsers ?? []).map((b) => (
+        <button
+          key={b.id}
+          className="btn-ghost !py-0.5 text-[11px] tap"
+          onClick={() => fromBrowser(b.id, b.label)}
+          disabled={busy}
+          title={t("cookies.fromBrowserTitle")}
+        >
+          {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Globe className="h-3 w-3" />}{" "}
+          {t("cookies.fromBrowser", { browser: b.label })}
+        </button>
+      ))}
+      {browsers.data && browsers.data.browsers.length === 0 && (
+        <span className="text-[11px] text-amber-400/90">
+          {t("cookies.fromBrowserNone", { host })}
+        </span>
+      )}
+    </div>
+  ) : null;
+
   const dropZone = (
     <div
       onDragOver={(e) => {
@@ -390,6 +451,7 @@ export default function CookieJarPanel({
   const rest: ReactNode = (
     <>
       {intro}
+      {browserRow}
       {kept}
       {warnings.map((w) => (
         <div key={w} className="text-[10px] text-amber-400/90 border border-amber-900/40 bg-amber-950/20 rounded px-2 py-1">

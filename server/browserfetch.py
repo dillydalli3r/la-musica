@@ -56,11 +56,12 @@ _CANDIDATES = (
 # developer is already using.
 MANAGED_PORT = 9333
 
-# Where the window goes. Off to the side rather than hidden: the challenge
-# measures what a hidden window looks like, and an off-screen window is still a
-# real one. On a single-monitor desktop this is simply out of view.
-WINDOW_POSITION = "2400,40"
-WINDOW_SIZE = "1000,720"
+# Where the window goes. A REAL window is load-bearing — MEASURED, 2026-10-10:
+# headless is challenged even when the profile holds a valid persisted
+# `cf_clearance` — so it is placed FAR off the desktop instead of hidden. The
+# user never sees it, and Cloudflare still sees a browser that is not headless.
+WINDOW_POSITION = "-3200,-3200"
+WINDOW_SIZE = "900,600"
 
 # How long to let a challenge clear before giving up on that page. A real
 # browser clears these in a few seconds; the ceiling is for a slow first visit,
@@ -322,11 +323,23 @@ def fetch(url, cfg=None, timeout=CLEAR_TIMEOUT, settle=0.4):
             session = _Session(ws_url)
             session.call("Page.enable", timeout=20)
             session.call("Runtime.enable", timeout=20)
-            session.call("Page.navigate", {"url": str(url)}, timeout=30)
+            nav = session.call("Page.navigate", {"url": str(url)}, timeout=30)
+            # A navigation that never reached a document is NOT a page. Chrome
+            # answers `net::ERR_*` and then renders its own error document,
+            # which carries no challenge marker — so without this check a 503
+            # or a dead host came back as "a page with no genres", the caller
+            # reported "no data", and the source looked like it had answered.
+            # MEASURED 2026-10-10: RateYourMusic serves `503` to an anonymous
+            # client on every `/release/` URL, and that error page was being
+            # returned as the album page.
+            if str(((nav.get("result") or {}).get("errorText")) or ""):
+                return None
             html = ""
             end = time.time() + timeout
             while time.time() < end:
                 time.sleep(settle)
+                if str(session.value("location.href") or "").startswith("chrome-error"):
+                    return None
                 html = session.value("document.documentElement.outerHTML") or ""
                 if (html and not _challenge(html)
                         and session.value("document.readyState") == "complete"):

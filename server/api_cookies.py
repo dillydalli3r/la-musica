@@ -31,6 +31,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from server import api_aoty, api_rym, api_youtube
+from server.cookies import CookieUpload
 
 router = APIRouter(tags=["cookies"])
 
@@ -63,11 +64,23 @@ SOURCES: Dict[str, dict] = {
         "hosts": [api_rym.RYM_HOST],
         "list": api_rym.cookie_list,
         "comment": api_rym.set_cookie_comment,
+        # The source's own UPLOAD route, called with the jar read out of the
+        # browser: it validates (all four shapes), keeps only this host's
+        # cookies, stores the header `integrations._rym_cookie` reads, and
+        # reports what a signed-out or expired export is worth — so a browser
+        # read and a paste cannot drift apart.
+        "upload": api_rym.rym_cookies_post,
+        # The UA half of the credential: Cloudflare binds `cf_clearance` to the
+        # browser that earned it, so a jar read out of a browser is only half
+        # of what that browser sends (see `server/browsercookies.py`).
+        "ua_key": "rym_user_agent",
     },
     "aoty": {
         "hosts": [api_aoty.AOTY_HOST],
         "list": api_aoty.cookie_list,
         "comment": api_aoty.set_cookie_comment,
+        "upload": api_aoty.aoty_cookies_post,
+        "ua_key": "aoty_user_agent",
     },
 }
 
@@ -90,6 +103,93 @@ def _payload(name: str, spec: dict, cookies: List[dict]) -> dict:
         "present": bool(cookies),
         "cookies": cookies,
     }
+
+
+@router.get("/api/cookies/browsers")
+def cookies_browsers():
+    """The browsers this machine has a signed-in profile for.
+
+    Declared BEFORE `/api/cookies/{source}` so "browsers" is a route and not a
+    source name that 404s. Each row carries the User-Agent that browser sends —
+    which is half of what a cleared session is (see
+    `server/browsercookies.py`) — so the panel can offer "read it from Firefox"
+    instead of asking the user to export a file.
+    """
+    from server import browsercookies
+
+    return {"browsers": browsercookies.summary(),
+            "installed": bool(browsercookies.available())}
+
+
+class BrowserImport(BaseModel):
+    """Which browser to read the session out of."""
+    browser: str = "firefox"
+
+
+@router.post("/api/cookies/{source}/from-browser")
+def cookies_from_browser(source: str, req: BrowserImport):
+    """Read the credential out of a browser the user is already signed in to.
+
+    The whole point of the panel, one step further: rather than exporting a
+    `cookies.txt` by hand and pasting it, this asks the yt-dlp the app already
+    ships to dump that browser's cookies, keeps only the ones this source is
+    sent, stores them, and stores that browser's User-Agent with them.
+
+    Both halves matter. MEASURED, 2026-10-10: RateYourMusic answers `503` to an
+    anonymous client on EVERY release page but `200` with the owner's own jar,
+    and the same jar with the app's built-in Chrome UA is a `403` — the cookie
+    counts only alongside the UA that earned it.
+    """
+    spec = _source(source)
+    upload = spec.get("upload")
+    if not callable(upload):
+        raise HTTPException(
+            400, f"{source} has no browser-readable jar — its own settings "
+                 "choose the browser instead (see Settings → Sources)")
+    from server import browsercookies
+    from server import cookies as cookies_mod
+
+    text = browsercookies.jar(req.browser)
+    if not text:
+        raise HTTPException(
+            400, f"could not read {req.browser}'s cookies — install yt-dlp "
+                 "from Dependencies, or pick another browser (a profile that "
+                 "has never visited the site has nothing to give)")
+    # A whole browser profile's jar is ~2000 cookies and megabytes; this source
+    # is sent a handful. Filter to its hosts FIRST — the upload route's own
+    # size guard is about the user pasting a password store, not about us —
+    # then hand it the slice, so its validation, storage and warnings are the
+    # ones a paste would get.
+    filtered, kept_rows, _dropped = cookies_mod.filter_jar(text, spec["hosts"])
+    if not kept_rows:
+        raise HTTPException(
+            400, f"{req.browser} holds no {'/'.join(spec['hosts'])} cookie — "
+                 "open the site in that browser once, signed in, and read it "
+                 "again")
+    state = upload(CookieUpload(text=filtered))
+    kept = int((state or {}).get("stored") or 0)
+    if not kept:
+        raise HTTPException(
+            400, f"{req.browser} holds no usable {'/'.join(spec['hosts'])} "
+                 "cookie — open the site in that browser once, signed in, and "
+                 "read it again")
+    ua = browsercookies.user_agent(req.browser)
+    key = spec.get("ua_key")
+    if ua and key:
+        from mlo.config import load_config, save_config
+        cfg = load_config() or {}
+        if cfg.get(key) != ua:
+            cfg[key] = ua
+            if not save_config(cfg):
+                reason = getattr(save_config, "last_error", "") or ""
+                raise HTTPException(
+                    500, f"the cookies were saved but the User-Agent was not"
+                         f"{(': ' + reason) if reason else ''}")
+    out = _payload(source, spec, spec["list"]())
+    out.update({"browser": req.browser, "user_agent": ua or "",
+                "stored": kept,
+                "warnings": list((state or {}).get("warnings") or [])})
+    return out
 
 
 @router.get("/api/cookies/{source}")

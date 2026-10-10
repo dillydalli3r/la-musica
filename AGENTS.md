@@ -278,3 +278,23 @@ When they do ask for one:
   patches the module (see `tools/test_browserfetch.py`). A smoke run with the
   live config will open one window, placed off to the side: expect it, and make
   sure whatever started it stops it (`main.py`'s lifespan does).
+- **A session cookie beats a browser, and is the ONLY thing that reads a RYM
+  release page.** MEASURED, 2026-10-10: `/release/album/...` answers `503` —
+  Chrome renders an error page for it — to every client with no session, while
+  `/artist/` and `/search` answer `200`; with the owner's own cookie set the
+  release page is `200` and 654 KB. The UA travels WITH the cookie (same jar:
+  Firefox's UA → `200`, the built-in Chrome UA → `403`), which is why
+  `server/browsercookies.py` stores both, and why
+  `POST /api/cookies/{source}/from-browser` reads them out of a browser the
+  user is already signed in to. HEADLESS is not an option — Chrome is
+  challenged even on a warmed profile that HOLDS a valid persisted
+  `cf_clearance`, with `--dump-dom`, with `--virtual-time-budget`, and with
+  `--disable-blink-features=AutomationControlled` — so a browser route must
+  place its window OFF the desktop (`browserfetch.WINDOW_POSITION`) rather
+  than hide it. RYM also THROTTLES this client (a burst of requests turns into
+  `403 Just a moment…` for a while, credentials or not) and rotates its own
+  `sec_*` tokens in `Set-Cookie`, so a jar read before the burst is not a jar
+  that works during it. And `Page.navigate`'s `errorText` (and a
+  `chrome-error:` location) must be treated as a FAILED fetch: Chrome's error
+  page carries no challenge marker, so it was being returned as "a page with
+  no genres" and reported as "no data".

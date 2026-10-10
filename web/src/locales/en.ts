@@ -535,6 +535,11 @@ export default {
   "cookies.keptHosts": "Only cookies for {hosts} are kept — everything else in the export is left out.",
   "cookies.importedAt": "Imported {when} — {count} cookie(s)",
   "cookies.keptCount": "{count} cookie(s) kept",
+  "cookies.fromBrowser": "Read from {browser}",
+  "cookies.fromBrowserTitle": "Read the session out of a browser you are already signed in to",
+  "cookies.fromBrowserHint": "No export and no pasting: the app takes the cookies that browser already holds for {host}, and stores that browser's own User-Agent with them — Cloudflare binds a clearance to the exact User-Agent that earned it, so the two have to travel together.",
+  "cookies.fromBrowserDone": "Read {count} cookie(s) from {browser}.",
+  "cookies.fromBrowserNone": "No browser with a cookie profile was found on this machine — install yt-dlp from Dependencies, then open {host} in the browser once.",
 
   "cookies.sectionTitle": "Cookie logins — import a cookies.txt",
 

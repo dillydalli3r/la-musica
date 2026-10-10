@@ -529,6 +529,30 @@ export interface CookieList {
   cookies: CookieEntry[];
 }
 
+/** One browser the app can read a session out of (`/api/cookies/browsers`).
+ *  `profiles` is how many cookie-bearing profiles were found for it, and
+ *  `user_agent` is the exact UA that browser sends — stored beside the cookie,
+ *  because a `cf_clearance` counts only alongside the UA that earned it. */
+export interface CookieBrowser {
+  id: string;
+  label: string;
+  profiles: number;
+  user_agent: string;
+}
+
+export interface CookieBrowsers {
+  browsers: CookieBrowser[];
+  installed: boolean;
+}
+
+/** What a browser read answered: the stored list plus what it managed to keep. */
+export interface CookieFromBrowserReply extends CookieList {
+  browser: string;
+  user_agent: string;
+  stored: number;
+  warnings: string[];
+}
+
 /** One credit row of `/api/credits`: who did what on a track or an album.
  *  `role` arrives already lower-cased and grouped-ready, `attributes` are the
  *  instrument / vocal part the relation stated, and `mbid` is empty on rows
@@ -3938,6 +3962,23 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text }),
     }, 60000),
+  /** The browsers this machine has a signed-in profile for, with the
+   *  User-Agent each one sends — `GET /api/cookies/browsers`. The panel offers
+   *  these as "read it from <browser>" instead of asking for an export. */
+  cookieBrowsers: () =>
+    json<CookieBrowsers>(`${API}/cookies/browsers`),
+  /** Read one source's credential out of a browser the user is already signed
+   *  in to — `POST /api/cookies/{source}/from-browser`. The server asks the
+   *  yt-dlp it ships for that browser's cookies, keeps only the ones this
+   *  source is sent, stores them AND that browser's User-Agent (Cloudflare
+   *  binds a `cf_clearance` to the UA that earned it, so the two travel
+   *  together). Answers with the stored list, like `cookieList`. */
+  cookiesFromBrowser: (source: "rym" | "aoty", browser: string) =>
+    json<CookieFromBrowserReply>(`${API}/cookies/${source}/from-browser`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ browser }),
+    }, 240000),
   /** The cookies ONE cookie login stores, with each cookie's own comment —
    *  `GET /api/cookies/{source}` (server/api_cookies.py). The same shape for
    *  the yt-dlp jar (`youtube`) and the RYM (`rym`) and AOTY (`aoty`)
