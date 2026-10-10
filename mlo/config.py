@@ -2032,6 +2032,20 @@ DEFAULT_CONFIG = {
     # when it has been over it (the chain's own one-line summary rides along).
     "notify_import_start": False,
     "notify_import_done": True,
+    # The master switch for the whole notification feature (server/events.py).
+    # Off, the server still publishes only the OUTCOME kinds — a result of work
+    # the user asked for, and the only word they get that it did not happen —
+    # and silences every "nice to know" kind (a wish landing, an import
+    # starting or finishing, a peer's download) on every device at once. That
+    # is what a single "do not notify me" control has to mean.
+    "notify_enabled": True,
+    # Whether those loud OUTCOME kinds (a failed download, an import short of a
+    # decision, a store the server pruned) are announced at all. This is the
+    # one switch that can silence them, and it ships ON: the guarantee that an
+    # acquisition outcome is never silent holds while it is. The master above
+    # never overrides it — with the master off and this on, outcomes still
+    # speak; with this off, nothing does.
+    "notify_outcomes": True,
     # UI language for the web app and the client shells. English is the
     # shipped language and the fallback for every key a locale does not
     # translate (web/src/locales). The library's own tag language — the one

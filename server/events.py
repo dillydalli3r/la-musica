@@ -51,11 +51,15 @@ really is waiting on a person, see spec R166), script_done / script_failed and
 grade_done (a run of the library scripts, from `/api/run`), update_available (a
 newer release exists).
 
-The OUTCOME kinds — download_failed and import_needs_data — are deliberately
-not switchable off in config: they are the only word the user gets that
-something they asked for did not happen, and the `notify_*` switches cover the
-"this is nice to know" ones (`notify_download_done`, `notify_import_ready` and
-the import start/done kinds).
+Two switches own the "do not tell me" side. `notify_enabled` is the master: off
+it silences every "nice to know" kind (`notify_download_done`,
+`notify_import_ready`, the import start/done kinds, the Soulseek ones) on every
+device at once — that is what one master control has to mean. It never silences
+an OUTCOME: download_failed, import_needs_data and storage_pruned are the only
+word the user gets that something they asked for did not happen, and they have
+their own switch. `notify_outcomes`, ON by default, is the ONE switch that can
+silence even them, which keeps the documented guarantee ("acquisition outcomes
+are never silent") for every config that predates it.
 
 Clients filter by `event`; unknown kinds must be ignored, not fatal, so a
 newer client can talk to an older server.
@@ -166,12 +170,55 @@ def _log_frames(since: float) -> list:
     return out
 
 
+# The OUTCOME kinds: a result of work the user asked for, and the only word
+# they get that it did not happen. The master `notify_enabled` never silences
+# one of these — only `notify_outcomes` can. Kept in step with the client's own
+# OUTCOME_KINDS (web/src/lib/notifications.ts), so neither half of the app is
+# louder than the other about which kinds are mandatory.
+_OUTCOME_KINDS = frozenset({
+    "download_failed",
+    "import_needs_data",
+    "storage_pruned",
+})
+
+# Machine SIGNALS, not user notices: `library_changed` says "the library moved,
+# drop what you derived from it" and is never listed or popped (the client
+# skips it too — see SILENT_KINDS in web/src/lib/notifications.ts). The master
+# switch must NOT touch one: silencing a refresh is not "do not tell me", it is
+# the app quietly going stale on every other client.
+_SIGNAL_KINDS = frozenset({
+    "library_changed",
+})
+
+
 def _notify_configured(kind: str, cfg: dict) -> bool:
     """Is this event kind switched on in the config?
+
+    Two switches gate the whole feature ahead of the per-kind ones: the master
+    `notify_enabled` (off silences every "nice to know" kind at once) and
+    `notify_outcomes` (the ONE switch that can silence an OUTCOME — see
+    `_OUTCOME_KINDS`). An outcome is never silenced by the master; that is the
+    documented guarantee, and `notify_outcomes` ships True to keep it for a
+    config that predates the key.
 
     Defaults are True: a server whose config predates these keys must still
     announce a found wish, which is the whole point of the feature.
     """
+    if not isinstance(cfg, dict):
+        return True
+    kind = str(kind or "")
+    if kind in _SIGNAL_KINDS:
+        # A refresh signal, not a notice: the master never silences it.
+        return True
+    if kind in _OUTCOME_KINDS:
+        # An outcome: the master never touches it, and `notify_outcomes` (ON by
+        # default) is the switch that finally can.
+        return bool(cfg.get("notify_outcomes", True))
+    # Everything else is narration the master can silence wholesale — checked
+    # FIRST, so a config with the feature off publishes nothing but outcomes
+    # whatever the per-kind switches say.
+    if not bool(cfg.get("notify_enabled", True)):
+        return False
     key = {
         "wish_found": "notify_wish_found",
         "download_done": "notify_download_done",
@@ -182,8 +229,6 @@ def _notify_configured(kind: str, cfg: dict) -> bool:
         "upload_started": "notify_soulseek_upload_start",
     }.get(kind)
     if not key:
-        return True
-    if not isinstance(cfg, dict):
         return True
     return bool(cfg.get(key, True))
 

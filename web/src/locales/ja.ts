@@ -188,6 +188,8 @@ export default {
   "settings.user_remove_self": "サインイン中のユーザーは削除できません",
   "settings.notifications": "通知",
   "settings.notifications_help": "判断が必要なインポート、完了したインポート、サーバーが自ら整理したストレージのデスクトップ通知。許可はクライアントごとに求めます。",
+  "settings.notify_master": "Notifications on this server",
+  "settings.notify_outcomes": "Outcome notices (failed download, an import needing a decision, pruned storage)",
 
   "page.home": "ホーム",
   "page.library": "ライブラリ",

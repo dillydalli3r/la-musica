@@ -22,6 +22,7 @@ Per-disc rip-log scoring: OPSnet Logchecker (PHP) scores each log directly
 via `php logchecker.phar analyze --no_text <log>` and returns the 0-100 score.
 No stub audio needed — Logchecker parses the log text itself.
 """
+import hashlib
 import os
 import re
 import subprocess
@@ -96,6 +97,46 @@ XLD_CRC_RE = re.compile(r"^CRC32 hash\s*:\s*([0-9A-Fa-f]{8})")
 XLD_TEST_CRC_RE = re.compile(r"^CRC32 hash\s+\(test run\)\s*:\s*([0-9A-Fa-f]{8})")
 XLD_SKIP_ZERO_RE = re.compile(r"^CRC32 hash\s+\(skip zero\)\s*:\s*([0-9A-Fa-f]{8})")
 ACCURATE_CRC_RE = re.compile(r"\[([0-9A-Fa-f]{8})\]")
+
+# The ripper a rip log's header names — the same three-way split Logchecker
+# makes (Ripper::EAC / Ripper::XLD / Ripper::WHIPPER). EAC and XLD keep the
+# fingerprints they always had; whipper's YAML log (whipper/result/logger.py)
+# begins with the header line it always writes,
+# "Log created by: whipper X.Y.Z (internal logger)".
+WHIPPER_HEADER_RE = re.compile(r"^Log created by:\s*whipper\b",
+                               re.MULTILINE | re.IGNORECASE)
+
+# whipper's YAML log keys each Tracks entry with an INDENTED "N:" line under a
+# top-level "Tracks:" section, and writes the extraction / test CRCs as
+# "Copy CRC: <HEX>" / "Test CRC: <HEX>" — a colon where EAC writes only a
+# space. Its TOC uses the SAME "N:" key shape (there the values are
+# Start/Length/…), so only the section header says which mapping a key opens.
+WHIPPER_SECTION_RE = re.compile(r"^Tracks:[ \t]*$")
+WHIPPER_TRACK_KEY_RE = re.compile(r"^  (\d+):[ \t]*$")
+WHIPPER_COPY_CRC_RE = re.compile(r"^Copy CRC\s*:\s*([0-9A-Fa-f]{8})")
+WHIPPER_TEST_CRC_RE = re.compile(r"^Test CRC\s*:\s*([0-9A-Fa-f]{8})")
+# whipper's TOC per-track length: "Length: mm:ss:ff", the same CD-frame time
+# EAC/XLD print in their pipe rows, written under the track's "N:" key.
+WHIPPER_TOC_RE = re.compile(
+    r"^  (\d+):[ \t]*$\n(?:^    \S[^\n]*$\n)*?^    Length: (\d+):(\d{2}):(\d{2})[ \t]*$",
+    re.MULTILINE,
+)
+
+
+def log_dialect(text):
+    """Which ripper wrote a rip log: 'whipper' | 'xld' | 'eac' | ''.
+
+    Read off the header each signs itself with — the split `parse_log_checksums`
+    and `check_log_checksum` branch on. EAC and XLD are recognised exactly as
+    they were before whipper was added, so no existing log changes dialect."""
+    if WHIPPER_HEADER_RE.search(text):
+        return "whipper"
+    if "X Lossless Decoder" in text or text.lstrip().startswith("XLD"):
+        return "xld"
+    if "Exact Audio Copy" in text:
+        return "eac"
+    return ""
+
 
 # A cue sheet's own tracklist: "  TRACK 01 AUDIO", the TITLE/PERFORMER lines
 # that belong to it, and the FILE line that names the audio it describes. The
@@ -342,10 +383,18 @@ def read_log_text(path):
 
 def parse_log_toc_seconds(text):
     """Total playtime of the log's 'TOC of the extracted CD' table, in
-    seconds (CD sectors are 1/75 s)."""
+    seconds (CD sectors are 1/75 s).
+
+    EAC and XLD print the table as pipe rows ("  1  | 00:00:00 | 03:41:34 |");
+    whipper's YAML log states the same per-track time as "Length: mm:ss:ff"
+    under each TOC "N:" key. Both spellings are read here, and they never
+    coincide: a whipper key line is "  1:" where the pipe rows need a '|'."""
     total = 0.0
     for m in TOC_ROW_RE.finditer(text):
         mins, secs, frames = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        total += mins * 60 + secs + frames / 75.0
+    for m in WHIPPER_TOC_RE.finditer(text):
+        mins, secs, frames = int(m.group(2)), int(m.group(3)), int(m.group(4))
         total += mins * 60 + secs + frames / 75.0
     return total
 
@@ -354,28 +403,59 @@ def parse_log_checksums(text):
     """Map track number -> CRC-32 hex (8 chars, uppercase) from a rip log.
 
     Walks the "Track  N" sections — EAC writes "Track  1", XLD "Track 01".
+    whipper's YAML log has no such header: its per-track block opens with an
+    INDENTED "N:" key under the "Tracks:" section and carries the extraction /
+    test CRCs as "Copy CRC: <HEX>" / "Test CRC: <HEX>" (a colon EAC omits).
 
     The EXTRACTION's CRC outranks a test run's, because that is the one that
     describes the bytes on disk: EAC's "Copy CRC" over its "Test CRC", and
     XLD's plain `CRC32 hash` over `CRC32 hash (test run)`. XLD writes the test
     run FIRST, so at equal priority a track whose first read had to be
     re-read (the CRCs then differ) was compared by the failed pass's value
-    instead of the audio's. The priorities are Copy CRC 4, EAC Test CRC 3,
-    XLD's plain CRC 2, XLD test run 1, an AccurateRip bracket 0. `CRC32 hash
-    (skip zero)` matches NONE of them: it skips zero samples, so it is a
-    different number and describes no file.
+    instead of the audio's. whipper's "Copy CRC:" keeps the same 4-vs-3
+    relation to its "Test CRC:" (its `Status: Error, CRC mismatch` is the
+    tracker's own note, not a value): Copy always wins. The priorities are
+    Copy CRC 4, EAC Test CRC 3, XLD's plain CRC 2, XLD test run 1, an
+    AccurateRip bracket 0. `CRC32 hash (skip zero)` matches NONE of them: it
+    skips zero samples, so it is a different number and describes no file.
     """
     per_track = {}
     priority = {}  # track -> priority level
     current = None
+    whipper = log_dialect(text) == "whipper"
+    in_tracks = False
     for raw in text.splitlines():
         line = raw.strip()
+        if whipper and WHIPPER_SECTION_RE.match(raw):
+            # A whipper TOC uses the same "N:" keys; only the Tracks section
+            # holds CRCs, so its header is what opens a key's block here.
+            in_tracks = True
+            continue
+        if whipper and in_tracks:
+            m = WHIPPER_TRACK_KEY_RE.match(raw)
+            if m:
+                current = int(m.group(1))
+                continue
         m = re.match(r"^Track\s+(\d{1,3})\b", line, re.IGNORECASE)
         if m:
             current = int(m.group(1))
             continue
         if current is None:
             continue
+        if whipper and in_tracks:
+            m = WHIPPER_COPY_CRC_RE.match(line)
+            if m:
+                # Copy is the extraction's own CRC: highest priority 4
+                if priority.get(current, -1) < 4:
+                    per_track[current] = m.group(1).upper()
+                    priority[current] = 4
+                continue
+            m = WHIPPER_TEST_CRC_RE.match(line)
+            if m:
+                if priority.get(current, -1) < 3:
+                    per_track[current] = m.group(1).upper()
+                    priority[current] = 3
+                continue
         m = COPY_CRC_RE.match(line)
         if m:
             # Copy is the extraction's own CRC: highest priority 4
@@ -2322,10 +2402,12 @@ def check_log_checksum(log_path):
       detail: human string or None
 
     EAC 1.0b1+ rip logs are UTF-16LE with BOM and carry a Rijndael checksum
-    (pypi `eac-logchecker`). XLD / older EAC logs that never had a checksum
-    return 'unsupported' so callers can treat them as PASS when the toggle is
-    on (avoids false-failing XLD collections). A log that claims a checksum
-    but fails verification returns 'invalid'.
+    (pypi `eac-logchecker`). Whipper's YAML log signs itself with a trailing
+    "SHA-256 hash:" of the log text, verified below over the raw bytes that
+    precede it. XLD / older EAC logs that never had a checksum return
+    'unsupported' so callers can treat them as PASS when the toggle is on
+    (avoids false-failing XLD collections). A log that claims a checksum but
+    fails verification returns 'invalid'.
 
     "Older EAC" is read off the log's OWN header: a version below 1.0 (the
     release the checksum arrived in, same boundary as the line above) is
@@ -2350,6 +2432,23 @@ def check_log_checksum(log_path):
             return (None, str(e)[:120])
         # Detect log flavour via decoded snippet
         txt = read_log_text(log_path)
+        # whipper signs its YAML log with a trailing SHA-256 of the log text
+        # itself: whipper/result/logger.py hashes the dumped log and appends
+        # "\nSHA-256 hash: %s\n". Verify over the RAW bytes that precede that
+        # line, so neither a decode nor a re-encode can change what was
+        # signed. A whipper log whose hash line is gone claims nothing and is
+        # 'unsupported' (the same R30 pass XLD gets) — the value is never
+        # guessed, and only a signature that IS there and does not match is
+        # 'invalid'.
+        if WHIPPER_HEADER_RE.search(txt):
+            m_hash = re.search(rb"\nSHA-256 hash: ([0-9A-Fa-f]{64})\s*$", raw)
+            if not m_hash:
+                return ("unsupported", "whipper log has no SHA-256 hash line")
+            want = m_hash.group(1).decode("ascii").upper()
+            got = hashlib.sha256(raw[:m_hash.start()]).hexdigest().upper()
+            if got != want:
+                return ("invalid", f"expected {want} computed {got}")
+            return ("ok", None)
         # XLD or non-EAC -> unsupported (no checksum to verify)
         if "X Lossless Decoder" in txt or txt.lstrip().startswith("XLD"):
             return ("unsupported", "XLD log has no EAC checksum")

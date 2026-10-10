@@ -93,6 +93,19 @@ def reset():
 def _init():
     with _lock:
         with _conn() as c:
+            # sqlite's defaults (rollback journal, synchronous=FULL, no
+            # auto_vacuum) cost a fsync per commit and leave freed pages in the
+            # file; this store gains a row on every play. WAL keeps the reader
+            # (the charts) off the writer's lock, NORMAL halves the fsyncs, and
+            # incremental auto_vacuum is what lets `record`'s retention prune
+            # hand freed bytes back to the filesystem. auto_vacuum goes FIRST:
+            # setting journal_mode writes the file header, after which the mode
+            # can no longer change without a VACUUM — and it must precede the
+            # first table for a fresh file to record it (an already-populated
+            # file only adopts it via VACUUM).
+            c.execute("PRAGMA auto_vacuum=INCREMENTAL")
+            c.execute("PRAGMA journal_mode=WAL")
+            c.execute("PRAGMA synchronous=NORMAL")
             # The key starts with `user`, like ratings and playlists' likes: two
             # people on one server may listen to the same track and neither may
             # see the other's history. `""` is the default/admin scope written
@@ -132,13 +145,45 @@ def album_of(path):
     return head if sep else ""
 
 
+def _prune(c, cfg=None, now=None):
+    """Drop plays past the configured retention; answer how many rows went.
+
+    `plays_retention_days` is OPTIONAL and defaults to OFF: 0, absent or
+    unreadable all mean "no prune", which is exactly what this store did
+    before the option existed, so an install that never sets it sees no
+    change. Only a positive number trims — the size bound is opt-in so the
+    safe direction (never losing history) is what doing nothing gives you.
+
+    The caller owns the transaction: the DELETE rides along with the insert,
+    and `record` reclaims the freed pages afterwards (`PRAGMA
+    incremental_vacuum` does nothing while a transaction is open).
+    """
+    if cfg is None:
+        try:
+            from mlo.config import load_config
+            cfg = load_config()
+        except Exception:
+            return 0
+    try:
+        days = float((cfg or {}).get("plays_retention_days", 0) or 0)
+    except (TypeError, ValueError):
+        days = 0.0
+    if days <= 0:
+        return 0
+    cutoff = (time.time() if now is None else float(now)) - days * 86400.0
+    return c.execute("DELETE FROM plays WHERE started_at < ?",
+                     (cutoff,)).rowcount
+
+
 def record(path, user="", at=None):
     """Store ONE play of *path* and answer what was written.
 
-    Deliberately ONE insert and no file I/O: this runs on the playback start
-    path, where opening the track to check it still exists would cost a stat on
-    every play. A path whose file is gone keeps its history like any other —
-    the store is a record of what was played, not a view of the library.
+    Deliberately ONE insert (plus the optional retention sweep, which reads the
+    config for `plays_retention_days`) and no stat of the track itself: this
+    runs on the playback start path, where opening the track to check it still
+    exists would cost a stat on every play. A path whose file is gone keeps its
+    history like any other — the store is a record of what was played, not a
+    view of the library.
     """
     p = api_path(path)
     if not p:
@@ -149,6 +194,15 @@ def record(path, user="", at=None):
         with _conn() as c:
             c.execute("INSERT INTO plays (user, path, album, started_at) "
                       "VALUES (?, ?, ?, ?)", (str(user or ""), p, album, started))
+            pruned = _prune(c)
+        # AFTER the `with` commits: `PRAGMA incremental_vacuum` is a no-op
+        # inside a transaction, and reclaiming the pruned rows' pages is the
+        # point of pruning a database at all.
+        if pruned:
+            try:
+                c.execute("PRAGMA incremental_vacuum")
+            except sqlite3.Error:
+                pass
     return {"path": p, "album": album, "started_at": started}
 
 

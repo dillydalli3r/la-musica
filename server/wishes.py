@@ -122,6 +122,14 @@ def _init(path=None):
         conn = sqlite3.connect(path or db_path(), timeout=30)
         conn.row_factory = sqlite3.Row
         try:
+            # WAL + NORMAL (sqlite defaults are a rollback journal and a fsync
+            # per commit) and incremental auto_vacuum. auto_vacuum goes FIRST:
+            # setting journal_mode writes the file header, after which the
+            # auto_vacuum mode can no longer change without a VACUUM — and it
+            # must also precede the first table for a fresh file to record it.
+            conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
             with conn as c:
                 _create_schema(c)
         finally:

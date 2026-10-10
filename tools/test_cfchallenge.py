@@ -54,6 +54,8 @@ ok(cfchallenge.is_challenge("<html>enable JavaScript and cookies to continue</ht
 # A local FlareSolverr-shaped stub, and a stub site behind it
 # --------------------------------------------------------------------------- #
 class _Handler(http.server.BaseHTTPRequestHandler):
+    busy_hits = 0               # GETs to /busy, to count the transient retries
+
     def log_message(self, *a):
         pass
 
@@ -88,6 +90,17 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                         {"name": "__cf_bm", "value": "bm"}]}})
 
     def do_GET(self):
+        if self.path.startswith("/busy"):
+            # A site that is merely BUSY, not challenging: a 429 with a body
+            # that is not the interstitial. Never a page, always retried.
+            type(self).busy_hits += 1
+            body = b"busy"
+            self.send_response(429)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         # The site itself: challenge without the clearance cookie, the page with.
         if "cf_clearance=cleared-token" in (self.headers.get("Cookie") or ""):
             body = PAGE.encode("utf-8")
@@ -168,6 +181,74 @@ try:
                                    solve_on_challenge=False)
     ok(clean["ok"] is True and clean["via"] == "http" and clean["html"] == PAGE,
        f"a plain page is read without a solver: {clean}")
+
+    # 4. A 429/5xx that is NOT a challenge is transient, never a page: it is
+    # retried (FETCH_RETRIES) and, still busy, reported as a failure — so a
+    # caller reports a refusal instead of parsing it to None as "no data".
+    cfchallenge.clear()
+    _Handler.busy_hits = 0
+    _real_interval = cfchallenge.FETCH_MIN_INTERVAL
+    cfchallenge.FETCH_MIN_INTERVAL = 0.0    # the pace is proved in the next test
+    try:
+        busy = cfchallenge.fetch_page(f"{base}/busy", {}, host="busy.example",
+                                      solve_on_challenge=False)
+    finally:
+        cfchallenge.FETCH_MIN_INTERVAL = _real_interval
+    ok(busy["ok"] is False and busy["status"] == 429
+       and busy["challenge"] is False and busy["html"] == ""
+       and busy["via"] == "none",
+       f"an exhausted 429 is a failure, not a page: {busy}")
+    ok(_Handler.busy_hits == cfchallenge.FETCH_RETRIES + 1,
+       f"a busy host is tried {cfchallenge.FETCH_RETRIES} times more: "
+       f"{_Handler.busy_hits}")
+
+    # Retry-After is read as delta-seconds OR an HTTP-date; nonsense is ignored
+    # (the per-host pace still spaces the retry).
+    class _Resp:
+        def __init__(self, value):
+            self.headers = {"Retry-After": value}
+
+    ok(cfchallenge._retry_after(_Resp("2")) == 2.0, "Retry-After delta-seconds")
+    ok(cfchallenge._retry_after(_Resp("Wed, 21 Oct 2099 07:28:00 GMT")) > 0,
+       "Retry-After HTTP-date")
+    ok(cfchallenge._retry_after(_Resp("nonsense")) == 0.0,
+       "a nonsense Retry-After is not honoured")
+
+    # ----------------------------------------------------------------------- #
+    # Pacing lives in fetch_page, not the caller: consecutive GETs to ONE host
+    # are >= FETCH_MIN_INTERVAL apart, and two hosts never stall each other. A
+    # fake clock makes the sleeps measurable with no real waiting.
+    # ----------------------------------------------------------------------- #
+    class _Clock:
+        def __init__(self):
+            self.t = 1000.0
+            self.slept = 0.0
+
+        def time(self):
+            return self.t
+
+        def sleep(self, seconds):
+            self.slept += seconds
+            self.t += seconds
+
+    _real_time = cfchallenge.time
+    cfchallenge._FETCH_GATES.clear()
+    clock = _Clock()
+    cfchallenge.time = clock
+    try:
+        for _ in range(4):
+            cfchallenge.fetch_page(f"{base}/plain", {}, host="pace-a.example",
+                                   solve_on_challenge=False)
+        ok(clock.slept >= 3 * cfchallenge.FETCH_MIN_INTERVAL,
+           f"4 fetches to one host sleep >= 3 intervals: {clock.slept}")
+        before = clock.slept
+        cfchallenge.fetch_page(f"{base}/plain", {}, host="pace-b.example",
+                               solve_on_challenge=False)
+        ok(clock.slept == before,
+           f"a different host is not stalled by the first: {clock.slept - before}")
+    finally:
+        cfchallenge.time = _real_time
+        cfchallenge._FETCH_GATES.clear()
 
     # ----------------------------------------------------------------------- #
     # A solve the solver LOST is remembered per host — the fix for the import

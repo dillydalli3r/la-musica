@@ -190,6 +190,47 @@ events_mod.flush_coalesced()
 check("...and a failed run does not add a summary to the failure that spoke",
       [f["event"] for f in frames()] == ["download_failed"], str([f["event"] for f in frames()]))
 
+print("== the master switch and the outcome switch ==")
+from mlo.config import DEFAULT_CONFIG  # noqa: E402
+
+# `notify_enabled` is the master: off, it silences every "nice to know" kind on
+# every device, because the server publishes nothing of them at all. It never
+# silences an OUTCOME — the only word the user gets that something they asked
+# for did not happen. `notify_outcomes`, ON by default, is the one switch that
+# finally can. Both ship True, so a config written before they existed keeps
+# today's behaviour.
+check("the master ships ON and the outcome switch ships ON",
+      DEFAULT_CONFIG.get("notify_enabled") is True
+      and DEFAULT_CONFIG.get("notify_outcomes") is True)
+check("the master silences a wish, a download and an import",
+      events_mod._notify_configured("wish_found", {"notify_enabled": False}) is False
+      and events_mod._notify_configured("download_done", {"notify_enabled": False}) is False
+      and events_mod._notify_configured("import_done", {"notify_enabled": False}) is False
+      and events_mod._notify_configured("upload_started", {"notify_enabled": False}) is False)
+check("...but never an outcome",
+      events_mod._notify_configured("download_failed", {"notify_enabled": False}) is True
+      and events_mod._notify_configured("import_needs_data", {"notify_enabled": False}) is True
+      and events_mod._notify_configured("storage_pruned", {"notify_enabled": False}) is True)
+check("...and a machine signal (library_changed) is never silenced either",
+      events_mod._notify_configured("library_changed", {"notify_enabled": False}) is True)
+check("the outcome switch is the one that silences them",
+      events_mod._notify_configured("download_failed", {"notify_outcomes": False}) is False
+      and events_mod._notify_configured("import_needs_data", {"notify_outcomes": False}) is False
+      and events_mod._notify_configured("storage_pruned", {"notify_outcomes": False}) is False)
+check("...and the per-kind switches still rule with both masters on",
+      events_mod._notify_configured("wish_found", {"notify_wish_found": False}) is False
+      and events_mod._notify_configured("import_done", {"notify_import_done": False}) is False)
+drain()
+events_mod.emit("download_done", "Imported Four", "", {}, config={"notify_enabled": False})
+check("...so a silenced kind really never reaches the wire", frames() == [], str(frames()))
+drain()
+events_mod.emit("import_needs_data", "Needs a decision", "", {},
+                config={"notify_enabled": False})
+check("...while an outcome speaks even with the master off",
+      [f["event"] for f in frames()] == ["import_needs_data"],
+      str([f["event"] for f in frames()]))
+drain()
+
 print("== a finished script run (/api/run) ==")
 import server.script_runners as script_runners  # noqa: E402
 

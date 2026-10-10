@@ -80,6 +80,64 @@ _FAILED = {}
 _STARTED_FOR = {"at": 0.0, "ok": False}
 _START_TTL = 60.0
 
+# Outbound pacing for the live scrapers. `fetch_page` is the ONE gate: it keeps
+# consecutive GETs to the same host at least this far apart, so a caller that
+# paced as well (aoty.fetch used to) would only make every request pay twice.
+# Both scraped sources ask for one request a second.
+FETCH_MIN_INTERVAL = 1.0
+# A 429 or a 5xx that is NOT the interstitial is the site being busy, not an
+# answer, so it is retried this many times before the fetch fails.
+FETCH_RETRIES = 2
+# {host: [lock, last_ts]} — one lock and one timestamp PER host, so two hosts
+# never wait on each other while each host's own requests stay serialised.
+_FETCH_GATES: dict = {}
+_FETCH_GATES_LOCK = threading.Lock()
+
+
+def _pace(host):
+    """Sleep until *host*'s previous request is ``FETCH_MIN_INTERVAL`` old.
+
+    A blank host has nothing to key the gate on and is not paced."""
+    if not host:
+        return
+    with _FETCH_GATES_LOCK:
+        gate = _FETCH_GATES.get(host)
+        if gate is None:
+            gate = [threading.Lock(), 0.0]
+            _FETCH_GATES[host] = gate
+    with gate[0]:
+        wait = FETCH_MIN_INTERVAL - (time.time() - gate[1])
+        if wait > 0:
+            time.sleep(wait)
+        gate[1] = time.time()
+
+
+def _retry_after(r):
+    """Seconds a response's ``Retry-After`` asks us to wait, or 0.0.
+
+    The header is delta-seconds or an HTTP-date; anything else, a header already
+    in the past, or a body-less response is 0.0 — the per-host pace then spaces
+    the retry regardless."""
+    try:
+        raw = str(r.headers.get("Retry-After") or "").strip()
+    except Exception:
+        return 0.0
+    if not raw:
+        return 0.0
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        pass
+    try:
+        import calendar
+        from email.utils import parsedate
+        when = parsedate(raw)
+        if when is None:
+            return 0.0
+        return max(0.0, float(calendar.timegm(when)) - time.time())
+    except Exception:
+        return 0.0
+
 
 def host_of(url):
     """The hostname of *url* — the key everything per-host is kept under.
@@ -384,17 +442,36 @@ def fetch_page(url, cfg=None, *, headers=None, cookies=None, params=None,
         request_headers.setdefault("User-Agent", ua)
     status = None
     text = ""
-    try:
-        from server import httpclient  # noqa: F401
-        import httpx
-        r = httpx.get(url, params=params or {}, headers=request_headers,
-                      cookies=jar or None, timeout=timeout,
-                      follow_redirects=True)
-        status, text = r.status_code, (r.text or "")
-    except Exception as e:
-        status, text = None, f"__error__:{type(e).__name__}"
+    r = None
+    for attempt in range(FETCH_RETRIES + 1):
+        _pace(host)                 # the ONE per-host gate — see FETCH_MIN_INTERVAL
+        try:
+            from server import httpclient  # noqa: F401
+            import httpx
+            r = httpx.get(url, params=params or {}, headers=request_headers,
+                          cookies=jar or None, timeout=timeout,
+                          follow_redirects=True)
+            status, text = r.status_code, (r.text or "")
+        except Exception as e:
+            r = None
+            status, text = None, f"__error__:{type(e).__name__}"
+        # A 429 or a 5xx that is NOT the interstitial is the site being busy,
+        # not an answer, so it must not be parsed as a page: retry it, spaced by
+        # the per-host pace above plus any Retry-After the site named.
+        busy = (r is not None and not is_challenge(text, status)
+                and (status == 429 or (status or 0) >= 500))
+        if not busy or attempt >= FETCH_RETRIES:
+            break
+        wait = _retry_after(r)
+        if wait > 0:
+            time.sleep(wait)
 
     if not text.startswith("__error__") and not is_challenge(text, status):
+        if r is not None and (status == 429 or (status or 0) >= 500):
+            # The retries above were not enough: an exhausted refusal is no
+            # page — the caller must report a failure, not "no data".
+            return {"ok": False, "html": "", "status": status,
+                    "challenge": False, "via": "none"}
         return {"ok": True, "html": text, "status": status,
                 "challenge": False, "via": "http"}
 

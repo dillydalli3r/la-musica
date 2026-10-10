@@ -39,7 +39,6 @@ from __future__ import annotations
 
 import html as _html
 import re
-import threading
 import time
 from datetime import datetime, timezone
 from urllib.parse import quote_plus, urlparse
@@ -60,10 +59,6 @@ AOTY_HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
     "Upgrade-Insecure-Requests": "1",
 }
-
-_LAST = 0.0
-_MIN_INTERVAL = 1.0            # AOTY's own etiquette: one request a second
-_PACE_LOCK = threading.Lock()  # the 1 req/s pacing, held across callers
 
 # The last fetch's outcome, for the report — see `last_response`. AOTY has ONE
 # route (live), so the difference between "AOTY refused us" (a Cloudflare
@@ -198,15 +193,12 @@ def fetch(path, cfg=None):
     transient refusal is NOT one of them: only a page AOTY really served, or a
     real "no such page", is worth remembering.
     """
-    global _LAST, _LAST_INFO
+    global _LAST_INFO
     if not path:
         return None
     url = path if path.startswith("http") else f"{AOTY_BASE}{path}"
-    with _PACE_LOCK:
-        wait = _MIN_INTERVAL - (time.time() - _LAST)
-        if wait > 0:
-            time.sleep(wait)
-        _LAST = time.time()
+    # Pacing is `cfchallenge.fetch_page`'s alone now: it keys the 1 req/s per
+    # host, so a gate here too would only make every request pay twice.
     got = cfchallenge.fetch_page(url, cfg, headers=headers(cfg),
                                  cookies=dict(cookie_pairs(cfg)), timeout=25.0,
                                  host="albumoftheyear.org")

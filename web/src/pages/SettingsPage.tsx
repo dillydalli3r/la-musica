@@ -1454,7 +1454,7 @@ export default function SettingsPage() {
     // not part of any field group, so they are seeded explicitly — without
     // that they render unchecked while the server has them on (the default),
     // and the first click would set the value to true instead of false.
-    .concat("ui_locale", "notify_wish_found", "notify_import_start", "notify_import_done", "notify_soulseek_download_start", "notify_soulseek_upload_start");
+    .concat("ui_locale", "notify_enabled", "notify_outcomes", "notify_wish_found", "notify_download_done", "notify_import_ready", "notify_import_start", "notify_import_done", "notify_soulseek_download_start", "notify_soulseek_upload_start");
   const [scriptCfg, setScriptCfg] = useState<Record<string, unknown>>({});
   const setCfg = (k: string, v: unknown) => setScriptCfg((c) => ({ ...c, [k]: v }));
 
@@ -1577,6 +1577,8 @@ export default function SettingsPage() {
    *  client still asks for its own OS permission below. */
   const NOTIFY_KEYS = [
     { k: "notify_wish_found", label: "Wish found on Soulseek" },
+    { k: "notify_download_done", label: "Download finished" },
+    { k: "notify_import_ready", label: "Album ready to import" },
     { k: "notify_import_start", label: "Import started (moving in, then the chain)" },
     { k: "notify_import_done", label: "Import finished (with the chain's summary)" },
     { k: "notify_soulseek_download_start", label: "Soulseek download started" },
@@ -2810,6 +2812,20 @@ export default function SettingsPage() {
                 {t("settings.notifications")}
               </div>
               <p className="text-[11px] text-zinc-600 leading-relaxed">{t("settings.notifications_help")}</p>
+              {/* The two switches that own the whole feature come first, ahead
+                  of the per-kind ones: the master silences every "nice to
+                  know" kind at once, and the outcome switch is the only one
+                  that can silence the loud outcome kinds (it ships on). */}
+              <div className="flex flex-wrap gap-x-6 gap-y-1.5">
+                <label className="flex items-center gap-2 text-xs text-zinc-200 cursor-pointer select-none">
+                  <input type="checkbox" checked={!!scriptCfg.notify_enabled} onChange={(e) => setCfg("notify_enabled", e.target.checked)} />
+                  {t("settings.notify_master")}
+                </label>
+                <label className="flex items-center gap-2 text-xs text-zinc-300 cursor-pointer select-none">
+                  <input type="checkbox" checked={!!scriptCfg.notify_outcomes} onChange={(e) => setCfg("notify_outcomes", e.target.checked)} />
+                  {t("settings.notify_outcomes")}
+                </label>
+              </div>
               <div className="flex flex-wrap items-center gap-2">
                 <button
                   className="btn-ghost !py-1.5 text-xs tap"

@@ -1,4 +1,5 @@
 import react from '@vitejs/plugin-react'
+import { fileURLToPath } from 'node:url'
 import { defineConfig, type Plugin } from 'vite'
 
 /** List the app SHELL for the service worker.
@@ -53,6 +54,9 @@ function precacheManifest(): Plugin {
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react(), precacheManifest()],
+  // `@/…` resolves to `src/…` (declared for TypeScript in tsconfig.app.json):
+  // the alias the shadcn/ui tooling and the components/ui layer use.
+  resolve: { alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) } },
   // The proxy target is the scratch server the dev session drives, not a
   // hardcoded 8000: that port is the owner's live install, and a dev server
   // proxying to it would let a click in a test bed hit the real library.

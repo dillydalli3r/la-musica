@@ -10,6 +10,12 @@
 
     /* Bundler mode */
     "moduleResolution": "bundler",
+    /* The `@/` alias shadcn/ui's tooling (and the new components/ui layer)
+       speaks. The rest of the app keeps its relative imports — this exists so
+       `npx shadcn add <component>` can drop a file that resolves, nothing
+       more. No `baseUrl`: TypeScript 6 deprecates it (TS5101), and `paths`
+       resolves relative to this tsconfig on its own. */
+    "paths": { "@/*": ["./src/*"] },
     "allowImportingTsExtensions": true,
     "verbatimModuleSyntax": true,
     "moduleDetection": "force",

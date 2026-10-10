@@ -122,6 +122,14 @@ def _conn():
 def _init():
     with _lock:
         with _conn() as c:
+            # WAL + NORMAL (sqlite defaults are a rollback journal and a fsync
+            # per commit) and incremental auto_vacuum. auto_vacuum goes FIRST:
+            # setting journal_mode writes the file header, after which the
+            # auto_vacuum mode can no longer change without a VACUUM — and it
+            # must also precede the first table for a fresh file to record it.
+            c.execute("PRAGMA auto_vacuum=INCREMENTAL")
+            c.execute("PRAGMA journal_mode=WAL")
+            c.execute("PRAGMA synchronous=NORMAL")
             c.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS artist_watch (

@@ -5,6 +5,7 @@ evaluator move (server.naming re-exports it).
 
 Run:  python tools/test_grading_paths.py
 """
+import hashlib
 import os
 import shutil
 import subprocess
@@ -1761,6 +1762,128 @@ ok([round(r["seconds"], 2) for r in _discs.log_track_rows(XLD_SAMPLE)]
 ok(_discs._norm_name(_discs.parse_log_track_files(XLD_SAMPLE)[1])
    == _discs._norm_name("01 - Burn the Witch.flac"),
    "the RIPPER's own Filename still names the local file once normalised")
+
+# ----------------------------------------------------------------------
+# whipper rip logs: a YAML log, read like EAC/XLD once its dialect is known
+# ----------------------------------------------------------------------
+print("== whipper rip logs ==")
+# whipper writes its log as YAML (whipper/result/logger.py) and signs it with a
+# trailing SHA-256. The body below is the upstream project's own
+# test_result_logger.log verbatim; that checked-in fixture's hash line is STALE
+# (it does not match the file's own bytes: sha256 of its body is F3B0DB4B…, not
+# the 2B176D8C… it stores), so this fixture re-signs the body exactly the way
+# whipper does — sha256(body), then "\nSHA-256 hash: <HEX>\n".
+# The TOC lists two tracks (the release holds thirteen), and its "N:" keys are
+# the SAME shape the Tracks section uses, so only the "Tracks:" header tells
+# the parser which mapping a key opens. `Copy CRC:`/`Test CRC:` carry the colon
+# EAC's "Copy CRC "/"Test CRC " never do.
+WHIPPER_BODY = """\
+Log created by: whipper 0.7.4.dev87+gb71ec9f.d20191026 (internal logger)
+Log creation date: 2019-10-26T14:25:02Z
+
+Ripping phase information:
+  Drive: HL-DT-STBD-RE  WH14NS40 (revision 1.03)
+  Extraction engine: cdparanoia cdparanoia III 10.2 libcdio 2.0.0 x86_64-pc-linux-gnu
+  Defeat audio cache: true
+  Read offset correction: 6
+  Overread into lead-out: false
+  Gap detection: cdrdao 1.2.4
+  CD-R detected: false
+
+CD metadata:
+  Release:
+    Artist: Example - Symbol - Artist
+    Title: 'Album With: - Dashes'
+  CDDB Disc ID: c30bde0d
+  MusicBrainz Disc ID: eyjySLXGdKigAjY3_C0nbBmNUHc-
+  MusicBrainz lookup URL: https://musicbrainz.org/cdtoc/attach?toc=1+13+228039+150+16414+33638+51378+69369+88891+104871+121645+138672+160748+178096+194680+212628&tracks=13&id=eyjySLXGdKigAjY3_C0nbBmNUHc-
+
+TOC:
+  1:
+    Start: 00:00:00
+    Length: 03:36:64
+    Start sector: 0
+    End sector: 16263
+
+  2:
+    Start: 03:36:64
+    Length: 03:49:49
+    Start sector: 16264
+    End sector: 33487
+
+Tracks:
+  1:
+    Filename: ./soundtrack/Various Artists - Shark Tale - Motion Picture Soundtrack/01. Sean Paul & Ziggy Marley - Three Little Birds.flac
+    Peak level: 0.90036
+    Pre-emphasis:
+    Extraction speed: 7.0 X
+    Extraction quality: 100.00 %
+    Test CRC: 0025D726
+    Copy CRC: 0025D726
+    AccurateRip v1:
+      Result: Found, exact match
+      Confidence: 14
+      Local CRC: 95E6A189
+      Remote CRC: 95E6A189
+    AccurateRip v2:
+      Result: Found, exact match
+      Confidence: 11
+      Local CRC: 113FA733
+      Remote CRC: 113FA733
+    Status: Copy OK
+
+  2:
+    Filename: ./soundtrack/Various Artists - Shark Tale - Motion Picture Soundtrack/02. Christina Aguilera feat. Missy Elliott - Car Wash (Shark Tale mix).flac
+    Peak level: 0.972351
+    Pre-emphasis:
+    Extraction speed: 7.7 X
+    Extraction quality: 100.00 %
+    Test CRC: F77C14CB
+    Copy CRC: F77C14CB
+    AccurateRip v1:
+      Result: Found, exact match
+      Confidence: 14
+      Local CRC: 0B3316DB
+      Remote CRC: 0B3316DB
+    AccurateRip v2:
+      Result: Found, exact match
+      Confidence: 10
+      Local CRC: A0AE0E57
+      Remote CRC: A0AE0E57
+    Status: Copy OK
+
+Conclusive status report:
+  AccurateRip summary: All tracks accurately ripped
+  Health status: No errors occurred
+  EOF: End of status report
+"""
+WHIPPER_SAMPLE = WHIPPER_BODY + "\nSHA-256 hash: %s\n" % (
+    hashlib.sha256(WHIPPER_BODY.encode("utf-8")).hexdigest().upper())
+ok(_discs.log_dialect(WHIPPER_SAMPLE) == "whipper",
+   "a whipper log is detected from its 'Log created by: whipper' header")
+ok(_discs.log_dialect(XLD_SAMPLE) == "xld"
+   and _discs.log_dialect("Exact Audio Copy v1.3\n") == "eac",
+   "EAC / XLD keep the dialect they always had")
+_whipper_crcs = _discs.parse_log_checksums(WHIPPER_SAMPLE)
+ok(_whipper_crcs == {1: "0025D726", 2: "F77C14CB"},
+   "the YAML Tracks section's `Copy CRC:` (the colon EAC omits) is read as the "
+   f"track's CRC ({_whipper_crcs})")
+ok(round(_discs.parse_log_toc_seconds(WHIPPER_SAMPLE), 4) == 446.5067,
+   "and the TOC's per-track `Length: mm:ss:ff` totals the disc "
+   f"({_discs.parse_log_toc_seconds(WHIPPER_SAMPLE)})")
+# The log signs itself: the trailing SHA-256 covers the bytes that precede it.
+_whipper_path = os.path.join(tmp, "whipper.log")
+with open(_whipper_path, "w", encoding="utf-8", newline="\n") as fh:
+    fh.write(WHIPPER_SAMPLE)
+_whipper_state = _discs.check_log_checksum(_whipper_path)
+ok(_whipper_state == ("ok", None),
+   f"and its trailing SHA-256 verifies ({_whipper_state})")
+with open(_whipper_path, "w", encoding="utf-8", newline="\n") as fh:
+    fh.write(WHIPPER_SAMPLE.replace("  EOF: End of status report",
+                                    "  EOF: End of status report "))
+_whipper_state = _discs.check_log_checksum(_whipper_path)
+ok(_whipper_state[0] == "invalid" and "expected" in (_whipper_state[1] or ""),
+   f"a doctored whipper log fails its own signature ({_whipper_state})")
 
 # …and the TOC is what attributes a log to its disc when its NAME does not
 # (rename_logs_for_discs step 3, which the real owner's log needs): the two

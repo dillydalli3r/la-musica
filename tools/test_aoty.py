@@ -168,8 +168,8 @@ ok(intg._genre_source_skip("albumoftheyear",
 # `cfchallenge.fetch_page` is the seam `fetch` reads; stubbing it keeps this
 # offline. A CHALLENGE is not a page: `fetch` returns None AND `last_response`
 # says why, so the genre chain can report a refusal rather than "no data" and
-# can refuse to remember it as a 30-day negative.
-aoty._MIN_INTERVAL = 0.0
+# can refuse to remember it as a 30-day negative. (The per-host pace now lives
+# in cfchallenge.fetch_page, not on aoty — and the seam below stubs it out.)
 _real_fetch_page = aoty.cfchallenge.fetch_page
 
 

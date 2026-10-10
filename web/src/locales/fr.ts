@@ -188,6 +188,8 @@ export default {
   "settings.user_remove_self": "Vous ne pouvez pas supprimer l'utilisateur avec lequel vous êtes connecté",
   "settings.notifications": "Notifications",
   "settings.notifications_help": "Notifications de bureau pour les imports en attente d’une décision, les imports terminés et les stockages que le serveur a purgés lui-même. Chaque client demande sa propre autorisation.",
+  "settings.notify_master": "Notifications on this server",
+  "settings.notify_outcomes": "Outcome notices (failed download, an import needing a decision, pruned storage)",
 
   "page.home": "Accueil",
   "page.library": "Bibliothèque",

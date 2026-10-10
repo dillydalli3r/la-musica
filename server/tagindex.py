@@ -20,8 +20,9 @@ served only when that signature matches EXACTLY, so:
     album is read again — a changed file is never served from the index;
   * a file deleted drops its line from the signature, and an album whose folder
     is gone is pruned;
-  * a settings change moves the config key (the whole config, so no option can
-    be forgotten), and entries computed under other settings are unreachable.
+  * a settings change moves the config key (a hash of the whole config, so no
+    option can be forgotten), and entries computed under other settings are
+    unreachable.
 
 App state OUTSIDE the album folder also reaches a payload — `mlo.audit`'s
 evidence store is one JSON file for the whole library, and it is what the
@@ -40,6 +41,7 @@ contents, only the payload the API would have served.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
 import sqlite3
@@ -129,6 +131,9 @@ def _connect(cfg):
         try:
             os.makedirs(os.path.dirname(path), exist_ok=True)
             conn = sqlite3.connect(path, timeout=10.0, check_same_thread=False)
+            # auto_vacuum BEFORE journal_mode: the latter writes the header,
+            # which freezes the auto_vacuum mode for the file's life.
+            conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
             # The tables first: reading the schema version from a database that
@@ -156,16 +161,25 @@ def _connect(cfg):
 
 
 def config_key(cfg) -> str:
-    """The settings half of an index key: the WHOLE config, canonically.
+    """The settings half of an index key: a short hash of the WHOLE config.
 
     Not a list of the options that matter today — that list is what a future
     option gets forgotten from, and a payload computed under other settings
     would then be served as if it were this one's.
+
+    The HASH is the key, not the canonical dump itself: the dump is the
+    `album_payload` PRIMARY KEY, so a ~2 KB settings JSON was most of every
+    row and each settings change wrote a full parallel set of rows (all of
+    them unreachable, and not swept until `prune`'s year-old rule reached
+    them). A slice of the sha256 of the same canonical dump still moves
+    whenever any byte of the config moves — the invalidation argument is
+    unchanged — while a row key stays a fixed 16 characters.
     """
     try:
-        return json.dumps(cfg, sort_keys=True, default=str, separators=(",", ":"))
+        raw = json.dumps(cfg, sort_keys=True, default=str, separators=(",", ":"))
     except Exception:
         return ""
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
 def _entry_stamp(path) -> str:
@@ -335,9 +349,9 @@ def cached_album(album_dir, cfg, light, builder, cfg_key=None):
     are transient answers that must not be pinned.
 
     *cfg_key* is the caller's `config_key(cfg)` when a whole build already
-    computed it: the key is a canonical dump of the whole config, and a build
-    asking for it per album would pay that dump a thousand times for one
-    answer that cannot change while the build runs.
+    computed it: the key carries a hash of the whole config, and a build asking
+    for it per album would pay that canonical dump + digest a thousand times
+    for one answer that cannot change while the build runs.
     """
     sig = dir_signature(album_dir, cfg)
     if sig is None:

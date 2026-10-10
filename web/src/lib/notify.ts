@@ -1,12 +1,14 @@
-import { IN_TAURI, getToken, onAuthLost, serverUrl } from "../api";
+import { IN_TAURI, api, getToken, onAuthLost, serverUrl } from "../api";
 import { t } from "./i18n";
 import { toast } from "../store";
 import {
   OS_KINDS,
-  PUSH_KINDS,
   SILENT_KINDS,
   ingest,
+  isMasterSilenced,
   openNotification,
+  pushKinds,
+  setNotifyEnabled,
   type NotificationRecord,
   type NotifyEvent,
 } from "./notifications";
@@ -313,8 +315,10 @@ async function registerSubscription(
     keys: sub.keys,
     // What this device asked to be woken for (lib/notifications.ts). The
     // server honours it per subscription, so a device that asked for less is
-    // not woken for the rest.
-    kinds: Object.keys(PUSH_KINDS),
+    // not woken for the rest. `pushKinds()` narrows the set by the master
+    // switch, so a device never asks to be woken for a kind the server has
+    // been told not to publish.
+    kinds: pushKinds(),
   });
   rememberPushEndpoint(sub.endpoint);
 }
@@ -433,6 +437,10 @@ export async function sendTestPush(): Promise<PushTestResult> {
  *  that deserve one and falls back to a toast otherwise — a toast is not a
  *  downgrade the user should have to discover. */
 export async function showNotification(ev: AppEvent, rec: NotificationRecord): Promise<void> {
+  // The master switch (config `notify_enabled`) silences non-outcome kinds on
+  // this client too — no OS popup, no toast. The tray already skipped such a
+  // frame (`ingest`), so nothing has been logged for it either.
+  if (isMasterSilenced(ev.event)) return;
   const title = ev.title || t("notify.event");
   const body = ev.body || "";
   if (!OS_KINDS[ev.event]) {
@@ -556,8 +564,13 @@ function handle(raw: string) {
   // A SILENT kind is a signal, not an outcome: it refreshes screens and is
   // never listed (see SILENT_KINDS).
   const silent = SILENT_KINDS[frame.event] === true;
-  const rec = silent ? null : ingest(frame);
-  if (!silent && !rec) return;
+  // The master switch (config `notify_enabled`) silences a non-outcome kind:
+  // no tray entry (ingest answers null) and no OS popup. It is NOT the same as
+  // a replayed frame — the screens listening below still hear it — so it is
+  // told apart rather than folded into the "already seen" early return.
+  const silenced = isMasterSilenced(frame.event);
+  const rec = silent || silenced ? null : ingest(frame);
+  if (!silent && !silenced && !rec) return;
   for (const fn of eventListeners) {
     try {
       fn(frame.event);
@@ -569,10 +582,27 @@ function handle(raw: string) {
   void showNotification(frame, rec);
 }
 
+/** One read of the server's master notification switch (`notify_enabled`),
+ *  handed to the tray (lib/notifications.ts). The server already refuses to
+ *  PUBLISH non-outcome kinds with it off; this is the client's own belt to
+ *  that brace — a frame that raced the config call, or a locally derived
+ *  entry, must not pop up on a client told to be quiet. A config that cannot
+ *  be read keeps the shipped default (on), which is the choice the server
+ *  itself makes when its config is unreadable. */
+async function syncNotifyMaster(): Promise<void> {
+  try {
+    const cfg = await api.config();
+    setNotifyEnabled(cfg.notify_enabled !== false);
+  } catch {
+    /* keep the default: notifications on */
+  }
+}
+
 /** Open the event socket and keep it open. Safe to call once per app mount;
  *  calling it again while a socket is live does nothing. Returns a stop
  *  function (used on unmount and by HMR). */
 export function startEventStream(): () => void {
+  void syncNotifyMaster();
   stopped = false;
   const mine = ++generation;
   const current = () => !stopped && mine === generation;

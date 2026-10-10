@@ -188,6 +188,8 @@ export default {
   "settings.user_remove_self": "No puedes eliminar el usuario con el que has iniciado sesión",
   "settings.notifications": "Notificaciones",
   "settings.notifications_help": "Notificaciones de escritorio para importaciones que necesitan una decisión, importaciones terminadas y almacenes que el servidor ha purgado por su cuenta. Cada cliente pide su propio permiso.",
+  "settings.notify_master": "Notifications on this server",
+  "settings.notify_outcomes": "Outcome notices (failed download, an import needing a decision, pruned storage)",
 
   "page.home": "Inicio",
   "page.library": "Biblioteca",

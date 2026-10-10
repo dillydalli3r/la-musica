@@ -207,7 +207,9 @@ export default {
   "settings.user_remove": "Remove user",
   "settings.user_remove_self": "You cannot remove the user you are signed in as",
   "settings.notifications": "Notifications",
-  "settings.notifications_help": "Desktop notifications for imports that need a decision, finished imports and stores the server pruned on its own. Each client asks for its own permission.",
+  "settings.notifications_help": "Notifications have three layers. The server switches below decide which events are published at all — turning one off silences that kind on every device. On top of that, each client asks the operating system for permission to raise a popup, and each device separately opts in to Web Push so a closed app can still be woken.",
+  "settings.notify_master": "Notifications on this server",
+  "settings.notify_outcomes": "Outcome notices (failed download, an import needing a decision, pruned storage)",
 
   // —— Page titles, one per route ————————————————————————————————————
   "page.home": "Home",

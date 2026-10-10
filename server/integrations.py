@@ -2552,10 +2552,9 @@ _rym_route = {}               # which ROUTE answered (a live page or an
                               # clears it before each call so the note belongs
                               # to the answer it is reported next to
 # Cloudflare's interstitial instead of a release page. Cached or parsed it
-# would be an empty page at best, so it counts as unreachable.
-_RYM_CHALLENGE_RE = re.compile(
-    r"just a moment|cf-?challenge|_cf_chl|checking your browser|"
-    r"enable javascript and cookies", re.I)
+# would be an empty page at best, so it counts as unreachable. The marker is
+# the shared `cfchallenge.CHALLENGE_RE` — one regex for both scraped sources
+# (this module used to keep a narrower copy that missed "attention required").
 # RYM renders genres, styles and descriptors as /genre/<slug> anchors, in that
 # order on a release page (primary genres first) — the anchors are the whole
 # scrape, so a markup change degrades to "no genres", never to wrong ones.
@@ -3279,9 +3278,9 @@ def _rym_archive_fetch(url, params=None):
     back is not a page this module may read: nothing answered, a non-200 replay
     (the `id_` form replays the capture's OWN status, so a capture of RYM's
     refusal is a 403 here too), an empty body, or the Cloudflare interstitial RYM
-    served the crawler that day. That last check is the plain `_RYM_CHALLENGE_RE`
-    the live path uses — the same regex, one parser — and it is why an archived
-    refusal can never be read as genres.
+    served the crawler that day. That last check is the shared
+    `cfchallenge.CHALLENGE_RE` the live path uses — the same regex, one
+    parser — and it is why an archived refusal can never be read as genres.
 
     `answered` says a response arrived at all, which is what tells a page
     archive.org does not HAVE from archive.org being unable to answer: the first
@@ -3295,7 +3294,7 @@ def _rym_archive_fetch(url, params=None):
     if getattr(r, "status_code", None) != 200:
         return None, final, True
     text = _rym_archive_body(getattr(r, "text", "") or "")
-    if not text.strip() or _RYM_CHALLENGE_RE.search(text[:4000]):
+    if not text.strip() or cfchallenge.CHALLENGE_RE.search(text[:4000]):
         return None, final, True
     return text, final, True
 
@@ -3514,7 +3513,7 @@ def _rym_get(path, params=None, cfg=None, expect=None):
         # every user meets as "refused without a Cloudflare challenge" would
         # send them after the network instead of the cookie, and would hide the
         # `cf_clearance`/`rym_user_agent` pair the challenge branch names.
-        challenge = bool(r.text and _RYM_CHALLENGE_RE.search(r.text[:4000]))
+        challenge = bool(r.text and cfchallenge.CHALLENGE_RE.search(r.text[:4000]))
         _rym_unreachable(_rym_reason(cfg, r.status_code, challenge=challenge,
                                      tries=tried),
                          cfg, status=r.status_code, challenge=challenge,
@@ -3523,7 +3522,7 @@ def _rym_get(path, params=None, cfg=None, expect=None):
     if not r.text:
         _rym_unreachable("empty response", cfg, status=r.status_code, url=url)
         return None
-    if _RYM_CHALLENGE_RE.search(r.text[:4000]):
+    if cfchallenge.CHALLENGE_RE.search(r.text[:4000]):
         _rym_unreachable(_rym_reason(cfg, r.status_code, challenge=True), cfg,
                          status=r.status_code, challenge=True, url=url)
         return None

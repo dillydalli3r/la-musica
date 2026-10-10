@@ -157,6 +157,15 @@ _SCHEMA_MIGRATIONS = ("ALTER TABLE sessions ADD COLUMN username TEXT",)
 
 def _ensure_schema(conn):
     """Create the tables and apply the migrations. Idempotent; locks nothing."""
+    # WAL + NORMAL (sqlite defaults are a rollback journal and a fsync per
+    # commit) and incremental auto_vacuum. auto_vacuum goes FIRST: setting
+    # journal_mode writes the file header, after which the mode can no longer
+    # change without a VACUUM — and this is the one place the tables are
+    # created, so it must also precede them for a fresh file to record it.
+    # Harmless on the `_conn` heal path, where the tables are already there.
+    conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
     conn.executescript(_SCHEMA)
     for stmt in _SCHEMA_MIGRATIONS:
         try:

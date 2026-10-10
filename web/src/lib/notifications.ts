@@ -95,6 +95,46 @@ function str(v: unknown): string {
   return typeof v === "string" ? v.trim() : v === undefined || v === null ? "" : String(v).trim();
 }
 
+/** The OUTCOME kinds the master switch never silences: a result of work the
+ *  user asked for, and the only word they get that it did not happen. Kept in
+ *  step with the server's own `_OUTCOME_KINDS` (server/events.py) so neither
+ *  half of the app is louder than the other about which kinds are mandatory. */
+export const OUTCOME_KINDS: Record<string, true> = {
+  download_failed: true,
+  import_needs_data: true,
+  storage_pruned: true,
+};
+
+/** The server's master notification switch (`notify_enabled`), mirrored here.
+ *  One plain module-scope flag the whole tray shares — NOT a second store. The
+ *  server already refuses to PUBLISH non-outcome kinds with the master off, so
+ *  this is the client's own belt to that brace: a frame that a config call
+ *  raced still must not pop an OS banner or fill the panel. Defaults to true —
+ *  a server whose config predates the key announces everything, which is what
+ *  every build before this one shipped. */
+let masterEnabled = true;
+
+/** Mirror the server's `notify_enabled`. lib/notify.ts reads it from
+ *  /api/config when the event stream starts. */
+export function setNotifyEnabled(on: boolean): void {
+  masterEnabled = on !== false;
+}
+
+/** Is this kind silenced by the master switch? Only a non-outcome kind is:
+ *  an outcome is never silenced by the master (that is the documented
+ *  guarantee), and `notify_outcomes` is the server-side switch that owns
+ *  those. */
+export function isMasterSilenced(kind: string): boolean {
+  return !masterEnabled && OUTCOME_KINDS[str(kind)] !== true;
+}
+
+/** The kinds this device asks the server to push it, narrowed by the master:
+ *  with notifications off on the server there is no point waking a closed app
+ *  for the kinds it would not publish anyway. */
+export function pushKinds(): string[] {
+  return Object.keys(PUSH_KINDS).filter((k) => !isMasterSilenced(k));
+}
+
 /** The in-app route a kind's `data` points at, when the emit did not name one.
  *
  *  Derived rather than required of every emit site, and always a route the
@@ -180,6 +220,10 @@ export function unreadCount(): number {
 export function ingest(ev: NotifyEvent): NotificationRecord | null {
   const kind = str(ev?.event);
   if (!kind) return null;
+  // The master switch (config `notify_enabled`) suppresses a non-outcome kind
+  // on top of the server's own gate: no tray entry, and no OS popup (lib/notify.ts
+  // skips the same frame). An outcome is never suppressed here.
+  if (isMasterSilenced(kind)) return null;
   const at = Number(ev.at) > 0 ? Math.round(Number(ev.at) * 1000) : Date.now();
   const title = str(ev.title);
   const id = Number(ev.seq) > 0 ? `e${Number(ev.seq)}` : `${kind}:${at}:${title}`;
