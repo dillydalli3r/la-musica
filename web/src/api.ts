@@ -3039,14 +3039,16 @@ export const api = {
     json<{ ok: boolean; message: string; status: SolverStatus }>(
       `${API}/solver/stop`, { method: "POST" }, 60000
     ),
-  /** Persist whether the app may bring its own solver up at boot. */
-  solverAutostart: (enabled: boolean) =>
+  /** Write the card's own settings: the autostart switch, and/or the URL
+   *  override for a solver this machine does not run. Omitted fields are left
+   *  alone, so the switch never blanks an override and vice versa. */
+  solverConfig: (body: { enabled?: boolean; url?: string }) =>
     json<{ ok: boolean; message: string; status: SolverStatus }>(
       `${API}/solver/config`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ enabled }),
+        body: JSON.stringify(body),
       },
       30000
     ),

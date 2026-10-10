@@ -16,17 +16,21 @@ import { toast } from "../store";
  *  the same `cf_solver_url` contract it already spoke).
  *
  *  Everything the card shows comes from `GET /api/solver`, including WHERE the
- *  effective URL came from — a configured URL, the container's
- *  `MLO_SOLVER_URL`, the child process this card started, or a solver already
- *  listening. That distinction is the whole point: "no solver" and "a solver
- *  you did not start" look identical unless the panel says which.
+ *  effective URL came from — the container's `MLO_SOLVER_URL`, the child
+ *  process this app runs, or a solver already listening. No URL is ever typed
+ *  in for the normal case: installing FlareSolverr IS the setup, and the only
+ *  field here is the deliberate override for a solver this machine does not
+ *  run (another host, another port), kept out of the way in a disclosure.
  *
  *  Install reuses the Dependencies installer (`/api/dependencies/install`) —
  *  the download is ~300 MB and takes minutes, which is why the button says so
- *  — rather than keeping a second copy of the fetch/verify/report path here. */
+ *  — rather than keeping a second copy of the fetch/verify/report path here.
+ *  Installing also STARTS it (server/main.py), so the card follows the same
+ *  poll it uses while the app brings the solver up at boot. */
 export default function SolverCard() {
   const qc = useQueryClient();
   const [busy, setBusy] = useState<"" | "install" | "start" | "stop" | "cfg">("");
+  const [url, setUrl] = useState<string | null>(null);
   const { data, isLoading } = useQuery({
     queryKey: ["solver"],
     queryFn: async () => (await api.solver()).status,
@@ -79,8 +83,28 @@ export default function SolverCard() {
   const setAutostart = async (enabled: boolean) => {
     setBusy("cfg");
     try {
-      const r = await api.solverAutostart(enabled);
+      const r = await api.solverConfig({ enabled });
       if (!r.ok) toast.error(r.message || "could not save");
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setBusy("");
+      refresh();
+    }
+  };
+
+  const saveUrl = async (value: string) => {
+    setBusy("cfg");
+    try {
+      const r = await api.solverConfig({ url: value.trim() });
+      if (r.ok) {
+        toast.success(value.trim()
+          ? `Using the solver at ${value.trim()}`
+          : "Override cleared — the app finds its own solver again");
+        setUrl(null);
+      } else {
+        toast.error(r.message || "could not save");
+      }
     } catch (e) {
       toast.error(String(e));
     } finally {
@@ -91,7 +115,7 @@ export default function SolverCard() {
 
   const sourceLabel = (s: SolverStatus): string => {
     switch (s.source) {
-      case "config": return "from the Solver URL set here";
+      case "config": return "from the override below";
       case "env": return "from the MLO_SOLVER_URL environment (the container's solver service)";
       case "managed": return "started by la musica";
       case "local": return "already answering on the default port (a sidecar, or one left running)";
@@ -112,7 +136,8 @@ export default function SolverCard() {
       <div className="text-[10px] text-zinc-600">
         RateYourMusic and Album of the Year both sit behind Cloudflare. Instead of pasting a session
         cookie that expires, install FlareSolverr once and let it pass the challenge with a real
-        browser — no cookie to fetch, and nothing to re-paste when it stops working.
+        browser — no cookie to fetch, no URL to fill in, and nothing to re-paste when it stops
+        working. Installing it runs it.
       </div>
 
       {isLoading && (
@@ -131,6 +156,13 @@ export default function SolverCard() {
               ? <> The solver in use: <span className="font-mono text-zinc-300">{status.url}</span> — {sourceLabel(status)}.</>
               : <> No solver is answering, so RateYourMusic and Album of the Year still need their cookies (or they report the challenge).</>}
           </div>
+
+          {status.installed && status.autostart && !status.running
+           && status.source === "" && (
+            <div className="text-[10px] text-amber-500 flex items-center gap-2">
+              <Loader2 className="w-3 h-3 animate-spin" /> starting it…
+            </div>
+          )}
 
           {!status.installed && status.install_note && (
             <div className="text-[10px] text-amber-500">{status.install_note}</div>
@@ -199,6 +231,36 @@ export default function SolverCard() {
             timeout setting above).{" "}
             {status.log ? <>Its log is <span className="font-mono">{status.log}</span>.</> : null}
           </div>
+
+          {/* The one case the automatic resolution cannot cover. Kept in a
+              disclosure on purpose: a plain field here is what made the URL
+              look like a required setting. */}
+          <details className="text-[10px] text-zinc-500">
+            <summary className="cursor-pointer">
+              Using a solver somewhere else? (advanced)
+            </summary>
+            <div className="mt-1 flex items-center gap-2 flex-wrap">
+              <input
+                className="input flex-1 min-w-[16rem] !py-1 text-[11px] font-mono"
+                placeholder="http://host:8191 — empty = the app's own"
+                defaultValue={status.source === "config" ? status.url : ""}
+                onChange={(e) => setUrl(e.target.value)}
+                disabled={busy !== ""}
+              />
+              <button
+                className="btn-ghost !py-1 text-xs tap"
+                disabled={busy !== "" || url === null}
+                onClick={() => saveUrl(url ?? "")}
+              >
+                {busy === "cfg" ? "saving…" : "Save"}
+              </button>
+            </div>
+            <div className="mt-1 text-[10px] text-zinc-600">
+              Only for a FlareSolverr on another machine or another port. Leave it empty and the app
+              uses the solver it runs itself{status.source === "env"
+                ? " (here: the MLO_SOLVER_URL environment)" : ""}.
+            </div>
+          </details>
         </>
       )}
     </div>

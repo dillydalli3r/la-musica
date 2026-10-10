@@ -6802,6 +6802,15 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   (`cf_solver_autostart`, ON; it does nothing when FlareSolverr is absent) —
   and when a solver answers from the environment or a sidecar, the Dependencies
   row says so instead of asking for a local install it does not need.
+  **No URL is ever typed in for the normal case**: `cf_solver_url` has no
+  Settings row (a field is exactly what made it look required), the card shows
+  the effective URL and which of the four sources supplied it, and the one
+  field that exists is an "advanced" disclosure for a solver on another
+  machine. **Installing also starts it** (`solver.start_after_install`, called
+  by `/api/dependencies/install`): installing is the user saying they want it,
+  so no Start press is needed and `cf_solver_autostart` — which governs BOOT,
+  not this — does not veto a fresh install. A solver already answering (the
+  sidecar) makes that a no-op, never a second process.
 - **R358d — a missing per-track web rating FAILS the grade, by default.** The
   public verdict is part of what a finished album carries, so `WEBRATING` joins
   `GENRE`/`MOOD`/`ENERGY` in `mlo.grader.TAG_PRESENCE_CHECKS`:

@@ -381,6 +381,24 @@ def ensure_started(cfg=None):
     return start(cfg)
 
 
+def start_after_install(cfg=None):
+    """Start the solver the moment its install finished — no Start press.
+
+    Installing FlareSolverr is the user saying they want it, so the install
+    route calls this (server/main.py) instead of leaving a download sitting
+    still until someone presses a button. It no-ops when a solver already
+    answers, which is the sidecar case: the `flaresolverr` service is up
+    before the local copy exists, so the download must not spawn a second one.
+    `autostart` does not gate this — that switch is about BOOT; a fresh install
+    is an explicit act.
+    """
+    if base_url(cfg):
+        return True, "already available"
+    if not installed():
+        return False, "FlareSolverr is not installed"
+    return start(cfg)
+
+
 def status(cfg=None):
     """The Solver card's payload (Settings → Discovery)."""
     cfg = _cfg(cfg)

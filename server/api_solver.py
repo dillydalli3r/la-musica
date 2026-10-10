@@ -26,10 +26,20 @@ from server import solver
 router = APIRouter(tags=["solver"])
 
 
-class AutostartBody(BaseModel):
-    """`cf_solver_autostart` from the card's switch."""
+class SolverConfigBody(BaseModel):
+    """The two things the card can write: the autostart switch, and — only for a
+    solver that runs SOMEWHERE ELSE — an explicit URL override.
 
-    enabled: bool = True
+    Both are optional so a write only touches what it names: the card's
+    checkbox must not blank an override someone set, and clearing the override
+    must not flip the switch. `cf_solver_url` is left empty by default and the
+    app finds the solver itself (server/solver.py), so this field exists for the
+    one case the automatic resolution cannot cover — a solver on another
+    machine or another port — and is not part of the normal setup.
+    """
+
+    enabled: Optional[bool] = None
+    url: Optional[str] = None
 
 
 def _payload(message: str = "", ok: Optional[bool] = None):
@@ -67,10 +77,18 @@ def solver_stop():
 
 
 @router.post("/api/solver/config")
-def solver_config(req: AutostartBody):
-    """Persist whether the app may bring its own solver up at boot."""
+def solver_config(req: SolverConfigBody):
+    """Persist the autostart switch and/or the URL override.
+
+    The install and start paths need no URL at all — that is the point of the
+    card — so a write here is either that switch or the deliberate override for
+    a solver this machine does not run.
+    """
     cfg = load_config()
-    cfg["cf_solver_autostart"] = bool(req.enabled)
+    if req.enabled is not None:
+        cfg["cf_solver_autostart"] = bool(req.enabled)
+    if req.url is not None:
+        cfg["cf_solver_url"] = str(req.url or "").strip()
     if not save_config(cfg):
         reason = getattr(save_config, "last_error", "") or ""
         return _payload(f"could not save the setting ({reason})".strip(), False)

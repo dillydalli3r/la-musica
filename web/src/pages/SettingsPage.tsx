@@ -1204,10 +1204,6 @@ export default function SettingsPage() {
           help: "The User-Agent Album of the Year requests are sent with. Cloudflare binds its `cf_clearance` cookie to the exact User-Agent (and network) that passed its challenge, so the stored cookie only counts when this matches the browser it came from — copy that browser's User-Agent (devtools → Network → any request → Request Headers → User-Agent) and paste it here. Blank = the built-in Chrome User-Agent the app already sends.",
         },
         {
-          k: "cf_solver_url", label: "FlareSolverr URL (Cloudflare solver)", type: "text",
-          help: "Where the Cloudflare solver lives, e.g. http://127.0.0.1:8191. Leave it EMPTY for the normal case: the app installs FlareSolverr from Dependencies, runs it itself (the Cloudflare solver card below has Start/Stop), and uses the MLO_SOLVER_URL environment the shipped Docker setup sets for its solver service. A value here is the explicit override and wins over both — set it only to point at a solver somewhere else (another machine, another port).",
-        },
-        {
           k: "cf_solver_timeout", label: "Cloudflare solver timeout (ms)", type: "number",
           help: "How long the solver may take to answer a challenge before the request is given up on. Default 60000.",
         },

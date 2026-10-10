@@ -223,6 +223,23 @@ try:
     ok(solver.ensure_started({"cf_solver_autostart": False})
        == (False, "autostart is off"),
        "autostart off short-circuits")
+    ok(solver.start_after_install({}) == (False, "FlareSolverr is not installed"),
+       "and so is the post-install start")
+
+    # …but a finished INSTALL starts it, with no press and regardless of the
+    # boot switch: installing the solver IS the user saying they want it.
+    reset()
+    ok(solver.start_after_install({"cf_solver_autostart": False})
+       == (True, "started"),
+       "the install starts the solver even with autostart off")
+    ok(_fake["started"] == 1, "and it really spawned one")
+
+    # The sidecar case: something already answers, so the local install must
+    # not spawn a second FlareSolverr next to it.
+    reset(healthy=True)
+    ok(solver.start_after_install(REAL) == (True, "already available"),
+       "an install beside a running sidecar leaves it alone")
+    ok(_fake["started"] == 0, "no duplicate process")
 
     # Status payload for the card.
     reset()
