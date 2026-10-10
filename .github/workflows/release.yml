@@ -354,3 +354,21 @@ jobs:
             source.json
           draft: false
           prerelease: false
+
+      - name: The release page says what changed
+        # The release EXISTS, so it is also the thing to check: 1.2.0 published
+        # with an EMPTY body while `body_path` was passed and the file was in
+        # the workspace (the manifest carried the notes the page did not), so
+        # the input the step was handed is not evidence that the page has them.
+        # A release whose page says nothing about what changed is the exact
+        # failure the notes step above exists to prevent, and this is the end
+        # where it can actually be seen.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          BODY="$(gh release view "${GITHUB_REF_NAME}" --json body -q .body)"
+          if [ -z "${BODY//[[:space:]]/}" ]; then
+            echo "::error::release ${GITHUB_REF_NAME} has an EMPTY body - the notes did not reach the page"
+            exit 1
+          fi
+          echo "release body: $(printf '%s' "$BODY" | wc -c) characters"
