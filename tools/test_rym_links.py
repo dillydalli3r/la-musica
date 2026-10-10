@@ -861,6 +861,11 @@ try:
     assert last["status"] == 403 and last["challenge"] is True, last
     assert "cf_clearance" in last["reason"], last["reason"]
     assert "rym_user_agent" in last["reason"], last["reason"]
+    # …and the sentence says HOW to get one — Cloudflare issues it only to a
+    # browser that passed the challenge, so the fix is to make that happen (or
+    # hand the job to a solver)
+    assert "PASSED its challenge" in last["reason"], last["reason"]
+    assert "cf_solver_url" in last["reason"], last["reason"]
     # pre-fix this 403 was reported as a challenge-free network block
     assert "without a Cloudflare challenge" not in last["reason"], last["reason"]
 

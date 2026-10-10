@@ -2921,9 +2921,13 @@ def _rym_reason(cfg=None, status=None, challenge=False, tries=1):
             ("the rym_cookie has expired or is not for this network" if cookie
              else "no rym_cookie is set")
         if cookie and not _rym_has_clearance(cfg):
-            why += (", and it carries no `cf_clearance` — that cookie and "
-                    "`rym_user_agent` must BOTH match the browser (and "
-                    "network) that passed the challenge")
+            why += (", and it carries no `cf_clearance` — Cloudflare issues "
+                    "that pair only to a browser that has PASSED its "
+                    "challenge, and it counts only alongside that browser's "
+                    "own `rym_user_agent` and network; clear "
+                    "rateyourmusic.com's cookies and reload the site until "
+                    "the challenge passes, then export that tab (or set "
+                    "`cf_solver_url`)")
         elif cookie and _rym_user_agent(cfg) == RYM_HEADERS["User-Agent"]:
             # The classic case: a good cookie from a browser whose Chrome is
             # NOT the build this app sends by default. `cf_clearance` is bound

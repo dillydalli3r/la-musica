@@ -6686,7 +6686,11 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   built-in UA names that binding as the suspect too (`_rym_reason`): the cookie
   may be fine and only its browser's UA missing. A stored cookie with
   no `cf_clearance` says so in `_rym_reason` and in the credential warnings
-  the Sources panel renders, naming both halves of the pair. The status check
+  the Sources panel renders, naming both halves of the pair AND how to come by
+  it — Cloudflare issues `cf_clearance` only to a browser that has PASSED its
+  challenge, so a browser it never challenged has none to export (clear the
+  site's cookies and reload until the challenge passes, then export that tab,
+  or set `cf_solver_url`). The status check
   reads the interstitial out of a NON-200 body too — the live site serves the
   challenge as HTTP 403, and only 200s used to be checked, so every blocked
   request was reported as "refused without a Cloudflare challenge" and the 403
