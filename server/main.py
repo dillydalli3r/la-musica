@@ -72,6 +72,7 @@ from server import api_soulseek
 from server import api_youtube
 from server import api_rym
 from server import api_aoty
+from server import api_solver
 from server import api_cookies
 from server import api_run
 from server import api_export
@@ -136,6 +137,23 @@ async def _lifespan(app: FastAPI):
             except Exception as e:
                 print(f"[mlo] slskd autostart failed: {e}")
         threading.Thread(target=_autostart_slskd, daemon=True).start()
+    # …and the Cloudflare solver (server/solver.py). Installing FlareSolverr
+    # from Dependencies IS the whole setup: with autostart on (the default) the
+    # app brings it up itself, so the first import after a restart is not
+    # cookie-less again. It does nothing when FlareSolverr is not installed —
+    # the common case — so this costs a `detect_all_tools` call, not a spawn.
+    if load_config().get("cf_solver_autostart", True):
+        def _autostart_solver():
+            try:
+                from server import solver
+                ok, msg = solver.ensure_started()
+                if not ok and msg not in ("already available",
+                                          "FlareSolverr is not installed",
+                                          "autostart is off"):
+                    print(f"[mlo] solver autostart skipped: {msg}")
+            except Exception as e:
+                print(f"[mlo] solver autostart failed: {e}")
+        threading.Thread(target=_autostart_solver, daemon=True).start()
     # Wishlist worker: periodically re-searches Soulseek for saved releases.
     try:
         from server import wishes_worker
@@ -289,6 +307,17 @@ async def _lifespan(app: FastAPI):
         interrupt_recovery.shutdown()
     except Exception as e:
         print(f"[mlo] graceful shutdown failed: {e}")
+    # The Cloudflare solver is the app's OWN child (unlike slskd, a daemon a
+    # user may want left up), so a clean shutdown stops it — a FlareSolverr
+    # left behind by every quit is a process nobody asked to keep. A process
+    # this app did NOT start (the Docker sidecar, a service run by hand) is
+    # never killed; a run ended by a hard kill leaves an orphan the next start
+    # adopts instead of spawning a second one (server/solver.py).
+    try:
+        from server import solver
+        solver.stop()
+    except Exception:
+        pass
 
 
 # --------------------------------------------------------------------------- #
@@ -2986,6 +3015,7 @@ app.include_router(api_soulseek.router)
 app.include_router(api_youtube.router)
 app.include_router(api_rym.router)
 app.include_router(api_aoty.router)
+app.include_router(api_solver.router)
 app.include_router(api_cookies.router)
 app.include_router(api_run.router)
 app.include_router(api_export.router)
@@ -3530,8 +3560,30 @@ def dependencies(refresh: int = Query(0)):
         os.makedirs(str(tools_dir()), exist_ok=True)
     except OSError:
         pass
-    return {"deps_dir": str(tools_dir()),
-            **fetchdeps.dependencies_payload(refresh=bool(refresh))}
+    payload = fetchdeps.dependencies_payload(refresh=bool(refresh))
+    # FlareSolverr is the one tool the app can also be GIVEN rather than
+    # installed: the shipped Docker setup runs it as a `flaresolverr` service
+    # and the app is told where (`MLO_SOLVER_URL`), and a user may run a
+    # sidecar on the host. In that case the local download it offers is not
+    # missing — it is unnecessary — so the row is rewritten to say which solver
+    # is answering instead of pressing the user to fetch 300 MB they do not
+    # need. A solver the app INSTALLED is left alone (the row is the update
+    # surface for it).
+    try:
+        from server import solver
+        url, source = solver.resolve()
+        if url and source in ("env", "config", "local") and not solver.installed():
+            for row in payload.get("tools") or []:
+                if row.get("key") == "flaresolverr":
+                    row.update(
+                        state="ok",
+                        action="none",
+                        install_note=None,
+                        note=f"provided by the solver at {url} "
+                             f"({source}) — no local install needed")
+    except Exception:
+        pass
+    return {"deps_dir": str(tools_dir()), **payload}
 
 
 def _check_source_kind(kind):
@@ -3702,6 +3754,11 @@ def dependencies_install(req: DepsInstallRequest):
             # install what this platform can install rather than refusing the
             # whole press.
             keys = fetchdeps.installable_keys()
+        # A bulk press means "the missing encoders", never a ~300 MB service
+        # the user has not asked for (see fetchdeps.OPT_IN_TOOLS): FlareSolverr
+        # is installed from its own row (Settings → Discovery, or its
+        # Dependencies row) and only ever updated once it is there.
+        keys = [k for k in keys if k not in fetchdeps.OPT_IN_TOOLS]
     else:
         wanted = set(req.keys)
         keys = [k for k in fetchdeps.DISPLAY_NAMES if k in wanted]

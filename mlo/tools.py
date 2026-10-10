@@ -365,6 +365,12 @@ _DEPS_NATIVE_FIELDS = {
     # without this entry an install into the tools folder would be invisible
     # to the Dependencies row that offered it.
     "slskd": ("slskd_exe", ()),
+    # flaresolverr: the Cloudflare solver service server/solver.py runs, not
+    # a per-file tool. Recorded like slskd so an install into the tools folder
+    # is visible to the Dependencies row and to server/solver.py's own
+    # resolution; the executable it names is the SERVER, spawned and stopped
+    # by that module rather than invoked per request.
+    "flaresolverr": ("flaresolverr_exe", ()),
 }
 
 
@@ -595,6 +601,22 @@ def detect_all_tools():
             tools["slskd"] = {
                 "version": sv,
                 "slskd_exe": os.path.join(d, "slskd.exe"),
+            }
+
+    # flaresolverr: the Cloudflare solver (server/solver.py spawns it). Same
+    # rule as slskd — `flaresolverr.exe` is what the Windows asset of the
+    # release carries, and a bare `flaresolverr` in the same folder is the
+    # Linux build of a library two hosts can share, which must never be
+    # reported (spawning an ELF on Windows is the 500 that rule prevents).
+    # Its version is not probed — it is a server with no version flag, and
+    # `--help` would start it — so the versioned folder name is the number.
+    fsv, fsf, deps_root = _detect_tool_dirs("flaresolverr")
+    if fsf:
+        d = os.path.join(deps_root, fsf)
+        if os.path.isfile(os.path.join(d, "flaresolverr.exe")):
+            tools["flaresolverr"] = {
+                "version": fsv,
+                "flaresolverr_exe": os.path.join(d, "flaresolverr.exe"),
             }
 
     # Fill gaps from system packages (Linux/macOS/Docker) so each tool

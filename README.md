@@ -12,7 +12,7 @@ FastAPI backend + React UI over the `mlo` engine: music and music videos, playli
 docker compose up -d      # build from source; `docker compose pull` fetches the GHCR image instead
 docker compose logs -f    # follow the backend log
 ```
-Edit the committed `./music:/music` bind mount to a real absolute host path first, then open <http://localhost:8000>. `/music` holds the library **and** all app state, and the container runs as uid/gid **1000**, so the mount must be writable by that user. Image `ghcr.io/dillydalli3r/la-musica:latest`, container `la-musica`; `MLO_MUSIC_FOLDER=/music` and `MLO_SERVER_HOST=0.0.0.0` are the only env vars it needs. Tools (ffmpeg, flac, yt-dlp, …) install from **Settings → Dependencies**.
+Edit the committed `./music:/music` bind mount to a real absolute host path first, then open <http://localhost:8000>. `/music` holds the library **and** all app state, and the container runs as uid/gid **1000**, so the mount must be writable by that user. Image `ghcr.io/dillydalli3r/la-musica:latest`, container `la-musica`; `MLO_MUSIC_FOLDER=/music` and `MLO_SERVER_HOST=0.0.0.0` are the only env vars it needs. Tools (ffmpeg, flac, yt-dlp, …) install from **Settings → Dependencies**. The compose file also runs a **FlareSolverr** service — the Cloudflare solver behind RateYourMusic and Album of the Year — so those two need no session cookie; a host install gets the same thing by installing `flaresolverr` from Dependencies (Settings → Discovery has the Start/Stop card).
 
 **From source**:
 ```bash

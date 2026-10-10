@@ -174,13 +174,22 @@ with runners(True):
               fetchdeps.install_problem(key, platform="linux", machine="x86_64") is None)
     # rsgain is the exception: upstream ships an x86-64 Linux build and no ARM
     # one, so an ARM host must fall back to the distro package rather than
-    # reading a download that does not exist.
+    # reading a download that does not exist. flaresolverr is the same x64-only
+    # shape with NO distro package behind it (it is distributed as a binary or
+    # a container), so there the row says it cannot be fetched instead of
+    # naming a package that does not provide it.
     for key in LINUX_NATIVE_X64_ONLY:
         check(f"Linux/x86-64 installs {key} from its own release",
               fetchdeps.install_kind(key, platform="linux", machine="x86_64") == "deps"
               and fetchdeps.install_problem(key, platform="linux", machine="x86_64") is None)
-        check(f"Linux/arm64 falls back to the {key} distro package",
-              fetchdeps.install_kind(key, platform="linux", machine="aarch64") == "system")
+        if key in fetchdeps.LINUX_PACKAGES:
+            check(f"Linux/arm64 falls back to the {key} distro package",
+                  fetchdeps.install_kind(key, platform="linux", machine="aarch64") == "system")
+        else:
+            check(f"Linux/arm64 cannot fetch {key}, and the row says why",
+                  fetchdeps.install_kind(key, platform="linux", machine="aarch64") == "unsupported"
+                  and bool(fetchdeps.install_problem(
+                      key, platform="linux", machine="aarch64")))
 
 # The grouping above has to cover the whole table, or a tool added to
 # LINUX_BINARIES silently skips every check in this file.

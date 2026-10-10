@@ -1663,17 +1663,28 @@ DEFAULT_CONFIG = {
     # no longer affects what genre or rating an import writes, and RYM's link
     # resolution comes from MusicBrainz rather than the archive.
     "rym_archive_fallback": True,
-    # A FlareSolverr-compatible solver, e.g. "http://127.0.0.1:8191". Both
-    # scraped sources (RateYourMusic and Album of the Year) sit behind
-    # Cloudflare's challenge, which refuses every automated client this project
-    # can run (measured: plain HTTP, curl_cffi, headless Chromium and a headed
-    # Chrome all got the 403 interstitial). A solver keeps a real browser warm
-    # and solves the challenge once per host; the cookies it wins are reused
-    # for the plain fast path until they expire, so one solve buys many fast
-    # requests. Empty = no solver: the live page is then only reachable with a
+    # A FlareSolverr-compatible solver. Both scraped sources (RateYourMusic
+    # and Album of the Year) sit behind Cloudflare's challenge, which refuses
+    # every automated client this project can run (measured: plain HTTP,
+    # curl_cffi, headless Chromium and a headed Chrome all got the 403
+    # interstitial). A solver keeps a real browser warm and solves the
+    # challenge once per host; the cookies it wins are reused for the plain
+    # fast path until they expire, so one solve buys many fast requests.
+    #
+    # Empty is the NORMAL case now: FlareSolverr is installed from
+    # Dependencies and run by this app (server/solver.py), so the URL resolves
+    # on its own — a set value is the explicit override that wins over it (and
+    # over the MLO_SOLVER_URL/FLARESOLVERR_URL environment the shipped Docker
+    # compose uses). With neither, the live page is reachable only with a
     # cleared session cookie (rym_cookie / aoty_cookie), and a refused page is
     # reported as a challenge, never filled from somewhere else.
     "cf_solver_url": "",
+    # Whether the app may bring its own FlareSolverr up by itself. Ships ON: it
+    # removes the cookie work entirely, and it does nothing at all when
+    # FlareSolverr is not installed. Off, the solver runs only when the user
+    # presses Start (Settings → Discovery), and a configured `cf_solver_url`
+    # or environment URL is used regardless.
+    "cf_solver_autostart": True,
     # How long the solver may spend on one page, in milliseconds (FlareSolverr's
     # own budget). A hard challenge can take most of a minute.
     "cf_solver_timeout": 60000,

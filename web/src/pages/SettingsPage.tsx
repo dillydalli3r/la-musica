@@ -8,6 +8,7 @@ import CookieJarPanel from "../components/CookieJarPanel";
 import FolderPicker from "../components/FolderPicker";
 import SourcesPanel from "../components/SourcesPanel";
 import SecurityPanel from "../components/SecurityPanel";
+import SolverCard from "../components/SolverCard";
 import AiTestButton from "../components/AiTestButton";
 import PageHeader from "../components/PageHeader";
 import { toast } from "../store";
@@ -1204,7 +1205,7 @@ export default function SettingsPage() {
         },
         {
           k: "cf_solver_url", label: "FlareSolverr URL (Cloudflare solver)", type: "text",
-          help: "FlareSolverr-compatible solver, e.g. http://127.0.0.1:8191 — solves Cloudflare for RYM/AOTY; empty = cookie only.",
+          help: "Where the Cloudflare solver lives, e.g. http://127.0.0.1:8191. Leave it EMPTY for the normal case: the app installs FlareSolverr from Dependencies, runs it itself (the Cloudflare solver card below has Start/Stop), and uses the MLO_SOLVER_URL environment the shipped Docker setup sets for its solver service. A value here is the explicit override and wins over both — set it only to point at a solver somewhere else (another machine, another port).",
         },
         {
           k: "cf_solver_timeout", label: "Cloudflare solver timeout (ms)", type: "number",
@@ -2671,6 +2672,7 @@ export default function SettingsPage() {
               {tab === "videos" && <YoutubeCookieJar />}
               {tab === "discovery" && (
                 <div className="space-y-2">
+                  <SolverCard />
                   <RymCookieJar onStored={(v) => setCfg("rym_cookie", v)} />
                   <AotyCookieJar onStored={(v) => setCfg("aoty_cookie", v)} />
                 </div>

@@ -72,7 +72,21 @@ def is_challenge(text, status=None):
 
 
 def solver_url(cfg=None):
-    """The configured FlareSolverr-compatible endpoint, or ""."""
+    """The solver endpoint to use, or "".
+
+    The whole resolution — `cf_solver_url`, then `MLO_SOLVER_URL` /
+    `FLARESOLVERR_URL`, then the managed FlareSolverr this app installs and
+    runs (server/solver.py), then anything already answering on the default
+    local port — lives in `server.solver`, because a solver is now something
+    the app can OWN rather than only be pointed at. This stays the one name the
+    rest of this module calls; if the manager cannot be imported (a stripped
+    build), the configured value still works on its own.
+    """
+    try:
+        from server import solver
+        return solver.base_url(cfg)
+    except Exception:
+        pass
     try:
         if cfg is None:
             from mlo.config import load_config

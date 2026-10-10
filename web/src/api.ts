@@ -2244,6 +2244,32 @@ export interface WatchCandidates {
 }
 
 
+/** The Cloudflare solver's state (server/solver.py), as the card renders it. */
+export type SolverStatus = {
+  installed: boolean;
+  executable: string;
+  version?: string | null;
+  /** How FlareSolverr installs on THIS host (mlo.fetchdeps.install_kind). */
+  install_kind?: "deps" | "system" | "unsupported";
+  /** Why it cannot be installed here, when it cannot — the sentence shown. */
+  install_note?: string | null;
+  /** Anything answering on the resolved URL right now. */
+  running: boolean;
+  /** True when the process is one THIS app started (Stop can end it). */
+  managed: boolean;
+  pid?: number | null;
+  /** The endpoint the scraped sources will use, or "" when there is none. */
+  url: string;
+  /** Where that URL came from: the config, the environment, our child process,
+   *  or something already listening on the default port. */
+  source: "" | "config" | "env" | "managed" | "local";
+  /** Whether the app may bring its own solver up at boot. */
+  autostart: boolean;
+  default_url: string;
+  timeout_ms: number;
+  log?: string;
+};
+
 export const api = {
   health: () => json<{ status: string; version: string }>(`${API}/health`),
   /** The running server's version, checked against the latest GitHub release
@@ -2997,6 +3023,32 @@ export const api = {
         body: JSON.stringify({ keys: keys ?? null }),
       },
       900000
+    ),
+
+  // ── Cloudflare solver (server/solver.py) ──────────────────────────────
+  /** Installed? running? which URL, and where did it come from? */
+  solver: () => json<{ status: SolverStatus }>(`${API}/solver`),
+  /** Start the managed solver (or report that one already answers). Waits for
+   *  `/health`, so the budget covers a cold boot's browser launch. */
+  solverStart: () =>
+    json<{ ok: boolean; message: string; status: SolverStatus }>(
+      `${API}/solver/start`, { method: "POST" }, 180000
+    ),
+  /** Stop the solver THIS app started; a sidecar or a hand-run one stays. */
+  solverStop: () =>
+    json<{ ok: boolean; message: string; status: SolverStatus }>(
+      `${API}/solver/stop`, { method: "POST" }, 60000
+    ),
+  /** Persist whether the app may bring its own solver up at boot. */
+  solverAutostart: (enabled: boolean) =>
+    json<{ ok: boolean; message: string; status: SolverStatus }>(
+      `${API}/solver/config`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled }),
+      },
+      30000
     ),
 
   /** Upload a cover. No track/tracks → the album cover; `track` → that file's

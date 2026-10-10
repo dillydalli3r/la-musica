@@ -6777,6 +6777,31 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   `_rym_blocked`), so its challenge is re-reported each run until a credential
   or a solver answers.
   MusicBrainz, keyless, is unaffected.
+- **R384 — the Cloudflare solver is a DEPENDENCY the app installs and runs,
+  not a URL the user must find.** RYM and AOTY sit behind a challenge that
+  refuses every plain client this project can run (measured: HTTP, curl_cffi,
+  headless Chromium, headed Chrome), so the cookie route is the one the user
+  actually feels — a `cf_clearance` bound to one browser's UA and network, and
+  a browser Cloudflare never challenged has none to export at all. So
+  FlareSolverr is installable like any other tool (`mlo/fetchdeps`:
+  `flaresolverr`, pinned v3.5.2, Windows x64 zip / Linux x64 tarball;
+  `install_kind` reports `unsupported` on macOS and ARM and names Docker
+  there), the app RUNS it (`server/solver.py` — the same CREATE_NO_WINDOW
+  supervisor rule as slskd, `HOST`/`PORT` pinned to loopback:8191, a
+  `/health` wait, adopt-not-duplicate, and Stop that only ever kills the child
+  it started), and `cfchallenge.solver_url` resolves the endpoint in ONE order:
+  `cf_solver_url`, then `MLO_SOLVER_URL`/`FLARESOLVERR_URL`, then the managed
+  child, then anything already answering on the default port (cached, so the
+  per-album skip checks never pay a probe each). The Docker setup ships the
+  sidecar (`flaresolverr` service on both compose files, pinned to the same
+  release, loopback-published on the real install, unlabeled so watchtower does
+  not move it under a running import) and the app is told its URL by
+  environment. The bulk "Install all" never fetches the ~300 MB service
+  (`OPT_IN_TOOLS`) — it is installed from its own row or the Settings →
+  Discovery card, which also carries Start/Stop and the autostart switch
+  (`cf_solver_autostart`, ON; it does nothing when FlareSolverr is absent) —
+  and when a solver answers from the environment or a sidecar, the Dependencies
+  row says so instead of asking for a local install it does not need.
 - **R358d — a missing per-track web rating FAILS the grade, by default.** The
   public verdict is part of what a finished album carries, so `WEBRATING` joins
   `GENRE`/`MOOD`/`ENERGY` in `mlo.grader.TAG_PRESENCE_CHECKS`:
