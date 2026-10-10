@@ -5759,9 +5759,16 @@ def _run_genre_chain(paths, limit=None, progress=None, sources=None, staged=Fals
     # landed it yet still runs, just without the `source i/N` steps.
     hook = {"progress": progress} if progress is not None and \
         "progress" in inspect.signature(intg.genre_chain).parameters else {}
-    chain = intg.genre_chain(artist=artist, album=album, release=release,
-                             limit=cap, cfg=cfg, files=files, sources=sources,
-                             **hook)
+    # The source loop is the part that can wait on a browser, so it runs under
+    # a solver budget: with no cleared cookie and a solver that cannot pass
+    # either challenge, the scraped sources would otherwise hold this
+    # user-facing request open for minutes ("Importing genres…" and no way to
+    # stop it). MusicBrainz still answers once the budget is out.
+    from server import cfchallenge
+    with cfchallenge.budget(intg.GENRE_IMPORT_BUDGET_S):
+        chain = intg.genre_chain(artist=artist, album=album, release=release,
+                                 limit=cap, cfg=cfg, files=files, sources=sources,
+                                 **hook)
     names = chain.get("genres") or []
     # The chain already merged every track's own genres ahead of the
     # release-wide ones and capped them per track — `_write_album_genres`, the

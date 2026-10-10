@@ -27,6 +27,7 @@ challenge (MusicBrainz, or an already-cleared RYM) never pays for the solver.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -92,6 +93,76 @@ FETCH_RETRIES = 2
 # never wait on each other while each host's own requests stay serialised.
 _FETCH_GATES: dict = {}
 _FETCH_GATES_LOCK = threading.Lock()
+
+# Per host: a solve is running RIGHT NOW. FlareSolverr drives ONE browser, so
+# two callers asking for the same host do not run side by side — the second
+# queues behind the first and the request the user is watching pays the whole
+# solve twice. MEASURED, 2026-10-10: boot's warm-up probe and the first genre
+# import were in flight for rateyourmusic.com a second apart, and the import
+# waited out BOTH (~2.5 minutes for that source alone). A caller that finds one
+# already running starts none; `solve` answers None and records no failure —
+# "not known yet" is not "known bad".
+_SOLVING: dict = {}
+_SOLVING_LOCK = threading.Lock()
+
+# The smallest solve worth starting: a browser handed less than this cannot
+# get through a challenge, so with less left the attempt is not made at all.
+MIN_SOLVE_BUDGET = 5.0
+
+# The calling THREAD's solver deadline (an epoch time, or absent when
+# unbounded), set by a request that must answer in bounded time — the genre
+# import. `solve` clamps its own budget to what is left and starts nothing once
+# the budget is gone, so a host that cannot answer cannot hold a user-facing
+# request open. Thread-local on purpose: FastAPI runs sync routes in a
+# threadpool, and a background import must not inherit a user's deadline.
+_BUDGET = threading.local()
+
+
+@contextlib.contextmanager
+def budget(seconds):
+    """Cap solver work on THIS thread to *seconds* from now (re-entrant).
+
+    A nested call can only TIGHTEN the deadline: the outer caller's stays the
+    ceiling. Nothing set means unbounded, which is what every caller that is
+    not a user-facing request wants.
+    """
+    prev = getattr(_BUDGET, "until", None)
+    # `None` means unbounded; 0 (or anything else) is a real deadline, so
+    # `budget(0)` reads as "no time left" rather than as "no budget".
+    until = None if seconds is None else time.time() + float(seconds)
+    if prev is not None and (until is None or prev < until):
+        until = prev
+    _BUDGET.until = until
+    try:
+        yield
+    finally:
+        _BUDGET.until = prev
+
+
+def budget_left():
+    """Seconds left on this thread's solver budget, or None when unbounded."""
+    until = getattr(_BUDGET, "until", None)
+    return None if until is None else max(0.0, until - time.time())
+
+
+def probing(host):
+    """Whether a solve for *host* is running right now (see `_SOLVING`)."""
+    with _SOLVING_LOCK:
+        return str(host or "").lower() in _SOLVING
+
+
+def _solving_begin(host):
+    """Claim *host*'s one solve slot — False when the slot is already taken."""
+    with _SOLVING_LOCK:
+        if host in _SOLVING:
+            return False
+        _SOLVING[host] = True
+        return True
+
+
+def _solving_end(host):
+    with _SOLVING_LOCK:
+        _SOLVING.pop(host, None)
 
 
 def _pace(host):
@@ -222,7 +293,14 @@ def warm_solver(cfg=None):
                     continue
                 if str((cfg or {}).get(cookie_key) or "").strip():
                     continue
-                solve(url, cfg)
+                got = solve(url, cfg)
+                if got and got.get("html") and not is_challenge(got["html"]):
+                    # A solve that WORKED is proof as much as a failure is, and
+                    # caching its clearance HERE is what lets the chain take the
+                    # fast path from its first import instead of having to win a
+                    # solve of its own. This is the one caller allowed to spend
+                    # a browser on a host nothing has answered for yet.
+                    _remember(host, got.get("cookies"), got.get("user_agent"))
             except Exception:
                 continue
 
@@ -366,56 +444,80 @@ def solve(url, cfg=None, timeout=None):
     (`host_failed`), and no solver at all is an answer too: the app's own
     install is started on demand (`ensure_solver`) rather than reported as a
     missing configuration.
+
+    ONE solve per host at a time (`_SOLVING`): a second caller finding one in
+    flight gets None immediately rather than a browser's worth of queued wait.
+    A caller with a deadline (`budget`) gets its own shortened budget, and gets
+    None — again without recording a failure — once the deadline leaves less
+    than `MIN_SOLVE_BUDGET`: the host is not known-bad, the clock is.
     """
     target = host_of(url)
     if target and host_failed(target):
         return None      # known-bad host: do not pay the timeout again
-    base = solver_url(cfg)
-    if not base and ensure_solver(cfg):
+    left = budget_left()
+    if left is not None and left < MIN_SOLVE_BUDGET:
+        return None      # out of time: no answer, and NOT a failure
+    if target and not _solving_begin(target):
+        return None      # one solve per host at a time — see `_SOLVING`
+    try:
         base = solver_url(cfg)
-    if not base or not url:
-        return None
-    budget = timeout if timeout is not None else solver_timeout(cfg)
-    payload = {"cmd": "request.get", "url": str(url),
-               "maxTimeout": int(budget * 1000)}
-    try:
-        from server import httpclient  # noqa: F401  (shared client, one seam)
-        import httpx
-        r = httpx.post(f"{base}/v1", json=payload, timeout=budget + 10.0)
-    except Exception as e:
-        record_failure(target, f"the solver did not answer ({type(e).__name__})")
-        return None
-    try:
-        body = r.json() if r.content else {}
-    except ValueError:
-        record_failure(target, "the solver sent something that is not JSON")
-        return None
-    solution = body.get("solution") if isinstance(body, dict) else None
-    if not isinstance(solution, dict):
-        # FlareSolverr's failure shape: {"status": "error", "message": "Error
-        # solving the challenge. Timeout after 60.0 seconds."}. Its own words
-        # are what the report needs, so they are kept, not paraphrased.
-        message = ""
-        if isinstance(body, dict):
-            message = str(body.get("message") or body.get("error") or "")
-        if not message and getattr(r, "status_code", 0) >= 400:
-            message = f"the solver answered HTTP {r.status_code}"
-        record_failure(target, message or "the solver could not pass the challenge")
-        return None
-    html = solution.get("response")
-    if html is None or is_challenge(html):
-        record_failure(target, str(body.get("message") or "")
-                       or "the solver ended on the challenge page")
-        return None
-    cookies = {}
-    for cookie in solution.get("cookies") or []:
-        name = str((cookie or {}).get("name") or "").strip()
-        if name:
-            cookies[name] = str((cookie or {}).get("value") or "")
-    user_agent = str(solution.get("userAgent") or "")
-    return {"html": html,
-            "status": solution.get("status"),
-            "cookies": cookies, "user_agent": user_agent}
+        if not base and ensure_solver(cfg):
+            base = solver_url(cfg)
+        if not base or not url:
+            return None
+        allow = timeout if timeout is not None else solver_timeout(cfg)
+        if left is not None:
+            allow = min(allow, left)
+        payload = {"cmd": "request.get", "url": str(url),
+                   "maxTimeout": int(allow * 1000)}
+        # The grace above a solve is for the solver's own response overhead, but
+        # it is NOT a licence to outlive a caller's deadline: a request someone
+        # is watching gets its clock back.
+        wait = allow + (1.0 if left is not None else 10.0)
+        try:
+            from server import httpclient  # noqa: F401  (shared client, one seam)
+            import httpx
+            r = httpx.post(f"{base}/v1", json=payload, timeout=wait)
+        except Exception as e:
+            record_failure(target,
+                           f"the solver did not answer ({type(e).__name__})")
+            return None
+        try:
+            body = r.json() if r.content else {}
+        except ValueError:
+            record_failure(target, "the solver sent something that is not JSON")
+            return None
+        solution = body.get("solution") if isinstance(body, dict) else None
+        if not isinstance(solution, dict):
+            # FlareSolverr's failure shape: {"status": "error", "message":
+            # "Error solving the challenge. Timeout after 60.0 seconds."}. Its
+            # own words are what the report needs, so they are kept, not
+            # paraphrased.
+            message = ""
+            if isinstance(body, dict):
+                message = str(body.get("message") or body.get("error") or "")
+            if not message and getattr(r, "status_code", 0) >= 400:
+                message = f"the solver answered HTTP {r.status_code}"
+            record_failure(target,
+                           message or "the solver could not pass the challenge")
+            return None
+        html = solution.get("response")
+        if html is None or is_challenge(html):
+            record_failure(target, str(body.get("message") or "")
+                           or "the solver ended on the challenge page")
+            return None
+        cookies = {}
+        for cookie in solution.get("cookies") or []:
+            name = str((cookie or {}).get("name") or "").strip()
+            if name:
+                cookies[name] = str((cookie or {}).get("value") or "")
+        user_agent = str(solution.get("userAgent") or "")
+        return {"html": html,
+                "status": solution.get("status"),
+                "cookies": cookies, "user_agent": user_agent}
+    finally:
+        if target:
+            _solving_end(target)
 
 
 def fetch_page(url, cfg=None, *, headers=None, cookies=None, params=None,

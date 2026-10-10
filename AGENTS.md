@@ -251,3 +251,14 @@ When they do ask for one:
   the packaged `mlo-server.exe` or the desktop app for scratch work, and never
   post a wizard flip to a port you have not just checked is both free and yours
   (`netstat -ano | findstr LISTENING`).
+- **A route someone is watching never spends an unbounded solve.** FlareSolverr
+  drives ONE browser, and on this network it cannot pass either scraped host's
+  challenge, so a cold solve costs its whole `cf_solver_timeout` — MEASURED
+  60-75 s, with the two hosts in series: "Importing genres…" sat for 124 s, and
+  the first import also raced the boot warm-up, which was solving the same host
+  at the same time. `server/cfchallenge.solve` now runs ONE solve per host at a
+  time (a second caller gets `None` — not a browser queued behind the first) and
+  honours a per-thread deadline (`cfchallenge.budget`, which the genre route
+  sets from `integrations.GENRE_IMPORT_BUDGET_S`); `warm_solver` caches a
+  clearance it WON as well as the failures it met. Any new user-facing path that
+  can touch a browser must set a budget too, or it inherits the same stall.

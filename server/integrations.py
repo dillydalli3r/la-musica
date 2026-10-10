@@ -4966,6 +4966,19 @@ def bandcamp_album(artist="", album="", titles=None):
 #                     sources cannot, and it never meets a challenge.
 GENRE_SOURCES = ["rateyourmusic", "albumoftheyear", "musicbrainz"]
 
+# How long the WHOLE source loop of a synchronous genre import may spend.
+# MEASURED, 2026-10-10: with no cleared cookie and a solver that cannot pass
+# either challenge from this network, each scraped source costs its full solve
+# (~60-75 s, and they run in series) — so the request the wizard was showing as
+# "Importing genres…" ran for minutes with no way to stop it. The two scraped
+# sources are what this bounds; MusicBrainz is keyless, is never challenged,
+# and STILL ANSWERS once the clock is out, which is what keeps a bounded import
+# from also being an empty one. One healthy cold solve measured 15.1 s, so this
+# leaves room for exactly that and not for a second one — and a healthy solver
+# usually spends none of it, because the boot warm-up caches its clearance
+# (`cfchallenge.warm_solver`).
+GENRE_IMPORT_BUDGET_S = 20.0
+
 
 # The key an ALBUM- or ARTIST-wide answer is filed under: it applies to every
 # track of the release, and the row's `level` is what says so.
@@ -5065,6 +5078,13 @@ def _genre_source_skip(source, cfg):
                     "Cloudflare challenge (%s) — the site refuses this client "
                     "from this network; a cleared rym_cookie is the other "
                     "route" % failed)
+        if not _rym_cookie(cfg) and cfchallenge.probing("rateyourmusic.com"):
+            # The solver is mid-solve for this host RIGHT NOW (the boot warm-up,
+            # usually). `solve` would start none — one browser, one solve — so
+            # there is nothing to wait for and nothing to blame: the chain says
+            # so and moves on to the source that can answer.
+            return ("skipped: the solver is testing RateYourMusic right now — "
+                    "no answer yet; try again in a moment")
         if _rym_blocked(cfg):
             why = _rym_last_reason()
             base = ("skipped: RateYourMusic refused this cookie — paste a "
@@ -5085,6 +5105,9 @@ def _genre_source_skip(source, cfg):
                     "Cloudflare challenge (%s) — the site refuses this client "
                     "from this network; a cleared aoty_cookie is the other "
                     "route" % failed)
+        if not aoty.cookie(cfg) and cfchallenge.probing("albumoftheyear.org"):
+            return ("skipped: the solver is testing Album of the Year right "
+                    "now — no answer yet; try again in a moment")
         return None
     return None
 
@@ -5993,6 +6016,21 @@ def genre_chain(artist="", album="", release=None, limit=None, sources=None,
     notes, skipped, asked = {}, {}, []
     stopped_after = None
     for i, source in enumerate(order, 1):
+        if source in ("rateyourmusic", "albumoftheyear"):
+            left = cfchallenge.budget_left()
+            if left is not None and left < cfchallenge.MIN_SOLVE_BUDGET:
+                # A request with a deadline (the genre import) has spent it on
+                # a host that could not answer, so the second scraped source is
+                # not asked at all rather than given a solve it cannot finish.
+                # It is REPORTED as not asked — and MusicBrainz, keyless and
+                # never challenged, is still free to answer below.
+                notes[source] = skipped[source] = (
+                    "not asked: the genre import's time budget ran out — "
+                    "RateYourMusic and Album of the Year take longer than this "
+                    "to answer without a cleared cookie; paste one in "
+                    "Settings → Discovery, or press Test in Sources to let the "
+                    "solver finish first")
+                continue
         skip = _genre_source_skip(source, cfg)
         if skip:
             # Known-blocked or unconfigured: NOT asked at all, and the report

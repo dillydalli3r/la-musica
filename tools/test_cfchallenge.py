@@ -55,6 +55,7 @@ ok(cfchallenge.is_challenge("<html>enable JavaScript and cookies to continue</ht
 # --------------------------------------------------------------------------- #
 class _Handler(http.server.BaseHTTPRequestHandler):
     busy_hits = 0               # GETs to /busy, to count the transient retries
+    solves = 0                  # /v1 POSTs, to count real solve attempts
 
     def log_message(self, *a):
         pass
@@ -76,6 +77,11 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         url = str(req.get("url") or "")
         if self.path != "/v1" or req.get("cmd") != "request.get":
             return self._json({"status": "error", "message": "bad request"}, 400)
+        type(self).solves += 1
+        if "slow" in url:
+            # A solver that takes its time, so a second caller can be caught
+            # asking while the first is still in flight.
+            time.sleep(0.4)
         if "refuse" in url:
             # A solver that answered but still got the challenge.
             return self._json({"status": "ok", "solution": {
@@ -377,6 +383,75 @@ try:
     cfchallenge.clear()
     ok(_solver_mod3.blocked_hosts() == [],
        "…and it goes away with the latch")
+
+    # ----------------------------------------------------------------------- #
+    # One solve per host, and a deadline a caller can live with
+    # ----------------------------------------------------------------------- #
+    # FlareSolverr drives ONE browser, so two callers asking for the same host
+    # do not run side by side — the second only queues. MEASURED live,
+    # 2026-10-10: boot's warm-up probe and the first genre import were both in
+    # flight for rateyourmusic.com, and the import paid BOTH solves (~2.5 min).
+    cfchallenge.clear()
+    seen = {}
+
+    def _one_solve():
+        seen["first"] = cfchallenge.solve(f"{base}/slow", cfg)
+
+    worker = threading.Thread(target=_one_solve)
+    worker.start()
+    end = time.time() + 3
+    while time.time() < end and not cfchallenge.probing("127.0.0.1"):
+        time.sleep(0.01)
+    ok(cfchallenge.probing("127.0.0.1"),
+       "a solve in flight is visible to the next caller (probing)")
+    second = cfchallenge.solve(f"{base}/slow", cfg)
+    ok(second is None, "a second solve for the same host starts none")
+    ok(cfchallenge.host_failed("127.0.0.1") == "",
+       "…which is NOT a recorded failure: busy is not known-bad")
+    worker.join(5)
+    ok(seen.get("first") is not None and seen["first"]["html"] == PAGE,
+       "the solve that owned the host still returns its page")
+    ok(not cfchallenge.probing("127.0.0.1"), "…and frees the slot afterwards")
+
+    # A caller with a deadline (the genre import) must not be able to spend a
+    # solve it cannot finish — and a solve it declines to start must not latch
+    # the host bad, or the next import would inherit that verdict.
+    cfchallenge.clear()
+    before = _Handler.solves
+    with cfchallenge.budget(0.001):
+        spent = cfchallenge.solve(site, cfg)
+    ok(spent is None, "a spent budget answers None")
+    ok(_Handler.solves == before, "…without asking the solver at all")
+    ok(cfchallenge.host_failed("127.0.0.1") == "",
+       "…and without marking the host bad")
+    with cfchallenge.budget(30):
+        alive = cfchallenge.solve(site, cfg)
+    ok(alive is not None and alive["html"] == PAGE, "a live budget still solves")
+    ok(cfchallenge.budget_left() is None,
+       "…and the thread is unbounded again once the block ends")
+
+    # Nesting can only tighten: an inner budget must never outlive the caller's.
+    with cfchallenge.budget(100):
+        outer = cfchallenge.budget_left()
+        with cfchallenge.budget(1):
+            ok(cfchallenge.budget_left() <= 1.0, "a nested budget tightens")
+        with cfchallenge.budget(9999):
+            ok(cfchallenge.budget_left() <= outer + 0.001,
+               "…and a longer one never extends the outer budget")
+        ok(cfchallenge.budget_left() <= outer, "the outer budget is back after it")
+
+    # The warm-up is also the only caller allowed to spend a browser on a host
+    # nothing has answered for — and when it WINS, its clearance must reach the
+    # chain's fast path, or the import pays a solve the boot already paid for.
+    cfchallenge.clear()
+    cfchallenge.warm_solver({"cf_solver_url": base})
+    end = time.time() + 5
+    while time.time() < end and not cfchallenge.solved_cookies("rateyourmusic.com"):
+        time.sleep(0.02)
+    ok(cfchallenge.solved_cookies("rateyourmusic.com").get("cf_clearance")
+       == "cleared-token",
+       "a warm-up solve that WORKED caches its clearance for the chain")
+    cfchallenge.clear()
 finally:
     server.shutdown()
     cfchallenge.clear()

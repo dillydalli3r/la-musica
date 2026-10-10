@@ -1099,4 +1099,55 @@ assert "never a name you made up" in _ga.SYSTEM, _ga.SYSTEM
 
 print("genre_ai: published-name gate and prompt assertions passed")
 
+# --------------------------------------------------------------------------- #
+# A caller's deadline bounds the SCRAPED sources; MusicBrainz still answers
+# --------------------------------------------------------------------------- #
+# MEASURED live, 2026-10-10: with no cleared cookie and a solver that cannot
+# pass either challenge from this network, each scraped source spent its full
+# solve (~60-75 s) IN SERIES, and the request the wizard was showing as
+# "Importing genres…" ran for minutes with nothing to stop it. A caller with a
+# deadline must get an answer that is bounded AND honest, and must not lose the
+# keyless source that can still fill the tracks.
+from server import cfchallenge as _cfc
+
+clear()
+full_stack()
+with _cfc.budget(0):
+    _bounded = chain(limit=2)
+assert "budget" in _bounded["skipped"].get("rateyourmusic", ""), _bounded["skipped"]
+assert "budget" in _bounded["skipped"].get("albumoftheyear", ""), _bounded["skipped"]
+assert "rateyourmusic" not in _bounded["asked"], _bounded["asked"]
+assert "albumoftheyear" not in _bounded["asked"], _bounded["asked"]
+assert "musicbrainz" in _bounded["asked"], _bounded["asked"]
+assert _bounded["per_track"].get((1, 1)), _bounded["per_track"]
+
+# The deadline is the CALLER's: an unbounded one (the import pipeline, a
+# script) is untouched by it.
+clear()
+full_stack()
+_free = chain(limit=2)
+assert "rateyourmusic" in _free["asked"], _free["asked"]
+assert not _free["skipped"], _free["skipped"]
+assert _cfc.budget_left() is None, "the test thread is left unbounded"
+
+# A source whose host the solver is testing RIGHT NOW is reported as such, not
+# as "no data" — the answer is not known yet, and the chain must not wait for
+# a browser it cannot have (one solve per host at a time).
+clear()
+full_stack()
+_was = _cfc.probing
+try:
+    _cfc.probing = lambda host: True  # noqa: E731  (the whole point: mid-solve)
+    _probing = intg.genre_chain(artist="Test Artist", album="Test Album",
+                                release=RELEASE, limit=2,
+                                cfg={"mb_genre_count": 3,
+                                     "cf_solver_url": "http://127.0.0.1:9"},
+                                files=[FILE_ONE, FILE_TWO],
+                                sources=["rateyourmusic", "musicbrainz"])
+finally:
+    _cfc.probing = _was
+assert "testing RateYourMusic right now" in _probing["skipped"].get("rateyourmusic", ""), \
+    _probing["skipped"]
+assert "musicbrainz" in _probing["asked"], _probing["asked"]
+
 print("genres: all assertions passed")
