@@ -105,7 +105,8 @@ def main(argv: list[str]) -> int:
     by_module, by_stem = build_index()
     suites: set[str] = set()
     web_paths: list[str] = []
-    unmapped: list[str] = []
+    not_a_module: list[str] = []
+    unindexed: list[str] = []
 
     for rel in args:
         rel = rel.replace("\\", "/")
@@ -114,11 +115,11 @@ def main(argv: list[str]) -> int:
             continue
         module = module_of(rel)
         if module is None:
-            unmapped.append(rel)
+            not_a_module.append(rel)
             continue
         hit = by_module.get(module, set()) | by_stem.get(Path(rel).stem, set())
         if not hit:
-            unmapped.append(rel)
+            unindexed.append(rel)
         suites |= hit
 
     if suites:
@@ -133,8 +134,10 @@ def main(argv: list[str]) -> int:
         print("\n# web changes: npx tsc -b && npx oxlint src && npm run build (in web/)")
         print("# and the check for the surface you touched: node tools/check_<surface>.mjs")
 
-    if unmapped:
-        print("\n# not a server/ or mlo/ module (no suite index): " + ", ".join(sorted(set(unmapped))))
+    if unindexed:
+        print("\n# no suite imports these (run the whole gate): " + ", ".join(sorted(set(unindexed))))
+    if not_a_module:
+        print("\n# not a flat server/ or mlo/ module (no index): " + ", ".join(sorted(set(not_a_module))))
 
     if strict and not suites and not web_paths:
         return 1

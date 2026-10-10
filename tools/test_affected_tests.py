@@ -74,9 +74,16 @@ with redirect_stdout(buf):
     code = affected.main(["affected_tests.py", "server/plays.py", "docs/README.md"])
 out = buf.getvalue()
 check("a known module lists a suite", "tools/test_charts.py" in out, out[:200])
-check("an unindexed path is reported, not dropped",
-      "not a server/ or mlo/ module" in out and "docs/README.md" in out, out[:300])
+check("a non-module path is reported as such",
+      "not a flat server/ or mlo/ module" in out and "docs/README.md" in out, out[:300])
 check("that run still exits 0", code == 0, str(code))
+
+buf = io.StringIO()
+with redirect_stdout(buf):
+    affected.main(["affected_tests.py", "server/no_such_store.py"])
+out = buf.getvalue()
+check("a real module with no suite is reported as unindexed",
+      "no suite imports these" in out and "server/no_such_store.py" in out, out[:300])
 
 buf = io.StringIO()
 with redirect_stdout(buf):
