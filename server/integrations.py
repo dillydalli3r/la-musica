@@ -2687,7 +2687,13 @@ def _rym_user_agent(cfg=None):
     this to the UA that browser sends is what lets the stored clearance count.
     Read live, like the cookie, so it takes effect without a restart. Blank
     (the shipped default) is byte-for-byte the built-in UA, so an install that
-    never sets it sends exactly what it always did."""
+    never sets it sends exactly what it always did.
+
+    A SOLVED clearance is the exception: when the app's own solver got through,
+    the UA that earned those cookies is the solver's, and sending anything else
+    with them is the mismatch the clearance is bound against — so that UA wins
+    while it is fresh, for a config that pins none of its own.
+    """
     try:
         if cfg is None:
             from mlo.config import load_config
@@ -2695,7 +2701,14 @@ def _rym_user_agent(cfg=None):
         ua = str((cfg or {}).get("rym_user_agent") or "").strip()
     except Exception:
         ua = ""
-    return ua or RYM_HEADERS["User-Agent"]
+    if ua:
+        return ua
+    try:
+        from . import cfchallenge
+        solved = cfchallenge.solved_user_agent("rateyourmusic.com")
+    except Exception:
+        solved = ""
+    return solved or RYM_HEADERS["User-Agent"]
 
 
 def _rym_has_clearance(cfg=None):
@@ -2771,6 +2784,29 @@ def _rym_apply_ua(headers, ua):
     else:
         headers["sec-ch-ua-platform"] = '"Linux"'
     return headers
+
+
+def _adopt_solved_clearance(cfg=None):
+    """Merge a solved clearance into RYM's own jar — one solve, not one per page.
+
+    RYM builds its requests by hand (its own header set and jar), so it does not
+    go through `cfchallenge.fetch_page`'s fast path and would otherwise solve the
+    challenge again for EVERY page — a browser navigation per request. The
+    cookies the solver won are exactly the ones Cloudflare expects, so they join
+    the same jar the user's paste seeds; `_rym_user_agent` then sends them with
+    the solver's User-Agent, which is what the clearance is bound to.
+    """
+    try:
+        if not cfchallenge.solver_url(cfg):
+            return
+        solved = cfchallenge.solved_cookies("rateyourmusic.com")
+        if not solved:
+            return
+        jar = _rym_cookiejar(cfg)
+        for name, value in solved.items():
+            jar.set(name, value, domain="rateyourmusic.com")
+    except Exception:
+        pass
 
 
 def _rym_headers(cfg=None, warm=False):
@@ -2920,6 +2956,13 @@ def _rym_reason(cfg=None, status=None, challenge=False, tries=1):
                % (status if status is not None else 200)) + \
             ("the rym_cookie has expired or is not for this network" if cookie
              else "no rym_cookie is set")
+        # A solver that was TRIED and lost is part of the answer: "no rym_cookie
+        # is set" alone would send the user to paste one after the app had
+        # already failed to get through with a real browser.
+        solver_msg = _solver_failure(cfg, "rateyourmusic.com")
+        if solver_msg and not cookie:
+            why += (", and FlareSolverr could not pass it either (%s)"
+                    % solver_msg)
         if cookie and not _rym_has_clearance(cfg):
             why += (", and it carries no `cf_clearance` — Cloudflare issues "
                     "that pair only to a browser that has PASSED its "
@@ -3017,6 +3060,14 @@ def _rym_note(cfg=None, answered=False):
     if route in ("live", "archive"):
         return ""          # RYM answered; the page simply states nothing
     if not _rym_cookie(cfg):
+        # The solver is asked about before the cookie is blamed: "no rym_cookie"
+        # is the wrong sentence for a run where the app DID try a real browser
+        # and the site refused it anyway.
+        failed = _solver_failure(cfg, "rateyourmusic.com")
+        if failed:
+            return ("FlareSolverr could not pass RateYourMusic's Cloudflare "
+                    "challenge (%s) — the site refuses this client from this "
+                    "network; a cleared rym_cookie is the other route" % failed)
         return ("no rym_cookie in Settings → Discovery — RateYourMusic refuses "
                 "an automated client without one")
     return ""              # a refusal is the skip sentence's to report
@@ -3435,6 +3486,13 @@ def _rym_get(path, params=None, cfg=None, expect=None):
         solved = cfchallenge.solve(str(getattr(r, "url", "") or url), cfg)
         if (solved and solved.get("html")
                 and not cfchallenge.is_challenge(solved["html"])):
+            # The clearance the browser won is what makes the NEXT request a
+            # plain GET instead of another ~60 s solve. RYM builds its own
+            # headers and jar (it does not go through
+            # `cfchallenge.fetch_page`), so the cookies have to be merged here;
+            # `_rym_headers` then sends them with the solver's own User-Agent,
+            # which is what the clearance is bound to.
+            _adopt_solved_clearance(cfg)
             _rym_record(200, url)
             _rym_route.update({"route": "live", "cached": False, "url": url,
                                "snapshot": "", "solved": True})
@@ -4960,6 +5018,24 @@ def _genre_row(level, names, title=""):
     return row
 
 
+def _solver_failure(cfg, host):
+    """The reason the solver could not pass *host*, or "".
+
+    A solver that answers but cannot beat a host's challenge is a DIFFERENT
+    state from "no credential": the user must not be sent to paste a cookie as
+    if that were the only gap when the app also cannot get through with a real
+    browser. `cfchallenge.host_failed` holds the solver's own error for
+    FAIL_TTL after the attempt, so this is also what makes the second album
+    cheap — the question is not asked again.
+    """
+    try:
+        if not cfchallenge.solver_url(cfg):
+            return ""
+        return cfchallenge.host_failed(host)
+    except Exception:
+        return ""
+
+
 def _genre_source_skip(source, cfg):
     """WHY a source is not asked at all, or None when it is asked.
 
@@ -4981,6 +5057,15 @@ def _genre_source_skip(source, cfg):
             return ("skipped: no rym_cookie in Settings → Discovery "
                     "(RateYourMusic refuses an automated client without one; "
                     "or set cf_solver_url)")
+        failed = _solver_failure(cfg, "rateyourmusic.com")
+        if failed and not _rym_cookie(cfg):
+            # The solver IS configured and it lost: do not spend another 60 s
+            # proving it per album, and do not tell the user to paste a cookie
+            # as though nothing else had been tried.
+            return ("skipped: FlareSolverr could not pass RateYourMusic's "
+                    "Cloudflare challenge (%s) — the site refuses this client "
+                    "from this network; a cleared rym_cookie is the other "
+                    "route" % failed)
         if _rym_blocked(cfg):
             why = _rym_last_reason()
             base = ("skipped: RateYourMusic refused this cookie — paste a "
@@ -4995,6 +5080,12 @@ def _genre_source_skip(source, cfg):
             return ("skipped: no aoty_cookie in Settings → Discovery "
                     "(Album of the Year refuses an automated client without "
                     "one; or set cf_solver_url)")
+        failed = _solver_failure(cfg, "albumoftheyear.org")
+        if failed and not aoty.cookie(cfg):
+            return ("skipped: FlareSolverr could not pass Album of the Year's "
+                    "Cloudflare challenge (%s) — the site refuses this client "
+                    "from this network; a cleared aoty_cookie is the other "
+                    "route" % failed)
         return None
     return None
 
@@ -5516,6 +5607,11 @@ def _aoty_note(cfg=None, since=0.0):
     if info.get("ok"):
         return ""          # AOTY answered; it just states no genres here
     if info.get("challenge"):
+        failed = _solver_failure(cfg, "albumoftheyear.org")
+        if failed:
+            return ("Album of the Year's Cloudflare challenge beat the solver "
+                    "(%s) — the site refuses this client from this network; a "
+                    "cleared aoty_cookie is the other route" % failed)
         return ("Album of the Year was challenged by Cloudflare — set a fresh "
                 "aoty_cookie in Settings → Discovery (or cf_solver_url)")
     return ("Album of the Year did not answer — %s"

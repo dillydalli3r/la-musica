@@ -147,9 +147,15 @@ async def _lifespan(app: FastAPI):
             try:
                 from server import solver
                 ok, msg = solver.ensure_started()
-                if not ok and msg not in ("already available",
-                                          "FlareSolverr is not installed",
-                                          "autostart is off"):
+                if ok:
+                    # The solver is up: find out what it can pass NOW, in the
+                    # background, so the first genre import is not the thing
+                    # that waits ~60 s per host to learn it (cfchallenge).
+                    from server import cfchallenge
+                    cfchallenge.warm_solver(load_config())
+                elif msg not in ("already available",
+                                 "FlareSolverr is not installed",
+                                 "autostart is off"):
                     print(f"[mlo] solver autostart skipped: {msg}")
             except Exception as e:
                 print(f"[mlo] solver autostart failed: {e}")
@@ -3816,7 +3822,10 @@ def dependencies_install(req: DepsInstallRequest):
         def _start_solver():
             try:
                 from server import solver
-                solver.start_after_install()
+                ok, _msg = solver.start_after_install()
+                if ok:
+                    from server import cfchallenge
+                    cfchallenge.warm_solver(load_config())
             except Exception as e:
                 print(f"[mlo] solver start after install failed: {e}")
         threading.Thread(target=_start_solver, daemon=True).start()

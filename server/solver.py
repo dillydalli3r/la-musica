@@ -330,6 +330,7 @@ def start(cfg=None):
         _proc["started_at"] = time.time()
     if wait_until_ready(LOCAL_URL, START_TIMEOUT, popen=proc):
         _probe["url"], _probe["at"] = LOCAL_URL, time.time()
+        _clear_host_failures()
         return True, "started"
     if proc.poll() is not None:
         detail = _last_log_line(log)
@@ -342,6 +343,19 @@ def start(cfg=None):
     # a valid answer, and the caller's first real solve will wait like any
     # other.
     return True, "started (still warming up)"
+
+
+def _clear_host_failures():
+    """Forget "the solver could not pass this host" for a fresh attempt.
+
+    A Start is the user asking again — a restarted solver has a new browser
+    profile, and on a fresh boot the earlier failures are not this one's.
+    """
+    try:
+        from server import cfchallenge
+        cfchallenge.clear_failures()
+    except Exception:
+        pass
 
 
 def stop(cfg=None):
@@ -399,6 +413,26 @@ def start_after_install(cfg=None):
     return start(cfg)
 
 
+def blocked_hosts():
+    """[{host, message}] for the scraped hosts the solver could not pass.
+
+    The card needs this: "running" alone would look like everything is fine
+    while every genre import quietly skips both Cloudflare sources. The reason
+    is the solver's own, and it is the same latch the chain reads.
+    """
+    out = []
+    try:
+        from server import cfchallenge
+        for host, label in (("rateyourmusic.com", "RateYourMusic"),
+                            ("albumoftheyear.org", "Album of the Year")):
+            message = cfchallenge.host_failed(host)
+            if message:
+                out.append({"host": host, "label": label, "message": message})
+    except Exception:
+        pass
+    return out
+
+
 def status(cfg=None):
     """The Solver card's payload (Settings → Discovery)."""
     cfg = _cfg(cfg)
@@ -419,6 +453,10 @@ def status(cfg=None):
         "default_url": LOCAL_URL,
         "timeout_ms": _timeout_ms(cfg),
         "log": _log_path(),
+        # Hosts the solver was TRIED on and lost (see blocked_hosts): the card
+        # must not say "running" and leave the user wondering why the scraped
+        # sources are still skipped.
+        "blocked": blocked_hosts(),
     }
 
 

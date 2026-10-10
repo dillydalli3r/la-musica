@@ -263,8 +263,11 @@ def _probe_genre(pid, cfg):
         before = intg._rym_failures
         # This row IS a user's Test: forget the refusal latch first, so RYM is
         # asked again with whatever cookie is saved now — otherwise the row
-        # would report an earlier run's block however fresh the cookie is.
+        # would report an earlier run's block however fresh the cookie is. The
+        # solver's own "this host beat me" latch goes with it: a Test is the
+        # user asking the question again, network and all.
         intg._rym_clear_block()
+        intg.cfchallenge.clear_failures("rateyourmusic.com")
         data = intg.rym_genres(SAMPLE_ARTIST, SAMPLE_ALBUM, cfg)
         if intg._rym_failures != before:
             # WHY RYM said no, in RYM's own recorded words: "403/challenge"
@@ -282,6 +285,9 @@ def _probe_genre(pid, cfg):
         if not intg.aoty.cookie(cfg) and not intg.cfchallenge.solver_url(cfg):
             return "skipped", ("no aoty_cookie in Settings → Discovery "
                                "(or set cf_solver_url)")
+        # Same as RYM's Test: a fresh question, so the solver's failure latch
+        # for this host must not answer it.
+        intg.cfchallenge.clear_failures("albumoftheyear.org")
         html = intg.aoty_page(SAMPLE_ARTIST, SAMPLE_ALBUM, cfg=cfg,
                               kind="album")
         if not html:

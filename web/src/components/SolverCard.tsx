@@ -164,6 +164,23 @@ export default function SolverCard() {
             </div>
           )}
 
+          {/* Running is not the same as WORKING. The solver can be up and still
+              lose a site's challenge (measured live: it cannot pass either
+              scraped host from some networks), and the import then skips that
+              source — so the card says which hosts it could not pass, in the
+              solver's own words, instead of leaving "running" to imply
+              everything was fine. */}
+          {status.running && status.blocked?.length > 0 && (
+            <div className="text-[10px] text-amber-500 space-y-0.5">
+              {status.blocked.map((b) => (
+                <div key={b.host}>
+                  It could not pass {b.label}'s Cloudflare challenge ({b.message}) — that
+                  source is skipped and reported as such; a cleared cookie is the other route.
+                </div>
+              ))}
+            </div>
+          )}
+
           {!status.installed && status.install_note && (
             <div className="text-[10px] text-amber-500">{status.install_note}</div>
           )}

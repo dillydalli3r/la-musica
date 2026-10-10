@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 import time
 
 # The marker every one of these interstitials carries. Deliberately broad — a
@@ -53,8 +54,121 @@ DEFAULT_SOLVER_TIMEOUT_MS = 60000
 # what a request fails on, and reusing for more would pay a solve per album.
 COOKIE_TTL = 20 * 60.0
 
+# How long a host whose challenge the solver FAILED to pass is left alone.
+#
+# MEASURED, 2026-10-10, on this machine: FlareSolverr 3.5.2 boots, launches its
+# bundled Chromium and serves; then it cannot pass rateyourmusic.com's
+# challenge — "Error solving the challenge. Timeout after 60.0 seconds", the
+# interstitial still up, re-measured with tabs_till_verify too. That is a fact
+# about the host/network (an interactive Turnstile, a flagged IP), not a
+# timeout to retry: without this, every lookup pays the full 60 s before
+# reporting the same failure — the genre chain asks per album, and AOTY asks
+# once per page, so one import spent minutes doing nothing. Ten minutes, not
+# for ever: a challenge is meant to be passed once, and the user may fix the
+# network, clear it with a cleared cookie, or press Test.
+FAIL_TTL = 10 * 60.0
+
 # In-memory, per host: {"cookies": {name: value}, "user_agent": str, "at": ts}.
 _SOLVED = {}
+# Per host: {"at": ts, "message": str} — the last solve the solver FAILED. It
+# gates both the next solve attempt and what the genre chain reports, so a
+# challenge the solver cannot pass costs its 60 s ONCE. See FAIL_TTL.
+_FAILED = {}
+# The host we last tried to bring the managed solver up for, so a burst of
+# lookups does not each try to spawn one (and so a machine with no install does
+# not pay a detect pass per request). Reset with clear_failures().
+_STARTED_FOR = {"at": 0.0, "ok": False}
+_START_TTL = 60.0
+
+
+def host_of(url):
+    """The hostname of *url* — the key everything per-host is kept under.
+
+    `www.` is stripped: a site's requests are not all made to the same spelling
+    (`albumoftheyear.org` resolves through `www.albumoftheyear.org`, whose
+    SEARCH page is fetched first), and a latch that only matched one of the two
+    would let the other ask the solver again — measured live: AOTY's failure was
+    recorded under `www.albumoftheyear.org` while the skip check looked for
+    `albumoftheyear.org`, so nothing was skipped and the import paid the
+    timeout twice.
+    """
+    from urllib.parse import urlsplit
+    try:
+        host = (urlsplit(str(url or "")).hostname or "").lower()
+    except ValueError:
+        return ""
+    return host[4:] if host.startswith("www.") else host
+
+
+def host_failed(host, ttl=FAIL_TTL):
+    """Whether a solve for *host* failed inside the TTL — the reason or "".
+
+    `""` means "no known failure, try it", so callers can use the truthiness
+    directly; the string is the solver's own error, which the report quotes.
+    """
+    entry = _FAILED.get(str(host or "").lower())
+    if not entry or time.time() - entry.get("at", 0) > ttl:
+        return ""
+    return str(entry.get("message") or "the solver could not pass it")
+
+
+def record_failure(host, message=""):
+    """Remember that a solve failed for *host* (see host_failed)."""
+    if host:
+        _FAILED[str(host).lower()] = {"at": time.time(),
+                                      "message": str(message or "")}
+
+
+def clear_failures(host=None):
+    """Forget a failed solve — the Sources panel's Test, and Start.
+
+    A user who changes the network, pastes a cleared cookie or restarts the
+    solver is asking the question again, so the answer must not come from the
+    latch.
+    """
+    if host:
+        _FAILED.pop(str(host).lower(), None)
+    else:
+        _FAILED.clear()
+    _STARTED_FOR["at"] = 0.0
+
+
+# What the background warm-up probes, and the cookie that makes a probe
+# pointless for that host.
+WARM_URLS = (
+    ("rateyourmusic.com", "rym_cookie", "https://rateyourmusic.com/"),
+    ("albumoftheyear.org", "aoty_cookie", "https://www.albumoftheyear.org/"),
+)
+
+
+def warm_solver(cfg=None):
+    """Find out — once, at boot, in the background — what the solver can pass.
+
+    MEASURED, 2026-10-10: FlareSolverr runs but cannot pass either scraped
+    host's challenge from the owner's network, and the ANSWER takes a full
+    solve to learn (~60 s per host). Asking that question lazily means the
+    first genre import is the thing that waits for it — which is exactly how
+    "Importing genres…" sat for minutes. So the app asks it here instead: one
+    request per host, off the request path, recorded in the same failure latch
+    the chain reads, so an import afterward is instant and its report already
+    knows why the source was skipped.
+
+    Skipped when a cleared cookie answers that host anyway (the live path needs
+    no solver), and when the host is already solved or already latched. The
+    thread is a daemon: a shutdown must never wait for a browser.
+    """
+    def _run():
+        for host, cookie_key, url in WARM_URLS:
+            try:
+                if host_failed(host) or solved_cookies(host):
+                    continue
+                if str((cfg or {}).get(cookie_key) or "").strip():
+                    continue
+                solve(url, cfg)
+            except Exception:
+                continue
+
+    threading.Thread(target=_run, daemon=True, name="solver-warm").start()
 
 
 def is_challenge(text, status=None):
@@ -129,8 +243,53 @@ def solved_user_agent(host):
 
 
 def clear():
-    """Forget every solved cookie (tests, and a credential change in Settings)."""
+    """Forget the solver's own state: solved cookies, failed hosts, the lazy
+    start's rate-limit.
+
+    Used by the tests, and by a credential change in Settings — after which
+    every earlier answer (a clearance, or "this host beat me") was about a
+    state that no longer holds.
+    """
     _SOLVED.clear()
+    _FAILED.clear()
+    _STARTED_FOR["at"] = 0.0
+    _STARTED_FOR["ok"] = False
+
+
+def ensure_solver(cfg=None):
+    """Bring the app's own FlareSolverr up when a scrape needs one — or False.
+
+    The solver is a dependency the app installs and runs (server/solver.py), so
+    "installed but not started" must not read as "no Cloudflare answer": that is
+    exactly the state a run that installed it mid-session was left in, and the
+    one a user meets after a crash. Called from `solve`/`fetch_page` at the
+    moment a challenge is in hand, so the cost is only paid when it is needed.
+    Cheap after the first call (the manager no-ops when something answers), and
+    rate-limited so a burst of albums cannot each try to spawn one.
+
+    A hand-built cfg that carries neither solver key means "ask only what I
+    gave you" — the rule `server.solver.resolve` applies to the ambient URL —
+    so a unit test can never spawn a FlareSolverr on the machine running it.
+    """
+    if solver_url(cfg):
+        return True
+    if cfg is not None:
+        cfg = cfg or {}
+        if "cf_solver_url" not in cfg and "cf_solver_autostart" not in cfg:
+            return False
+    now = time.time()
+    if now - _STARTED_FOR["at"] < _START_TTL:
+        return _STARTED_FOR["ok"]
+    ok = False
+    try:
+        from server import solver
+        # `ensure_started` respects `cf_solver_autostart`: that switch means
+        # "do not bring it up by yourself", and a lazy start is by ourselves.
+        ok, _msg = solver.ensure_started(cfg)
+    except Exception:
+        ok = False
+    _STARTED_FOR["at"], _STARTED_FOR["ok"] = now, bool(ok)
+    return bool(ok)
 
 
 def solve(url, cfg=None, timeout=None):
@@ -144,8 +303,18 @@ def solve(url, cfg=None, timeout=None):
     as a plain ``{name: value}`` map (kept in memory for the fast path), and
     None means the solver is unconfigured, unreachable, or refused — the caller
     then reports the challenge, never "no data".
+
+    A host whose challenge the solver FAILED is not asked again for FAIL_TTL
+    (`host_failed`), and no solver at all is an answer too: the app's own
+    install is started on demand (`ensure_solver`) rather than reported as a
+    missing configuration.
     """
+    target = host_of(url)
+    if target and host_failed(target):
+        return None      # known-bad host: do not pay the timeout again
     base = solver_url(cfg)
+    if not base and ensure_solver(cfg):
+        base = solver_url(cfg)
     if not base or not url:
         return None
     budget = timeout if timeout is not None else solver_timeout(cfg)
@@ -155,23 +324,38 @@ def solve(url, cfg=None, timeout=None):
         from server import httpclient  # noqa: F401  (shared client, one seam)
         import httpx
         r = httpx.post(f"{base}/v1", json=payload, timeout=budget + 10.0)
-    except Exception:
+    except Exception as e:
+        record_failure(target, f"the solver did not answer ({type(e).__name__})")
         return None
     try:
         body = r.json() if r.content else {}
     except ValueError:
+        record_failure(target, "the solver sent something that is not JSON")
         return None
     solution = body.get("solution") if isinstance(body, dict) else None
     if not isinstance(solution, dict):
+        # FlareSolverr's failure shape: {"status": "error", "message": "Error
+        # solving the challenge. Timeout after 60.0 seconds."}. Its own words
+        # are what the report needs, so they are kept, not paraphrased.
+        message = ""
+        if isinstance(body, dict):
+            message = str(body.get("message") or body.get("error") or "")
+        if not message and getattr(r, "status_code", 0) >= 400:
+            message = f"the solver answered HTTP {r.status_code}"
+        record_failure(target, message or "the solver could not pass the challenge")
         return None
     html = solution.get("response")
+    if html is None or is_challenge(html):
+        record_failure(target, str(body.get("message") or "")
+                       or "the solver ended on the challenge page")
+        return None
     cookies = {}
     for cookie in solution.get("cookies") or []:
         name = str((cookie or {}).get("name") or "").strip()
         if name:
             cookies[name] = str((cookie or {}).get("value") or "")
     user_agent = str(solution.get("userAgent") or "")
-    return {"html": html if isinstance(html, str) else None,
+    return {"html": html,
             "status": solution.get("status"),
             "cookies": cookies, "user_agent": user_agent}
 

@@ -499,6 +499,38 @@ assert got["notes"]["rateyourmusic"].startswith("failed: "), got["notes"]
 # own album answer is what leads the merged list.
 assert got["per_track"][(1, 1)][0] == "Shoegaze", got["per_track"]
 
+# (a4) A host the SOLVER could not pass is skipped before any request, with the
+# solver's own words in the note. This is the fix for the import that spent
+# minutes: measured live, FlareSolverr cannot pass rateyourmusic.com from the
+# owner's network, and the chain used to pay its 60 s timeout once per album.
+clear()
+intg.cfchallenge.clear()
+_arch = {"rym_archive_fallback": True, "cf_solver_url": "http://solver:8191"}
+intg.cfchallenge.record_failure(
+    "rateyourmusic.com", "Error solving the challenge. Timeout after 60.0 seconds.")
+intg.cfchallenge.record_failure(
+    "albumoftheyear.org", "Error solving the challenge. Timeout after 60.0 seconds.")
+try:
+    fake = stub_rym({"rateyourmusic.com": RYM_PAGE})     # would answer if asked
+    calls = stub_aoty(AOTY_ALBUM_PAGE, AOTY_ARTIST_PAGE)
+    stub_mb({"release-group/rg-1": {"genres": [{"name": "Progressive Rock"}]}})
+    with contextlib.redirect_stdout(io.StringIO()):
+        got = intg.genre_chain(artist="Test Artist", album="Test Album",
+                               release=RELEASE, cfg=_arch, limit=6,
+                               files=[FILE_ONE, FILE_TWO])
+    assert got["asked"] == ["musicbrainz"], got["asked"]
+    assert fake.calls == [], fake.calls                 # not one RYM request
+    assert calls == [], calls                           # nor an AOTY page
+    for source, host in (("rateyourmusic", "RateYourMusic"),
+                         ("albumoftheyear", "Album of the Year")):
+        note = got["notes"][source]
+        assert note.startswith(f"skipped: FlareSolverr could not pass {host}"), note
+        assert "Timeout after 60.0 seconds." in note, note
+    # …and MusicBrainz still answered, so the import is not "no genres".
+    assert got["per_track"][(1, 1)][0] == "Alternative Metal", got["per_track"]
+finally:
+    intg.cfchallenge.clear()
+
 # --------------------------------------------------------------------------- #
 # 3) RateYourMusic — per-track rows, title mapping, album fallback
 # --------------------------------------------------------------------------- #

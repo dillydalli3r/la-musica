@@ -877,6 +877,47 @@ try:
         intg.rym_links("Rihanna", "Loud", cfg=CFG)
     reason = intg.rym_last_response()["reason"]
     assert "HTTP 403" in reason and "cf_clearance" not in reason, reason
+
+    # ----------------------------------------------------------------------- #
+    # 18) A solve is used ONCE: the clearance it won joins RYM's own jar and
+    #     its User-Agent rides along, so the next page is a plain GET
+    # ----------------------------------------------------------------------- #
+    # RYM builds its requests by hand (its own jar + header set), so unlike the
+    # AOTY path it does not get `cfchallenge.fetch_page`'s fast path for free.
+    # Without this, every page of a genre read bought ANOTHER browser
+    # navigation from the solver — the difference between "RYM works" and "RYM
+    # works slowly" on a machine where the solver can pass the challenge.
+    import server.cfchallenge as cf
+    interstitial = ("<html><head><title>Just a moment...</title></head>"
+                    "<body>checking your browser</body></html>")
+    _saved = (cf.solve, cf.solved_cookies, cf.solved_user_agent, cf.solver_url)
+    solved_calls = []
+
+    def _fake_solve(url, cfg=None, timeout=None):
+        solved_calls.append(url)
+        return {"html": genre_page("Rihanna", "Loud"), "status": 200,
+                "cookies": {"cf_clearance": "solved-token"}, "user_agent": "solver/9"}
+
+    cf.solve = _fake_solve
+    cf.solved_cookies = lambda host: {"cf_clearance": "solved-token"}
+    cf.solved_user_agent = lambda host: "solver/9"
+    cf.solver_url = lambda cfg=None: "http://solver:8191"
+    try:
+        fake = run({"/release/album/rihanna/loud/": status(403, interstitial),
+                    "/artist/rihanna": ok(artist_page("Rihanna"))})
+        got = intg.rym_genres("Rihanna", "Loud")
+        assert got and got["genres"] == ["Art Pop", "Neo Soul"], got
+        assert len(solved_calls) == 1, solved_calls
+        # The solved page came back from the solver, never from a second GET.
+        assert len(fake.calls) == 1, fake.calls
+        # The NEXT page is asked with the clearance AND the solver's UA.
+        intg.rym_artist_genres("Rihanna")
+        assert len(fake.calls) == 2, fake.calls
+        assert fake.jars[1].get("cf_clearance") == "solved-token", fake.jars[1]
+        assert fake.headers[1]["User-Agent"] == "solver/9", fake.headers[1]
+    finally:
+        (cf.solve, cf.solved_cookies, cf.solved_user_agent,
+         cf.solver_url) = _saved
 finally:
     intg.httpx = _real_httpx
     intg.mb_get_cached = _real_mb_get_cached

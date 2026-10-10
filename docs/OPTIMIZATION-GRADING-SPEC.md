@@ -6811,6 +6811,26 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   so no Start press is needed and `cf_solver_autostart` — which governs BOOT,
   not this — does not veto a fresh install. A solver already answering (the
   sidecar) makes that a no-op, never a second process.
+  **A solve the solver LOSES is remembered per host** (`cfchallenge._FAILED`,
+  `FAIL_TTL` = 10 min, `host_of` normalizes `www.` because AOTY's search page
+  is `www.albumoftheyear.org` while its bare domain is what the checks ask
+  about): measured live, FlareSolverr 3.5.2 boots and serves but cannot pass
+  either host's challenge from this network ("Error solving the challenge.
+  Timeout after 60.0 seconds."), and the genre chain used to pay that 60 s
+  once per album — AOTY asked again for every page. A latched host is skipped
+  BEFORE any request, with the solver's own words in the note; the Sources
+  panel's Test, Start, and a credential change clear the latch. **The app finds
+  out at boot instead of during an import** (`cfchallenge.warm_solver`, fired
+  by both solver-start paths): one request per host, in the background, and the
+  first genre import afterwards is seconds rather than minutes — measured on
+  the owner's own library: 135 s of warm-up, then 0.7 s for Plastic Beach with
+  the two sources skipped and MusicBrainz supplying the genres. **A clearance
+  the solver won is USED, not re-bought** (`_adopt_solved_clearance`): RYM
+  builds its own jar and headers, so it did not inherit `fetch_page`'s fast
+  path and solved the challenge again for every page; the cookies now join that
+  jar and `_rym_user_agent` sends the solver's UA with them, which is what a
+  clearance is bound to. The card reports which hosts the solver could not pass
+  (`solver.blocked_hosts`) — "running" alone must not imply "working".
 - **R358d — a missing per-track web rating FAILS the grade, by default.** The
   public verdict is part of what a finished album carries, so `WEBRATING` joins
   `GENRE`/`MOOD`/`ENERGY` in `mlo.grader.TAG_PRESENCE_CHECKS`:

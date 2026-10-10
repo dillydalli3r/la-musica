@@ -2263,6 +2263,8 @@ export type SolverStatus = {
   /** Where that URL came from: the config, the environment, our child process,
    *  or something already listening on the default port. */
   source: "" | "config" | "env" | "managed" | "local";
+  /** Hosts the solver was tried on and could not pass (its own words). */
+  blocked: { host: string; label: string; message: string }[];
   /** Whether the app may bring its own solver up at boot. */
   autostart: boolean;
   default_url: string;
