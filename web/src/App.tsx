@@ -1,10 +1,10 @@
 import { Suspense, lazy, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { Link, Navigate, NavLink, Route, Routes, useLocation, useNavigate } from "react-router-dom";
+import { Navigate, NavLink, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Activity, ArrowDownUp, ArrowUpRight, BarChart3, ChevronLeft, ChevronRight, ClipboardCheck, Compass, Disc3, Download, Eye, Gauge, HardDriveDownload, Heart, HeartHandshake, Home, Import,
-  Keyboard, Library, ListChecks, ListMusic, Loader2, Menu, Music2, Music4, PanelLeftClose, Search, Sliders, SlidersHorizontal, Sparkles, Tags, Trash2, User, WifiOff, X,
+  Activity, ArrowDownUp, BarChart3, ChevronLeft, ChevronRight, ClipboardCheck, Compass, Disc3, Download, Eye, Gauge, HardDriveDownload, Heart, HeartHandshake, Home, Import,
+  Keyboard, Library, ListChecks, ListMusic, Menu, Music2, Music4, PanelLeftClose, Search, Sliders, SlidersHorizontal, Sparkles, Tags, Trash2, User, WifiOff, X,
   Settings as SettingsIcon, Wrench,
 } from "lucide-react";
 import { api, AuthError, getToken, IN_TAURI, onAuthLost, serverUrl } from "./api";
@@ -95,6 +95,13 @@ import { affectsLibrary, invalidateLibrary } from "./lib/invalidate";
 import PlayerBar from "./components/PlayerBar";
 import { ProgressStack } from "./components/ProgressBar";
 import { EmptyState, PendingMark } from "./components/Badges";
+// The shell's own presentational islands live in their own folder: App.tsx is
+// the layout (sidebar, top bar, routes, player), not a drawer of components.
+import PageLoading from "./shell/PageLoading";
+import SearchHit from "./shell/SearchHit";
+import SetupLoading from "./shell/SetupLoading";
+import SlskIconDot from "./shell/SlskIconDot";
+import Toasts from "./shell/Toasts";
 
 // Sidebar sections: a long flat list of 14 entries is hard to scan, so the
 // rail groups them by what the user is doing (browse / acquire / maintain)
@@ -334,16 +341,6 @@ function useSlskDot(enabled: boolean) {
   return null;
 }
 
-function SlskIconDot({ dot }: { dot: { cls: string; tip: string; name?: string | null } | null }) {
-  if (!dot) return null;
-  return (
-    <span
-      className={`absolute -top-1 -right-1.5 h-2 w-2 rounded-full ${dot.cls} ring-2 ring-panel`}
-      title={dot.tip}
-    />
-  );
-}
-
 /** How often the bars check the lock registry for a producer that died without
  *  saying so. ONE timer for the whole stack, and none at all while no bar is
  *  up — never a timer per bar. */
@@ -441,124 +438,6 @@ function LiveProgress() {
     // up it is the free-floating cluster it always was.
     <div className="absolute left-2 right-2 sm:left-auto sm:right-4 top-full mt-1 z-40 flex flex-col gap-1">
       <ProgressStack entries={entries} onCancelExport={cancelExport} />
-    </div>
-  );
-}
-
-/** Shown while a lazy route's chunk downloads. Inlined (no spinner
- * library) so the fallback itself is part of the initial bundle. */
-function PageLoading() {
-  const { t } = useI18n();
-  return (
-    <div className="p-6 max-w-[1600px] mx-auto animate-pulse" aria-busy="true" aria-live="polite">
-      <div className="h-7 w-52 rounded bg-raise" />
-      <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-        {Array.from({ length: 6 }).map((_, i) => (
-          <div key={i} className="h-28 rounded-lg border border-border bg-card" />
-        ))}
-      </div>
-      <span className="sr-only">{t("loading.page")}</span>
-    </div>
-  );
-}
-
-/** The toast stack. Rendered by EVERY screen the app can show — the shell AND
- *  the setup wizard — so a message the wizard raises ("Saved", a dependency
- *  install finishing with failures) is actually seen. It used to live only in
- *  the shell's return, so a first-run wizard stored toasts nobody could see
- *  and then popped them over the library the moment setup finished. */
-function Toasts() {
-  const toasts = useStore((s) => s.toasts);
-  const dismissToast = useStore((s) => s.dismissToast);
-  const { t } = useI18n();
-  return (
-    <div
-      className="fixed bottom-20 left-1/2 -translate-x-1/2 z-50 flex flex-col items-center gap-2 w-[min(92vw,30rem)] pointer-events-none"
-      aria-live="polite"
-    >
-      {toasts.map((item) => (
-        <div
-          key={item.id}
-          role={item.severity === "error" ? "alert" : "status"}
-          className={`toast-in pointer-events-auto flex items-start gap-2 w-full rounded-lg border px-3.5 py-2 text-sm shadow-xl backdrop-blur ${
-            item.severity === "error"
-              ? "border-red-900/70 bg-red-950/85 text-red-100"
-              : item.severity === "success"
-              ? "border-emerald-900/70 bg-emerald-950/85 text-emerald-100"
-              : "border-accent/40 bg-panel/95 text-zinc-200"
-          }`}
-        >
-          <span className="flex-1 min-w-0 break-words">{item.message}</span>
-          <button
-            className="shrink-0 -mr-1 p-0.5 rounded opacity-70 hover:opacity-100"
-            onClick={() => dismissToast(item.id)}
-            title={t("toast.dismiss")}
-            aria-label={t("toast.dismiss")}
-          >
-            <X className="h-3.5 w-3.5" />
-          </button>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-/** Held until the config answers, in the SETUP frame rather than the shell's
- *  skeleton: on a first run the next thing on screen is the wizard, and the
- *  shell (sidebar, player, library) painting for a beat first is the library
- *  UI flashing through setup. */
-function SetupLoading() {
-  return (
-    <div className="safe-shell min-h-full bg-bg text-zinc-100 flex flex-col items-center justify-center">
-      <Loader2 className="h-5 w-5 animate-spin text-zinc-500" />
-    </div>
-  );
-}
-
-/** One typed row in the top-bar search dropdown: a direct in-app link to the
- *  entity, with its kind on the right. A MusicBrainz hit is a link into the
- *  app's own browser (`/mb/…`) exactly like a local hit is a link into the
- *  library — `external` adds musicbrainz.org as a small secondary affordance,
- *  never the primary click. */
-function SearchHit({ to, icon: Icon, label, hint, onGo, external, marker }: {
-  to: string;
-  icon: LucideIcon;
-  label: string;
-  hint: string;
-  onGo: () => void;
-  /** musicbrainz.org URL of the same entity, for the escape-hatch icon */
-  external?: string;
-  /** A state mark the hit carries beside its name — a pending album's dot
-   *  (`PendingMark`), so a search result reads as "not downloaded yet" the
-   *  same way the library row it opens does. */
-  marker?: ReactNode;
-}) {
-  const body = (
-    <>
-      <Icon className="h-4 w-4 text-accent-soft shrink-0" />
-      <span className="flex-1 min-w-0 truncate">{label}</span>
-      {marker}
-      <span className="text-[10px] uppercase tracking-wider text-zinc-600 shrink-0">{hint}</span>
-    </>
-  );
-  const cls = "w-full flex items-center gap-2.5 px-3 py-2 text-xs text-zinc-200 hover:bg-raise transition-colors";
-  return (
-    <div className="flex items-center">
-      <Link to={to} onClick={onGo} className={cls}>
-        {body}
-      </Link>
-      {external && (
-        <a
-          href={external}
-          target="_blank"
-          rel="noreferrer"
-          onClick={onGo}
-          title="Open on MusicBrainz"
-          className="shrink-0 mr-1.5 p-1.5 rounded-lg text-zinc-600 hover:text-white hover:bg-raise transition-colors"
-        >
-          <ArrowUpRight className="h-3.5 w-3.5" />
-        </a>
-      )}
     </div>
   );
 }
