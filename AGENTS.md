@@ -149,6 +149,14 @@ When they do ask for one:
   node tools/check_<the surface you touched>.mjs    # payload-driven: no server needed
   ```
 
+- **Narrow the gate while you work.** `python tools/affected_tests.py --diff`
+  (or name the files: `… mlo/discs.py server/plays.py`) prints only the suites
+  whose imports reach those files, so a small edit runs a handful instead of all
+  ~140 — the full loop above stays the handover gate. It reads imports, so a
+  transitive dependency it cannot see is yours to judge: when the change touches
+  a shared seam (`mlo/config.py`, `mlo/paths.py`, `server/events.py`,
+  `server/main.py`, `server/integrations.py`, a wire format), run everything.
+  Its own suite is `tools/test_affected_tests.py`.
 - **UI checks**: `node tools/check_*.mjs <payload.json>` stand the real app up on
   a stub backend, so they need no server and never touch the owner's library;
   `tools/check_*.cjs` drive a running scratch server (8011 up, scratch
@@ -157,6 +165,13 @@ When they do ask for one:
   (`python dev.py --no-open --no-tray`), drive the real page, and read what it
   did — a check that passes while the screen is wrong is a check that is wrong.
 - Web on its own: `cd web && npm run build` (typecheck `npx tsc -b`).
+- **`web/src/components/ui/` is shadcn/ui's home.** New *shared* UI primitives
+  go there, built on Radix + `cn()` from `@/lib/utils` (e.g. `ui/switch.tsx`).
+  The rest of the app keeps its relative imports and the `.btn*` / `.panel` /
+  `.input` classes in `web/src/index.css` as the design vocabulary — the ui/
+  layer wraps those, it does not replace them. `web/components.json` plus the
+  `@/*` alias (`tsconfig.app.json`, `vite.config.ts`) is what lets
+  `npx shadcn add <component>` drop a file that resolves.
 - **The Rust helper** (`rust/`, binary `mlo-audio`): build it with
   `cargo build --release --manifest-path rust/Cargo.toml` (zero crate
   dependencies, so it builds offline). `mlo/dr.py` prefers it and falls back to
