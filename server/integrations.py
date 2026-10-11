@@ -1992,6 +1992,20 @@ def _advisory_alias_queries(artist, title, album, recording_mbid, tags, cfg):
         found = search_aliases("release-group", group_id, cfg, album)
         if found:
             names["album"] = found
+    # The file's OWN alias tags join LAST and need no id at all: a track whose
+    # alias was written to it (because its name is published in another
+    # language) but which carries no MusicBrainz ids has no other way to be
+    # asked about under that name. In the common case the value is already in
+    # the MB list above — this is what covers the file that has no ids.
+    try:
+        from mlo.audio import file_aliases
+        for slot, values in file_aliases(tags).items():
+            merged = names.setdefault(slot, [])
+            for value in values:
+                if value not in merged:
+                    merged.append(value)
+    except Exception:
+        pass
     if not names:
         return []
     original = (" ".join(str(artist or "").split()),

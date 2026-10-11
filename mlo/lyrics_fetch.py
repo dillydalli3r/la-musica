@@ -73,8 +73,16 @@ _ALIAS_ENTITIES = (
 )
 
 
-def _search_aliases(get_tag, config, artist, title, album):
+def _search_aliases(get_tag, config, artist, title, album, tags=None):
     """Alternative NAMES for this track's artist, title and album, or {}.
+
+    Two sources, and the file's OWN comes first for the entities it names: the
+    alias tags an import wrote (`TITLEALIAS` / `ARTISTALIAS` / `ALBUMALIAS`, via
+    `mlo.audio.file_aliases`) and MusicBrainz's own aliases looked up by MBID.
+    The tags are what makes this work for a track with an alias but NO
+    MusicBrainz ids — the exact file whose name is published in another
+    language, which is why the alias is on it at all — and the MB list adds the
+    reader's locale ladder for the entities the ids do name.
 
     The whole input of the chain's second pass (``fetch_lyrics``'s *aliases*):
     ``{"artist": [...], "title": [...], "album": [...]}``, each list as
@@ -126,6 +134,15 @@ def _search_aliases(get_tag, config, artist, title, album):
         found = [str(n).strip() for n in (found or []) if str(n or "").strip()]
         if found:
             out[slot] = found
+    try:
+        from mlo.audio import file_aliases
+        for slot, values in file_aliases(tags).items():
+            merged = out.setdefault(slot, [])
+            for value in values:
+                if value not in merged:
+                    merged.append(value)
+    except Exception:
+        pass
     return out
 
 
@@ -304,7 +321,7 @@ def fetch_one(path, config, replace=False, mark_absent=True):
             config, artist, title, album, duration, youtube_id=youtube_id,
             min_score=_AUTO_MIN_SCORE,
             aliases=lambda: _search_aliases(af.get_tag, config, artist, title,
-                                            album))
+                                            album, af.all_tags()))
         if hit is None:
             # Either no provider had it, or every answer was a weak match —
             # both mean "nothing safe to write", and both are retried by the

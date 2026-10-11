@@ -301,7 +301,7 @@ def _ai_answer(cfg, artist, title, album):
     return None, (f"ai replied {answer!r} — not a lone 0 or 1, nothing written")
 
 
-def _alias_substitutions(get_tag, cfg, artist, title, album):
+def _alias_substitutions(get_tag, cfg, artist, title, album, tags=None):
     """Ordered alias name substitutions for one track, or () when it has none.
 
     `mlo.lyrics_fetch._search_aliases` reads the file's MusicBrainz ids: with
@@ -318,7 +318,7 @@ def _alias_substitutions(get_tag, cfg, artist, title, album):
     except Exception:
         return ()
     try:
-        aliases = _search_aliases(get_tag, cfg, artist, title, album) or {}
+        aliases = _search_aliases(get_tag, cfg, artist, title, album, tags) or {}
         if not aliases:
             return ()
         return tuple(_alias_queries(artist, title, album, aliases) or ())

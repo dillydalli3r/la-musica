@@ -878,6 +878,51 @@ def alias_family_of(name):
     return alias_tag_parts(name)[0]
 
 
+def alias_values(tags, family):
+    """Every value *family*'s alias tags hold on ONE file, or [].
+
+    `tags` is what `AudioFile.all_tags()` returns. A file may carry the family
+    bare (`TITLEALIAS`) or with the locale MusicBrainz stated for it
+    (`TITLEALIAS-JA`, `ARTISTALIAS-EN_PH`), in any container spelling —
+    :func:`alias_family_of` is the ONE reader of that, so this agrees with the
+    writer (`mlo.autotag`), the grade and the strip pass by construction.
+    Values keep the file's own order, de-duplicated case-insensitively, with
+    empties dropped.
+    """
+    out, seen = [], set()
+    for name, value in (tags or {}).items():
+        if alias_family_of(name) != family:
+            continue
+        text = str(value or "").strip()
+        if text and text.lower() not in seen:
+            seen.add(text.lower())
+            out.append(text)
+    return out
+
+
+def file_aliases(tags):
+    """``{"artist": [...], "title": [...], "album": [...]}`` from the FILE.
+
+    The aliases ALREADY ON the file — what an import wrote from MusicBrainz
+    (`mlo.autotag` stamps `ARTISTALIAS` / `TITLEALIAS` / `ALBUMALIAS`) — in the
+    shape the shared search walk takes
+    (`mlo.lyrics_providers._alias_queries`, which the lyrics chain and the
+    advisory route both feed). Entities with no alias are simply absent.
+
+    WHY it matters: the walk used to be fed from MusicBrainz alone, looked up
+    BY MBID — so a file that carries an alias but no
+    `MUSICBRAINZ_*ID` tags had no alternative name to search with at all, which
+    is exactly the track whose name is published in another language (the
+    reason the alias was written to the file in the first place).
+    """
+    found = {
+        "title": alias_values(tags, "TITLEALIAS"),
+        "artist": alias_values(tags, "ARTISTALIAS"),
+        "album": alias_values(tags, "ALBUMALIAS"),
+    }
+    return {entity: names for entity, names in found.items() if names}
+
+
 def alias_locale_fold(value):
     """The language part of a locale code: ``"ja-Latn"``/``"en_PH"`` ->
     ``"ja"``/``"en"`` — the SAME fold `server.integrations._alias_ladder`

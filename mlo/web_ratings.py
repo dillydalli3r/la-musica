@@ -634,6 +634,20 @@ def _existing(af, tag):
         return ""
 
 
+def _file_aliases(af):
+    """The alias tags on a file as the search walk's input, or {}.
+
+    `mlo.audio.file_aliases` is the one reader of those tags (bare or
+    locale-suffixed, any container spelling); a file that will not open, or
+    carries none, simply has no second pass.
+    """
+    try:
+        from mlo.audio import file_aliases
+        return file_aliases(af.all_tags())
+    except Exception:
+        return {}
+
+
 def write_ratings(path, album=None, track=None, cfg=None, force=False):
     """Fill the four tags on ONE file; never replace a value unless *force*.
 
@@ -854,6 +868,10 @@ def run_web_ratings(config, fetch=None):
                     # tag alone.)
                     "web_rating": _existing(af, "WEBRATING"),
                     "album_web_rating": _existing(af, "ALBUMWEBRATING"),
+                    # The alias tags the file carries, in the shape the shared
+                    # search walk takes — the second pass's input when the
+                    # stored names find nothing (see `_track_answer`).
+                    "aliases": _file_aliases(af),
                 })
             except Exception as e:
                 out["errors"].append(f"{os.path.basename(path)}: {e}")
@@ -877,14 +895,31 @@ def run_web_ratings(config, fetch=None):
 
             A row that already carries a WEBRATING makes no request: the
             writer would skip the answer, so no answer is what it is.
+
+            The STORED names are asked first; only when NO source answered for
+            them are the track's ALIAS names asked the same way — a platform
+            that files the release under the localized name answers only to
+            that name. A track that found something pays nothing extra.
             """
             if not force and row["web_rating"]:
                 return None
-            return track_rating(row["artist"] or row["albumartist"],
-                                row["title"], row["rec_mbid"],
-                                config, fetch,
-                                album={"artist": artist, "album": album,
-                                       "mbid": rg})
+            artist_row = row["artist"] or row["albumartist"]
+            around = {"artist": artist, "album": album, "mbid": rg}
+            got = track_rating(artist_row, row["title"], row["rec_mbid"],
+                               config, fetch, album=around)
+            if got is not None:
+                return got
+            try:
+                from mlo.lyrics_providers import _alias_queries
+            except Exception:
+                return None
+            for a_name, t_name, _al, _entity, _query in _alias_queries(
+                    artist_row, row["title"], album, row.get("aliases") or {}):
+                got = track_rating(a_name, t_name, row["rec_mbid"], config,
+                                   fetch, album=around)
+                if got is not None:
+                    return got
+            return None
 
         def _album_answer():
             """The album's own ask, once for the folder — or no request at all
