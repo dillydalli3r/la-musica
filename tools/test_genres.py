@@ -1150,4 +1150,49 @@ assert "testing RateYourMusic right now" in _probing["skipped"].get("rateyourmus
     _probing["skipped"]
 assert "musicbrainz" in _probing["asked"], _probing["asked"]
 
+# ----------------------------------------------------------------------- #
+# Per-track RYM genres: each track's OWN page, linked from the release page
+# ----------------------------------------------------------------------- #
+# MEASURED live, 2026-10-10: a release page states the RELEASE's genres and
+# none inside its rows; every track's own page states one, and the release page
+# links all of them. So the chain's per-track tier for RYM is those pages —
+# each a request, paced and cached by `_rym_get` — and the row's title must
+# parse cleanly for the by-title mapping ("Orchestral Intro" came out as
+# "Orchestral Introlyrics 1:09" live).
+_RYM_TRACKS_PAGE = (
+    '<html><body><h1 class="album_title">Test Album</h1>'
+    '<a href="/artist/test-artist">Test Artist</a>'
+    '<a href="/genre/heavy-metal">Heavy Metal</a>'
+    '<table class="tracklist">'
+    '<tr class="tracklist_row"><td class="tracklist_track_num">1</td>'
+    '<td class="tracklist_track_title">'
+    '<a href="/song/test-artist/track-one">Track One</a></td>'
+    "lyrics 3:01</tr>"
+    '<tr class="tracklist_row"><td class="tracklist_track_num">2</td>'
+    '<td class="tracklist_track_title">'
+    '<a href="/song/test-artist/track-two">Track Two</a></td>'
+    "lyrics 4:02</tr>"
+    "</table></body></html>"
+)
+_SONG_ONE = ('<html><body><a href="/genre/industrial-metal">'
+             "Industrial Metal</a></body></html>")
+_SONG_TWO = ('<html><body><a href="/genre/groove-metal">'
+             "Groove Metal</a></body></html>")
+
+clear()
+stub_rym({"rateyourmusic.com/release": _RYM_TRACKS_PAGE,
+          "/song/test-artist/track-one": _SONG_ONE,
+          "/song/test-artist/track-two": _SONG_TWO})
+stub_aoty(None, None)
+stub_json(lambda url, params: None)
+stub_mb(MB_DEFAULT)
+_tracked = chain(limit=2, sources=["rateyourmusic"])
+assert _tracked["per_track"].get((1, 1)) == ["Industrial Metal", "Heavy Metal"], \
+    _tracked["per_track"].get((1, 1))
+assert _tracked["per_track"].get((1, 2)) == ["Groove Metal", "Heavy Metal"], \
+    _tracked["per_track"].get((1, 2))
+# A row answered by its OWN page is TRACK level, not the release's.
+assert _tracked["levels"].get(FILE_ONE) == "track", _tracked["levels"]
+assert _tracked["level_counts"].get("track") == 2, _tracked["level_counts"]
+
 print("genres: all assertions passed")

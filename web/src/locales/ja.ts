@@ -492,6 +492,11 @@ export default {
   "cookies.keptHosts": "{hosts} の Cookie のみ保持します — エクスポートの残りは保存されません。",
   "cookies.importedAt": "{when} にインポート — Cookie {count} 件",
   "cookies.keptCount": "Cookie {count} 件を保持",
+  "cookies.fromBrowser": "{browser} から読み取る",
+  "cookies.fromBrowserTitle": "すでにログインしているブラウザからセッションを読み取ります",
+  "cookies.fromBrowserHint": "エクスポートも貼り付けも不要: そのブラウザが {host} 用にすでに持っている Cookie を取得し、そのブラウザ自身の User-Agent と一緒に保存します。Cloudflare は許可を取得した正確な User-Agent に結び付けるため、両者は常に一緒に送る必要があります。",
+  "cookies.fromBrowserDone": "{browser} から {count} 件の Cookie を読み取りました。",
+  "cookies.fromBrowserNone": "このマシンに Cookie プロファイルを持つブラウザが見つかりません — 依存関係から yt-dlp をインストールし、ブラウザで {host} を一度開いてください。",
 
   "cookies.sectionTitle": "Cookie ログイン — cookies.txt を取り込む",
 

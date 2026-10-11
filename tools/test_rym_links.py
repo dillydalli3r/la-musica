@@ -933,4 +933,68 @@ finally:
     intg._rym_last_info = _real_last_info
     mlo_audio.AudioFile = _real_audiofile
 
+# ----------------------------------------------------------------------- #
+# Per-track genres: each track's OWN page, linked from the release page
+# ----------------------------------------------------------------------- #
+# MEASURED live, 2026-10-10: a RYM RELEASE page states the RELEASE's genres,
+# not each track's — "Plastic Beach" carries 8 `/genre/` anchors for the album
+# and none inside its rows — while every track's OWN page states one
+# (`/song/gorillaz/orchestral-intro/` → "Cinematic Classical"), and the release
+# page links all of them. So the per-track tier is one request per track, and
+# the row's title has to come out clean for the by-title mapping to work
+# (live, "Orchestral Intro" parsed as "Orchestral Introlyrics 1:09").
+def _release_with_tracks(tracks):
+    rows = "".join(
+        f'<div class="tracklist_line"><span class="tracklist_num">{i}</span>'
+        f'<span class="tracklist_title"><a href="/song/{slug}">{title}</a>'
+        f"</span>"
+        f"lyrics 3:0{i}</div>"
+        for i, (title, slug) in enumerate(tracks, 1)
+    )
+    return ('<html><body><h1 class="album_title">Loud</h1>'
+            '<a href="/artist/rihanna">Rihanna</a>'
+            '<a href="/genre/art-pop">Art Pop</a>'
+            f"{rows}</body></html>")
+
+
+def _song_page(name):
+    slug = name.lower().replace(" ", "-")
+    return f'<html><body><a href="/genre/{slug}">{name}</a></body></html>'
+
+
+fake = run({
+    "/release/album/rihanna/loud/":
+        ok(_release_with_tracks([("S&amp;M", "rihanna/sm"),
+                                 ("Only Girl", "rihanna/only-girl")])),
+    "/song/rihanna/sm": ok(_song_page("Dance Pop")),
+    "/song/rihanna/only-girl": ok(_song_page("Electropop")),
+})
+# The track pages are only fetched when the app can actually reach RYM (a
+# cookie, a browser, or a solver) — the same condition the release page needs.
+intg._rym_cookie = lambda cfg=None: "cf_clearance=x"
+got = intg.rym_genres("Rihanna", "Loud")
+assert got and got["tracks"], got
+_by_title = {row["title"]: row for row in got["tracks"]}
+assert set(_by_title) == {"S&M", "Only Girl"}, _by_title
+assert _by_title["S&M"]["genres"] == ["Dance Pop"], _by_title["S&M"]
+assert _by_title["Only Girl"]["genres"] == ["Electropop"], _by_title["Only Girl"]
+assert _by_title["S&M"]["level"] == "track", _by_title["S&M"]
+# The release-level list is still the release's answer, and still separate.
+assert got["genres"] == ["Art Pop"], got["genres"]
+assert sum(1 for u in fake.calls if u.endswith("/song/rihanna/sm")) == 1, fake.calls
+assert sum(1 for u in fake.calls if u.endswith("/song/rihanna/only-girl")) == 1, fake.calls
+
+# A track page that cannot be read leaves the row answering at ALBUM level
+# rather than dropping the track: the release's genres still apply to it.
+fake = run({
+    "/release/album/rihanna/loud/":
+        ok(_release_with_tracks([("S&M", "rihanna/sm")])),
+    "/song/rihanna/sm": status(404, ""),
+})
+intg._rym_cookie = lambda cfg=None: "cf_clearance=x"
+got = intg.rym_genres("Rihanna", "Loud")
+assert got and got["tracks"], got
+assert got["tracks"][0]["genres"] == [], got["tracks"][0]
+assert got["genres"] == ["Art Pop"], got["genres"]
+
 print("test_rym_links: OK")

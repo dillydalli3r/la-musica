@@ -2640,15 +2640,92 @@ def _rym_tracks_from(html):
             continue
         title = _html.unescape(re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "",
                                                           match.group(1)))).strip()
+        # The row's title cell wraps the title, a "lyrics" link and the running
+        # time, and stripping the tags leaves them joined: MEASURED live,
+        # "Orchestral Intro" came out as "Orchestral Introlyrics 1:09". The
+        # title is what maps a row onto OUR track when the numbering does not
+        # line up, so it has to be the title alone.
+        title = re.sub(r"\s*lyrics?\s*\d+:\d{2}\s*$", "", title, flags=re.I)
+        title = re.sub(r"\s*\d+:\d{2}\s*$", "", title).strip()
         if not title:
             continue
         num = _RYM_TRACK_NUM_RE.search(row)
         out.append({
             "position": int(num.group(1)) if num else len(out) + 1,
             "title": title,
+            # The track's OWN page, which is where RYM states its genre (see
+            # `_rym_track_genres`). Kept on the row so the parser stays pure and
+            # the I/O lives with the caller.
+            "path": _rym_song_path(row),
             "genres": _rym_labels(_RYM_GENRE_RE, row),
         })
     return out
+
+
+# How many track pages one release may fetch, and how long that may take. A
+# release page links every track's own page; at RYM's 1 req/s that is seconds
+# per album, and each page is cached 30 days like every other RYM page. The
+# caps are for a 60-track box set: the release-level list still answers the
+# tracks past them, and the run is bounded either way.
+RYM_TRACK_PAGE_MAX = 40
+RYM_TRACK_BUDGET = 45.0
+
+_RYM_SONG_HREF_RE = re.compile(r'href="(/song/[^"]+)"', re.I)
+
+
+def _rym_song_path(row):
+    """The `/song/<artist>/<slug>/` path a release-page ROW links, or ""."""
+    match = _RYM_SONG_HREF_RE.search(row or "")
+    return match.group(1) if match else ""
+
+
+def _rym_track_genres(rows, cfg, started):
+    """Fill each track row's OWN genres from its `/song/...` page, in place.
+
+    WHY — MEASURED, 2026-10-10: a RYM RELEASE page states the RELEASE's genres,
+    not each track's (`Plastic Beach` carries 8 `/genre/` anchors for the album
+    and none inside its rows), while every track's OWN page states one
+    (`/song/gorillaz/orchestral-intro/` → `Cinematic Classical`), and the
+    release page links all of them. So the per-track tier is one request per
+    track — paced at RYM's 1 req/s and disk-cached 30 days by `_rym_get`, so it
+    is a first-run cost per album, not a per-run one.
+
+    A row whose page cannot be read keeps the release-level answer the caller
+    already has (`genre_chain` marks that `level: album`), and the loop stops
+    on the first refusal — `_rym_get` latches a blocked RYM, and hammering a
+    site that just said no is how a source gets banned rather than slowed.
+    """
+    if not rows or not _rym_live_pages(cfg):
+        return
+    end = time.time() + RYM_TRACK_BUDGET
+    fetched = 0
+    for row in rows:
+        if row.get("genres") or not row.get("path"):
+            continue            # a row that states its own, or links none
+        if fetched >= RYM_TRACK_PAGE_MAX:
+            break               # a box set: the release list answers the rest
+        if time.time() > end or _rym_blocked(cfg) or _rym_expired(started):
+            break
+        fetched += 1
+        page = _rym_get(row["path"], cfg=cfg, expect="/song/")
+        if not page:
+            if _rym_blocked(cfg):
+                break
+            continue
+        names = _rym_genres_from(page)
+        if names:
+            row["genres"] = names
+            row["level"] = "track"
+
+
+def _rym_live_pages(cfg):
+    """Whether a page may be fetched at all (a browser or a cookie exists)."""
+    if _rym_cookie(cfg):
+        return True
+    try:
+        return bool(browserfetch.available(cfg) or cfchallenge.solver_url(cfg))
+    except Exception:
+        return False
 
 
 def _rym_cookie(cfg=None):
@@ -3777,6 +3854,7 @@ def _rym_live_album_answer(artist, album, cfg, album_url=""):
         if html:
             got = _rym_album_answer(html, path)
             if got:
+                _rym_track_genres(got.get("tracks") or [], cfg, started)
                 return got
     # 2) RYM's own release slugs (see `_rym_release_paths` for the order).
     if not _rym_expired(started) and not _rym_blocked(cfg):
@@ -3785,6 +3863,7 @@ def _rym_live_album_answer(artist, album, cfg, album_url=""):
             if html:
                 got = _rym_album_answer(html, url)
                 if got:
+                    _rym_track_genres(got.get("tracks") or [], cfg, started)
                     return got
             if _rym_expired(started) or _rym_blocked(cfg):
                 return None
@@ -3805,6 +3884,8 @@ def _rym_live_album_answer(artist, album, cfg, album_url=""):
                 return None
             continue
         got = _rym_album_answer(page, rel_url)
+        if got:
+            _rym_track_genres(got.get("tracks") or [], cfg, started)
         if not got:
             continue
         got["artist_page"] = f"{RYM_BASE}{m.group(1)}" if m else ""
