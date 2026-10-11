@@ -1195,4 +1195,53 @@ assert _tracked["per_track"].get((1, 2)) == ["Groove Metal", "Heavy Metal"], \
 assert _tracked["levels"].get(FILE_ONE) == "track", _tracked["levels"]
 assert _tracked["level_counts"].get("track") == 2, _tracked["level_counts"]
 
+# ----------------------------------------------------------------------- #
+# The alias pass: the stored names first, the files' aliases only if nothing
+# ----------------------------------------------------------------------- #
+# A source that files a release under its localized name answers only to it,
+# and the alias is on the files (`ALBUMALIAS`) — so the chain runs a second
+# pass under those names, and ONLY when the first found nothing at all.
+_calls = []
+_real_names = intg._genre_chain_names
+_real_alias_pairs = intg._genre_alias_pairs
+try:
+    def _fake_names(a="", al="", **kw):
+        _calls.append((a, al))
+        if al == "Alias Album":
+            return {"genres": ["Art Pop"], "per_track": {}}
+        return {"genres": [], "per_track": {}}
+
+    intg._genre_chain_names = _fake_names
+    intg._genre_alias_pairs = lambda a, al, files, cfg: [("Test Artist", "Alias Album")]
+
+    _calls.clear()
+    got = intg.genre_chain(artist="Test Artist", album="Test Album", cfg=CFG,
+                           files=[FILE_ONE])
+    assert _calls == [("Test Artist", "Test Album"),
+                      ("Test Artist", "Alias Album")], _calls
+    assert got["genres"] == ["Art Pop"], got
+
+    # A first pass that answered never pays for the alias pass.
+    intg._genre_chain_names = lambda a="", al="", **kw: (
+        _calls.append((a, al)), {"genres": ["Heavy Metal"], "per_track": {}})[1]
+    _calls.clear()
+    got = intg.genre_chain(artist="Test Artist", album="Test Album", cfg=CFG,
+                           files=[FILE_ONE])
+    assert _calls == [("Test Artist", "Test Album")], _calls
+    assert got["genres"] == ["Heavy Metal"], got
+
+    # No aliases on the files -> no second pass at all.
+    intg._genre_alias_pairs = _real_alias_pairs
+    intg._genre_chain_names = _real_names
+    intg._genre_alias_pairs = lambda a, al, files, cfg: []
+    _calls.clear()
+    intg._genre_chain_names = lambda a="", al="", **kw: (
+        _calls.append((a, al)), {"genres": [], "per_track": {}})[1]
+    intg.genre_chain(artist="Test Artist", album="Test Album", cfg=CFG,
+                     files=[FILE_ONE])
+    assert _calls == [("Test Artist", "Test Album")], _calls
+finally:
+    intg._genre_chain_names = _real_names
+    intg._genre_alias_pairs = _real_alias_pairs
+
 print("genres: all assertions passed")

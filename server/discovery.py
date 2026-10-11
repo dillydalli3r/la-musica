@@ -2089,7 +2089,38 @@ def bandcamp_album_description(artist, album):
     return None
 
 
-def artist_image(name, mbid=None, cfg=None):
+_MAX_ALIAS_NAMES = 3
+
+
+def _alias_names(entity, mbid, cfg, name):
+    """The ALIAS names to search *name* under, or [].
+
+    MusicBrainz's own aliases for the entity, in the reader's locale ladder
+    order (`search_aliases` is the ONE reader — `server.integrations`), minus
+    the stored name itself and capped: an artist filed under their localized
+    name answers only to it, and a name-based source otherwise finds whichever
+    act owns the spelling.
+
+    "No alias pass" is the answer when there is no id, no name, or the lookup
+    cannot speak — never a guessed name.
+    """
+    if not mbid or not name:
+        return []
+    try:
+        from server.integrations import search_aliases
+        found = search_aliases(entity, mbid, cfg, name) or []
+    except Exception:
+        return []
+    out, seen = [], {str(name).strip().lower()}
+    for value in found:
+        text = str(value or "").strip()
+        if text and text.lower() not in seen:
+            seen.add(text.lower())
+            out.append(text)
+    return out[:_MAX_ALIAS_NAMES]
+
+
+def artist_image(name, mbid=None, cfg=None, _alias_pass=True):
     """Best available artist photo, walking the configured image sources.
 
     Returns `{url, source, label, kind}` — the caller downloads and stores it
@@ -2153,6 +2184,17 @@ def artist_image(name, mbid=None, cfg=None):
             if summary and summary.get("image"):
                 return {"url": summary["image"], "source": "wikipedia",
                         "label": "Wikipedia lead image", "kind": "photo"}
+    # Nothing answered for the stored name: the artist's ALIASES are asked the
+    # same way, one at a time — the MBID route above has already been tried, so
+    # the substituted pass is name-based only. `_alias_pass` guards the
+    # recursion: an alias has no alias pass of its own.
+    if _alias_pass:
+        for alt in _alias_names("artist", mbid, cfg, name):
+            found = artist_image(alt, mbid=None, cfg=cfg, _alias_pass=False)
+            if found:
+                found["alias_pass"] = {"used": True, "entity": "artist",
+                                       "query": alt}
+                return found
     return None
 
 
@@ -2240,7 +2282,7 @@ def _description_from_wikipedia(kind, artist, title=None, cfg=None):
     return None
 
 
-def artist_description(name, mbid=None, cfg=None):
+def artist_description(name, mbid=None, cfg=None, _alias_pass=True):
     """Artist description from the configured description sources.
 
     A known `mbid` is answered by TheAudioDB's own record for it BEFORE any
@@ -2310,10 +2352,18 @@ def artist_description(name, mbid=None, cfg=None):
                     "text": annotation.strip(), "title": (data or {}).get("name") or name,
                     "source": "musicbrainz",
                     "source_url": f"https://musicbrainz.org/artist/{artist_mbid}"})
+    # Nothing answered for the stored name: the artist's ALIASES, one at a
+    # time, exactly as `artist_image` does it (and with the same guard).
+    if _alias_pass:
+        for alt in _alias_names("artist", mbid, cfg, name):
+            found = artist_description(alt, mbid=None, cfg=cfg,
+                                       _alias_pass=False)
+            if found:
+                return found
     return None
 
 
-def album_description(artist, album, mbid=None, cfg=None):
+def album_description(artist, album, mbid=None, cfg=None, _alias_pass=True):
     """Album description from the configured description sources.
 
     Same rule as `artist_description`: the provider's FULL text (the whole
@@ -2362,6 +2412,15 @@ def album_description(artist, album, mbid=None, cfg=None):
                     "text": annotation.strip(), "title": (data or {}).get("title") or album,
                     "source": "musicbrainz",
                     "source_url": f"https://musicbrainz.org/release-group/{rg['mbid']}"})
+    # Nothing answered for the stored release name: the RELEASE GROUP's
+    # aliases are tried the same way — the artist half is unchanged, because a
+    # description is filed by the release's own name.
+    if _alias_pass:
+        for alt in _alias_names("release-group", mbid, cfg, album):
+            found = album_description(artist, alt, mbid=None, cfg=cfg,
+                                      _alias_pass=False)
+            if found:
+                return found
     return None
 
 

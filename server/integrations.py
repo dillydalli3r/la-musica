@@ -5972,6 +5972,69 @@ def _genre_ai_rank(cfg, artist, album, title, candidates, count, extra=None):
 
 def genre_chain(artist="", album="", release=None, limit=None, sources=None,
                 cfg=None, files=None, progress=None):
+    """Per-track genres for a release — the stored names, then the aliases.
+
+    The sources are asked under the release's OWN names first (see
+    `_genre_chain_names`, which is all of the work). Only when NOTHING answered
+    for them — no genre and no per-track row — are the names the FILES carry as
+    aliases tried, one substitution at a time, stopping at the first that
+    answers.
+
+    WHY: a release whose title is published in another language carries
+    `ALBUMALIAS` / `ARTISTALIAS` on its files (`mlo.autotag` writes them), and a
+    source that files the release under that name answers only to it. The alias
+    pass is therefore free for the ordinary album — it runs only after a pass
+    that found nothing — and it never replaces an answer: the stored names'
+    result is what is returned when it produced anything at all.
+    """
+    args = dict(release=release, limit=limit, sources=sources, cfg=cfg,
+                files=files, progress=progress)
+    got = _genre_chain_names(artist, album, **args)
+    if got and (got.get("genres") or got.get("per_track")):
+        return got
+    for a_name, al_name in _genre_alias_pairs(artist, album, files, cfg):
+        alt = _genre_chain_names(a_name, al_name, **args)
+        if alt and (alt.get("genres") or alt.get("per_track")):
+            return alt
+    return got
+
+
+def _genre_alias_pairs(artist, album, files, cfg):
+    """[(artist, album)] substitutions from the FILES' own alias tags, or [].
+
+    The shared walk `mlo.lyrics_providers._alias_queries` does the ordering
+    (the whole name localised first, then each entity on its own, capped), so a
+    genre lookup and a lyrics lookup substitute names the same way. Nothing is
+    read when the files name no alias, and an unreadable file just contributes
+    nothing.
+    """
+    tags = {}
+    for path in (files or [])[:1]:
+        try:
+            from mlo.audio import AudioFile, file_aliases
+            tags = file_aliases(AudioFile(path).all_tags())
+        except Exception:
+            tags = {}
+        break
+    if not tags:
+        return []
+    try:
+        from mlo.lyrics_providers import _alias_queries
+    except Exception:
+        return []
+    out, seen = [], set()
+    for a_name, _t, al_name, _entity, _query in _alias_queries(
+            artist, "", album, tags):
+        pair = (str(a_name or "").strip(), str(al_name or "").strip())
+        if pair != (str(artist or "").strip(), str(album or "").strip()) \
+                and pair not in seen:
+            seen.add(pair)
+            out.append(pair)
+    return out
+
+
+def _genre_chain_names(artist="", album="", release=None, limit=None,
+                        sources=None, cfg=None, files=None, progress=None):
     """Per-track genres for a release, merged from the configured sources.
 
     The sources are asked IN ORDER until every track is full, and no further:
