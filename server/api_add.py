@@ -235,7 +235,7 @@ def _create_all(targets, cfg, *, queries=None, title="", artist="", year="",
     "Add to library" press is about. Measured on a real add by release id
     (`.pi/profile_add.py`, case b): 10-20 s of the request's ~11-21 s were
     `pending_albums.prefetch_content`'s provider calls (`cover_search` ~3-8 s,
-    the RYM link lookup ~2.7 s, MusicBrainz metadata ~3-5 s) — content that
+    MusicBrainz metadata ~3-5 s) — content that
     is only ever read when the user OPENS the album's page, and that the
     reply does not need: the folder, its manifest, its cover and its wish are
     already on disk by then, which is what the album row shows. So every

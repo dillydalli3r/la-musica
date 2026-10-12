@@ -5,7 +5,7 @@ import { Save, Play, Disc3, ListPlus, ListStart, ListMusic, ShieldCheck, ImageUp
 import { api } from "../api";
 import { fmtTech, fmtDuration, isVideoFile } from "../lib/fmt";
 import { uncacheTrack } from "../lib/mediaCache";
-import { LinkEditorButton, MbIcon, RymIcon } from "../components/Links";
+import { LinkEditorButton, MbIcon } from "../components/Links";
 import { SubtitledVideo } from "../components/SubtitledVideo";
 import { useStore, toast } from "../store";
 import { AuditBadge, DisambiguationMark, GradeBadge, IssueList, EmptyState, PageLoading, LyricsKindChip, allowPlainOf, isInstrumental } from "../components/Badges";
@@ -214,14 +214,11 @@ export default function TrackPage() {
   // The identity links a tag value can be opened at. The label shown for each
   // comes from the registry like every other tag's (tagLabel below), so only
   // the URL shape lives here.
-  const linkTags: Record<string, { kind: "mb" | "rym"; url?: (v: string) => string }> = {
-    MUSICBRAINZ_ALBUMID: { kind: "mb", url: (v) => `https://musicbrainz.org/release/${v}` },
-    MUSICBRAINZ_TRACKID: { kind: "mb", url: (v) => `https://musicbrainz.org/recording/${v}` },
-    MUSICBRAINZ_ARTISTID: { kind: "mb", url: (v) => `https://musicbrainz.org/artist/${v}` },
-    MUSICBRAINZ_RELEASEGROUPID: { kind: "mb", url: (v) => `https://musicbrainz.org/release-group/${v}` },
-    RATEYOURMUSIC_ALBUM: { kind: "rym" },
-    RATEYOURMUSIC_TRACK: { kind: "rym" },
-    RATEYOURMUSIC_ARTIST: { kind: "rym" },
+  const linkTags: Record<string, { url: (v: string) => string }> = {
+    MUSICBRAINZ_ALBUMID: { url: (v) => `https://musicbrainz.org/release/${v}` },
+    MUSICBRAINZ_TRACKID: { url: (v) => `https://musicbrainz.org/recording/${v}` },
+    MUSICBRAINZ_ARTISTID: { url: (v) => `https://musicbrainz.org/artist/${v}` },
+    MUSICBRAINZ_RELEASEGROUPID: { url: (v) => `https://musicbrainz.org/release-group/${v}` },
   };
 
   // The grader puts the full problem text on the ALBUM and only the check code
@@ -457,17 +454,17 @@ export default function TrackPage() {
                         >
                           {row.value}
                         </span>
-                        {/* the identity-link button rides on its own tag row:
-                            MB rows carry the MusicBrainz mark, RYM rows the RYM mark */}
+                        {/* the identity-link button rides on its own tag row,
+                            carrying the MusicBrainz mark */}
                         {linkTags[row.tag] && (
                           <a
-                            href={linkTags[row.tag].url ? linkTags[row.tag].url!(row.value) : row.value}
+                            href={linkTags[row.tag].url(row.value)}
                             target="_blank"
                             rel="noreferrer"
                             title={`Open ${tagLabel(reg, row.tag)}`}
                             className="p-1 rounded hover:bg-raise transition-transform hover:scale-110 inline-flex items-center shrink-0"
                           >
-                            {linkTags[row.tag].kind === "mb" ? <MbIcon className="h-3.5 w-3.5" /> : <RymIcon className="h-3.5 w-3.5" />}
+                            <MbIcon className="h-3.5 w-3.5" />
                           </a>
                         )}
                         {row.excess && (

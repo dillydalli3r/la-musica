@@ -873,8 +873,7 @@ _lib_changed_timer = None
 _NOT_LIBRARY_WRITES = (
     "/api/auth", "/login", "/logout", "/password", "/revoke-all", "/setup",
     "/users", "/api/push", "/api/config", "/api/dependencies", "/api/export",
-    "/api/eq", "/api/cookies", "/api/youtube/cookies", "/api/rym/cookies",
-    "/api/aoty/cookies",
+    "/api/eq", "/api/cookies", "/api/youtube/cookies",
     "/api/ai/test", "/api/open-folder", "/api/naming/preview",
     "/api/library/query", "/api/import/scripts/preview",
     "/api/import/prompts/dismiss", "/api/import/sessions", "/api/recommend",

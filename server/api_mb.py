@@ -585,32 +585,6 @@ def lyrics_write(req: LyricsWriteRequest):
     return {"ok": True, "lrc": lrc_path.replace("\\", "/")}
 
 
-@router.get("/api/rym/validate")
-def rym_validate(url: str = Query(...)):
-    """Is this a RateYourMusic link, and WHICH page is it?
-
-    `valid` keeps its old meaning ("a RYM URL") for callers that only accept
-    or reject a paste; `kind` is what lets the link editor put an artist page
-    in the artist field instead of storing it as the album link — a song page
-    written into RATEYOURMUSIC_ALBUM would look resolved forever and block the
-    automatic album lookup.
-    """
-    kind = intg.rym_url_kind(url)
-    return {"valid": kind is not None, "kind": kind}
-
-
-@router.get("/api/rym/resolve")
-def rym_resolve(artist: str = Query(""), album: str = Query("")):
-    """Verified RateYourMusic links for an album, for the link editor.
-
-    Same resolution the import uses (rym_links_auto gates it): each link is
-    None unless RYM itself confirmed that page, and `note` says why nothing
-    was found — "could not resolve" is the normal "paste the URL yourself"
-    answer, so it is a 200 here, never an error.
-    """
-    return intg.rym_links(artist, album, cfg=load_config())
-
-
 def _genre_names(value, cap):
     """The canonical genre list one caller's GENRE value holds.
 
@@ -619,8 +593,8 @@ def _genre_names(value, cap):
     repeated GENRE fields holding MusicBrainz's own names. `str(v)` stored the
     first as ONE genre literally named "['shoegaze', 'rock']" and the second as
     one named "Rock; Shoegaze" — one field, and a genre no reader recognises.
-    `normalize_genres` splits it, resolves each name, derives the family and
-    puts it first, capped at *cap*.
+    `normalize_genres` splits it, resolves each name to MusicBrainz's own and
+    keeps the caller's order (the source's rank), capped at *cap*.
     """
     from mlo.genres import normalize_genres
     return normalize_genres(value, cap)

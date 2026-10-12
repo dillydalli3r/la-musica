@@ -180,6 +180,12 @@ def _apply_mode(tmp, dest) -> None:
 # All three clear on their own in milliseconds, which is what the bounded
 # retry below waits out; a real permissions problem (a read-only destination,
 # no rights on the folder) still ends in the same error after the attempts.
+# MEASURED (2026-10-12, Windows 11 26200): a holder that DOES share delete does
+# not make ``os.replace`` itself succeed — MoveFileEx refuses a replace onto an
+# open destination regardless of share mode, because the classic delete keeps
+# the old NAME reserved. That is why the read routes open with FILE_SHARE_DELETE
+# (open_shared_read) AND the writer has replace_over_open_handle: together they
+# let a tag write land while this app streams the file.
 _TRANSIENT_WINERRORS = (5, 32, 33)
 # A few tries over ~1.5 s. Long enough to outlast an AV pass or a short
 # ffprobe/share-scan read of the same file; short enough that an interactive
@@ -198,17 +204,85 @@ def _is_transient_replace(exc) -> bool:
                                            errno.EBUSY, errno.ETXTBSY)
 
 
-def _held_open(dest, exc) -> PermissionError:
+def held_replace_error(dest, exc, *, queued=False) -> PermissionError:
     """The honest error for a rename Windows refused: what likely holds it, and
-    that nothing was written."""
+    what became of the change.
+
+    *queued* is the truth when the caller HANDED THE CHANGE TO A LATER DRAIN
+    (``mlo.pending``): the same diagnosis, but the old "nothing was written and
+    the original is unchanged" claim is then false — the change is recorded and
+    will land when the file is free — so it is dropped rather than printed.
+    """
+    tail = ("the change is QUEUED and will be written when the file is free"
+            if queued
+            else "nothing was written and the original is unchanged")
     out = PermissionError(
         f"{os.path.basename(str(dest))} could not be replaced: Windows denied "
         f"the rename — another program has it open (a player, a scanner, "
-        f"antivirus, or another job) or the file is read-only; nothing was "
-        f"written and the original is unchanged. ({exc})")
+        f"antivirus, or another job) or the file is read-only; {tail}. ({exc})")
     out.winerror = getattr(exc, "winerror", None)
     out.errno = getattr(exc, "errno", None)
     return out
+
+
+# The old private name: kept so every existing caller and docstring still
+# resolves (this was `_held_open`).
+_held_open = held_replace_error
+
+
+def is_held_replace(exc) -> bool:
+    """Whether *exc* is a rename this app's own retry gave up on (a holder or a
+    read-only destination). ``held_replace_error`` copies the original's
+    ``winerror``/``errno``, which is what distinguishes it from an unrelated
+    PermissionError."""
+    if not isinstance(exc, PermissionError):
+        return False
+    return (getattr(exc, "winerror", None) in _TRANSIENT_WINERRORS
+            or getattr(exc, "errno", None) in (errno.EACCES, errno.EPERM,
+                                               errno.EBUSY, errno.ETXTBSY))
+
+
+def replace_over_open_handle(tmp, dest) -> bool:
+    """Place *tmp* over *dest* when a holder that SHARES DELETE is what denied
+    ``os.replace`` — the Windows half of the owner's fix.
+
+    Windows' ``MoveFileEx(REPLACE_EXISTING)`` refuses a rename onto a
+    destination that is open **even when its handles share delete**: the
+    classic delete leaves the old NAME reserved until the last handle closes,
+    so the rename cannot create the new entry at that name (MEASURED,
+    2026-10-12, Windows 11 26200: ``os.replace`` onto a plain-open file AND
+    onto a handle opened with ``FILE_SHARE_DELETE`` both fail with WinError 5;
+    ``os.remove`` of the same held file succeeds). Moving the old file OUT of
+    the name first is what frees it, and the file is movable while open
+    precisely because its holder shares delete (see
+    :func:`open_shared_read`) — the reader keeps the OLD bytes on its handle,
+    which is the streaming route's contract.
+
+    A holder that does NOT share delete makes the first rename fail, so this
+    cannot weaken the rule: the caller then reports the held-file error exactly
+    as before. The old bytes are removed under a temp name the startup sweep
+    already recognises, so a failure between the two renames leaves a swept
+    temp, never a lost file. Returns whether *dest* now holds *tmp*'s bytes.
+    """
+    try:
+        backup = new_temp(dest)
+    except OSError:
+        return False                       # no place to stage the old file
+    try:
+        os.replace(dest, backup)           # frees the name; holder keeps bytes
+    except OSError:
+        _discard(backup)
+        return False
+    try:
+        os.replace(tmp, dest)              # the new file takes the freed name
+    except OSError:
+        try:
+            os.replace(backup, dest)       # put the original back
+        except OSError:
+            pass
+        return False
+    _discard(backup)                       # the old bytes, now unlinked
+    return True
 
 
 def replace_locked(tmp, dest, *, attempts=REPLACE_ATTEMPTS, delay=REPLACE_DELAY,
@@ -219,6 +293,13 @@ def replace_locked(tmp, dest, *, attempts=REPLACE_ATTEMPTS, delay=REPLACE_DELAY,
     through :func:`replace_temp`) so a rename that a reader, a scanner or a
     sibling job has momentarily blocked is waited out instead of surfacing as
     the owner's "Access is denied" on a library file that is not read-only.
+
+    When the denial OUTLASTS the retries on Windows, the writer tries
+    :func:`replace_over_open_handle` once: a holder that shares delete (the
+    app's own media routes — see :func:`open_shared_read`) does not block the
+    write any more, it just keeps the old bytes until it closes. A holder that
+    does not share delete (an external player, a scanner, a read-only file)
+    still ends in the same give-up below.
 
     On give-up it raises :class:`PermissionError` whose message names what
     likely holds the file and says nothing was written. The caller still owns
@@ -234,6 +315,8 @@ def replace_locked(tmp, dest, *, attempts=REPLACE_ATTEMPTS, delay=REPLACE_DELAY,
         except OSError as exc:
             if i >= attempts or not _is_transient_replace(exc):
                 if _is_transient_replace(exc):
+                    if os.name == "nt" and replace_over_open_handle(tmp, dest):
+                        return
                     raise _held_open(dest, exc) from exc
                 raise
             last = exc
@@ -241,6 +324,67 @@ def replace_locked(tmp, dest, *, attempts=REPLACE_ATTEMPTS, delay=REPLACE_DELAY,
                 time.sleep(delay)
     if last is not None:  # defensive: the loop returns or raises
         raise _held_open(dest, last) from last
+
+
+def open_shared_read(path):
+    """Open *path* for reading with the share mode Windows lets a rename land
+    through — the fix for the owner's report, verbatim:
+
+        set_tag: … could not be replaced … [WinError 5] …
+        '.mlo_tmp_nmgvmk4c.tmp' -> '…Clint Eastwood….flac'
+
+    That write is :func:`replace_locked`'s, and its retry CANNOT win here: the
+    app's own player serves the file while it plays, and a plain
+    ``open(path, "rb")`` (which is what Starlette's ``FileResponse`` uses) asks
+    for ``FILE_SHARE_READ | FILE_SHARE_WRITE`` but NOT delete — so
+    ``os.replace`` (``MoveFileEx``) onto that path is denied for the WHOLE
+    playback, and no 1.5 s retry window reaches past it. Open the file with
+    ``FILE_SHARE_DELETE`` as well and the rename is allowed the instant it is
+    asked for: the reader keeps the OLD bytes on its handle until it closes,
+    which is exactly the streaming route's contract.
+
+    The handle is a buffered binary reader of the same bytes everywhere: on
+    Windows through ``CreateFileW`` + ``msvcrt.open_osfhandle`` (both stdlib,
+    no new dependency), and a plain ``open(path, "rb")`` elsewhere, where a
+    rename over an open file is already permitted so there is nothing to fix.
+    """
+    if os.name != "nt":
+        return open(path, "rb")
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    GENERIC_READ = 0x80000000
+    FILE_SHARE_READ = 0x00000001
+    FILE_SHARE_WRITE = 0x00000002
+    FILE_SHARE_DELETE = 0x00000004
+    OPEN_EXISTING = 3
+    FILE_ATTRIBUTE_NORMAL = 0x80
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                            wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD,
+                            wintypes.HANDLE]
+    create_file.restype = wintypes.HANDLE
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [wintypes.HANDLE]
+    close_handle.restype = wintypes.BOOL
+
+    handle = create_file(str(path), GENERIC_READ,
+                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                         None, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, None)
+    if not handle or handle == wintypes.HANDLE(-1).value:
+        err = ctypes.get_last_error()
+        raise OSError(err, ctypes.FormatError(err), str(path))
+    try:
+        fd = msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
+    except OSError:
+        close_handle(handle)
+        raise
+    # ``open_osfhandle`` hands ownership of *handle* to the CRT: closing the
+    # file object below closes both the fd and the OS handle.
+    return open(fd, "rb")
 
 
 def read_bytes_locked(path, *, attempts=REPLACE_ATTEMPTS, delay=REPLACE_DELAY) -> bytes:

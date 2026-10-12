@@ -304,7 +304,7 @@ export default {
   "charts.no_plays_title": "Pas encore d'écoutes",
   "charts.no_source_title": "Aucune source n'a de classement pour cette période",
   "charts.unsupported_title": "Aucun classement n'a pu être lu",
-  "charts.empty_online": "Toutes les sources interrogées sont revenues vides, et les puces ci-dessus disent lesquelles ont été interrogées. Essayez une autre période ou un autre type : Last.fm, Deezer et Apple ne publient qu'un classement actuel, et RateYourMusic n'a ni classement mensuel ni hebdomadaire.",
+  "charts.empty_online": "Toutes les sources interrogées sont revenues vides, et les puces ci-dessus disent lesquelles ont été interrogées. Essayez une autre période ou un autre type : Last.fm, Deezer et Apple ne publient qu'un classement actuel.",
   "charts.error_title": "Les classements n'ont pas pu être lus",
   "browse.not_asked": "aucune requête exécutée pour l'instant",
   "browse.error_title": "La requête n'a pas pu être lue",

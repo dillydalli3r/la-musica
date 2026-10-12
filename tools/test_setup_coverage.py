@@ -208,7 +208,7 @@ for block in re.findall(r"\{\s*\n\s*title: \"[^\"]+\",(.*?)\n    \},", groups_sr
 # A credential is something a person pastes in: keys, tokens, secrets, a
 # cookie, a password. `auth_password_hash` is deliberately not one — it is a
 # derived value the server refuses to accept back (see HIDDEN_KEYS).
-CREDENTIAL = re.compile(r"(_api_key|_token|_secret|_password$|^rym_cookie$|spotify_client_id)")
+CREDENTIAL = re.compile(r"(_api_key|_token|_secret|_password$|spotify_client_id)")
 credentials = {k for k in config_keys if CREDENTIAL.search(k)}
 check(
     not (credentials - covered),

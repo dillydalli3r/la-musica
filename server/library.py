@@ -16,7 +16,8 @@ from mlo.audio import AudioFile
 from mlo.artistdata import has_image, strip_mbid_suffix
 from mlo.paths import (expected_tracks_state, LIB_VIDEO_EXTS,
                        load_expected_tracks, load_pending,
-                       load_track_covers, _album_file, SIDECAR_COVER_EXTS)
+                       load_track_covers, _album_file, SIDECAR_COVER_EXTS,
+                       library_root)
 from server import tagcache
 
 # Tags surfaced per track for sorting/filtering on the frontend.
@@ -28,7 +29,6 @@ TRACK_TAGS = [
     "MUSICBRAINZ_ARTISTID", "MUSICBRAINZ_TRACKID",
     "MUSICBRAINZ_RELEASEGROUPID", "MUSICBRAINZ_RELEASETRACKID",
     "MUSICBRAINZ_WORKID",
-    "RATEYOURMUSIC_ALBUM", "RATEYOURMUSIC_TRACK", "RATEYOURMUSIC_ARTIST",
     "ALBUMARTISTSORT", "ORIGINALDATE", "RELEASETYPE", "RELEASESTATUS",
     "RELEASECOUNTRY", "CATALOGNUMBER", "LABEL", "BARCODE", "SCRIPT",
     # MusicBrainz's other-language names (mlo.autotag writes them), read here
@@ -71,7 +71,7 @@ ALBUM_LEVEL_TAGS = [
     "ITUNESADVISORY", "ALBUMITUNESADVISORY",
     "MUSICBRAINZ_ALBUMID", "MUSICBRAINZ_ALBUMARTISTID",
     "MUSICBRAINZ_RELEASEGROUPID",
-    "RATEYOURMUSIC_ALBUM", "MEDIA", "CATALOGNUMBER", "LABEL", "BARCODE",
+    "MEDIA", "CATALOGNUMBER", "LABEL", "BARCODE",
     "RELEASETYPE", "RELEASESTATUS", "RELEASECOUNTRY", "SCRIPT",
     # Album-level alias facts: one release states one album name and one
     # credited artist, so the first readable track speaks for the album (the
@@ -655,8 +655,6 @@ def _pending_album_row(folder, root):
         "MUSICBRAINZ_ALBUMID": info.get("release_id") or None,
         "MUSICBRAINZ_RELEASEGROUPID": info.get("release_group_id") or None,
         "RELEASETYPE": info.get("release_type") or None,
-        "RATEYOURMUSIC_ALBUM": links.get("album") or None,
-        "RATEYOURMUSIC_ARTIST": links.get("artist") or None,
     })
     # THE RELEASE'S OWN FACTS, while it is still arriving (the owner's ask:
     # an album being imported must not read as a blank cell). The pressing's
@@ -681,9 +679,7 @@ def _pending_album_row(folder, root):
         row["media"] = identity["MEDIA"]
     row["meta"] = meta
     for key, val in (("ALBUM", info.get("title")), ("ALBUMARTIST", info.get("artist")),
-                     ("ARTIST", info.get("artist")), ("DATE", info.get("year")),
-                     ("RATEYOURMUSIC_ALBUM", links.get("album")),
-                     ("RATEYOURMUSIC_ARTIST", links.get("artist"))):
+                     ("ARTIST", info.get("artist")), ("DATE", info.get("year"))):
         if key in row["album_values"]:
             row["album_values"][key] = str(val or "").strip()
     # The release's own tracklist, with nothing on disk matching it: every
@@ -727,7 +723,12 @@ def _add_expected_tracks(res, album_dir):
     # nothing about it says which position it occupies.
     on_disk = {(tr.get("discnumber") or 1, tr.get("tracknumber"))
                for tr in res.get("tracks", [])}
-    names = [tr.get("file") for tr in res.get("tracks", []) if tr.get("file")]
+    # A track in a disc subfolder carries "CD2/01 - x.flac" as its `file`
+    # (the album's own audio is read from the folder AND its disc folders);
+    # a manifest row names a FILE, so this list is the leaf names, exactly as
+    # `mlo.discs.disk_rows` reports them.
+    names = [os.path.basename(str(tr.get("file") or ""))
+             for tr in res.get("tracks", []) if tr.get("file")]
     # The same rows as the file walk would produce (disc, position, TITLE), for
     # the discs whose manifest and files are numbered in different conventions
     # (see `expected_tracks_state`): a 2-CD release numbered 14-26 against a
@@ -913,6 +914,16 @@ def _drop_filled_placeholders(result):
             ar["aggregate"] = _aggregate_albums(kept)
 
 
+def _merge_disc_folders(album_dirs, artists_root):
+    """Fold every disc SUBFOLDER of an album back into the album folder.
+
+    See `mlo.discs.merge_disc_albums`, the ONE rule (the album walk yields
+    every folder holding audio; a disc-subfolder release is ONE album).
+    """
+    from mlo.discs import merge_disc_albums
+    return merge_disc_albums(album_dirs, artists_root)
+
+
 def _library_builder(folder, cfg):
     """The uncached build of the library tree — one walk, one album pool.
 
@@ -928,6 +939,9 @@ def _library_builder(folder, cfg):
         # same directory scan mlo.grader's run fills).
         dir_scan = {}
         albums = _find_albums(folder, dir_scan)
+        # ONE album per multi-disc release: its disc SUBFOLDERS are part of it,
+        # not albums of their own (see `_merge_disc_folders`).
+        albums = _merge_disc_folders(albums, library_root(folder) or "")
         # The index holds one row per album that ever had audio here; a folder
         # that is gone (a deleted album, an organizer run) must not keep its
         # row until the next sweep of the whole file. One pass over the index's

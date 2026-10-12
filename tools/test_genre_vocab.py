@@ -11,10 +11,11 @@ What this pins:
   * `parent_of` answers with a FAMILY, never with a specific genre, and with
     None rather than a wrong guess;
   * `normalize_genres` is the list policy: the specific names a source stated,
-    kept as they arrived, except that any name another member of the SAME list
-    sits under is dropped (the old app-written family slot, wherever it sits)
-    — duplicates collapsed, the cap enforced, and an unrecognised name kept
-    verbatim (lossless);
+    kept as they arrived — the ORDER is the source's own rank (MusicBrainz
+    publishes an entity's genres by vote count, most-voted first) — with
+    duplicates collapsed, the FIRST N names kept, and an unrecognised name
+    kept verbatim (lossless); nothing is dropped for being a parent
+    (owner's call, 2026-10-12);
   * `server.integrations.genre_category` buckets a name by that FAMILY and only
     by its spelling when the vocabulary has no family for it, so the page's
     fixed buckets cannot disagree with the family the app derived (the owner's
@@ -188,27 +189,31 @@ check(G.normalize_genres(["Shoegaze"]) == ["Shoegaze"],
       "nothing is added: the tag holds what a source stated",
       G.normalize_genres(["Shoegaze"]))
 check(G.normalize_genres(["Shoegaze", "Dream Pop"], count=3)
-      == ["Shoegaze", "Dream Pop"], "count 3 fits both names")
+      == ["Shoegaze", "Dream Pop"], "count 3 fits both names, in order")
 check(G.normalize_genres(["Shoegaze", "Dream Pop"]) == ["Shoegaze", "Dream Pop"],
       "the cap counts NAMES, and no slot is spent on a level")
-check(G.normalize_genres(["rock", "Shoegaze"]) == ["Shoegaze"],
-      "a head another member of the list sits under is the old family slot")
-check(G.normalize_genres(["Shoegaze", "rock"]) == ["Shoegaze"],
-      "…and the same head in a LATER slot is dropped too: order stops mattering")
-check(G.normalize_genres(["Trap", "Hip-Hop"], count=3) == ["Trap"],
-      "a head its own list contains is dropped wherever it sits")
+check(G.normalize_genres(["Shoegaze", "Dream Pop", "IDM"], count=2)
+      == ["Shoegaze", "Dream Pop"],
+      "the cap keeps the FIRST N — the source's own rank, never re-sorted")
+check(G.normalize_genres(["rock", "Shoegaze"]) == ["Rock", "Shoegaze"],
+      "a parent+child pair a source stated is kept verbatim, in its order")
+check(G.normalize_genres(["Shoegaze", "rock"]) == ["Shoegaze", "Rock"],
+      "…and the reverse order survives just as it arrived: nothing is derived")
+check(G.normalize_genres(["Trap", "Hip-Hop"], count=3) == ["Trap", "Hip Hop"],
+      "a broad head beside a specific name is two ordinary names now")
 check(G.normalize_genres(["Rock", "Jazz"], count=3) == ["Rock", "Jazz"],
-      "a stated head nothing in the list sits under keeps its place")
+      "a stated head nothing in the list sits under survives unchanged")
 check(G.normalize_genres(["Trip Hop", "Alternative Rock"], count=3)
-      == ["Trip Hop", "Alternative Rock"], "a pair with no ancestor edge is left")
+      == ["Trip Hop", "Alternative Rock"],
+      "a pair with no ancestor edge is left in the source's order")
 check(G.normalize_genres(["Pop", "Art Pop", "House"], count=3)
-      == ["Art Pop", "House"], "a three-name list loses only the ancestor")
+      == ["Pop", "Art Pop", "House"], "a three-name list keeps all three")
 check(G.normalize_genres(["Shoegaze", "shoegaze", "SHOEGAZE"]) == ["Shoegaze"],
       "duplicates collapse case-insensitively")
 check(G.normalize_genres(["Shoegaze"], count=1) == ["Shoegaze"],
       "count 1 is one name")
 check(G.normalize_genres(["Shoegaze", "Nonsense"]) == ["Shoegaze", "Nonsense"],
-      "a junk name is kept, in the order it arrived",
+      "a junk name is kept, after the known ones",
       G.normalize_genres(["Shoegaze", "Nonsense"]))
 check(G.normalize_genres(["Nonsense"], count=2) == ["Nonsense"],
       "an unrecognised name is stored verbatim, not casefolded",
@@ -218,13 +223,13 @@ check(G.normalize_genres([]) == [] and G.normalize_genres(None) == [],
 check(G.normalize_genres(["Alternative Rock / Shoegaze"]) == ["Alternative Rock", "Shoegaze"],
       "one stored value holding a list is read as names",
       G.normalize_genres(["Alternative Rock / Shoegaze"]))
-check(G.normalize_genres(["Pop", "Art Pop"]) == ["Art Pop"],
-      "the shape this app used to write loses exactly the derived lead",
+check(G.normalize_genres(["Pop", "Art Pop"]) == ["Pop", "Art Pop"],
+      "the shape this app used to invent is just two stated names now",
       G.normalize_genres(["Pop", "Art Pop"]))
-check(G.family_of(["Art Pop"]) == "Pop" and G.family_of(["Deep House"]) == "Electronic",
-      "the head is DERIVED for the callers that want one broad word",
-      (G.family_of(["Art Pop"]), G.family_of(["Deep House"])))
-check(G.family_of(["Nonsense"]) == "", "…and an unknown name has none")
+# The one-time `family_of` view is gone with the parent idea (2026-10-12):
+# nothing derives a broad word above a list any more.
+check(not hasattr(G, "family_of"),
+      "mlo.genres no longer exposes a derived family view")
 
 # --------------------------------------------------------------------------- #
 # 6. split_stored() and format_genres()
@@ -234,21 +239,26 @@ check(G.split_stored("Rock; Shoegaze") == ["Rock", "Shoegaze"], "the '; ' form")
 check(G.split_stored("Shoegaze") == ["Shoegaze"], "the single form")
 check(G.split_stored("") == [] and G.split_stored(None) == [], "the empty form")
 check(G.format_genres(["Shoegaze", "dream pop"]) == "Shoegaze / Dream Pop",
-      "rendering joins the names, head included", G.format_genres(["Shoegaze", "dream pop"]))
+      "rendering joins the names in their own order", G.format_genres(["Shoegaze", "dream pop"]))
 
 # --------------------------------------------------------------------------- #
 # 7. issues()
 # --------------------------------------------------------------------------- #
-check(G.issues(["shoegaze", "rock"]) == ["derived parent genre stored"],
-      "the old family slot is reported wherever it sits")
-check(G.issues(["shoegaze", "dream pop", "idm"], count=2)
+check(G.issues(["shoegaze", "rock"]) == [],
+      "a parent beside its own child is not a defect any more (2026-10-12)")
+check(G.issues(["rock", "shoegaze"]) == [], "…in either order")
+check(G.issues(["Trip Hop", "Alternative Rock"]) == []
+      and G.issues(["Alternative Rock", "Trip Hop"]) == [],
+      "…and no order is 'not canonical': both renderings are in shape")
+check(G.issues(["dream pop", "idm", "shoegaze"], count=2)
       == ["too many (3 > 2)"], "over the cap")
-check(G.issues(["rock", "shoegaze"]) == ["derived parent genre stored"],
-      "…and in front of a name it contains too")
-check(G.issues(["shoegaze", "rock", "idm"], count=3)
-      == ["derived parent genre stored"], "…including mid-list")
-check(G.issues(["rock", "jazz"]) == [], "…but a stated head nothing sits under is not")
-check("duplicate" in G.issues(["shoegaze", "shoegaze", "rock"]), "a duplicate")
+check(G.issues(["shoegaze", "rock", "idm"], count=3) == [],
+      "…including a mid-list parent")
+check(G.issues(["jazz", "rock"]) == [], "…and a stated head nothing sits under")
+check(G.issues(["rock", "rock"]) == ["duplicate"]
+      and G.issues(["shoegaze", "shoegaze"]) == ["duplicate"],
+      "a repeat is the one structural defect the check still names")
+check("duplicate" in G.issues(["rock", "shoegaze", "shoegaze"]), "a duplicate")
 check(any("not a known genre" in p for p in G.issues(["nonsense", "rock"])),
       "an unrecognised name is reported")
 check(G.issues([]) == ["missing"], "an empty list is missing")

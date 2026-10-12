@@ -329,7 +329,7 @@ export default {
   "charts.no_plays_title": "No plays yet",
   "charts.no_source_title": "No source had a chart for this window",
   "charts.unsupported_title": "No chart could be read",
-  "charts.empty_online": "Every source the server asked came back empty, and the chips above say which ones were asked. Try another window, or another kind — Last.fm, Deezer and Apple publish a current chart only, and RateYourMusic has no month or week chart.",
+  "charts.empty_online": "Every source the server asked came back empty, and the chips above say which ones were asked. Try another window, or another kind — Last.fm, Deezer and Apple publish a current chart only.",
   "charts.error_title": "The charts could not be read",
 
   // —— Browse page: what an empty or failed result says ——————————————————

@@ -129,12 +129,11 @@ def make_album(name, *, links, cover, advisory, cover_now=False, advisory_now=Fa
         if advisory_now:
             tags["ITUNESADVISORY"] = "0"
         if links:
-            # What a MusicBrainz-driven import arrives with: the release id and
-            # the links the release stamping already resolved.
+            # What a MusicBrainz-driven import arrives with: the release id the
+            # release stamping already resolved (the Links family's MB_LINK).
             tags["MUSICBRAINZ_ALBUMID"] = "11111111-1111-1111-1111-111111111111"
-            tags["RATEYOURMUSIC_ALBUM"] = "https://rateyourmusic.com/release/album/x/"
         set_tags(path, tags)
-    ANSWERS[name] = {"cover": cover, "advisory": advisory, "links": links}
+    ANSWERS[name] = {"cover": cover, "advisory": advisory}
     return album
 
 
@@ -146,21 +145,9 @@ ANSWERS = {}
 _chain_calls = []
 _step_calls = []
 _real = {n: getattr(imports, n) for n in
-         ("stamp_rym_links", "fetch_advisories", "fetch_instrumentals",
+         ("fetch_advisories", "fetch_instrumentals",
           "run_metadata_step", "run_cover_step", "_stamp_release")}
 _real_chain = script_runners.run_chain
-
-
-def stub_stamp(album_dir, cfg):
-    name = os.path.basename(album_dir)
-    _step_calls.append(("links", name, dict(cfg)))
-    if (ANSWERS.get(name) or {}).get("links"):
-        for f in sorted(os.listdir(album_dir)):
-            if f.lower().endswith(".flac"):
-                set_tags(os.path.join(album_dir, f),
-                         {"RATEYOURMUSIC_ALBUM": "https://rateyourmusic.com/release/album/x/"})
-        return {"album": "https://rateyourmusic.com/release/album/x/", "artist": None, "note": ""}
-    return {"album": None, "artist": None, "note": "no RYM page found"}
 
 
 def stub_advisory(paths, cfg):
@@ -275,7 +262,7 @@ def stub_chain(cfg, ids, targets=None, force=None, progress=None, wait=True,
     return entries
 
 
-for _name, _fn in (("stamp_rym_links", stub_stamp), ("fetch_advisories", stub_advisory),
+for _name, _fn in (("fetch_advisories", stub_advisory),
                    ("fetch_instrumentals", stub_instrumentals),
                    ("run_metadata_step", stub_metadata), ("run_cover_step", stub_cover),
                    ("_stamp_release", stub_genres)):
@@ -309,7 +296,6 @@ CFG = {
     "import_scripts": [4],
     "import_autonomy": "automatic",
     "import_review_families": [],
-    "rym_links_auto": True,
     "cover_auto_fetch": True,
     "cover_review": False,
     "advisory_auto_fetch": True,
@@ -323,7 +309,6 @@ CFG = {
     "grade_check_genre_order": True,
     "grade_check_genre_vocab": True,
     "grade_check_mb_links": True,
-    "grade_check_rym_links": True,
     "grade_check_lyrics": True,
     "grade_check_mood": False,
     "grade_check_energy": False,

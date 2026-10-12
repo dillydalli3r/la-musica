@@ -27,7 +27,12 @@ import path holds it to:
     folder dialog) is COPIED into the library: the original's bytes, names and
     mtimes are untouched, because the app's own staging is the only thing it
     owns — while a path the APP staged (`<music>/.mlo/…`, or a finished
-    download) is still MOVED and drained, so staging leaves no duplicate.
+    download) is still MOVED and drained, so staging leaves no duplicate;
+  * a track ADDED to an album the library already holds
+    (`POST /api/import/upload?album=…`, the wizard's Match step "Add tracks…")
+    fills THAT album: the path is used as-is, so no `(2)` folder is opened
+    beside it, no name is guessed from tags, and a name the album holds keeps
+    the album's own bytes (`kept`); a path outside the music folder is refused.
 
 Nothing here touches the network and no external tool is required: the
 fixtures are crafted archives (zip and tar by hand, `.7z` only when this host
@@ -443,6 +448,216 @@ res = CLIENT.post("/api/import/unpack/discard", data={"dirs": [os.path.dirname(A
 eq(res.json()["skipped"], [os.path.dirname(ALBUM_SRC).replace("\\", "/")],
    "a folder the app did NOT make is never removed")
 check(os.path.isdir(os.path.dirname(ALBUM_SRC)), "…it is still there")
+
+# --------------------------------------------------------------------------- #
+# 3c. adding tracks to an album the library already holds
+# --------------------------------------------------------------------------- #
+# `POST /api/import/upload` takes an `album` path — the wizard's Match step,
+# "Add tracks…" (spec R396). The caller already knows which album the files
+# belong to, so the path is used AS-IS: no name is guessed, no `(2)` folder is
+# opened, and the arriving audio FILLS the album (`merge_into_album`'s rule —
+# a file the album already holds is kept, never replaced). Without it, adding
+# one track to an album the library lists could only be done by re-importing
+# the whole folder through a name the tags had to agree with.
+print("\n== adding tracks to an album the library already holds ==")
+
+add_src = os.path.join(WORK, "add-src")
+os.makedirs(add_src, exist_ok=True)
+first = os.path.join(add_src, "03 - Added.wav")
+make_wav(first, 1.0)
+with open(first, "rb") as fh:
+    res = CLIENT.post("/api/import/upload",
+                      params={"target_dir": os.path.basename(folder_album),
+                              "album": folder_album},
+                      files=[("files", ("03 - Added.wav", fh.read()))])
+eq(res.status_code, 200, "a track added to an existing album is accepted", res.text[:300])
+body = res.json()
+eq(body.get("merged"), True, "the reply says the album was filled")
+eq(body.get("saved"),
+   [os.path.join(folder_album, "03 - Added.wav").replace("\\", "/")],
+   "…and names the file it placed")
+check("03 - Added.wav" in os.listdir(folder_album),
+      "the file landed IN that album, not in a folder named after it",
+      os.listdir(folder_album))
+check(not os.path.isdir(os.path.join(library_root(MF), "Folder Rip (2)")),
+      "…and no (2) folder was opened beside it")
+own_before = {name: hashlib.sha1(open(os.path.join(folder_album, name), "rb").read()).hexdigest()
+              for name in ("01 - One.wav", "02 - Two.wav", "rip.cue", "rip.log")}
+after_names = sorted(os.listdir(folder_album))
+check(all(name in after_names for name in own_before),
+      "the album's own files are all still there", after_names)
+
+# The same name again is KEPT, not replaced: the album's copy keeps its bytes.
+second = os.path.join(add_src, "03 - Added (different).wav")
+make_wav(second, 2.0)
+before = hashlib.sha1(open(os.path.join(folder_album, "03 - Added.wav"), "rb").read()).hexdigest()
+with open(second, "rb") as fh:
+    res = CLIENT.post("/api/import/upload",
+                      params={"target_dir": os.path.basename(folder_album),
+                              "album": folder_album},
+                      files=[("files", ("03 - Added.wav", fh.read()))])
+eq(res.status_code, 200, "re-adding a name the album holds is accepted", res.text[:300])
+eq(res.json().get("kept"),
+   [os.path.join(folder_album, "03 - Added.wav")],
+   "…and reported as kept")
+eq(hashlib.sha1(open(os.path.join(folder_album, "03 - Added.wav"), "rb").read()).hexdigest(),
+   before, "…with the album's own bytes, not the arriving ones")
+eq({name: hashlib.sha1(open(os.path.join(folder_album, name), "rb").read()).hexdigest()
+    for name in own_before}, own_before,
+   "…and none of the album's own files was rewritten by either add")
+
+# The album path is a containment guard, not free text: outside the music
+# folder is refused outright.
+res = CLIENT.post("/api/import/upload",
+                  params={"target_dir": "Elsewhere",
+                          "album": os.path.join(MF, "..", "Elsewhere")},
+                  files=[("files", ("x.wav", open(first, "rb").read()))])
+eq(res.status_code, 400, "an album path outside the music folder is refused")
+check("outside music folder" in res.text, "…with the reason", res.text[:200])
+res = CLIENT.post("/api/import/upload",
+                  params={"target_dir": "Elsewhere",
+                          "album": os.path.join(library_root(MF), "Nowhere")},
+                  files=[("files", ("x.wav", open(first, "rb").read()))])
+eq(res.status_code, 404, "a path that is not an album is refused too", res.text[:200])
+
+# --------------------------------------------------------------------------- #
+# 3d. TWO BATCHES, ONE ALBUM NAME: neither batch overwrites the other
+# --------------------------------------------------------------------------- #
+# The wizard's worklist stages several batches and imports them one after
+# another, each album through the SAME POST /api/import/upload. Two batches
+# that resolve to the SAME album name — two discs, two editions, or two uploads
+# of one album — used to land in one folder, and `_place_staged` moved the
+# second batch's files onto the first's with os.replace: the first batch's
+# audio was GONE, silently. The second upload is now a DIFFERENT album that
+# happens to share the name, so it gets a folder of its own and both survive.
+print("\n== two batches, one album name: both land, neither is overwritten ==")
+
+BATCHES = os.path.join(WORK, "batches")
+batch_one = os.path.join(BATCHES, "one", "Colliding Album.wav")
+batch_two = os.path.join(BATCHES, "two", "Colliding Album.wav")
+os.makedirs(os.path.dirname(batch_one), exist_ok=True)
+os.makedirs(os.path.dirname(batch_two), exist_ok=True)
+make_wav(batch_one, 0.05)
+make_wav(batch_two, 0.25)          # the same track NAME, different bytes
+first_bytes = open(batch_one, "rb").read()
+second_bytes = open(batch_two, "rb").read()
+check(first_bytes != second_bytes, "the fixture's two tracks differ byte for byte")
+
+
+def upload_batch(path, name="Colliding Album"):
+    """One batch's album through the route the wizard calls, exactly as the
+    worklist does: a multipart upload under the album name the batch carries."""
+    with open(path, "rb") as fh:
+        return CLIENT.post("/api/import/upload", params={"target_dir": name},
+                           files=[("files", ("01 - track.wav", fh.read()))])
+
+
+res_a = upload_batch(batch_one)
+eq(res_a.status_code, 200, "the first batch's album imports", res_a.text[:200])
+album_a = res_a.json()["album_path"]
+eq(os.path.basename(album_a), "Colliding Album", "…under the name it was given")
+eq(res_a.json().get("collided"), False, "…and it collided with nothing")
+
+res_b = upload_batch(batch_two)
+eq(res_b.status_code, 200, "the second batch's album imports too", res_b.text[:200])
+album_b = res_b.json()["album_path"]
+eq(os.path.basename(album_b), "Colliding Album (2)",
+   "…into a folder of its own: the taken name is deduplicated, as the bulk queue does")
+eq(res_b.json().get("collided"), True, "…and the reply says the name was taken")
+check(_pathish(album_b) != _pathish(album_a), "the two albums are different folders")
+
+one = os.path.join(album_a, "01 - track.wav")
+two = os.path.join(album_b, "01 - track.wav")
+check(os.path.isfile(one) and os.path.isfile(two), "both tracks are on disk")
+eq(open(one, "rb").read(), first_bytes,
+   "the FIRST batch's track is byte for byte the file it uploaded")
+eq(open(two, "rb").read(), second_bytes,
+   "…and the second batch's is too: neither replaced the other")
+eq(sorted(n for n in os.listdir(library_root(MF)) if n.startswith("Colliding")),
+   ["Colliding Album", "Colliding Album (2)"],
+   "…and the library gained exactly two albums, not one fused and not one lost")
+
+# Both are REAL albums, not orphan folders: the library lists each of them with
+# its own track, which is what "both batches imported" means.
+from mlo.config import load_config as _load_config  # noqa: E402
+from server import library as _lib_mod  # noqa: E402
+from server import tagcache as _tagcache  # noqa: E402
+
+_tagcache.invalidate_all()
+_albums = {os.path.normcase(os.path.abspath(str(a.get("path") or ""))): a
+           for artist in _lib_mod.build_library(_load_config()).get("artists", [])
+           for a in artist.get("albums", [])}
+for _label, _album in (("the first", album_a), ("the second", album_b)):
+    _row = _albums.get(os.path.normcase(os.path.abspath(_album)))
+    check(_row is not None, f"{_label} batch's album is a library album", _album)
+    eq(sorted(os.path.basename(t.get("file") or "")
+              for t in (_row or {}).get("tracks") or []),
+       ["01 - track.wav"], f"…{_label} batch's album holds its own track")
+
+# The SAME upload again is not a collision: a retried batch lands on the
+# byte-identical copies it made, so it stays ONE album. This is the deliberate
+# replace `_place_staged` was written for — it must not become " (3)".
+res_retry = upload_batch(batch_two)
+eq(res_retry.status_code, 200, "a retried batch imports", res_retry.text[:200])
+eq(os.path.basename(res_retry.json()["album_path"]), "Colliding Album (2)",
+   "…into the folder it already made, not a third one")
+eq(res_retry.json().get("collided"), False, "…and that is not a collision")
+eq(sorted(n for n in os.listdir(library_root(MF)) if n.startswith("Colliding")),
+   ["Colliding Album", "Colliding Album (2)"],
+   "still exactly two albums for the two batches")
+
+# A tree staged by the SERVER (`staged=`, the wizard's unpacked archive)
+# follows the same rule: an album name already taken gets a folder of its own
+# rather than replacing the albums that are there.
+third_wav = os.path.join(BATCHES, "three", "01 - track.wav")
+os.makedirs(os.path.dirname(third_wav), exist_ok=True)
+make_wav(third_wav, 0.6)
+third_bytes = open(third_wav, "rb").read()
+third_zip = os.path.join(BATCHES, "third.zip")
+with open(third_zip, "wb") as fh:
+    fh.write(zip_bytes([("01 - track.wav", third_bytes)]))
+with open(third_zip, "rb") as fh:
+    res = CLIENT.post("/api/import/unpack", files={"file": ("third.zip", fh.read())})
+eq(res.status_code, 200, "the third batch's archive is unpacked", res.text[:200])
+third_tree = res.json()
+res_staged = CLIENT.post("/api/import/upload", params={"target_dir": "Colliding Album"},
+                         data={"staged": json.dumps([f["path"] for f in third_tree["files"]])})
+eq(res_staged.status_code, 200, "…and imported through the same route", res_staged.text[:200])
+eq(os.path.basename(res_staged.json()["album_path"]), "Colliding Album (3)",
+   "…into a THIRD folder, never onto the two that are there")
+eq(res_staged.json().get("collided"), True, "…and the reply says the name was taken")
+eq(open(os.path.join(res_staged.json()["album_path"], "01 - track.wav"), "rb").read(),
+   third_bytes, "…with the staged copy's own bytes")
+eq(open(one, "rb").read(), first_bytes, "…and the first album is still untouched")
+CLIENT.post("/api/import/unpack/discard", data={"dirs": [third_tree["dir"]]})
+
+# The function's own rule, called directly: it never replaces a differing file.
+# (The route above deduplicates before it gets here; this keeps the guarantee
+# true of `_place_staged` itself, whoever calls it.)
+from fastapi import HTTPException as _HTTPException  # noqa: E402
+
+with tempfile.TemporaryDirectory(prefix="place-", dir=WORK) as place_stage:
+    src = os.path.join(place_stage, "01 - track.wav")
+    with open(src, "wb") as fh:
+        fh.write(second_bytes)
+    try:
+        mlo_main._place_staged([("01 - track.wav", src)], album_a)
+    except _HTTPException as e:
+        check("different file" in str(e.detail) and "01 - track.wav" in str(e.detail),
+              "placing onto a DIFFERENT name is refused, naming the collision",
+              str(e.detail))
+    else:
+        check(False, "placing onto a different name must be refused, not replaced")
+    check(os.path.isfile(src), "…and the staged copy is left whole")
+    eq(open(os.path.join(album_a, "01 - track.wav"), "rb").read(), first_bytes,
+       "…with the album's own bytes untouched")
+    # …while a file it already holds byte for byte is simply dropped: a retry
+    # repeats its own upload, it does not duplicate it.
+    again = os.path.join(place_stage, "copy.wav")
+    shutil.copyfile(one, again)
+    mlo_main._place_staged([("01 - track.wav", again)], album_a)
+    check(not os.path.exists(again), "an identical copy is dropped, not kept beside")
+    eq(open(one, "rb").read(), first_bytes, "…and the album's copy is still the same bytes")
 
 # --------------------------------------------------------------------------- #
 # 3e. WHO supplied the folder decides whether it MOVES or is COPIED. The

@@ -64,7 +64,7 @@ REQUIRED_HOST = "youtube.com"
 NOTES_KEY = "cookie_notes"
 
 # Which cookie source the notes belong to. RYM's notes share the same store
-# (see server/api_rym.py) — one store, one key, one reader.
+# (the cookie panel's own store) — one store, one key, one reader.
 SOURCE = "youtube"
 
 

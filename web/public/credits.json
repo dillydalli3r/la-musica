@@ -3,105 +3,428 @@
     {
       "title": "Services & websites",
       "items": [
-        { "name": "MusicBrainz", "license": "CC-BY-SA / CC0 (data)", "url": "https://musicbrainz.org", "use": "release, artist and recording metadata" },
-        { "name": "Cover Art Archive", "license": "CC-BY-SA / CC0 (data)", "url": "https://coverartarchive.org", "use": "release cover art" },
-        { "name": "LRCLIB", "license": "service", "url": "https://lrclib.net", "use": "synced lyrics (fetch and publish)" },
-        { "name": "RateYourMusic", "license": "service", "url": "https://rateyourmusic.com", "use": "genres and the album/artist links" },
-        { "name": "ListenBrainz", "license": "CC0 / CC-BY-SA (data)", "url": "https://listenbrainz.org", "use": "sitewide listening charts" },
-        { "name": "Deezer", "license": "service", "url": "https://developers.deezer.com/api", "use": "catalogue search, similarity, artist imagery" },
-        { "name": "iTunes Search API", "license": "service", "url": "https://performance-partners.apple.com/search-api", "use": "catalogue fallback and artwork" },
-        { "name": "TheAudioDB", "license": "service", "url": "https://www.theaudiodb.com", "use": "artist biographies, press images" },
-        { "name": "Wikipedia", "license": "CC BY-SA 4.0 (text)", "url": "https://www.wikipedia.org", "use": "artist and album descriptions" },
-        { "name": "Wikidata", "license": "CC0", "url": "https://www.wikidata.org", "use": "identity links behind those descriptions" },
-        { "name": "Discogs", "license": "service", "url": "https://www.discogs.com/developers", "use": "genre and release lookups (own API token)" },
-        { "name": "Last.fm", "license": "service", "url": "https://www.last.fm/api", "use": "genre and tag lookups (own API key)" },
-        { "name": "AcoustID", "license": "service (non-commercial)", "url": "https://acoustid.org", "use": "fingerprint lookups (own application key)" },
-        { "name": "Chromaprint", "license": "LGPL-2.1+", "url": "https://github.com/acoustid/chromaprint", "use": "the fpcalc fingerprints AcoustID reads" },
-        { "name": "NetEase Cloud Music", "license": "service", "url": "https://music.163.com", "use": "additional lyrics source" },
-        { "name": "QQ Music", "license": "service", "url": "https://y.qq.com", "use": "additional lyrics source" },
-        { "name": "Kugou", "license": "service", "url": "https://www.kugou.com", "use": "additional lyrics source" },
-        { "name": "Kuwo", "license": "service", "url": "https://www.kuwo.cn", "use": "additional lyrics source" },
-        { "name": "Spotify", "license": "service", "url": "https://developer.spotify.com", "use": "catalogue search (own client credentials)" },
-        { "name": "Bandcamp", "license": "service", "url": "https://bandcamp.com", "use": "release links" },
-        { "name": "Musichoarders covers", "license": "community service", "url": "https://covers.musichoarders.xyz", "use": "cover search" },
-        { "name": "YouTube", "license": "service", "url": "https://www.youtube.com", "use": "music videos and their captions" }
+        {
+          "name": "MusicBrainz",
+          "license": "CC-BY-SA / CC0 (data)",
+          "url": "https://musicbrainz.org",
+          "use": "release, artist and recording metadata"
+        },
+        {
+          "name": "Cover Art Archive",
+          "license": "CC-BY-SA / CC0 (data)",
+          "url": "https://coverartarchive.org",
+          "use": "release cover art"
+        },
+        {
+          "name": "LRCLIB",
+          "license": "service",
+          "url": "https://lrclib.net",
+          "use": "synced lyrics (fetch and publish)"
+        },
+        {
+          "name": "ListenBrainz",
+          "license": "CC0 / CC-BY-SA (data)",
+          "url": "https://listenbrainz.org",
+          "use": "sitewide listening charts"
+        },
+        {
+          "name": "Deezer",
+          "license": "service",
+          "url": "https://developers.deezer.com/api",
+          "use": "catalogue search, similarity, artist imagery"
+        },
+        {
+          "name": "iTunes Search API",
+          "license": "service",
+          "url": "https://performance-partners.apple.com/search-api",
+          "use": "catalogue fallback and artwork"
+        },
+        {
+          "name": "TheAudioDB",
+          "license": "service",
+          "url": "https://www.theaudiodb.com",
+          "use": "artist biographies, press images"
+        },
+        {
+          "name": "Wikipedia",
+          "license": "CC BY-SA 4.0 (text)",
+          "url": "https://www.wikipedia.org",
+          "use": "artist and album descriptions"
+        },
+        {
+          "name": "Wikidata",
+          "license": "CC0",
+          "url": "https://www.wikidata.org",
+          "use": "identity links behind those descriptions"
+        },
+        {
+          "name": "Discogs",
+          "license": "service",
+          "url": "https://www.discogs.com/developers",
+          "use": "genre and release lookups (own API token)"
+        },
+        {
+          "name": "Last.fm",
+          "license": "service",
+          "url": "https://www.last.fm/api",
+          "use": "genre and tag lookups (own API key)"
+        },
+        {
+          "name": "AcoustID",
+          "license": "service (non-commercial)",
+          "url": "https://acoustid.org",
+          "use": "fingerprint lookups (own application key)"
+        },
+        {
+          "name": "Chromaprint",
+          "license": "LGPL-2.1+",
+          "url": "https://github.com/acoustid/chromaprint",
+          "use": "the fpcalc fingerprints AcoustID reads"
+        },
+        {
+          "name": "NetEase Cloud Music",
+          "license": "service",
+          "url": "https://music.163.com",
+          "use": "additional lyrics source"
+        },
+        {
+          "name": "QQ Music",
+          "license": "service",
+          "url": "https://y.qq.com",
+          "use": "additional lyrics source"
+        },
+        {
+          "name": "Kugou",
+          "license": "service",
+          "url": "https://www.kugou.com",
+          "use": "additional lyrics source"
+        },
+        {
+          "name": "Kuwo",
+          "license": "service",
+          "url": "https://www.kuwo.cn",
+          "use": "additional lyrics source"
+        },
+        {
+          "name": "Spotify",
+          "license": "service",
+          "url": "https://developer.spotify.com",
+          "use": "catalogue search (own client credentials)"
+        },
+        {
+          "name": "Bandcamp",
+          "license": "service",
+          "url": "https://bandcamp.com",
+          "use": "release links"
+        },
+        {
+          "name": "Musichoarders covers",
+          "license": "community service",
+          "url": "https://covers.musichoarders.xyz",
+          "use": "cover search"
+        },
+        {
+          "name": "YouTube",
+          "license": "service",
+          "url": "https://www.youtube.com",
+          "use": "music videos and their captions"
+        }
       ]
     },
     {
       "title": "Vendored tools",
       "items": [
-        { "name": "beets", "license": "MIT", "url": "https://beets.io", "use": "MusicBrainz imports with Picard-parity tagging" },
-        { "name": "FFmpeg", "license": "LGPL-2.1+ / GPL-2.0+ (GPL build bundled)", "url": "https://ffmpeg.org", "use": "remuxing, transcoding, decode verification" },
-        { "name": "flac", "license": "BSD-3 (libFLAC) / GPL-2+ (tools)", "url": "https://github.com/xiph/flac", "use": "FLAC encode / decode / verify" },
-        { "name": "CUETools", "license": "GPL-2.0-or-later (bundles TagLibSharp LGPL-2.1, Newtonsoft.Json MIT, FFmpeg.AutoGen LGPL-3.0, hdcd/unrar/ALAC/libFLAC/wavpack/Monkey's Audio)", "url": "https://github.com/gchudov/cuetools.net", "use": "CUE handling & verification" },
-        { "name": "Logchecker", "license": "MIT", "url": "https://github.com/OPSnet/Logchecker", "use": "rip log grading (EAC / XLD)" },
-        { "name": "PHP", "license": "PHP-3.01", "url": "https://www.php.net", "use": "runs the Logchecker phar" },
-        { "name": "AudioAuditor", "license": "GPL-3.0", "url": "https://github.com/Angel2mp3/AudioAuditor", "use": "audio authenticity auditing" },
-        { "name": "rsgain", "license": "BSD-2-Clause", "url": "https://github.com/complexlogic/rsgain", "use": "ReplayGain 2.0 tagging" },
-        { "name": "libjxl", "license": "BSD-3-Clause", "url": "https://github.com/libjxl/libjxl", "use": "JPEG XL cover art" },
-        { "name": "libjpeg-turbo", "license": "BSD-3 / IJG / zlib", "url": "https://github.com/libjpeg-turbo/libjpeg-turbo", "use": "JPEG processing" },
-        { "name": "7-Zip", "license": "LGPL-2.1-or-later (unRAR restriction)", "url": "https://www.7-zip.org", "use": "unpacks NSIS installers and .7z/.rar archives (carried by the Windows desktop install)" },
-        { "name": "oxipng", "license": "MIT", "url": "https://github.com/oxipng/oxipng", "use": "lossless PNG optimization" },
-        { "name": "librosa", "license": "ISC", "url": "https://librosa.org", "use": "BPM / key analysis" }
+        {
+          "name": "beets",
+          "license": "MIT",
+          "url": "https://beets.io",
+          "use": "MusicBrainz imports with Picard-parity tagging"
+        },
+        {
+          "name": "FFmpeg",
+          "license": "LGPL-2.1+ / GPL-2.0+ (GPL build bundled)",
+          "url": "https://ffmpeg.org",
+          "use": "remuxing, transcoding, decode verification"
+        },
+        {
+          "name": "flac",
+          "license": "BSD-3 (libFLAC) / GPL-2+ (tools)",
+          "url": "https://github.com/xiph/flac",
+          "use": "FLAC encode / decode / verify"
+        },
+        {
+          "name": "CUETools",
+          "license": "GPL-2.0-or-later (bundles TagLibSharp LGPL-2.1, Newtonsoft.Json MIT, FFmpeg.AutoGen LGPL-3.0, hdcd/unrar/ALAC/libFLAC/wavpack/Monkey's Audio)",
+          "url": "https://github.com/gchudov/cuetools.net",
+          "use": "CUE handling & verification"
+        },
+        {
+          "name": "Logchecker",
+          "license": "MIT",
+          "url": "https://github.com/OPSnet/Logchecker",
+          "use": "rip log grading (EAC / XLD)"
+        },
+        {
+          "name": "PHP",
+          "license": "PHP-3.01",
+          "url": "https://www.php.net",
+          "use": "runs the Logchecker phar"
+        },
+        {
+          "name": "AudioAuditor",
+          "license": "GPL-3.0",
+          "url": "https://github.com/Angel2mp3/AudioAuditor",
+          "use": "audio authenticity auditing"
+        },
+        {
+          "name": "rsgain",
+          "license": "BSD-2-Clause",
+          "url": "https://github.com/complexlogic/rsgain",
+          "use": "ReplayGain 2.0 tagging"
+        },
+        {
+          "name": "libjxl",
+          "license": "BSD-3-Clause",
+          "url": "https://github.com/libjxl/libjxl",
+          "use": "JPEG XL cover art"
+        },
+        {
+          "name": "libjpeg-turbo",
+          "license": "BSD-3 / IJG / zlib",
+          "url": "https://github.com/libjpeg-turbo/libjpeg-turbo",
+          "use": "JPEG processing"
+        },
+        {
+          "name": "7-Zip",
+          "license": "LGPL-2.1-or-later (unRAR restriction)",
+          "url": "https://www.7-zip.org",
+          "use": "unpacks NSIS installers and .7z/.rar archives (carried by the Windows desktop install)"
+        },
+        {
+          "name": "oxipng",
+          "license": "MIT",
+          "url": "https://github.com/oxipng/oxipng",
+          "use": "lossless PNG optimization"
+        },
+        {
+          "name": "librosa",
+          "license": "ISC",
+          "url": "https://librosa.org",
+          "use": "BPM / key analysis"
+        }
       ]
     },
     {
       "title": "Python packages",
       "items": [
-        { "name": "FastAPI", "license": "MIT", "url": "https://github.com/fastapi/fastapi" },
-        { "name": "Uvicorn", "license": "BSD-3-Clause", "url": "https://github.com/encode/uvicorn" },
-        { "name": "httpx", "license": "BSD-3-Clause", "url": "https://github.com/encode/httpx" },
-        { "name": "mutagen", "license": "GPL-2.0-or-later", "url": "https://github.com/quodlibet/mutagen", "use": "audio tag read/write (imported in-process)" },
-        { "name": "Pillow", "license": "HPND (MIT-CMU)", "url": "https://github.com/python-pillow/Pillow" },
-        { "name": "websockets", "license": "BSD-3-Clause", "url": "https://github.com/python-websockets/websockets" },
-        { "name": "python-multipart", "license": "Apache-2.0", "url": "https://github.com/kludex/python-multipart" },
-        { "name": "aiofiles", "license": "Apache-2.0", "url": "https://github.com/Tinche/aiofiles" }
+        {
+          "name": "FastAPI",
+          "license": "MIT",
+          "url": "https://github.com/fastapi/fastapi"
+        },
+        {
+          "name": "Uvicorn",
+          "license": "BSD-3-Clause",
+          "url": "https://github.com/encode/uvicorn"
+        },
+        {
+          "name": "httpx",
+          "license": "BSD-3-Clause",
+          "url": "https://github.com/encode/httpx"
+        },
+        {
+          "name": "mutagen",
+          "license": "GPL-2.0-or-later",
+          "url": "https://github.com/quodlibet/mutagen",
+          "use": "audio tag read/write (imported in-process)"
+        },
+        {
+          "name": "Pillow",
+          "license": "HPND (MIT-CMU)",
+          "url": "https://github.com/python-pillow/Pillow"
+        },
+        {
+          "name": "websockets",
+          "license": "BSD-3-Clause",
+          "url": "https://github.com/python-websockets/websockets"
+        },
+        {
+          "name": "python-multipart",
+          "license": "Apache-2.0",
+          "url": "https://github.com/kludex/python-multipart"
+        },
+        {
+          "name": "aiofiles",
+          "license": "Apache-2.0",
+          "url": "https://github.com/Tinche/aiofiles"
+        }
       ]
     },
     {
       "title": "Bundled Python dependencies",
       "items": [
-        { "name": "numpy, scipy, scikit-learn, joblib, pooch, soundfile, threadpoolctl, cloudpickle, idna, pycparser, audioread, lazy-loader", "license": "BSD-3-Clause / MIT (numpy bundles 0BSD, Zlib, CC0-1.0 parts)", "url": "https://numpy.org", "use": "installed with librosa" },
-        { "name": "numba, llvmlite, decorator, lap, musicbrainzngs", "license": "BSD-2-Clause (llvmlite also Apache-2.0 WITH LLVM-exception)", "url": "https://numba.pydata.org", "use": "installed with librosa / beets" },
-        { "name": "beets, confuse, mediafile, filetype, jellyfish, platformdirs, PyYAML, narwhals, urllib3, charset-normalizer, cffi", "license": "MIT (cffi MIT-0)", "url": "https://beets.io", "use": "installed with beets / librosa" },
-        { "name": "requests, msgpack", "license": "Apache-2.0", "url": "https://requests.readthedocs.io", "use": "installed with librosa" },
-        { "name": "packaging", "license": "Apache-2.0 OR BSD-2-Clause", "url": "https://github.com/pypa/packaging", "use": "installed with librosa" },
-        { "name": "colorama", "license": "BSD-3-Clause", "url": "https://github.com/tartley/colorama", "use": "installed with beets" },
-        { "name": "typing_extensions, standard-aifc, standard-chunk, standard-sunau, audioop-lts", "license": "PSF-2.0", "url": "https://pypi.org/project/typing-extensions/", "use": "runtime shims" },
-        { "name": "certifi", "license": "MPL-2.0", "url": "https://github.com/certifi/python-certifi", "use": "installed with librosa" },
-        { "name": "soxr (native libsoxr)", "license": "LGPL-2.1-or-later", "url": "https://github.com/dofuuz/python-soxr", "use": "resampling, installed with librosa" },
-        { "name": "Unidecode", "license": "GPL-2.0-or-later", "url": "https://github.com/avian2/unidecode", "use": "transliteration in the beets tree" }
+        {
+          "name": "numpy, scipy, scikit-learn, joblib, pooch, soundfile, threadpoolctl, cloudpickle, idna, pycparser, audioread, lazy-loader",
+          "license": "BSD-3-Clause / MIT (numpy bundles 0BSD, Zlib, CC0-1.0 parts)",
+          "url": "https://numpy.org",
+          "use": "installed with librosa"
+        },
+        {
+          "name": "numba, llvmlite, decorator, lap, musicbrainzngs",
+          "license": "BSD-2-Clause (llvmlite also Apache-2.0 WITH LLVM-exception)",
+          "url": "https://numba.pydata.org",
+          "use": "installed with librosa / beets"
+        },
+        {
+          "name": "beets, confuse, mediafile, filetype, jellyfish, platformdirs, PyYAML, narwhals, urllib3, charset-normalizer, cffi",
+          "license": "MIT (cffi MIT-0)",
+          "url": "https://beets.io",
+          "use": "installed with beets / librosa"
+        },
+        {
+          "name": "requests, msgpack",
+          "license": "Apache-2.0",
+          "url": "https://requests.readthedocs.io",
+          "use": "installed with librosa"
+        },
+        {
+          "name": "packaging",
+          "license": "Apache-2.0 OR BSD-2-Clause",
+          "url": "https://github.com/pypa/packaging",
+          "use": "installed with librosa"
+        },
+        {
+          "name": "colorama",
+          "license": "BSD-3-Clause",
+          "url": "https://github.com/tartley/colorama",
+          "use": "installed with beets"
+        },
+        {
+          "name": "typing_extensions, standard-aifc, standard-chunk, standard-sunau, audioop-lts",
+          "license": "PSF-2.0",
+          "url": "https://pypi.org/project/typing-extensions/",
+          "use": "runtime shims"
+        },
+        {
+          "name": "certifi",
+          "license": "MPL-2.0",
+          "url": "https://github.com/certifi/python-certifi",
+          "use": "installed with librosa"
+        },
+        {
+          "name": "soxr (native libsoxr)",
+          "license": "LGPL-2.1-or-later",
+          "url": "https://github.com/dofuuz/python-soxr",
+          "use": "resampling, installed with librosa"
+        },
+        {
+          "name": "Unidecode",
+          "license": "GPL-2.0-or-later",
+          "url": "https://github.com/avian2/unidecode",
+          "use": "transliteration in the beets tree"
+        }
       ]
     },
     {
       "title": "Desktop shell (Rust)",
       "items": [
-        { "name": "tauri, tauri-build, tauri-plugin-dialog, tauri-plugin-autostart", "license": "MIT / Apache-2.0", "url": "https://tauri.app", "use": "desktop shell" },
-        { "name": "serde, serde_json, dirs, windows-rs", "license": "MIT / Apache-2.0", "url": "https://serde.rs", "use": "serialization, paths" },
-        { "name": "auto-launch", "license": "MIT", "url": "https://github.com/zzzgydi/auto-launch", "use": "start on login" },
-        { "name": "Cargo.lock crate graph (453 crates)", "license": "permissive; MPL-2.0 file-level (5 crates); no GPL/AGPL", "url": "https://github.com/dillydalli3r/la-musica/blob/main/desktop/src-tauri/Cargo.lock", "use": "full crate list + licences" }
+        {
+          "name": "tauri, tauri-build, tauri-plugin-dialog, tauri-plugin-autostart",
+          "license": "MIT / Apache-2.0",
+          "url": "https://tauri.app",
+          "use": "desktop shell"
+        },
+        {
+          "name": "serde, serde_json, dirs, windows-rs",
+          "license": "MIT / Apache-2.0",
+          "url": "https://serde.rs",
+          "use": "serialization, paths"
+        },
+        {
+          "name": "auto-launch",
+          "license": "MIT",
+          "url": "https://github.com/zzzgydi/auto-launch",
+          "use": "start on login"
+        },
+        {
+          "name": "Cargo.lock crate graph (453 crates)",
+          "license": "permissive; MPL-2.0 file-level (5 crates); no GPL/AGPL",
+          "url": "https://github.com/dillydalli3r/la-musica/blob/main/desktop/src-tauri/Cargo.lock",
+          "use": "full crate list + licences"
+        }
       ]
     },
     {
       "title": "Frontend packages",
       "items": [
-        { "name": "React", "license": "MIT", "url": "https://react.dev" },
-        { "name": "React Router", "license": "MIT", "url": "https://github.com/remix-run/react-router" },
-        { "name": "TanStack Query", "license": "MIT", "url": "https://github.com/TanStack/query" },
-        { "name": "Zustand", "license": "MIT", "url": "https://github.com/pmndrs/zustand" },
-        { "name": "lucide-react", "license": "ISC", "url": "https://github.com/lucide-icons/lucide" },
-        { "name": "Tailwind CSS", "license": "MIT", "url": "https://github.com/tailwindlabs/tailwindcss" },
-        { "name": "Vite", "license": "MIT", "url": "https://github.com/vitejs/vite" },
-        { "name": "TypeScript", "license": "Apache-2.0", "url": "https://github.com/microsoft/TypeScript" },
-        { "name": "Tauri API", "license": "MIT / Apache-2.0", "url": "https://github.com/tauri-apps/tauri" }
+        {
+          "name": "React",
+          "license": "MIT",
+          "url": "https://react.dev"
+        },
+        {
+          "name": "React Router",
+          "license": "MIT",
+          "url": "https://github.com/remix-run/react-router"
+        },
+        {
+          "name": "TanStack Query",
+          "license": "MIT",
+          "url": "https://github.com/TanStack/query"
+        },
+        {
+          "name": "Zustand",
+          "license": "MIT",
+          "url": "https://github.com/pmndrs/zustand"
+        },
+        {
+          "name": "lucide-react",
+          "license": "ISC",
+          "url": "https://github.com/lucide-icons/lucide"
+        },
+        {
+          "name": "Tailwind CSS",
+          "license": "MIT",
+          "url": "https://github.com/tailwindlabs/tailwindcss"
+        },
+        {
+          "name": "Vite",
+          "license": "MIT",
+          "url": "https://github.com/vitejs/vite"
+        },
+        {
+          "name": "TypeScript",
+          "license": "Apache-2.0",
+          "url": "https://github.com/microsoft/TypeScript"
+        },
+        {
+          "name": "Tauri API",
+          "license": "MIT / Apache-2.0",
+          "url": "https://github.com/tauri-apps/tauri"
+        }
       ]
     },
     {
       "title": "Fonts & services",
       "items": [
-        { "name": "Inter", "license": "SIL OFL 1.1", "url": "https://rsms.me/inter/", "use": "UI typeface" },
-        { "name": "MusicBrainz", "license": "CC-BY-SA / CC0 (data)", "url": "https://musicbrainz.org", "use": "metadata" },
-        { "name": "LRCLIB", "license": "service", "url": "https://lrclib.net", "use": "synced lyrics" }
+        {
+          "name": "Inter",
+          "license": "SIL OFL 1.1",
+          "url": "https://rsms.me/inter/",
+          "use": "UI typeface"
+        },
+        {
+          "name": "MusicBrainz",
+          "license": "CC-BY-SA / CC0 (data)",
+          "url": "https://musicbrainz.org",
+          "use": "metadata"
+        },
+        {
+          "name": "LRCLIB",
+          "license": "service",
+          "url": "https://lrclib.net",
+          "use": "synced lyrics"
+        }
       ]
     }
   ]

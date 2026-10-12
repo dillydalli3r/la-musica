@@ -9,11 +9,6 @@ APIs every time Settings opens. This pins:
   * a keyed source without its key is `skipped` + `configured: false`, and the
     row names the key to ask for,
   * an unconfigured source is never probed (no request, even with probe=1),
-  * UNLESS it has a second route: with `cf_solver_url` set, the two scraped
-    genre sources (RateYourMusic, Album of the Year) are `ok` and ARE probed
-    without their cookie — the cookie is still asked for, but a solver reads
-    the LIVE page without one, so its absence does not sink the source
-    (`optional_needs` says so),
   * a probe that raises is a `fail` row with a detail, never an exception,
   * `probe=False` calls nothing at all,
   * every registered source appears exactly once, with the documented keys.
@@ -77,11 +72,11 @@ health = sh.health_payload(cfg={}, probe=False)
 rows = health["sources"]
 ids = [r["id"] for r in rows]
 
-# The RYM link row shares its id with the genre source that reads the same
-# cookie — the id may appear twice, the (kind, id) pair may not.
+# Every registry the payload reads, in one list. A (kind, id) pair may not
+# repeat, though one id can appear under two kinds (a source and its login).
 expected = (list(LYRICS_SOURCES) + sorted(intg.ADVISORY_SOURCES)
             + list(intg.GENRE_SOURCES) + list(discovery.IMAGE_SOURCES)
-            + ["rateyourmusic"] + [spec["id"] for spec in discover.SOURCES]
+            + [spec["id"] for spec in discover.SOURCES]
             + list(cc.credential_ids()))
 ok(sorted(ids) == sorted(expected),
    f"every registered source is reported once ({len(ids)} rows, "
@@ -112,11 +107,6 @@ ok(all(isinstance(r["detail"], str) and r["detail"] for r in rows),
    "every row explains itself")
 ok(all(("synced" in r) == (r["kind"] == "lyrics") for r in rows),
    "`synced` is on the lyrics rows only")
-link_rows = [r for r in rows if r["kind"] == "links"]
-ok(len(link_rows) == 1 and link_rows[0]["id"] == "rateyourmusic"
-   and link_rows[0]["needs"] == ["rym_cookie"],
-   f"the one link row is RateYourMusic and asks for the cookie "
-   f"({[r['label'] for r in link_rows]})")
 lyrics_rows = [r for r in rows if r["kind"] == "lyrics"]
 ok([r.get("rank") for r in lyrics_rows] == [1, 2, 3, 4, 5, 6],
    f"the lyrics rows carry the registry's 1-based rank in order "
@@ -211,9 +201,7 @@ ok(len(sh.health_payload(cfg={})["sources"]) == len(rows),
 # configuration state (no request may leave the machine for this)
 # --------------------------------------------------------------------------- #
 print("== configuration state ==")
-for sid, needs in (("spotify-isrc", ["spotify_client_id", "spotify_client_secret"]),
-                   ("rateyourmusic", ["rym_cookie"]),
-                   ("albumoftheyear", ["aoty_cookie"])):
+for sid, needs in (("spotify-isrc", ["spotify_client_id", "spotify_client_secret"]),):
     r = row(health, sid)
     ok(r["needs"] == needs, f"{sid} names the config keys it needs ({r['needs']})")
     ok(r["configured"] is False and r["status"] == "skipped",
@@ -228,49 +216,13 @@ ok(all(row(health, sid)["configured"] is True
 ok(all(row(health, sid)["detail"] == "configured" for sid in keyless),
    "and says exactly that")
 
-configured_cfg = {"spotify_client_id": "id", "spotify_client_secret": "secret",
-                  "rym_cookie": "cf=1", "aoty_cookie": "cf=1"}
+configured_cfg = {"spotify_client_id": "id", "spotify_client_secret": "secret"}
 keyed = sh.health_payload(cfg=configured_cfg)["sources"]
-ok(all(row({"sources": keyed}, sid)["configured"] is True
-       for sid in ("spotify-isrc", "rateyourmusic", "albumoftheyear")),
-   "setting the keys flips every keyed source to configured")
+ok(row({"sources": keyed}, "spotify-isrc")["configured"] is True,
+   "setting the keys flips the keyed source to configured")
 
-ok(all(r["id"] == "rateyourmusic" for r in rows if "optional_needs" in r),
-   "with no solver set, only the RYM link row carries `optional_needs`")
-
-# --------------------------------------------------------------------------- #
-# the two sources with a SECOND route: a Cloudflare solver
-# --------------------------------------------------------------------------- #
-# cfg={} above has no `cf_solver_url`, so the two scraped genre sources have no
-# second route: the cookie is required there and the row is `skipped`. With a
-# solver set, an empty cookie makes the LIVE page unavailable to the plain
-# request, not the source: each row is runnable and IS probed through the
-# solver, while still asking for the cookie (`needs`) — the panel's paste field
-# and "cookie missing" chip depend on that.
-solver_on = {"cf_solver_url": "http://solver:8191"}
-rym_on = row({"sources": sh.health_payload(cfg=solver_on, kind="genre")["sources"]},
-             "rateyourmusic")
-ok(rym_on["configured"] is False and rym_on["status"] == "ok"
-   and rym_on["optional_needs"] == ["rym_cookie"]
-   and "cf_solver_url" in rym_on["detail"],
-   f"solver set: RYM runs without a cookie "
-   f"({rym_on['status']}: {rym_on['detail']})")
-aoty_on = row({"sources": sh.health_payload(cfg=solver_on, kind="genre")["sources"]},
-              "albumoftheyear")
-ok(aoty_on["configured"] is False and aoty_on["status"] == "ok"
-   and aoty_on["optional_needs"] == ["aoty_cookie"]
-   and "cf_solver_url" in aoty_on["detail"],
-   f"solver set: AOTY runs without a cookie too "
-   f"({aoty_on['status']}: {aoty_on['detail']})")
-link_on = sh.health_payload(cfg={}, kind="links")["sources"][0]
-ok(link_on["configured"] is False and link_on["status"] == "ok"
-   and link_on["optional_needs"] == ["rym_cookie"],
-   "…and the link row is runnable without the cookie too (MusicBrainz route)")
-rym_off = row({"sources": sh.health_payload(cfg={}, kind="genre")["sources"]},
-              "rateyourmusic")
-ok(rym_off["status"] == "skipped" and "optional_needs" not in rym_off
-   and rym_off["detail"] == "needs rym_cookie",
-   f"no solver: the cookie is required again ({rym_off['detail']})")
+ok(not [r for r in rows if "optional_needs" in r],
+   "no source has a second route, so none carries `optional_needs`")
 
 print("== probe=False is free ==")
 intg._advisory_json = stub("advisory_json", None)
@@ -279,11 +231,6 @@ intg._deezer_advisory = stub("deezer_advisory", None)
 intg._spotify_advisory = stub("spotify_advisory", None)
 intg._apple_album_advisory = stub("apple_advisory", None)
 intg._itunes_song_advisory = stub("itunes_advisory", None)
-intg.rym_genres = stub("rym_genres", None)
-# Album of the Year's live scraper: the same "no call leaves the machine"
-# guarantee as the RYM seam above, for the genre row and its `cf_solver_url`
-# probe.
-intg.aoty_page = stub("aoty_page", None)
 intg._audiodb_genre_names = stub("audiodb_genres", [])
 discovery._json = stub("discovery_json", None)
 discovery.deezer_artist = stub("deezer_artist", None)
@@ -306,10 +253,6 @@ discovery.discogs_style_search = stub("discogs_style", {"rows": [], "total": Non
 discovery.lastfm_tag_top = stub("lastfm_tag_top", {"rows": [], "total": None})
 discovery.listenbrainz_similar_artists = stub("lb_similar", [])
 discovery.spotify_genre_albums = stub("spotify_genre", {"rows": [], "total": None})
-# The Discover registry's RateYourMusic row is a CHARTS source, probed through
-# the scrape in `server.integrations` — the seam below keeps this file's
-# "probe=False is free" and "no call leaves the machine" guarantees.
-intg.rym_charts = stub("rym_charts", {"rows": [], "total": None, "chart": ""})
 # The credentials rows have their own probe seam; the login row has nothing to
 # paste, so it is always asked and would otherwise read this machine's own
 # auth database on every probe=True call in this file.
@@ -328,8 +271,7 @@ CALLS.clear()
 sh.health_payload(cfg={}, probe=True)
 for sid, seam in (("spotify-isrc", "spotify_advisory"),
                   ("lastfm", "lastfm_genres"),
-                  ("discogs", "discogs_genres"),
-                  ("rateyourmusic", "rym_genres")):
+                  ("discogs", "discogs_genres")):
     ok(calls(seam) == 0,
        f"{sid} was never asked without its key (probe=1, {seam} calls: "
        f"{calls(seam)})")
@@ -342,63 +284,6 @@ ok(calls("deezer_artist") >= 1,
 ok(calls("credential_check") == 1,
    f"only the login credential was probed with an empty config "
    f"({calls('credential_check')} credential probes)")
-# …AND the two scraped sources with a second route ARE asked with an empty
-# cookie when a solver is set — that is what lets an install without a pasted
-# cookie still import genres live, and what the old "unconfigured ⇒ skipped"
-# rule was hiding.
-CALLS.clear()
-sh.health_payload(cfg={"cf_solver_url": "http://solver:8191"}, kind="genre",
-                  probe=True)
-ok(calls("rym_genres") == 1,
-   f"solver set: RYM IS probed without a cookie "
-   f"({calls('rym_genres')} rym_genres calls)")
-ok(calls("aoty_page") == 1,
-   f"solver set: AOTY IS probed without a cookie "
-   f"({calls('aoty_page')} aoty_page calls)")
-
-# The sample genre probe for a scraped source with NO cookie and NO solver
-# reads `skipped` and names what to configure — it never spends a request.
-ok(sh._probe_genre("albumoftheyear", {}) ==
-   ("skipped", "no aoty_cookie in Settings → Discovery (or set cf_solver_url)"),
-   "an unconfigured AOTY genre probe is skipped without asking")
-
-print("== the RYM link probe ==")
-saved_rym_links, saved_failures = intg.rym_links, intg._rym_failures
-try:
-    def _links(album=None, artist=None, note=""):
-        # *a/**k on purpose: the probe calls this positionally, and named
-        # parameters would shadow the captured values.
-        return lambda *a, **k: {"album": album, "artist": artist, "note": note}
-
-    intg.rym_links = _links("https://rateyourmusic.com/release/album/radiohead/pablo-honey/",
-                            "https://rateyourmusic.com/artist/radiohead")
-    st, detail = sh._probe_links("rateyourmusic", {"rym_cookie": "cf=1"})
-    ok(st == "ok" and "album" in detail and "artist" in detail,
-       f"both links found is an ok row ({detail})")
-
-    intg.rym_links = _links(note="could not resolve RateYourMusic links")
-    st, detail = sh._probe_links("rateyourmusic", {"rym_cookie": "cf=1"})
-    ok(st == "fail" and "could not resolve" in detail,
-       f"a verified miss is a fail carrying RYM's own note ({detail})")
-
-    def _refused(artist="", album="", cfg=None, mbid=None):
-        intg._rym_failures += 1
-        return {"album": None, "artist": None, "note": ""}
-
-    intg.rym_links = _refused
-    st, detail = sh._probe_links("rateyourmusic", {"rym_cookie": "cf=1"})
-    ok(st == "fail" and "Cookie" in detail,
-       f"RYM refusing the client says how to get past it ({detail})")
-
-    intg.rym_links = _links(artist="https://rateyourmusic.com/artist/radiohead")
-    st, detail = sh._probe_links("rateyourmusic", {"rym_cookie": "cf=1"})
-    ok(st == "ok" and "artist" in detail and "album" not in detail,
-       f"one half of the pair is still an ok row ({detail})")
-
-    ok(sh._probe_links("deezer", {})[1] == "unknown source",
-       "an id this probe does not own is skipped, never guessed at")
-finally:
-    intg.rym_links, intg._rym_failures = saved_rym_links, saved_failures
 
 print("== a rate-limited source says so ==")
 

@@ -33,17 +33,10 @@ What this pins, with the HTTP layer stubbed (no network at all):
     "existing") instead of showing a value with no provenance; `force=True`
     re-rates it, and even then only evidence may lower a stored rating;
   * one source asked once per pressing keeps its STRONGEST answer, so a later
-    pressing's explicit flag cannot lose to an earlier one's clean answer;
-  * RateYourMusic sends the full Chrome header set and carries the configured
-    `rym_cookie` in a cookie jar (so RYM's own Set-Cookie can join it, after
-    one warm-up navigation per paste), treats a blocked/challenge answer as
-    unreachable, logs ONE line per process, records the response it refused
-    (`rym_last_response`) and returns None so the genre chain falls through.
+    pressing's explicit flag cannot lose to an earlier one's clean answer.
 
 Run:  python tools/test_advisory_sources.py
 """
-import contextlib
-import io
 import os
 import sys
 import tempfile
@@ -53,8 +46,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from server import integrations as intg
 
 ISRC = "USRC17607839"
-# No Spotify credentials, and no RYM cookie: the documented "source skipped"
-# state. Tests that need them build their own dict.
+# No Spotify credentials: the documented "source skipped" state. Tests that
+# need them build their own dict.
 CFG = {}
 # The real transport seam, saved before any stub replaces it.
 _REAL_ADVISORY_JSON = intg._advisory_json
@@ -674,125 +667,7 @@ finally:
     mlo_audio.AudioFile = _real_audiofile
 
 # --------------------------------------------------------------------------- #
-# 7) RateYourMusic: honest about being blocked
-# --------------------------------------------------------------------------- #
-class FakeResponse:
-    def __init__(self, status=200, text="", url=""):
-        self.status_code, self.text, self.url = status, text, url
-
-
-class FakeCookies(dict):
-    """`httpx.Cookies` as the RYM code needs it: a jar the paste seeds, which
-    the fake transport reads back off every request it serves."""
-
-    def set(self, name, value, domain="", path="/"):
-        self[str(name)] = value
-
-
-class FakeHttpx:
-    HTTPError = RuntimeError
-    Cookies = FakeCookies
-
-    def __init__(self, response):
-        self.response = response
-        self.calls = []
-        self.jars = []
-
-    def get(self, url, params=None, headers=None, timeout=None,
-            follow_redirects=None, cookies=None):
-        self.calls.append({"url": url, "params": dict(params or {}),
-                           "headers": dict(headers or {})})
-        self.jars.append(dict(cookies or {}))
-        # The caller reads response.url back to confirm the page it landed on
-        # is the release it asked for — a stub that never states it makes
-        # every scrape look unverifiable.
-        self.response.url = url
-        return self.response
-
-
-_real_httpx = intg.httpx
-_real_cache_dir = intg._rym_cache_dir
-_real_cookie = intg._rym_cookie
-_real_jar = (intg._rym_jar, intg._rym_jar_paste, intg._rym_warmed,
-             intg._rym_last_info)
-try:
-    intg._rym_cache_dir = lambda: None          # never touch the real cache
-    intg.RYM_MIN_INTERVAL = 0.0                 # no politeness sleep in a test
-    intg._rym_cookie = lambda cfg=None: ""      # not configured
-    intg._rym_warned = False
-    intg._rym_jar, intg._rym_jar_paste = None, None
-    intg._rym_warmed, intg._rym_last_info = None, {}
-    fake = FakeHttpx(FakeResponse(403, ""))
-    intg.httpx = fake
-    log = io.StringIO()
-    with contextlib.redirect_stdout(log):
-        assert intg.rym_genres("Rihanna", "Loud") is None
-        assert intg.rym_genres("Rihanna", "Loud") is None   # not per album
-        assert intg.rym_artist_genres("Rihanna") is None
-    lines = [ln for ln in log.getvalue().splitlines() if ln.strip()]
-    assert len(lines) == 1 and "rateyourmusic" in lines[0], lines
-    assert "rym_cookie" in lines[0], lines
-    # one probe, and no warm-up: there is no cookie whose paste could be
-    # warmed, so the FIRST request is the page itself
-    assert [c["url"] for c in fake.calls] == [
-        "https://rateyourmusic.com/release/album/rihanna/loud/"], fake.calls
-    sent = fake.calls[0]["headers"]
-    assert "Mozilla/5.0" in sent.get("User-Agent", ""), sent
-    assert "Accept-Language" in sent and "Referer" in sent, sent
-    # the whole Chrome set, not just a UA: the client hints and the fetch
-    # metadata are what a browser always sends alongside it
-    assert sent.get("sec-ch-ua-platform") == '"Windows"', sent
-    assert sent.get("Sec-Fetch-Dest") == "document", sent
-    assert sent.get("Sec-Fetch-Mode") == "navigate", sent
-    assert sent.get("Sec-Fetch-Site") == "same-origin", sent
-    # and the refusal is recorded, so the panel can say WHICH one it was
-    record = intg.rym_last_response()
-    assert record["status"] == 403 and record["challenge"] is False, record
-    assert record["url"].endswith("/release/album/rihanna/loud/"), record
-
-    # a Cloudflare interstitial is not a page either
-    intg._rym_warned = False
-    fake = FakeHttpx(FakeResponse(200, "<html><title>Just a moment...</title>"))
-    intg.httpx = fake
-    log = io.StringIO()
-    with contextlib.redirect_stdout(log):
-        assert intg.rym_genres("Rihanna", "Loud") is None
-    assert "challenge" in log.getvalue(), log.getvalue()
-    assert intg.rym_last_response()["challenge"] is True, intg.rym_last_response()
-
-    # with the user's session cookie the same request carries it, and a real
-    # release page still parses. The credential rides in a cookie JAR, not a
-    # hand-built `Cookie:` header (that is what lets RYM's own Set-Cookie join
-    # it), and the first request a paste makes is ONE warm-up navigation to
-    # RYM's home page — the request that makes the WAF hand those over.
-    intg._rym_warned = False
-    intg._rym_cookie = lambda cfg=None: "cf_clearance=abc; session=xyz"
-    page = ('<html><body><h1 class="album_title">Loud</h1>'
-            '<a href="/artist/rihanna">Rihanna</a>'
-            '<a href="/genre/pop">Pop</a>'
-            '<a href="/genre/r&amp;b">R&amp;B</a></body></html>')
-    fake = FakeHttpx(FakeResponse(200, page))
-    intg.httpx = fake
-    log = io.StringIO()
-    with contextlib.redirect_stdout(log):
-        got = intg.rym_genres("Rihanna", "Loud")
-    assert log.getvalue() == "", log.getvalue()
-    assert got and got["genres"] == ["Pop"], got
-    assert [c["url"] for c in fake.calls] == [
-        "https://rateyourmusic.com/",
-        "https://rateyourmusic.com/release/album/rihanna/loud/"], fake.calls
-    assert fake.jars[0] == {"cf_clearance": "abc", "session": "xyz"}, fake.jars
-    assert fake.jars[1] == fake.jars[0], fake.jars
-    assert "Cookie" not in fake.calls[1]["headers"], fake.calls[1]["headers"]
-finally:
-    intg.httpx = _real_httpx
-    intg._rym_cache_dir = _real_cache_dir
-    intg._rym_cookie = _real_cookie
-    (intg._rym_jar, intg._rym_jar_paste, intg._rym_warmed,
-     intg._rym_last_info) = _real_jar
-
-# --------------------------------------------------------------------------- #
-# 8) Provenance is mandatory: no value without the source that stated it
+# 7) Provenance is mandatory: no value without the source that stated it
 # --------------------------------------------------------------------------- #
 assert {"deezer-isrc", "apple-album"} <= intg.ADVISORY_SOURCES
 clear()
@@ -812,7 +687,7 @@ for kwargs in ({"isrc": ISRC},
         assert route["source"] in route["answers"], route
 
 # --------------------------------------------------------------------------- #
-# 9) Cross-reference: every source is asked even when the first one already
+# 8) Cross-reference: every source is asked even when the first one already
 # answered — and an IDENTITY route's clean beats a NAME-guess route's explicit
 # (the false-positive guard: the owner's "Just" case is exactly this shape)
 # --------------------------------------------------------------------------- #

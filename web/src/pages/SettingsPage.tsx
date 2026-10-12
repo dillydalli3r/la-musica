@@ -8,7 +8,7 @@ import CookieJarPanel from "../components/CookieJarPanel";
 import FolderPicker from "../components/FolderPicker";
 import SourcesPanel from "../components/SourcesPanel";
 import SecurityPanel from "../components/SecurityPanel";
-import SolverCard from "../components/SolverCard";
+
 import AiTestButton from "../components/AiTestButton";
 import PageHeader from "../components/PageHeader";
 import Switch from "../components/ui/switch";
@@ -80,7 +80,7 @@ const TAG_FAMILIES = ["AUDIT", "LOG_GRADE", "REPLAYGAIN", "DYNAMIC_RANGE", "MEDI
  *  the same values when it loads the file) instead of an empty field. */
 const CFG_DEFAULTS: Record<string, unknown> = {
   mb_genre_count: 2,
-  genre_sources: ["rateyourmusic", "musicbrainz", "albumoftheyear"],
+  genre_sources: ["musicbrainz"],
   advisory_auto_fetch: true,
   metadata_auto_fetch: true,
   metadata_review: false,
@@ -104,8 +104,6 @@ type ProviderOption = { id: string; label: string; notes?: string; rank?: number
  *  files its answer under when it has nothing per track (the picker says
  *  "per track" for anything absent here). */
 const GENRE_LEVEL: Record<string, string> = {
-  rateyourmusic: "per track when its release page states one, else album, then artist",
-  albumoftheyear: "album + per-track scores, then artist",
   musicbrainz: "per track, then release group, then artist",
 };
 
@@ -337,32 +335,13 @@ function CoverDefaults() {
 
 /** The YouTube cookie jar (Settings → Videos).
  *
- *  The panel itself is `components/CookieJarPanel.tsx` — ONE implementation for
- *  every cookie login, shared with Settings → Sources, the wizard's Keys step
- *  and the Discovery tab's RYM box, so the two credentials' import boxes (and
- *  the per-cookie comment list both now show) cannot drift apart. This wrapper
+ *  The panel itself is `components/CookieJarPanel.tsx` — ONE implementation,
+ *  shared with Settings → Sources and the wizard's Keys step, so the import box
+ *  (and the per-cookie comment list it shows) cannot drift apart. This wrapper
  *  is only where the Videos tab renders it, exactly as before.
  */
 function YoutubeCookieJar() {
   return <CookieJarPanel source="youtube" />;
-}
-
-/** The RateYourMusic cookie (Settings → Discovery): the same shared panel for
- *  the RYM credential.
- *
- *  `onStored` pulls the imported value back into the `rym_cookie` field above:
- *  the credential is ONE config value, so after an import the box (and the next
- *  "Save all settings") has to agree with what RYM is actually sent.
- */
-function RymCookieJar({ onStored }: { onStored: (value: string) => void }) {
-  return <CookieJarPanel source="rym" onStored={onStored} />;
-}
-
-/** The Album of the Year cookie (Settings → Discovery): the same shared panel
- *  for the AOTY credential, which lives in `aoty_cookie` the way RYM's lives
- *  in `rym_cookie`. */
-function AotyCookieJar({ onStored }: { onStored: (value: string) => void }) {
-  return <CookieJarPanel source="aoty" onStored={onStored} />;
 }
 
 /** HH:MM:SS on the reader's own clock. The report is read next to the moment
@@ -833,7 +812,7 @@ export default function SettingsPage() {
         { k: "mood_enabled", label: "Write mood tags", type: "bool" },
         {
           k: "genre_autofill", label: "Trim genres to the configured count", type: "bool",
-          help: "Genres are never imported by a script: the import (MusicBrainz/RateYourMusic per track, "
+          help: "Genres are never imported by a script: the import (MusicBrainz per track, "
                 + "then the configured sources) and manual edits are the only writers. Script 8 only brings "
                 + "a list longer than the genre count back down to it.",
         },
@@ -1193,30 +1172,6 @@ export default function SettingsPage() {
         },
         { k: "discovery_timeout_s", label: "Request timeout (s)", type: "number", min: 3, max: 30 },
         {
-          k: "rym_cookie", label: "RateYourMusic cookie", type: "password",
-          help: "Optional persistent RateYourMusic cookie, imported or pasted from a signed-in RYM tab; use that browser's matching User-Agent below. If this is blank and Fetch a refused page with a real browser is on, the app reads only rateyourmusic.com cookies from this machine's browser profiles, filters them to that host, caches the cookie string in memory for 45 minutes, and never saves it to config or sends it elsewhere. Borrowed pairs are injected as session cookies for that page and deleted afterwards; Chrome's own clearance/site cookies remain in its app profile. Blank plus no signed-in local browser means RYM release pages cannot be read; MusicBrainz can still resolve links. Session credential — do not share; test with the Sources panel.",
-        },
-        {
-          k: "aoty_cookie", label: "Album of the Year cookie", type: "password",
-          help: "Optional persistent Album of the Year session, imported or pasted from a signed-in AOTY tab with its matching User-Agent. When blank and browser fetch is on, the app reads only albumoftheyear.org cookies from this machine's browser profiles, filters them to that host, caches them in memory for 45 minutes, and never saves them to config or sends them elsewhere. Borrowed pairs are injected as session cookies for that page and deleted afterwards; Chrome's own clearance/site cookies remain in its app profile. With a stored cookie the plain path is fast; without one the hidden browser is used so AOTY's search results and genres are not lost. Blank plus browser fetch off needs a solver or reports unavailable.",
-        },
-        {
-          k: "aoty_user_agent", label: "Album of the Year User-Agent", type: "text",
-          help: "The User-Agent Album of the Year requests are sent with. Cloudflare binds its `cf_clearance` cookie to the exact User-Agent (and network) that passed its challenge, so the stored cookie only counts when this matches the browser it came from — copy that browser's User-Agent (devtools → Network → any request → Request Headers → User-Agent) and paste it here. Blank = the built-in Chrome User-Agent the app already sends.",
-        },
-        {
-          k: "cf_solver_timeout", label: "Cloudflare solver timeout (ms)", type: "number",
-          help: "How long the solver may take to answer a challenge before the request is given up on. Default 60000.",
-        },
-        {
-          k: "cf_browser_fetch", label: "Fetch a refused page with a real browser", type: "bool",
-          help: "On, the app drives real Chrome/Edge on a hidden Windows desktop, so no window, taskbar button, or focus change appears; true --headless is detected by both sites. It warms hosts without a managed clearance at boot and keeps the clearance in its own profile. When no site cookie is stored, it reads only that host's cookies from local browser profiles via yt-dlp, filters/caches them in memory for 45 minutes, sends them only back to that host, and never saves them to config. Borrowed pairs are injected as session cookies for that page and deleted afterwards; Chrome's own clearance/site cookies remain in its app profile. Stored pastes win. Off, it does not start a browser or read local sessions; cache, stored cookies, or a configured solver remain.",
-        },
-        {
-          k: "rym_links_auto", label: "Auto-find RateYourMusic links", type: "bool",
-          help: "Asks rateyourmusic.com for the album and artist pages during an import (and from the link editor's Auto-find button). An existing link is never overwritten, and when RYM refuses the request the import carries on untouched — the link is then left for you to paste by hand.",
-        },
-        {
           k: "spotify_client_id", label: "Spotify client ID (optional)", type: "text",
           help: "Optional second advisory source (Spotify's ISRC lookup) behind Deezer and ahead of Apple. Empty = Spotify is skipped; an import never fails without it.",
         },
@@ -1306,7 +1261,7 @@ export default function SettingsPage() {
       fields: [
         {
           k: "mb_genre_count", label: "Genres per track (import, trimming and grading)", type: "number", min: 1, max: 3,
-          help: "How many genre NAMES a track may hold — every one of them a genre a source stated. The hierarchy above them (the parent genre, and up to a family head) is derived by the app and never written, so raising this adds genres, not levels. One value, three consumers: an import writes up to this many, script 8 / the genre import / script 10 trim any excess off, and grading fails a track carrying more. Fewer is fine — one track-level genre is a complete answer and nothing is topped up with filler. A per-run import limit may only lower this. Default 2.",
+          help: "How many genre NAMES a track may hold — the TOP 2 genres MusicBrainz lists for it (ranked, most-voted first), or whatever a person typed by hand, and nothing else. One value, three consumers: an import writes up to this many, script 8 / the genre import / script 10 trim any excess off, and grading fails a track carrying more. Fewer is fine — one track-level genre is a complete answer and nothing is topped up with filler. A per-run import limit may only lower this. Default 2.",
         },
         {
           k: "genre_sources", label: "Genre sources — every ticked source is asked; unticked ones are never used", type: "multi",
@@ -1314,7 +1269,7 @@ export default function SettingsPage() {
           // /api/sources/health = server/integrations.GENRE_SOURCES), and each
           // row says whether it can answer per track or only for the release.
           options: genreOptions,
-          help: "Asked top to bottom, and the chain stops for a track once it has a track-level answer (its own page) or the cap above is filled; an unticked source is never asked. The shipped order is RateYourMusic, MusicBrainz, Album of the Year: RYM is the only one of the three that classifies a TRACK, MusicBrainz answers per RECORDING and is keyless, and AOTY publishes no per-track genre at all — its genre row is the RELEASE's — so it is the album-level floor. The names are merged, deduped and capped per track, and the level above them is derived, never stored.",
+          help: "Asked top to bottom, and the chain stops for a track once it has a track-level answer (its own page) or the cap above is filled; an unticked source is never asked. MusicBrainz is the one source: it answers per RECORDING and is keyless. The names are merged, deduped and capped per track.",
         },
         {
           k: "web_ratings_enabled", label: "Web ratings (script 24)", type: "bool",
@@ -1323,15 +1278,9 @@ export default function SettingsPage() {
         {
           k: "web_ratings_sources", label: "Web rating sources — priority order, asked top to bottom", type: "multi",
           options: [
-            ["rateyourmusic", "RateYourMusic — album and track data; needs a stored `rym_cookie`, a signed-in local browser session (with browser fetching on), or a solver"],
-            ["albumoftheyear", "Album of the Year — album and per-track ratings; uses the hidden browser when no AOTY cookie is stored, or a stored cookie/solver"],
             ["musicbrainz", "MusicBrainz — the release group for the album, the recording (then its work) for a track"],
           ],
-          help: "Only these three ids are understood; anything else is ignored. All three ship, RateYourMusic first — it leads because it is the widest verdict the app can read (one score from tens of thousands of ratings) and it answers at BOTH levels: the release page for the album, and each track's own song page (found by slug and verified against the page's own title and artist before it is believed). All three rate a track: RYM and Album of the Year from their own track scores, MusicBrainz from the recording (then its work). RYM's per-track lookups are paced at one request per second, so a first pass over an album costs seconds rather than milliseconds — a first-run cost per album, not a per-run one. Each source's own vote count weights the average, so a score from 49,000 ratings counts for more than one from 16. A value is written only when at least one source answered, and the album's score and a track's are separate facts — neither is invented from the other.",
-        },
-        {
-          k: "rym_archive_fallback", label: "RateYourMusic: fall back to archived pages", type: "bool",
-          help: "Applies to RateYourMusic CHARTS only — genres and ratings come from the live site now (with the RYM cookie or a solver). A chart page rateyourmusic.com will not serve is read from the Wayback Machine's snapshot of the SAME page and parsed the same way; the report names the snapshot and its date.",
+          help: "MusicBrainz is the one web rating source: the release group for the album, the recording (then its work) for a track. It needs no key. Each source's own vote count weights the average, so a score from many ratings counts for more than one from a few. A value is written only when a source answered, and the album's score and a track's are separate facts — neither is invented from the other.",
         },
         {
           k: "ai_genre_inference", label: "Let a model rank the genres", type: "bool",
@@ -1393,7 +1342,6 @@ export default function SettingsPage() {
     { k: "grade_check_lyrics_format", label: "Lyrics format", type: "bool" },
     { k: "grade_check_sidecar_cover", label: "Sidecar cover", type: "bool" },
     { k: "grade_check_mb_links", label: "MusicBrainz links (album/artist/track)", type: "bool" },
-    { k: "grade_check_rym_links", label: "RateYourMusic links (album/artist/track)", type: "bool" },
     { k: "grade_check_media", label: "MEDIA tag", type: "bool" },
     { k: "grade_check_source", label: "SOURCE tag", type: "bool" },
     { k: "grade_check_album_tags", label: "Album-level tags", type: "bool" },
@@ -1421,15 +1369,15 @@ export default function SettingsPage() {
     { k: "grade_check_energy", label: "Energy tag present (0-100, with MOOD)", type: "bool" },
     { k: "grade_check_genre", label: "Genre tag present", type: "bool" },
     { k: "grade_check_web_rating", label: "Web rating present + in shape (WEBRATING, per track)", type: "bool",
-      help: "Every audio track needs the public verdict script 24 gathers, on the app's 0-100 scale — and the VALUE must be a whole number in its one spelling (WEBRATING_FORMAT / ALBUMWEBRATING_FORMAT when a file carries it): a source's own score pasted in raw (RateYourMusic's 4.54 on a 0-5 scale) fails and names script 24 as the fixer, while a stray decimal point is the same rating spelled differently and the format pass rewrites it." },
+      help: "Every audio track needs the public verdict script 24 gathers, on the app's 0-100 scale — and the VALUE must be a whole number in its one spelling (WEBRATING_FORMAT / ALBUMWEBRATING_FORMAT when a file carries it): a source's own score pasted in raw (a 4.54 on a 0-5 scale) fails and names script 24 as the fixer, while a stray decimal point is the same rating spelled differently and the format pass rewrites it." },
     { k: "grade_check_sidecar_format", label: "Sidecar text files canonically formatted (.mb_expected, descriptions)", type: "bool" },
     {
       k: "grade_check_genre_count", label: "Genre count per track (at most mb_genre_count)", type: "bool",
       help: "A track may hold at most the 'Genres per track' value — only an overflow fails (issue code GENRE_COUNT). There is no lower bound and no quota; keep the two in step.",
     },
     {
-      k: "grade_check_genre_structure", label: "Genre structure (no duplicates, no derived parent)", type: "bool",
-      help: "A GENRE tag holds the specific names a source stated; the level above them is derived and never stored. Reported per track as GENRE_STRUCTURE: a repeated name, or a parent name stored beside its own child, anywhere in the list (the family slot older builds wrote). Script 10 / Optimize remove both with the same predicate the check reads.",
+      k: "grade_check_genre_structure", label: "Genre structure (no duplicates, canonical order)", type: "bool",
+      help: "A GENRE tag holds the specific names a source stated; the list is held in one canonical (casefold-sorted) order, so two files holding the same names read the same. Reported per track as GENRE_STRUCTURE: a repeated name, or any other order. Script 10 / Optimize remove both with the same predicate the check reads.",
     },
     {
       k: "grade_check_genre_vocab", label: "Genre vocabulary (MusicBrainz)", type: "bool",
@@ -1484,8 +1432,8 @@ export default function SettingsPage() {
   const [previewing, setPreviewing] = useState(false);
   const [rawConfig, setRawConfig] = useState("{}");
   const [tab, setTab] = useState("general");
-  // A link can name the tab it wants: `/settings?tab=discovery` is how the
-  // Sources panel's RateYourMusic row reaches that tab's cookie import box.
+  // A link can name the tab it wants: `/settings?tab=videos` is how the
+  // Sources panel's YouTube row reaches that tab's cookie import box.
   // Every pick goes through here and drops the parameter again (the effect
   // under NAV adopts whatever the URL names), so the rail and the URL cannot
   // disagree — and the NEXT click on that link still moves, where navigating
@@ -2236,7 +2184,7 @@ export default function SettingsPage() {
                 <div className="text-xs text-zinc-400">Setup wizard</div>
                 <div className="text-[11px] text-zinc-600 leading-relaxed">
                   Re-runs the first-run walkthrough — music folder, dependencies, sources, AI &amp;
-                  RateYourMusic. Every step is skippable, and nothing on this page is
+                  artwork. Every step is skippable, and nothing on this page is
                   reset by it: it only writes what you enter there.
                 </div>
                 <button
@@ -2674,13 +2622,6 @@ export default function SettingsPage() {
                 </div>
               )}
               {tab === "videos" && <YoutubeCookieJar />}
-              {tab === "discovery" && (
-                <div className="space-y-2">
-                  <SolverCard />
-                  <RymCookieJar onStored={(v) => setCfg("rym_cookie", v)} />
-                  <AotyCookieJar onStored={(v) => setCfg("aoty_cookie", v)} />
-                </div>
-              )}
               {tab === "beets" && (
                 <div className="pt-2 border-t border-border space-y-2">
                   <div className="flex items-center gap-2 flex-wrap">

@@ -51,6 +51,14 @@
  *     trigger: pressed for real, then 3:1 against the field AND not the accent
  *     where the field cannot show it. The shipped white accent lit a ~1.1:1
  *     glyph on a bright cover — the clicked state was the invisible one.
+ *   - the lyric pane's TRANSLATION sub-lines: each must wear the SAME ink as
+ *     the line it sits under (the two computed colours are equal) and that ink
+ *     must answer the cover — dark on a bright one. They used to read
+ *     `text-accent-soft/70`, i.e. the shipped WHITE accent at 70 %: the
+ *     near-invisible grey the owner reported under a line while every ink
+ *     beside it flipped with the artwork. The fixture library stores no
+ *     translation, so `stubTranslations` seeds one through the app's own
+ *     /api/tags route.
  *
  * Four covers are stubbed: dark (#101014), the mid-grey one the old polarity
  * rule used to flip on (#808080), the bright-grey boundary case (#b4b4b4) and
@@ -525,6 +533,158 @@ async function stubCover(page, hex) {
     if (color) return route.fulfill({ json: { color: hex, album: "" } });
     return route.fulfill({ status: 200, headers: { "Content-Type": "image/svg+xml" }, body: svg });
   });
+}
+
+/** Seed what the pane's TRANSFORMS and the rating row need for the shot,
+ *  through the very routes the player reads them from.
+ *
+ *  `/api/tags` gets a TRANSLATION for every track that carries lyrics
+ *  (`lyrics_trans`, the key the server fills from the TRANSLATION-<lang> tags
+ *  / .<lang>.lrc sidecars) — each line prefixed so it differs from the line it
+ *  sits under, because a "translation" that repeats its own line is dropped by
+ *  the player (`transDup`) — plus a WEBRATING pair on the track's tags: the
+ *  readout beside the stars prints the reader's OWN number only while a web
+ *  reading is there to stand aside for (R359), so without one the row would
+ *  show no number at all.
+ *
+ *  The shared fixture library stores neither, so the check supplies them
+ *  rather than asking every other suite that shares
+ *  `tools/make_test_library.py` to carry the tags. */
+async function stubTranslations(page) {
+  await page.route("**/api/tags?*", async (route) => {
+    const resp = await route.fetch();
+    const json = await resp.json().catch(() => null);
+    if (json && typeof json.lyrics === "string" && json.lyrics.trim()) {
+      const lines = json.lyrics.split(/\r?\n/)
+        .map((l) => l.replace(/\[[^\]]*\]/g, "").trim()).filter(Boolean);
+      json.lyrics_trans = lines.map((l) => `EN — ${l}`).join("\n");
+      if (json.tags && !json.tags.WEBRATING) {
+        json.tags = { ...json.tags, WEBRATING: "85", WEBRATING_SOURCE: "RateYourMusic" };
+      }
+    }
+    await route.fulfill({ response: resp, json });
+  });
+}
+
+/** …and a rating of the READER's own for the track the run opens, through
+ *  `/api/ratings` (half-stars 0-10; 10 = five stars). That number — not the
+ *  web's words — is what the readout prints while both exist (R359), and it is
+ *  the ink the owner reported as hard to see. */
+async function stubRating(page, pathOf) {
+  await page.route("**/api/ratings?*", async (route) => {
+    const resp = await route.fetch();
+    const json = await resp.json().catch(() => ({}));
+    const path = pathOf();
+    if (path) json.ratings = { ...(json.ratings || {}), [path]: 10 };
+    await route.fulfill({ response: resp, json });
+  });
+}
+
+/** The rating row's readout beside the stars, as the app computed it.
+ *
+ *  It follows the same ink rule as everything else on this surface: the
+ *  reader's own number wears the row's `chromeText` — the stars' own ink — and
+ *  the web words the same ink at 80 %. The control's default for that number
+ *  is a fixed zinc-400, which on a bright cover sat a hair off the field while
+ *  the stars beside it had flipped (the owner's report: the local rating "can
+ *  be very hard to see"). Read from the DOM (text, colour, opacity, box) and
+ *  composited over the field at the row's own height, measured from the
+ *  block's gutter like the tiers above. */
+const readRatingReadout = (page) => page.evaluate(() => {
+  const overlay = document.querySelector("div.fixed.inset-0.z-50");
+  const group = overlay && overlay.querySelector('span[role="group"]');
+  if (!group) return null;
+  const span = [...group.children].find((c) => c.tagName === "SPAN" && c.classList.contains("ml-1.5"));
+  if (!span) return null;
+  const cs = getComputedStyle(span);
+  const r = span.getBoundingClientRect();
+  return {
+    text: (span.textContent || "").trim(),
+    color: cs.color,
+    opacity: Number(cs.opacity),
+    y: Math.round(r.top + r.height / 2),
+    h: Math.max(2, Math.round(r.height)),
+  };
+});
+
+/** …asserted per cover: the number is the reader's own (non-vacuous), its
+ *  painted ink clears the small-text floor on that row's field, and it answers
+ *  the cover the way every other glyph here must. */
+async function measureRatingReadout(page, label, tiers, coverLum) {
+  const r = await readRatingReadout(page);
+  check(`${label}: the rating row prints the reader's own number`,
+    !!r && r.text === "5", r ? `readout "${r.text}"` : "no rating readout in the DOM");
+  if (!r) return null;
+  const field = await clipAvg(page, { x: tiers.field.left + 6, y: r.y, width: 36, height: 12 });
+  const ink = painted(r.color, r.opacity, field);
+  const c = contrast(ink, field);
+  check(`${label}: the rating readout holds ${AA_SMALL}:1 on the field`,
+    c >= AA_SMALL,
+    `${c.toFixed(2)}:1 (need ${AA_SMALL}) colour=${r.color} opacity=${r.opacity} field=rgb(${field.map((v) => Math.round(v))})`);
+  const dark = relLum(ink) < 0.5;
+  check(`${label}: the rating readout's ink answers the cover (${coverLum > 0.42 ? "bright" : "dark"})`,
+    (coverLum <= 0.42) !== dark,
+    `painted=rgb(${ink.map((v) => Math.round(v))}) coverLum=${coverLum.toFixed(3)}`);
+  return { text: r.text, painted: ink.map((v) => Math.round(v)), contrast: c };
+}
+
+/** The lyric pane's translation sub-lines, as the app computed them.
+ *
+ *  Every one must paint the SAME colour as the line it sits under: the
+ *  sub-line carries no colour class of its own and inherits the row's ink
+ *  (`NowPlayingView`'s renderLine). It used to read `text-accent-soft/70`,
+ *  which follows the ACCENT rather than the cover — and the shipped accent is
+ *  WHITE, so on a bright cover the translation was a 70 % white grey under a
+ *  near-black line (the owner's report, 2026-10-12: the sub-line "should be
+ *  the same colour as the lyric text, black or white"). The rows are read from
+ *  the DOM through the sub-line's own `data-lyric-trans`, with the metadata
+ *  tiers above already proving the pixel floor the inherited ink clears. */
+const readLyricTrans = (page) => page.evaluate(() => {
+  const overlay = document.querySelector("div.fixed.inset-0.z-50");
+  const scroller = overlay && overlay.querySelector(".no-scrollbar");
+  if (!scroller) return null;
+  const out = [];
+  for (const row of scroller.children) {
+    const line = row.firstElementChild;
+    const sub = line && line.querySelector(":scope > div[data-lyric-trans]");
+    if (!sub) continue;
+    const cs = getComputedStyle(line), ss = getComputedStyle(sub);
+    out.push({
+      active: line.style.transform === "scale(1)",
+      line: { text: (line.textContent || "").trim().slice(0, 40), color: cs.color, size: cs.fontSize, weight: cs.fontWeight },
+      sub: { text: (sub.textContent || "").trim().slice(0, 40), color: ss.color, size: ss.fontSize, weight: ss.fontWeight },
+    });
+  }
+  return out;
+});
+
+/** …asserted per cover: sub-lines exist, every one wears its own line's ink
+ *  (and is the smaller, lighter line under it — the probe's own sanity check
+ *  that it read the sub-line and not the line), and that ink answers the
+ *  cover the way every other tier here must — dark on a bright one. */
+async function measureLyricTrans(page, label, coverLum) {
+  const rows = await readLyricTrans(page);
+  check(`${label}: the lyric pane renders translation sub-lines to measure`,
+    Array.isArray(rows) && rows.length > 0,
+    Array.isArray(rows) ? `${rows.length} sub-line(s)` : "no pane scroller");
+  if (!Array.isArray(rows) || !rows.length) return null;
+  const wrong = rows.filter((r) => r.sub.color !== r.line.color);
+  check(`${label}: every translation sub-line wears its own line's ink`,
+    wrong.length === 0,
+    wrong.map((r) => `"${r.line.text}" line=${r.line.color} trans=${r.sub.color}`).join(" | ")
+      || `${rows.length} sub-line(s), all ${rows[0].line.color}`);
+  const shaped = rows.find((r) => parseFloat(r.sub.size) < parseFloat(r.line.size)
+    && parseInt(r.sub.weight, 10) < parseInt(r.line.weight, 10));
+  check(`${label}: the sub-line is the smaller, lighter line under it (not the line itself)`,
+    !!shaped,
+    JSON.stringify(rows[0] && { line: `${rows[0].line.size}/${rows[0].line.weight}`, sub: `${rows[0].sub.size}/${rows[0].sub.weight}` }));
+  // Same polarity rule as the metadata tiers: bright cover → near-black ink.
+  // The accent-tinted grey this replaced was near-white on the white cover.
+  const dark = relLum(parseRgb(rows[0].line.color)) < 0.5;
+  check(`${label}: the sub-line's ink answers the cover (${coverLum > 0.42 ? "bright" : "dark"})`,
+    (coverLum <= 0.42) !== dark,
+    `colour=${rows[0].line.color} coverLum=${coverLum.toFixed(3)}`);
+  return rows.map((r) => ({ active: r.active, color: r.sub.color, text: r.sub.text }));
 }
 
 /** Wait until the top bar's icon inks stop changing, with the pointer parked.
@@ -1048,6 +1208,7 @@ async function measureChrome(page, label, hex) {
 
 async function measure(page, hex, label, pick) {
   let step = "cover stub";
+  let lyricInk = null;
   try {
     await stubCover(page, hex);
     step = "album page";
@@ -1097,6 +1258,8 @@ async function measure(page, hex, label, pick) {
     check(`${label}: the lyrics pane is up for the shot`,
       await page.locator("div.fixed.inset-0.z-50 .no-scrollbar").count() > 0,
       "the pane scroller is in the DOM");
+    step = "lyric sub-lines";
+    lyricInk = await measureLyricTrans(page, label, relLum(hexRgb(hex)));
     step = "read";
   } catch (e) {
     const where = await page.evaluate(() => location.href).catch(() => "?");
@@ -1154,11 +1317,14 @@ async function measure(page, hex, label, pick) {
     `title colour=${tiers.title.color} cover=${hex} coverLum=${coverLum.toFixed(3)}`);
   check(`${label}: the metadata tiers carry the glyph shadow`,
     tiers.title.shadow !== "none", `shadow=${tiers.title.shadow}`);
+  report.push(`translation-ink=${lyricInk?.[0]?.color ?? "—"}`);
+  const ratingInk = await measureRatingReadout(page, label, tiers, coverLum);
+  if (ratingInk) report.push(`rating-readout=rgb(${ratingInk.painted.join(" ")})@${ratingInk.contrast.toFixed(2)}:1`);
   // …and the chrome the metadata sits among: the two sliders, the top bar's
   // icon family and the two lyric chips (see measureChrome).
   const chrome = await measureChrome(page, label, hex);
   await page.screenshot({ path: path.join(SHOTS, `${label}.png`) });
-  return { lightInk, report, field, chrome };
+  return { lightInk, report, field, chrome, lyricInk };
 }
 
 (async () => {
@@ -1177,6 +1343,11 @@ async function measure(page, hex, label, pick) {
     }).then((c) => c.newPage());
     page.setDefaultTimeout(20000);
     page.on("pageerror", (e) => errs.push(e.message));
+    // The pane's translation sub-lines are seeded through the app's OWN
+    // /api/tags answer (see `stubTranslations`): the shared fixture carries no
+    // translation, and the sub-lines' ink is part of what the covers below
+    // measure.
+    await stubTranslations(page);
 
     // One album whose track carries lyrics (the pane has to be up, and the
     // metadata block only exists once something is playing through the bar).
@@ -1187,7 +1358,7 @@ async function measure(page, hex, label, pick) {
         for (const t of (al.tracks || []).slice(0, 4)) {
           const tags = await (await fetch(`${BASE}/api/tags?path=${encodeURIComponent(t.path)}`)).json().catch(() => null);
           if (typeof tags?.lyrics === "string" && tags.lyrics.trim()) {
-            pick = { album: al, track: { title: t.title || t.file.replace(/\.[^.]+$/, "") } };
+            pick = { album: al, track: { title: t.title || t.file.replace(/\.[^.]+$/, ""), path: t.path } };
             break;
           }
         }
@@ -1205,6 +1376,7 @@ async function measure(page, hex, label, pick) {
       }
     }
     check("the fixture has an album to play", !!pick.album, JSON.stringify(pick.album && pick.album.path));
+    await stubRating(page, () => pick?.track?.path);
 
     const covers = [
       ["#101014", "dark-cover"],

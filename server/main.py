@@ -3,7 +3,7 @@ FastAPI backend for la musica v2 — localhost:8000.
 
 Wraps the mlo/* engine as REST + WebSocket for the React frontend:
 library (tag-rich, sortable), grading/auditing, tag editing, playback
-streaming, playlists (manual + smart, .m3u8), MusicBrainz/LRCLIB/RYM
+streaming, playlists (manual + smart, .m3u8), MusicBrainz/LRCLIB
 integrations, and album import.
 """
 import os
@@ -70,9 +70,6 @@ from server import api_storage
 from server import api_streaming
 from server import api_soulseek
 from server import api_youtube
-from server import api_rym
-from server import api_aoty
-from server import api_solver
 from server import api_cookies
 from server import api_run
 from server import api_export
@@ -137,44 +134,24 @@ async def _lifespan(app: FastAPI):
             except Exception as e:
                 print(f"[mlo] slskd autostart failed: {e}")
         threading.Thread(target=_autostart_slskd, daemon=True).start()
-    # …and the Cloudflare solver (server/solver.py). Installing FlareSolverr
-    # from Dependencies IS the whole setup: with autostart on (the default) the
-    # app brings it up itself, so the first import after a restart is not
-    # cookie-less again. It does nothing when FlareSolverr is not installed —
-    # the common case — so this costs a `detect_all_tools` call, not a spawn.
-    if load_config().get("cf_solver_autostart", True):
-        def _autostart_solver():
-            try:
-                from server import solver
-                ok, msg = solver.ensure_started()
-                if ok:
-                    # The solver is up: find out what it can pass NOW, in the
-                    # background, so the first genre import is not the thing
-                    # that waits ~60 s per host to learn it (cfchallenge).
-                    from server import cfchallenge
-                    cfchallenge.warm_solver(load_config())
-                elif msg not in ("already available",
-                                 "FlareSolverr is not installed",
-                                 "autostart is off"):
-                    print(f"[mlo] solver autostart skipped: {msg}")
-            except Exception as e:
-                print(f"[mlo] solver autostart failed: {e}")
-        threading.Thread(target=_autostart_solver, daemon=True).start()
-    # …and the browser route's OWN warm-up, when it is allowed: the first
-    # navigation to either scraped host is what clears its challenge (MEASURED,
-    # 2026-10-11: ~27 s for Album of the Year, ~49 s for RateYourMusic), so it
-    # happens here — off the request path — instead of inside the user's first
-    # import, where it read as "no data" for a host that answers in a second
-    # once the clearance is in the profile. See `cfchallenge.warm_browser`; the
-    # browser draws on a hidden desktop, so no window is shown.
-    if load_config().get("cf_browser_fetch", True):
-        def _autostart_browser():
-            try:
-                from server import cfchallenge
-                cfchallenge.warm_browser(load_config())
-            except Exception as e:
-                print(f"[mlo] browser warm-up skipped: {e}")
-        threading.Thread(target=_autostart_browser, daemon=True).start()
+    # (The Cloudflare solver and the scraped hosts' browser warm-up lived here
+    # until 2026-10-12; both went with the two sites they served. MusicBrainz
+    # is a plain API: no cookie, no challenge, nothing to warm.)
+    # The RYM page cache is dead weight now (the reader that wrote it is gone),
+    # and it is the only RYM data the app itself kept on disk: remove it once,
+    # best effort, so an upgraded install carries none.
+    try:
+        # The path is the one the (deleted) RYM reader used: <music>/.mlo/data/
+        # rym_cache — `mlo.paths.app_data_dir` is the public half of that rule.
+        from mlo.paths import app_data_dir as _app_data_dir
+        _data = _app_data_dir(str(load_config().get("music_folder") or "") or None)
+        _stale = os.path.join(_data, "rym_cache") if _data else ""
+        if _stale and os.path.isdir(_stale):
+            import shutil as _shutil
+            _shutil.rmtree(_stale, ignore_errors=True)
+            print("[mlo] removed the retired RateYourMusic page cache")
+    except Exception:
+        pass
     # Wishlist worker: periodically re-searches Soulseek for saved releases.
     try:
         from server import wishes_worker
@@ -295,6 +272,14 @@ async def _lifespan(app: FastAPI):
             print(f"[mlo] home warm-up failed: {e}")
     threading.Thread(target=_warm_home, daemon=True,
                      name="home-warm").start()
+    # Tag writes a held file denied (mlo.pending): drain the queue once at
+    # startup and then on an interval, so an edit that could not land when the
+    # file was busy is written as soon as it frees — never silently lost.
+    try:
+        from mlo import pending as pending_tags
+        pending_tags.start_worker()
+    except Exception as e:
+        print(f"[mlo] pending tag-write worker failed to start: {e}")
     yield
     # Stop taking new work first (the workers above are the app's own source of
     # new jobs), then the honest part: wait — bounded — for whatever is still
@@ -324,30 +309,15 @@ async def _lifespan(app: FastAPI):
     except Exception:
         pass
     try:
+        from mlo import pending as pending_tags
+        pending_tags.stop()
+    except Exception:
+        pass
+    try:
         from server import interrupt_recovery
         interrupt_recovery.shutdown()
     except Exception as e:
         print(f"[mlo] graceful shutdown failed: {e}")
-    # The Cloudflare solver is the app's OWN child (unlike slskd, a daemon a
-    # user may want left up), so a clean shutdown stops it — a FlareSolverr
-    # left behind by every quit is a process nobody asked to keep. A process
-    # this app did NOT start (the Docker sidecar, a service run by hand) is
-    # never killed; a run ended by a hard kill leaves an orphan the next start
-    # adopts instead of spawning a second one (server/solver.py).
-    try:
-        from server import solver
-        solver.stop()
-    except Exception:
-        pass
-    # The browser this app drives for the two scraped hosts is its own child
-    # too, and it is a FULL Chromium: left behind, it is a window the user did
-    # not open and a few hundred megabytes. Its profile stays — that is where
-    # the clearance it earned lives, so the next run starts already cleared.
-    try:
-        from server import browserfetch
-        browserfetch.stop()
-    except Exception:
-        pass
 
 
 # --------------------------------------------------------------------------- #
@@ -1697,7 +1667,8 @@ def soulseek_local_file(path: str = Query(...)):
     if not os.path.isfile(p):
         raise HTTPException(404, "file not found")
     ctype = _CTYPES.get(os.path.splitext(p)[1].lower(), "application/octet-stream")
-    return FileResponse(p, media_type=ctype, headers={"Accept-Ranges": "bytes"})
+    return api_media.shared_file_response(p, ctype,
+                                          headers={"Accept-Ranges": "bytes"})
 
 
 # Containers Chromium can decode in a <video> element. Everything else —
@@ -1726,7 +1697,8 @@ def soulseek_preview_stream(path: str = Query(...), native: int = Query(0)):
 
     if native or ext in _NATIVE_VIDEO_EXTS:
         ctype = _CTYPES.get(ext, "application/octet-stream")
-        return FileResponse(p, media_type=ctype, headers={"Accept-Ranges": "bytes"})
+        return api_media.shared_file_response(p, ctype,
+                                              headers={"Accept-Ranges": "bytes"})
 
     ffmpeg = (detect_all_tools().get("ffmpeg") or {}).get("ffmpeg_exe")
     if not ffmpeg:
@@ -2560,8 +2532,13 @@ def soulseek_test_log(req: SoulseekTestLogRequest):
     """Download ONLY a folder's .log file(s), grade them with Logchecker,
     then clean up — a quality preview before committing to the album.
 
-    Returns {logs: [{file, score, checksum, detail}], ok} where ok means
-    every log reached the configured grade_log_score_threshold (100)."""
+    Returns {logs: [{file, score, checksum, accuraterip, detail}], ok}. The
+    verdict follows the auto-importer's gate exactly: a log whose own checksum
+    does not verify, whose AccurateRip section reports a failed track, or that
+    scores BELOW the configured grade_log_score_threshold (100) fails; a log
+    Logchecker could NOT score is judged on the rest (the importer still
+    checks its per-track CRCs after download) and is not failed for the missing
+    score; a download that timed out is nothing checked, so it is not a pass."""
     from server import soulseek
     from mlo.discs import score_disc_log
 
@@ -2587,22 +2564,33 @@ def soulseek_test_log(req: SoulseekTestLogRequest):
     _queue_downloads(soulseek, req.username,
                      [{"filename": f["filename"], "size": f.get("size") or 0}
                       for f in logs])
-    from server.soulseek_auto import _wait_for_files, _remote_rel
+    from server.soulseek_auto import (_wait_for_files, _remote_rel,
+                                      _log_accuraterip, _log_format)
     got = _wait_for_files(soulseek, ddir, req.username, logs, timeout_s=180)
 
     threshold = int(cfg.get("grade_log_score_threshold", 100) or 100)
     out = []
+    missing = 0
     for f in logs:
         local = got.get(f["filename"])
         if not local:
+            missing += 1
             out.append({"file": os.path.basename(f["filename"]), "score": None,
-                        "checksum": None, "detail": "download timed out"})
+                        "checksum": None, "accuraterip": None,
+                        "detail": "download timed out"})
             continue
         score = score_disc_log(local)
         from mlo.discs import check_log_checksum
         state, detail = check_log_checksum(local)
+        ar_state, _ar_detail = _log_accuraterip(local)
+        if score is None and state != "invalid" and ar_state != "fail":
+            # The same rule the auto-importer applies: an unscored log is not a
+            # failure by itself. Name the format the toolchain could not read.
+            detail = (f"{detail + '; ' if detail else ''}Logchecker could not "
+                      f"score it ({_log_format(local)}) — not a failure by itself")
         out.append({"file": os.path.basename(f["filename"]), "score": score,
-                    "checksum": state, "detail": detail})
+                    "checksum": state, "accuraterip": ar_state,
+                    "detail": detail})
         try:
             os.remove(local)
         except OSError:
@@ -2614,11 +2602,16 @@ def soulseek_test_log(req: SoulseekTestLogRequest):
                 os.rmdir(root)
     except OSError:
         pass
-    # An UNGRADED log (download or grade timed out) is not a pass: the verdict
-    # is about every log in the folder reaching the threshold, and the auto
-    # importer already treats an unscorable log as a failure.
-    ok = bool(out) and all(
-        e["score"] is not None and (e["score"] or 0) >= threshold for e in out
+    # A MISSED download is nothing checked, so it is not a pass. Otherwise the
+    # verdict is the acquisition gate exactly (see _log_passes): a checksum
+    # that does not verify, an AccurateRip section reporting a failed track, or
+    # a score BELOW the threshold is a failure — and a log Logchecker could not
+    # score is judged on the rest, never rejected for the missing score alone.
+    ok = bool(out) and missing == 0 and all(
+        e["checksum"] != "invalid"
+        and e.get("accuraterip") != "fail"
+        and (e["score"] is None or (e["score"] or 0) >= threshold)
+        for e in out
     )
     return {"ok": ok, "threshold": threshold, "logs": out}
 
@@ -3043,9 +3036,6 @@ app.include_router(api_storage.router)
 app.include_router(api_streaming.router)
 app.include_router(api_soulseek.router)
 app.include_router(api_youtube.router)
-app.include_router(api_rym.router)
-app.include_router(api_aoty.router)
-app.include_router(api_solver.router)
 app.include_router(api_cookies.router)
 app.include_router(api_run.router)
 app.include_router(api_export.router)
@@ -3090,17 +3080,14 @@ class LyricsEmbedRequest(BaseModel):
 
 
 class ImportCommit(BaseModel):
-    """Store MB/RYM links on an imported album. target_dir = album folder
-    name under music_folder, or an absolute path already inside it.
-
-    `rym_artist_link` is the artist-level page the wizard's Links step
-    confirmed (`/api/rym/validate` said "artist"): it lands on every track as
-    RATEYOURMUSIC_ARTIST in the SAME container write as the album tags, which
-    is what keeps that step to one rewrite per track."""
+    """Store the MusicBrainz release link on an imported album. target_dir =
+    album folder name under music_folder, or an absolute path already inside
+    it. ONE link, ONE pass over the album — the wizard's Links step has been
+    MusicBrainz-only since the scraped sources were removed (2026-10-12); the
+    nothing else is fetched or written: the app carries no RateYourMusic or
+    Album of the Year data at all (2026-10-12)."""
     target_dir: str
     mb_link: Optional[str] = None
-    rym_link: Optional[str] = None
-    rym_artist_link: Optional[str] = None
     staged: bool = False  # the wizard's album folder, wherever the user put it
 
 
@@ -3591,28 +3578,6 @@ def dependencies(refresh: int = Query(0)):
     except OSError:
         pass
     payload = fetchdeps.dependencies_payload(refresh=bool(refresh))
-    # FlareSolverr is the one tool the app can also be GIVEN rather than
-    # installed: the shipped Docker setup runs it as a `flaresolverr` service
-    # and the app is told where (`MLO_SOLVER_URL`), and a user may run a
-    # sidecar on the host. In that case the local download it offers is not
-    # missing — it is unnecessary — so the row is rewritten to say which solver
-    # is answering instead of pressing the user to fetch 300 MB they do not
-    # need. A solver the app INSTALLED is left alone (the row is the update
-    # surface for it).
-    try:
-        from server import solver
-        url, source = solver.resolve()
-        if url and source in ("env", "config", "local") and not solver.installed():
-            for row in payload.get("tools") or []:
-                if row.get("key") == "flaresolverr":
-                    row.update(
-                        state="ok",
-                        action="none",
-                        install_note=None,
-                        note=f"provided by the solver at {url} "
-                             f"({source}) — no local install needed")
-    except Exception:
-        pass
     return {"deps_dir": str(tools_dir()), **payload}
 
 
@@ -3842,17 +3807,6 @@ def dependencies_install(req: DepsInstallRequest):
     # "install it" IS the whole setup and no Start press is needed. It no-ops
     # when something already answers (a sidecar, or a child from an earlier
     # run); the Discovery card polls until the URL appears.
-    if any(r.get("key") == "flaresolverr" and r.get("ok") for r in results):
-        def _start_solver():
-            try:
-                from server import solver
-                ok, _msg = solver.start_after_install()
-                if ok:
-                    from server import cfchallenge
-                    cfchallenge.warm_solver(load_config())
-            except Exception as e:
-                print(f"[mlo] solver start after install failed: {e}")
-        threading.Thread(target=_start_solver, daemon=True).start()
     return {"results": results}
 
 
@@ -3989,6 +3943,11 @@ def get_artist(path: str = Query(...)):
 def _artist_payload(p, cfg):
     dir_scan = {}
     albums = lib_mod._find_albums(p, dir_scan)
+    # A multi-disc release's disc SUBFOLDERS belong to their album, not to the
+    # artist: fold them into it before the "directly under the artist" test
+    # below, or an album whose audio all sits in CD1/CD2 lists as no album.
+    from mlo.paths import library_root
+    albums = lib_mod._merge_disc_folders(albums, library_root(cfg.get("music_folder") or "") or "")
     direct = [alb for alb in sorted(albums)
               if os.path.dirname(alb).lower() == p.lower()]
     # Framework albums (`server.pending_albums`) hold no audio yet, so the walk
@@ -4116,7 +4075,6 @@ def stream(path: str = Query(...), download: int = Query(0)):
         raise HTTPException(400, "file outside music folder")
     ctype = _CTYPES.get(os.path.splitext(p)[1].lower(), "application/octet-stream")
     if download:
-        from server import api_media
         cfg = load_config()
         codec = str(cfg.get("download_codec") or "copy").strip().lower()
         if codec not in ("", "copy"):
@@ -4125,7 +4083,13 @@ def stream(path: str = Query(...), download: int = Query(0)):
         return api_media.full_body_response(p, ctype)
     # ponytail: unknown extensions stream as octet-stream; add explicit
     # mapping above when a supported player format is missing.
-    return FileResponse(p, media_type=ctype, headers={"Accept-Ranges": "bytes"})
+    #
+    # Served from a delete-sharing handle (api_media.shared_file_response):
+    # this response stays open for the WHOLE playback, and a plain open would
+    # deny every tag rename onto the file for that entire time — the owner's
+    # "Rated, but the RATING tag was not written" while a track played.
+    return api_media.shared_file_response(p, ctype,
+                                          headers={"Accept-Ranges": "bytes"})
 
 
 @app.get("/api/videos/stream")
@@ -4153,7 +4117,10 @@ def videos_stream(path: str = Query(...), transcode: int = Query(0)):
 
     if not transcode and ext in _NATIVE_VIDEO_EXTS:
         ctype = _CTYPES.get(ext, "application/octet-stream")
-        return FileResponse(p, media_type=ctype, headers={"Accept-Ranges": "bytes"})
+        # Delete-sharing handle: a video streams (and a viewer scrubs it) for
+        # minutes, so a plain open would block a tag write to it that long.
+        return api_media.shared_file_response(p, ctype,
+                                              headers={"Accept-Ranges": "bytes"})
 
     from mlo.tools import detect_all_tools
 
@@ -5699,8 +5666,9 @@ def track_download(path: str = Query(...)):
         raise HTTPException(404, "file not found")
     if not _in_music_folder(p, _music_folder()):
         raise HTTPException(400, "path is outside the music folder")
-    return FileResponse(p, media_type="application/octet-stream",
-                        filename=os.path.basename(p))
+    return api_media.shared_file_response(
+        p, "application/octet-stream",
+        headers={"Accept-Ranges": "bytes"}, filename=os.path.basename(p))
 
 
 @app.get("/api/track/export")
@@ -5729,14 +5697,14 @@ def track_export(path: str = Query(...), codec: str = Query("flac"),
     if codec == "copy":
         # No ffmpeg needed: the source file IS its own export, served as a
         # download under the name the browser should save it as.
-        return FileResponse(p, media_type="application/octet-stream",
-                            filename=os.path.basename(p))
+        return api_media.shared_file_response(
+            p, "application/octet-stream",
+            headers={"Accept-Ranges": "bytes"}, filename=os.path.basename(p))
     ext = spec.get("ext") or os.path.splitext(p)[1]
     args = exporter._codec_args(codec, quality)
     # The encode-and-serve step is server.api_media's (it is what the offline
     # download's own rendition uses); this route owns only the codec table it
     # reads from the exporter and the save-dialog naming.
-    from server import api_media
     return api_media.encoded_response(p, args, ext, "application/octet-stream",
                                       attachment=True)
 
@@ -5798,8 +5766,8 @@ def _write_album_genres(files, names, per_track=None, limit=None):
     The tag/cover caches are invalidated once, after the pool is joined.
 
     Returns {"updated": files whose container was written, "trimmed": files
-    that came down to the cap, "extra": values removed in total, "files":
-    their basenames}.
+    that came down to the cap, "extra": values removed in total, "without":
+    files left carrying no genre at all, "files": their basenames}.
     """
     from concurrent.futures import ThreadPoolExecutor
 
@@ -5813,29 +5781,38 @@ def _write_album_genres(files, names, per_track=None, limit=None):
     count = limit or DEFAULT_GENRE_COUNT
 
     def one(p):
-        """(written, trimmed, extra) for one file; never raises."""
+        """(written, trimmed, extra, without) for one file; never raises.
+
+        `without` is 1 when the file ends this pass carrying NO genre at all —
+        the state the grader fails (GENRE_MISSING). It is counted here because
+        this is the one place the file is open: the report's whole point is to
+        say the consequence where the import lands, not to have the user
+        discover it on the Grading page.
+        """
         try:
             af = AudioFile(p)
             if af.audio is None:
-                return (0, 0, 0)
+                return (0, 0, 0, 0)
             wanted = list(per_track.get(imports_svc._parse_trackno(p)) or [])
             if wanted or names:
                 # The chain answered: its list REPLACES the file's own.
                 want, changed = genre_plan(af, wanted + list(names or []), count)
-                if not changed:
-                    return (0, 0, 0)
-                genre_apply(af, want)
-                return (1, 0, 0)
+                if changed:
+                    genre_apply(af, want)
+                    return (1, 0, 0, 0 if want else 1)
+                from mlo.autotag import _stored_genres
+                stored, _verbatim = _stored_genres(af)
+                return (0, 0, 0, 0 if (stored or wanted or names) else 1)
             # No answer from any source: enforce the cap on what is stored.
             from mlo.autotag import _stored_genres
             stored, _verbatim = _stored_genres(af)
             want, changed = genre_plan(af, stored, count)
             if not changed:
-                return (0, 0, 0)
+                return (0, 0, 0, 0 if stored else 1)
             genre_apply(af, want)
-            return (1, 1, max(0, len(stored) - len(want)))
+            return (1, 1, max(0, len(stored) - len(want)), 0 if want else 1)
         except Exception:
-            return (0, 0, 0)
+            return (0, 0, 0, 0)
 
     workers = worker_count(load_config(), maximum=min(8, os.cpu_count() or 1),
                            items=len(files))
@@ -5848,6 +5825,7 @@ def _write_album_genres(files, names, per_track=None, limit=None):
     updated = sum(r[0] for r in results)
     trimmed = sum(r[1] for r in results)
     extra = sum(r[2] for r in results)
+    without = sum(r[3] for r in results)
     written = [os.path.basename(p) for p, r in zip(files, results) if r[0]]
     if updated:
         # SCOPED, not `invalidate_all`: the folders this run actually wrote.
@@ -5860,7 +5838,7 @@ def _write_album_genres(files, names, per_track=None, limit=None):
         tagcache.invalidate_album(*folders)
         mbresolve.invalidate()
     return {"updated": updated, "trimmed": trimmed, "extra": extra,
-            "files": written}
+            "without": without, "files": written}
 
 
 class GenreChainImportRequest(BaseModel):
@@ -5877,17 +5855,18 @@ class GenreChainImportRequest(BaseModel):
 def _run_genre_chain(paths, limit=None, progress=None, sources=None, staged=False):
     """Import GENRE from EVERY configured genre source, per track.
 
-    The chain runs in the order of `genre_sources` (RateYourMusic →
-    MusicBrainz → Album of the Year), merges what each source answers, dedupes
-    case-insensitively and caps them at `mb_genre_count` — the requested
-    `limit` (the wizard's per-run "Max genres") may only LOWER it, through the
-    one helper that reads the setting (`mlo.autotag.genre_count`), so a
-    per-run control can never write more genres than the user configured.
+    The chain runs in the order of `genre_sources` (MusicBrainz alone since
+    2026-10-12, when the two scraped hosts were removed), merges what each
+    source answers, dedupes case-insensitively and caps them at
+    `mb_genre_count` — the requested `limit` (the wizard's per-run "Max
+    genres") may only LOWER it, through the one helper that reads the setting
+    (`mlo.autotag.genre_count`), so a per-run control can never write more
+    genres than the user configured.
 
     It STOPS asking once every track is settled: its cap of specific names is
     filled, or a source answered that track's OWN page (`asked`,
-    `stopped_after`). A source that cannot answer is skipped before any request
-    — known-blocked (RateYourMusic) — and named in `skipped`. MusicBrainz
+    `stopped_after`). A source that cannot answer is skipped before any
+    request — known-blocked — and named in `skipped`. MusicBrainz
     recording genres refine each track when the album names a release.
 
     The report is what the wizard and the Settings panel render: `per_source`
@@ -5929,16 +5908,9 @@ def _run_genre_chain(paths, limit=None, progress=None, sources=None, staged=Fals
     # landed it yet still runs, just without the `source i/N` steps.
     hook = {"progress": progress} if progress is not None and \
         "progress" in inspect.signature(intg.genre_chain).parameters else {}
-    # The source loop is the part that can wait on a browser, so it runs under
-    # a solver budget: with no cleared cookie and a solver that cannot pass
-    # either challenge, the scraped sources would otherwise hold this
-    # user-facing request open for minutes ("Importing genres…" and no way to
-    # stop it). MusicBrainz still answers once the budget is out.
-    from server import cfchallenge
-    with cfchallenge.budget(intg.GENRE_IMPORT_BUDGET_S):
-        chain = intg.genre_chain(artist=artist, album=album, release=release,
-                                 limit=cap, cfg=cfg, files=files, sources=sources,
-                                 **hook)
+    chain = intg.genre_chain(artist=artist, album=album, release=release,
+                             limit=cap, cfg=cfg, files=files, sources=sources,
+                             **hook)
     names = chain.get("genres") or []
     # The chain already merged every track's own genres ahead of the
     # release-wide ones and capped them per track — `_write_album_genres`, the
@@ -5955,10 +5927,22 @@ def _run_genre_chain(paths, limit=None, progress=None, sources=None, staged=Fals
     updated = write["updated"]
     trimmed = write["trimmed"]
     extra = write["extra"]
+    without = int(write.get("without") or 0)
     trimmed_files = write["files"] if trimmed else []
     levels = chain.get("levels") or {}
     level_counts = chain.get("level_counts") or {}
     notes = dict(chain.get("notes") or {})
+    if without:
+        # The owner's rule (2026-10-12, with the scraped sources removed):
+        # MusicBrainz is the only source left, and when it states nothing a
+        # track keeps NO genre — which FAILS grading. Say so HERE, where the
+        # import lands, instead of letting the Grading page be the first place
+        # it is seen; nothing is invented to fill the gap.
+        notes["grading"] = (
+            f"{without} track(s) still carry no genre — the grade for each "
+            "fails (GENRE_MISSING). Add genres in the Genres step or the tag "
+            "editor, or configure an AI provider (Settings → AI) and re-run "
+            "this import")
     if trimmed:
         # Reuses the chain's own notes channel (the wizard renders it under the
         # genre step), so the trim is visible where genres are reported.
@@ -5991,7 +5975,7 @@ def _run_genre_chain(paths, limit=None, progress=None, sources=None, staged=Fals
             # re-encodes the key to a list and then explodes on the unhashable
             # key (`TypeError: unhashable type: 'list'`) — OUTSIDE the handler,
             # so the route answered a plain-text 500 with no detail every time
-            # the cap dropped a genre, which is every real MusicBrainz/RYM
+            # the cap dropped a genre, which is every real
             # import. The report therefore uses the app's own "disc:position"
             # key, the same string every other per-track map in the chain
             # already uses.
@@ -6014,28 +5998,10 @@ def genres_import(req: GenreChainImportRequest):
     """Import GENRE from the given sources (all configured ones by default).
 
     The wizard's two per-source buttons pass one source each, so MusicBrainz
-    and RateYourMusic are asked separately and each reply reports what that
+    and the configured AI tier are asked separately and each reply reports that
     source wrote."""
     return _run_genre_chain(req.paths, req.limit, sources=req.sources,
                             staged=req.staged)
-
-
-def _genre_path(name):
-    """The display form of a genre's hierarchy chain: "Pop › Synth-Pop".
-
-    The NAME ITSELF is the last element (`mlo.genre_vocab.path_of` answers
-    "this name, and what is above it", head first), so a surface that prints
-    this beside the name must drop the tail — the wizard does, through
-    `genreParents` in `web/src/lib/genres.ts`. One name when nothing is known
-    above it (a head, or a name outside the vocabulary) — the view never
-    invents a level.
-    """
-    try:
-        from mlo.genre_vocab import path_of
-        from mlo.genres import display_name
-        return " › ".join(display_name(n) for n in path_of(name))
-    except Exception:
-        return ""
 
 
 @app.get("/api/genres/facets")
@@ -6049,13 +6015,10 @@ def genres_facets():
     exactly one bucket, so the counts stay honest. A name is reported in
     MusicBrainz's own spelling (`mlo.genres.canonical`) and a stored value
     another tagger joined ("Rock / Shoegaze") counts as the two genres it
-    names, exactly as the writers and the grader read it. Every row also
-    carries `path`: the name WITH its chain above it, head first
-    ("Electronic › House › Deep House" is `deep house`'s row) — the tag stores
-    names, and this is where each one sits, computed by `mlo.genre_vocab
-    .path_of` rather than read out of any file. A reader that shows it BESIDE
-    the name drops the tail (`genreParents`), because printing the name twice
-    beside itself is what made the arrow read as a mystery."""
+    names, exactly as the writers and the grader read it. Rows carry the name
+    and its count — no "level above" (a parent chain was displayed here until
+    2026-10-12; what sits above a name is not something any data settles, so
+    the app no longer answers it anywhere a reader can see)."""
     from mlo.genres import canonical, split_stored
     from server import library as lib_mod
 
@@ -6072,7 +6035,7 @@ def genres_facets():
                 for piece in split_stored(raw):
                     text = canonical(piece) or piece
                     counts[text] = counts.get(text, 0) + 1
-    genres = [{"name": n, "count": c, "path": _genre_path(n)}
+    genres = [{"name": n, "count": c}
               for n, c in sorted(counts.items(), key=lambda x: (-x[1], x[0].lower()))]
     buckets = {}
     for row in genres:
@@ -6970,8 +6933,63 @@ async def import_unpack_discard(
     return {"ok": True, "removed": removed, "skipped": skipped}
 
 
+def _same_bytes(a: str, b: str) -> bool:
+    """Do two files hold the same bytes? Size first, then a full compare."""
+    try:
+        if os.path.getsize(a) != os.path.getsize(b):
+            return False
+        return filecmp.cmp(a, b, shallow=False)
+    except OSError:
+        return False
+
+
+def _same_album_again(staged, album_path: str) -> bool:
+    """Is `album_path` this SAME album, rather than another one with its name?
+
+    The destination answers, not the caller: an upload whose files all land on
+    absent names or on byte-identical copies is this album again — a retried
+    batch, whose already placed files are exactly the bytes it is sending —
+    while one that would replace a file holding DIFFERENT bytes is a different
+    release that happens to share the name (two discs/editions named alike, or
+    two batches of one wizard run). Only the first may land in place.
+    """
+    for rel, src in staged:
+        dest = os.path.join(album_path, *rel.split("/"))
+        if os.path.exists(dest) and not _same_bytes(src, dest):
+            return False
+    return True
+
+
+def _album_collision_dir(parent: str, name: str, staged) -> str:
+    """Where an upload goes when ``parent/name`` is already a DIFFERENT album.
+
+    A retry re-sends the same album under the same NAME (the wizard's worklist
+    carries names, not folders), so a sibling this batch already made —
+    "Name (2)", "Name (3)"… — is REUSED when its files are byte-identical to
+    what is being sent; only a batch nothing on disk matches gets a new folder,
+    deduplicated exactly as the bulk queue dedupes one (`imports.unique_dir`).
+    Without the reuse a retried batch would make " (3)", " (4)", … forever.
+    """
+    suffix = 2
+    while True:
+        candidate = os.path.join(parent, f"{name} ({suffix})")
+        if not os.path.isdir(candidate):
+            break
+        if _same_album_again(staged, candidate):
+            return candidate
+        suffix += 1
+    return imports_svc.unique_dir(parent, name)
+
+
 def _place_staged(staged, album_path: str) -> None:
     """Move each staged file to its own relative path inside `album_path`.
+
+    Never replaces a file that holds DIFFERENT bytes: a byte-identical copy is
+    already there (the staged one is dropped — nothing is lost), and anything
+    else refuses the whole placement with the collision named. The route gives
+    a same-named upload its own folder before it gets here (see
+    `import_upload`), so this is the backstop that keeps the rule true of the
+    function itself rather than of one caller.
 
     The album folder is made if it does not exist. A file a lock holds refuses
     the whole placement with the app's usual sentence — move_path retried every
@@ -6981,6 +6999,22 @@ def _place_staged(staged, album_path: str) -> None:
     for rel, src in staged:
         dest = os.path.join(album_path, *rel.split("/"))
         os.makedirs(os.path.dirname(dest), exist_ok=True)
+        if os.path.exists(dest):
+            if _same_bytes(src, dest):
+                # The album already holds these exact bytes — a retry of the
+                # upload that put them there. The staged copy is the duplicate
+                # the app made, so IT goes, never the album's file.
+                if os.path.normcase(os.path.abspath(src)) != \
+                        os.path.normcase(os.path.abspath(dest)):
+                    try:
+                        os.remove(src)
+                    except OSError:
+                        pass
+                continue
+            raise HTTPException(
+                500, f"could not place {rel} — "
+                     f"{os.path.basename(album_path)} already holds a "
+                     f"different file with that name")
         if not move_path(src, dest):
             raise HTTPException(
                 500, f"could not place {rel} — a file inside it is "
@@ -6990,6 +7024,7 @@ def _place_staged(staged, album_path: str) -> None:
 @app.post("/api/import/upload")
 async def import_upload(
     target_dir: str = Query(...),
+    album: Optional[str] = Query(None),
     files: List[UploadFile] = File(default=[]),
     staged: Optional[str] = Form(None),
 ):
@@ -7020,6 +7055,23 @@ async def import_upload(
     everything after that point is the same code as a byte upload, so an album
     that came out of an archive is grouped, merged and marked partial exactly
     like the folder it was meant to be.
+
+    `album` names the album the files belong to — the wizard's Match step,
+    "add tracks to this album". Its path is used as-is (fill-only, through
+    `server.imports.merge_into_album`), so nothing is guessed from tags, no
+    name collision can give the batch a `(2)` folder of its own, and `kept`
+    names whatever the album already had.
+
+    Two uploads that resolve to ONE album name never destroy each other's
+    bytes. An upload that lands on a folder already holding DIFFERENT files of
+    the same names is a different release that happens to share the name
+    (several batches of one wizard run, two discs or editions named alike), and
+    it is given a folder of its own — "Name (2)", the same dedup the bulk queue
+    uses — with `collided: true` in the reply. A retried upload, whose files
+    are byte-identical to the ones already placed, still lands in place; and an
+    album the LIBRARY already holds is filled by
+    `server.imports.merge_into_album`, which never replaces a file it has —
+    the ones it kept come back in `kept`.
     """
     cfg = load_config()
     folder = cfg.get("music_folder") or ""
@@ -7085,23 +7137,58 @@ async def import_upload(
         staged_files.extend(_staged_paths(staged, folder))
         if not staged_files:
             raise HTTPException(400, "no files to upload")
-        album_name, album_path, how = imports_svc.import_album_target(
-            [p for rel, p in staged_files if rel.lower().endswith(AUDIO_EXTS)], raw, cfg)
-        if not album_path:
-            album_path = os.path.normpath(
-                os.path.join(root, re_safe_filename(album_name) or safe))
+        if album and album.strip():
+            # "Add tracks to THIS album" (the wizard's Match step): the caller
+            # already knows which library album the files belong to, so no name
+            # is guessed, no `(2)` folder is opened and nothing collides — the
+            # arriving audio FILLS that album (`merge_into_album`, which never
+            # overwrites a file the album already holds) and `kept` reports the
+            # ones it would not give up.
+            album_path = os.path.normpath(album.strip())
+            if not os.path.isabs(album_path):
+                album_path = os.path.normpath(os.path.join(root, album_path))
+            if not _in_music_folder(album_path, folder):
+                raise HTTPException(400, "album outside music folder")
+            if not os.path.isdir(album_path):
+                raise HTTPException(404, "album not found")
+            album_name, how = os.path.basename(album_path), "library"
+        else:
+            album_name, album_path, how = imports_svc.import_album_target(
+                [p for rel, p in staged_files if rel.lower().endswith(AUDIO_EXTS)], raw, cfg)
+            if not album_path:
+                album_path = os.path.normpath(
+                    os.path.join(root, re_safe_filename(album_name) or safe))
         if not _in_music_folder(album_path, folder):
             raise HTTPException(400, "target outside music folder")
         merged = bool(how == "library" and os.path.isdir(album_path))
+        kept: List[str] = []
+        collided = False
         if merged:
             # The library already holds this album: fill it, and never
             # overwrite what it has (its own rip sheets, a same-named track).
-            imports_svc.merge_into_album(album_path, [p for _rel, p in staged_files])
+            # What it kept comes back in the reply, so a collision is a
+            # sentence the caller can say rather than a silent no-op.
+            _moved, kept = imports_svc.merge_into_album(
+                album_path, [p for _rel, p in staged_files])
         elif os.path.isdir(album_path) or not stage:
-            # Either the same album again — the bytes land where they are sent,
-            # as they always have (a retried upload replaces its own files) — or
-            # files the server already held (an unpacked archive), whose album
-            # folder is made here and filled file by file.
+            # The album folder is already there. It is either this same album
+            # again — a retried upload, whose files land on the copies they
+            # made last time — or a DIFFERENT release that happens to share the
+            # name (two batches of one wizard run, two editions, two discs).
+            # Only the first may land in place: the second gets a folder of its
+            # own — the SAME dedup the bulk queue uses (`imports.unique_dir`) —
+            # so no batch can ever replace another's audio. `_place_staged`
+            # refuses a differing name outright, so this is the only way in.
+            if os.path.isdir(album_path) and not _same_album_again(staged_files, album_path):
+                chosen = _album_collision_dir(
+                    os.path.dirname(album_path), os.path.basename(album_path), staged_files)
+                if not _in_music_folder(chosen, folder):
+                    raise HTTPException(400, "target outside music folder")
+                # `collided` is "this upload OPENED a folder of its own", not
+                # "the name was taken": a retry reuses the folder its own first
+                # go made, so only the genuinely new album is worth a word.
+                collided = not os.path.isdir(chosen)
+                album_path = chosen
             _place_staged(staged_files, album_path)
         else:
             if not move_path(stage, album_path):
@@ -7124,7 +7211,12 @@ async def import_upload(
     tagcache.invalidate_album(album_path)
     return {"ok": True, "saved": saved,
             "album_path": album_path.replace("\\", "/"),
-            "album_name": os.path.basename(album_path), "merged": merged}
+            "album_name": os.path.basename(album_path), "merged": merged,
+            # A collision is never silent: `collided` says this upload was
+            # given a folder of its own because the name was already taken by a
+            # different album, and `kept` names the files an album the library
+            # already holds was NOT asked to give up.
+            "collided": collided, "kept": kept}
 
 
 def _write_upload_bytes(dest: str, data: bytes) -> None:
@@ -7413,12 +7505,11 @@ def import_ingest(source: str = Query(...), target: str = Query(...)):
 
 @app.post("/api/import/commit")
 def import_commit(req: ImportCommit):
-    """Store MB/RYM links on every track of a freshly imported album.
+    """Store the MusicBrainz release link on every track of a freshly imported
+    album.
 
-    target_dir: album folder name under the library (Artists).
-    All three links — the MB release, the album page and (when the wizard
-    confirmed it) the artist page — land in ONE pass over the album, one
-    container write per track.
+    target_dir: album folder name under the library (Artists). The link lands
+    in ONE pass over the album, one container write per track.
     """
     cfg = load_config()
     folder = cfg.get("music_folder") or ""
@@ -7441,21 +7532,6 @@ def import_commit(req: ImportCommit):
     if mb:
         for p in changes:
             changes[p]["MUSICBRAINZ_ALBUMID"] = mb
-    rym = intg.parse_rym_album_url(req.rym_link)
-    if rym:
-        for p in changes:
-            changes[p]["RATEYOURMUSIC_ALBUM"] = rym
-    # The artist page is artist-level, so it goes on every track as
-    # RATEYOURMUSIC_ARTIST — and it goes into the SAME per-track map as the two
-    # album tags above, so the deferral below still turns the whole step into
-    # ONE container write per track. Only a page RYM's own kind check calls an
-    # artist is stored: a song or album link here would be a wrong artist link
-    # forever (every later import stamps only what no tag already holds), and it
-    # is what the wizard's field validation confirmed before sending it.
-    artist = (req.rym_artist_link or "").strip()
-    if intg.rym_url_kind(artist) == "artist":
-        for p in changes:
-            changes[p]["RATEYOURMUSIC_ARTIST"] = artist
     # One AudioFile per track, and every tag for that track inside ONE
     # container write. Without the deferral each set_tag costs a whole-file
     # copy + rewrite (mlo/atomic.rewrite_via), and this step stamps up to

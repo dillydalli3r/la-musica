@@ -488,7 +488,7 @@ export default function AlbumPage() {
    *  source ticked in Settings → Import (or in the wizard's tray), in their
    *  priority order, stopping as soon as a track's list is complete. The reply
    *  carries what each source wrote (`per_source`) and why one stayed silent
-   *  (`notes`), so a blocked RateYourMusic is reported instead of leaving a
+   *  (`notes`), so a genre source that answered nothing is reported instead of
    *  bare "0 updated". */
   const importGenres = async () => {
     if (genresBusy) return;
@@ -808,16 +808,18 @@ export default function AlbumPage() {
                 chips={[
                   // media (+ a download's source) + release countries / tech /
                   // album DR / disc count, where the identity block already
-                  // showed them. The media chip names the pressing — and, for
-                  // a digital release, where the files came from — the same
-                  // way the album's card does.
+                  // showed them. This is the ALBUM PAGE's own chip row, so the
+                  // media names the pressing with the TAG's full value
+                  // (mediaFullLabel: "SHM-CD", "Digital Media") — and, for a
+                  // digital release, where the files came from. The card's
+                  // badge wears the short family word instead.
                   mediaCountryLabel(data.media, data.meta?.RELEASECOUNTRY, data.source_summary),
                   albumTech(data.tracks),
                   data.meta?.["ALBUM DYNAMIC RANGE"] ? `ADR ${data.meta["ALBUM DYNAMIC RANGE"]}` : null,
                   maxDisc > 1 ? `${maxDisc} disc${maxDisc === 1 ? "" : "s"}` : null,
                 ].filter((c): c is string => !!c)}
               >
-                {/* identity strip: the grade verdict and the MB / RYM links —
+                {/* identity strip: the grade verdict and the MB links —
                     deliberately outside the truncating title. The advisory
                     mark is NOT here any more: it sits with the title. */}
                 <div className="flex items-center gap-2 flex-wrap">
@@ -860,14 +862,13 @@ export default function AlbumPage() {
                       </span>
                     </span>
                   )}
-                  {/* MusicBrainz / RateYourMusic identity links: exactly one
-                      of each — prefer the release over its group */}
+                  {/* MusicBrainz identity links: exactly one — prefer the
+                      release over its group */}
                   <LinkChips
                     tags={(data.meta ?? {}) as Record<string, unknown>}
                     only={[
                       ...(data.meta?.MUSICBRAINZ_ALBUMID ? [] : ["MUSICBRAINZ_RELEASEGROUPID"]),
                       "MUSICBRAINZ_ALBUMID",
-                      "RATEYOURMUSIC_ALBUM",
                     ]}
                   />
                 </div>

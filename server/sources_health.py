@@ -1,9 +1,9 @@
 """Which external sources work right now — one payload for the setup wizard.
 
-Five kinds of source, one row shape: the lyrics providers, the advisory
+Six kinds of source, one row shape: the lyrics providers, the advisory
 (ITUNESADVISORY) routes, the genre sources, the metadata (artist image)
-providers and the LINK sources (the RateYourMusic album/artist links an import
-stamps). Every row says what it needs, whether that is configured here, and —
+providers, the /api/discover/* sources and the credentials those sources
+need. Every row says what it needs, whether that is configured here, and —
 when asked to probe — what actually answered.
 
 `probe=False` (the default) answers from the config alone: NO request leaves
@@ -16,13 +16,11 @@ Honey), in parallel, and reports what came back:
 
   * `ok`      — it answered ("synced lyrics, 38 lines", "6 genres",
                 "artist photo 1000x1000"),
-  * `skipped` — it cannot run here at all (no key, no yt-dlp, RYM refusing us),
+  * `skipped` — it cannot run here at all (no key, no yt-dlp),
   * `fail`    — it ran and had nothing, or raised.
 
 A source can still run without a `needs` entry when something else stands in
-for it: a Cloudflare solver (`cf_solver_url`) reads the scraped GENRE rows
-without their cookie, and the RYM LINKS row resolves from MusicBrainz without
-`rym_cookie`. The entry stays in `needs` (the panel prompts for it) and
+for it. The entry stays in `needs` (the panel prompts for it) and
 `optional_needs` says which of `needs` the source can run without.
 
 Nothing here ever raises or writes anything: a broken source is a row, not a
@@ -43,9 +41,6 @@ SAMPLE_TRACK = "Creep"
 SAMPLE_ALBUM = "Pablo Honey"
 SAMPLE_ISRC = "GBAYE9200070"
 
-# RYM links are their own row rather than a second reading of the genre
-# source that shares the cookie: the genre probe asks for genres, this one
-# resolves the sample album's links, which is the thing the import writes.
 # `discover` is the /api/discover/* surface: its sources are the ones
 # `server.discover`'s registry declares, probed with what each can actually
 # answer (a genre list, a genre browse, a recommendation feed).
@@ -57,7 +52,7 @@ SAMPLE_ISRC = "GBAYE9200070"
 # Spotify is simply skipped without a client secret, so a REJECTED secret read
 # as "not configured". These rows ask the provider's own credential endpoint
 # instead; see server/credential_checks.
-KINDS = ("lyrics", "advisory", "genre", "metadata", "links", "discover",
+KINDS = ("lyrics", "advisory", "genre", "metadata", "discover",
          "credentials")
 
 # The ask order of the advisory routes — `resolve_advisory_route`'s own order.
@@ -90,8 +85,6 @@ _ADVISORY_PROVIDES = {
 
 # Genre source labels — the spellings the settings UI already shows.
 _GENRE_LABELS = {
-    "rateyourmusic": "RateYourMusic",
-    "albumoftheyear": "Album of the Year",
     "musicbrainz": "MusicBrainz",
 }
 
@@ -102,10 +95,6 @@ _GENRE_LABELS = {
 # the rows (and so of these lines) is that registry's priority list, and the
 # rows carry `rank` — the 1-based position — for the same reason.
 _GENRE_PROVIDES = {
-    "rateyourmusic": "the release page's own curated genres, per track where "
-                     "the page states one — live, needs rym_cookie or a solver",
-    "albumoftheyear": "the album page's genre row, then the artist page — "
-                      "live, needs aoty_cookie or a solver",
     "musicbrainz": "recording genres, then release, release group and artist — "
                    "curated, and the app's identity anchor",
 }
@@ -174,7 +163,6 @@ def _probe_lyrics(pid, cfg):
 # Advisory (ITUNESADVISORY) routes
 # --------------------------------------------------------------------------- #
 def _probe_advisory(pid, cfg):
-    from server import discovery
     from server import integrations as intg
 
     if pid == "deezer-isrc":
@@ -242,60 +230,8 @@ def _artist_mbid(cfg):
     return _ARTIST_MBID["mbid"]
 
 
-def _rym_reason_since(started):
-    """Why RYM refused, as the module recorded it for THIS probe — "" when the
-    record is older than the probe, or when RYM answered.
-
-    `integrations.rym_last_response()` is process-wide, so a probe that read
-    it blindly could report a refusal from an earlier run (or a test stub's)
-    as its own; the timestamp is what makes the sentence this probe's."""
-    from server import integrations as intg
-
-    last = intg.rym_last_response()
-    return str(last.get("reason") or "") if last.get("at", 0) >= started else ""
-
-
 def _probe_genre(pid, cfg):
     from server import integrations as intg
-
-    if pid == "rateyourmusic":
-        started = time.time()
-        before = intg._rym_failures
-        # This row IS a user's Test: forget the refusal latch first, so RYM is
-        # asked again with whatever cookie is saved now — otherwise the row
-        # would report an earlier run's block however fresh the cookie is. The
-        # solver's own "this host beat me" latch goes with it: a Test is the
-        # user asking the question again, network and all.
-        intg._rym_clear_block()
-        intg.cfchallenge.clear_failures("rateyourmusic.com")
-        data = intg.rym_genres(SAMPLE_ARTIST, SAMPLE_ALBUM, cfg)
-        if intg._rym_failures != before:
-            # WHY RYM said no, in RYM's own recorded words: "403/challenge"
-            # was one sentence for five different problems, and the fix for
-            # "no cookie configured" is not the fix for "the WAF is blocking
-            # this network" (see `integrations._rym_reason`). The row also
-            # carries `rym_last` — the response behind the sentence.
-            return "skipped", _rym_reason_since(started) or (
-                "RYM refused the request (403/challenge) — the cookie is "
-                "stale or this network is blocked")
-        detail = _count_detail((data or {}).get("genres"))
-        return ("ok", detail) if detail else ("fail", "no RYM genres for the sample")
-
-    if pid == "albumoftheyear":
-        if not intg.aoty.cookie(cfg) and not intg.cfchallenge.solver_url(cfg):
-            return "skipped", ("no aoty_cookie in Settings → Discovery "
-                               "(or set cf_solver_url)")
-        # Same as RYM's Test: a fresh question, so the solver's failure latch
-        # for this host must not answer it.
-        intg.cfchallenge.clear_failures("albumoftheyear.org")
-        html = intg.aoty_page(SAMPLE_ARTIST, SAMPLE_ALBUM, cfg=cfg,
-                              kind="album")
-        if not html:
-            return "fail", ("AOTY refused the request (Cloudflare challenge) "
-                            "or holds no page for the sample")
-        parsed = intg.aoty.parse_album(html) or {}
-        detail = _count_detail(parsed.get("genres"))
-        return ("ok", detail) if detail else ("fail", "no AOTY genres for the sample")
 
     if pid == "musicbrainz":
         mbid = _artist_mbid(cfg)
@@ -414,22 +350,6 @@ def _probe_discover(pid, cfg):
         return "fail", _why("no Spotify genre album",
                             intg.spotify_last_error(started))
 
-    if pid == "rym":
-        # RateYourMusic is a CHARTS-only source here (its genre reading lives
-        # in the import chain), so its probe asks the thing this registry entry
-        # is FOR: its all-time song chart. The refusal is reported in RYM's own
-        # words — the whole point of the row.
-        try:
-            got = intg.rym_charts(kind="tracks", period="all", limit=1, cfg=cfg)
-        except Exception as e:
-            return "fail", str(e)
-        rows = got.get("rows") or []
-        if rows:
-            return "ok", "%s (the %s chart)" % (
-                _count_detail([r.get("title") for r in rows], "songs"),
-                got.get("chart") or "all-time")
-        return "fail", "the chart page stated no rows we could read"
-
     return "skipped", "unknown source"
 
 
@@ -487,42 +407,6 @@ def _probe_metadata(pid, cfg):
 
 
 # --------------------------------------------------------------------------- #
-# Link sources — the RYM album/artist links an import stamps
-# --------------------------------------------------------------------------- #
-_RYM_LABELS = {"rateyourmusic": "RateYourMusic links (album + artist)"}
-
-
-def _probe_links(pid, cfg):
-    from server import integrations as intg
-
-    if pid != "rateyourmusic":
-        return "skipped", "unknown source"
-    # MusicBrainz states the RYM page for well-known releases, so a missing
-    # cookie is not automatically a failure — the note says which half of the
-    # ladder answered (or that RYM refused the client). The latch is cleared
-    # first because this row IS a user's Test: it asks RYM for real whatever
-    # an earlier refusal left standing.
-    started = time.time()
-    fails_before = intg._rym_failures
-    intg._rym_clear_block()
-    got = intg.rym_links(SAMPLE_ARTIST, SAMPLE_ALBUM, cfg) or {}
-    album, artist = got.get("album"), got.get("artist")
-    note = str(got.get("note") or "").strip()
-    if album or artist:
-        parts = [x for x in (("album" if album else ""),
-                             ("artist" if artist else "")) if x]
-        return "ok", " · ".join(parts) + " link resolved" + (f" · {note}" if note else "")
-    if intg._rym_failures > fails_before:
-        # RYM's own sentence first: "the pasted Cookie header was refused" is
-        # true of a 403 the WAF sent and misleading when RYM merely answered
-        # 503 — and `rym_last` on the row says which it was.
-        return "fail", (_rym_reason_since(started) or note or
-                        "RYM did not answer — the pasted Cookie header was "
-                        "refused (403/challenge); paste a fresh one")
-    return "fail", note or "no link could be verified"
-
-
-# --------------------------------------------------------------------------- #
 # Credentials — is the saved login accepted by the provider?
 # --------------------------------------------------------------------------- #
 def _probe_credentials(cid, cfg):
@@ -576,26 +460,10 @@ def _specs(kind=None):
     # `provides` is what that source contributes. Both come from this one
     # place, so a source reordered above GENRE_SOURCES renumbers itself here.
     for rank, pid in enumerate(intg.GENRE_SOURCES, 1):
-        # The two scraped sources now read LIVE only, so their cookie is what
-        # the source needs — a cloudflare solver (`cf_solver_url`) can stand in
-        # for either, which is why the key is "optional" under that gate.
-        needs = {"rateyourmusic": ["rym_cookie"],
-                 "albumoftheyear": ["aoty_cookie"],
-                 }.get(pid, [])
-        spec = {"id": pid, "kind": "genre", "rank": rank,
-                "provides": _GENRE_PROVIDES.get(pid, ""),
-                "label": _GENRE_LABELS.get(pid, pid), "needs": list(needs),
-                "probe": lambda cfg, p=pid: _probe_genre(p, cfg)}
-        if pid in ("rateyourmusic", "albumoftheyear"):
-            # The cookie is required, but a solver reads the live page without
-            # one — `_optional_keys` drops this key when `cf_solver_url` is set.
-            spec["optional"] = list(needs)
-            spec["optional_gate"] = "cf_solver_url"
-            spec["optional_detail"] = (
-                "runs without a cookie when cf_solver_url is set — pages are "
-                "then read through the solver; paste the cookie to skip the "
-                "solve")
-        specs.append(spec)
+        specs.append({"id": pid, "kind": "genre", "rank": rank,
+                      "provides": _GENRE_PROVIDES.get(pid, ""),
+                      "label": _GENRE_LABELS.get(pid, pid), "needs": [],
+                      "probe": lambda cfg, p=pid: _probe_genre(p, cfg)})
 
     for pid in discovery.IMAGE_SOURCES:
         specs.append({"id": pid, "kind": "metadata",
@@ -607,27 +475,6 @@ def _specs(kind=None):
                                 else ["discogs_token"] if pid == "discogs" else []),
                       "provides": discovery.SOURCE_NOTES.get(pid, ""),
                       "probe": lambda cfg, p=pid: _probe_metadata(p, cfg)})
-
-    # Links: the RYM pair an import writes onto the album's tracks. It needs
-    # the same cookie the genre row prompts for — that is the point: the
-    # wizard shows one place to paste it and one button that proves it works.
-    for pid in ("rateyourmusic",):
-        # The links row shares the genre row's cookie, and the note below
-        # spells out why a missing one does not read as "this source cannot
-        # run": MusicBrainz states the RYM page for many releases, so the
-        # resolver answers without the cookie and the cookie is what resolves
-        # the releases MusicBrainz does not cover.
-        specs.append({"id": pid, "kind": "links",
-                      "label": _RYM_LABELS[pid], "needs": ["rym_cookie"],
-                      "optional": ["rym_cookie"],
-                      "optional_detail": (
-                          "runs without rym_cookie — MusicBrainz states the "
-                          "RYM page where it has one; the cookie resolves the "
-                          "rest"),
-                      "provides": "the album and artist RateYourMusic links an "
-                                  "import writes onto the tracks — the same "
-                                  "cookie the genre row asks for.",
-                      "probe": lambda cfg, p=pid: _probe_links(p, cfg)})
 
     # Discover: `server.discover` IS the registry for the /api/discover/*
     # surface, so its sources are read from there — a source added to that
@@ -679,14 +526,10 @@ def _optional_keys(spec, cfg):
     most of them.
 
     A source is normally unrunnable without its key, which is why `needs` is
-    also what the panel prompts for. Two rows are the exception. The scraped
-    GENRE rows run without their cookie when a Cloudflare solver is configured
-    (`cf_solver_url` — pages are read through it), and the RYM LINKS row runs
-    without `rym_cookie` because MusicBrainz states the same page for many
-    releases. In both, the cookie stays in `needs` (the panel prompts for it)
-    and only the STATUS/`probe` decision consults this. `optional_gate` names
-    the key that decides a GATED entry (the genre rows' `cf_solver_url`); a
-    spec without one is unconditional, like the links row.
+    also what the panel prompts for. A spec may name the exceptions in
+    `optional`; the key stays in `needs` (the panel still prompts for it) and
+    only the STATUS/`probe` decision consults this. `optional_gate` names the
+    key that decides a GATED entry; a spec without one is unconditional.
     """
     out = list(spec.get("optional") or ())
     gate = str(spec.get("optional_gate") or "")
@@ -725,7 +568,6 @@ def health_payload(cfg=None, kind=None, probe=False):
         from mlo.config import load_config
 
         cfg = load_config() or {}
-    from server import integrations as intg
 
     specs = _specs(kind)
 
@@ -734,9 +576,9 @@ def health_payload(cfg=None, kind=None, probe=False):
         missing = _missing(spec, cfg)
         optional = _optional_keys(spec, cfg)
         # What actually STOPS the source: a missing key that has no second
-        # route. RYM without a cookie is runnable (the archive answers), so it
-        # is `ok` and IS probed, while `configured` stays False so the panel
-        # still says "cookie missing" and prompts for it.
+        # route. A missing key named in `optional` leaves the source runnable,
+        # so it is `ok` and IS probed, while `configured` stays False so the
+        # panel still prompts for it.
         blocking = [k for k in missing if k not in optional]
         if not missing:
             detail = "configured"
@@ -766,9 +608,9 @@ def health_payload(cfg=None, kind=None, probe=False):
             pending.append((row, spec))
 
     if pending:
-        # Two genre sources are reached through the sample artist's MBID, and
-        # MusicBrainz rate-limits per host: resolve it ONCE, up here, so the
-        # parallel probes below cannot race each other into a 503.
+        # MusicBrainz is reached through the sample artist's MBID and
+        # rate-limits per host: resolve it ONCE, up here, so the parallel
+        # probes below cannot race each other into a 503.
         if any(spec["id"] in ("listenbrainz", "musicbrainz")
                for _row, spec in pending):
             _artist_mbid(cfg)
@@ -778,17 +620,6 @@ def health_payload(cfg=None, kind=None, probe=False):
             for row, future in futures:
                 status, detail, ms = future.result()
                 row.update(status=status, detail=detail, ms=ms)
-                if row["id"] == "rateyourmusic":
-                    # The RYM rows carry WHY, not only that they failed:
-                    # `detail` is the sentence the probe built, and `rym_last`
-                    # is the response behind it — status code, whether the
-                    # Cloudflare challenge marker was in the body, the URL and
-                    # when. "403" and "403 with no challenge marker" are a
-                    # stale cookie and a blocked network respectively, and the
-                    # panel cannot tell them apart from a status chip.
-                    last = intg.rym_last_response()
-                    if last:
-                        row["rym_last"] = last
 
     return {"sources": rows,
             "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}

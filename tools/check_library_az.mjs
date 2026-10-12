@@ -35,6 +35,13 @@
  *     them, so the local shelf must ask for the same 12 rows the online shelf
  *     asks for and print the count it got (issue #54) — the request body is
  *     kept by the stub and the printed count is read off the heading line.
+ *   * The album PAGE header says which RELEASE it is: the label · catalog
+ *     number pair the release states (`meta.LABEL` / `meta.CATALOGNUMBER`, the
+ *     same fields `/api/album` serves) is drawn in the facts line under the
+ *     title. The fixture's served album carries both; the check then takes
+ *     them away and the line must be exactly what it was without them, so the
+ *     block that draws the pair can never leave a dash or an empty chip where
+ *     a release states nothing.
  *   * At 390 px the name box and the letter button must still share ONE row and
  *     stay inside the screen: the phone is where a toolbar turns into a stack.
  *   * The ARTIST's own verdict is one GREEN DOT beside the name — the artist
@@ -821,6 +828,49 @@ try {
     console.log(`\n[library-az] shelf: ${shelf.cards.length} cards, ${shelf.rows} rows x ${shelf.columns} columns, `
       + `card widths ${Math.min(...widths)}–${Math.max(...widths)} px, heading "${shelf.heading}"`);
   }
+  // ------------------------- 4b. the album header names the release
+  // The owner's ask: an album page says WHAT RELEASE it is — the label and the
+  // label's own catalog number — at the top, in the header facts' own voice
+  // (AlbumPage's `PageHeader` subtitle, beside the artist and the two dates),
+  // and only when the release states them. Both halves are read off the LIVE
+  // header: the fixture's served album carries both tags in its `meta` — the
+  // same field `/api/album` fills (`ALBUM_LEVEL_TAGS` → `_album_meta`) — and the
+  // second pass takes them away, where the line must be EXACTLY what it was
+  // without them: no placeholder, no dash, no empty chip left behind by the
+  // block that draws the pair.
+  const RELEASE = "Parlophone · 7243 5 32093 0 8";
+  /** The album header's facts line, as drawn: the subtitle div under the h1,
+   *  whitespace-collapsed (the flex row's gaps are visual, so textContent
+   *  joins the spans directly — the pair's own text is what is asserted). */
+  const headerFacts = async () => page.evaluate(() => {
+    const h1 = document.querySelector("h1");
+    const sub = h1?.parentElement?.querySelector("div.break-words");
+    return sub ? { text: (sub.textContent || "").replace(/\s+/g, " ").trim(),
+                   parts: [...sub.children].map((el) => (el.textContent || "").trim()).filter(Boolean) } : null;
+  });
+  await page.waitForSelector("h1", { timeout: 30000 });
+  await page.waitForTimeout(400);
+  const withTags = await headerFacts();
+  check(`the album header names its release — label · catalog number ("${RELEASE}")`,
+        !!withTags && withTags.text.includes(RELEASE),
+        JSON.stringify(withTags));
+  // The same album with neither tag: the pair's block must add NOTHING — and
+  // "nothing" is read as a property of the drawn line, so a stray " · " or a
+  // dash where the pair used to be fails it.
+  album.meta = { ...(album.meta || {}), LABEL: null, CATALOGNUMBER: null };
+  await page.goto(`${base}/album/${encodeURIComponent(albumPath)}`);
+  await page.waitForSelector("h1", { timeout: 30000 });
+  await page.waitForTimeout(400);
+  const withoutTags = await headerFacts();
+  const wanted = withTags ? withTags.text.replace(RELEASE, "").replace(/\s+/g, " ").trim() : null;
+  check("…and an album stating neither adds nothing to it — no dash, no empty chip",
+        !!withoutTags && !!wanted && withoutTags.text === wanted,
+        `${JSON.stringify(withoutTags?.text)} vs ${JSON.stringify(wanted)}`);
+  // Back to the fixture as shipped, so the later album-page passes (the medium
+  // chip) read the same release every other section does.
+  album.meta = { ...(album.meta || {}), LABEL: "Parlophone", CATALOGNUMBER: "7243 5 32093 0 8" };
+  console.log(`\n[library-az] album header with label · catalog: "${withTags?.text}"\n`
+    + `[library-az] album header without them:            "${withoutTags?.text}"`);
   // ------------------------- 5. the album's advisory mark
   // Every card reads the album's advisory through the same rule
   // (`albumAdvisory`), so the check walks both shapes it must get right: one
@@ -1150,15 +1200,24 @@ const releaseCount = (n) => `${n} Release${n === 1 ? "" : "s"}`;
         new URL(page.url()).pathname === "/library" && (await searchBox.inputValue()) === "",
         page.url());
 
-  /* ---- 8. a download's badge names where its files came from ------------
+  /* ---- 8. a download's badge names where its files came from, and a CD's
+   * card badge says "CD" ------------------------------------------------
    * A pressing's badge is its medium and its release countries ("CD · US, CA").
    * A DIGITAL release has no pressing, so the fact that takes that place is
    * where the files came from — the album's own `source_summary`, built by the
    * server from the tracks' SOURCE tags ("Bandcamp", "Qobuz", the reader's own
    * shop word). The app's own default source is the word "Digital"
    * (mlo.paths.DEFAULT_DIGITAL_SOURCE): it repeats the medium and is dropped
-   * rather than printed twice. The card and the album page print the same
-   * words in the same order, because they are built by the same helper. */
+   * rather than printed twice.
+   *
+   * The medium itself is spelled PER SURFACE: a CARD/icon wears the short
+   * family word (`mediaCardLabel`) — every value in the app's CD family
+   * (mlo/tagtext.py `CD_MEDIA_VALUES`) reads the one word "CD", so the
+   * fixture's plain "CD" rip and its "SHM-CD" variant both wear "CD" — while
+   * the ALBUM PAGE's own chip row wears the tag's full value
+   * (`mediaFullLabel`), so "SHM-CD" stays in full there and "Digital Media"
+   * (not the card's "Digital") names a download. The tooltip on a card keeps
+   * the FULL tag value, so the shelf can still tell which pressing it is. */
   const sourced = albumAt(0);           // the album page's own release
   sourced.source_summary = "Bandcamp";
   sourced.meta = { ...(sourced.meta || {}), RELEASECOUNTRY: "US; CA" };
@@ -1166,8 +1225,9 @@ const releaseCount = (n) => `${n} Release${n === 1 ? "" : "s"}`;
   album.meta = { ...(album.meta || {}), RELEASECOUNTRY: "US; CA" };
   const unsourced = albumAt(3);         // a download with no shop of its own
   unsourced.source_summary = "Digital";
-  const physical = albumAt(1);          // the rip: its badge must not move
+  const physical = albumAt(1);          // the plain CD rip: its badge must not move
   physical.source_summary = null;
+  const variant = albumAt(2);           // a non-plain CD variant (fixture media "SHM-CD")
 
   /** One card's badges: the medium (+source) chip and, beside it, the release
    *  countries — read off the card that links to `title`, the way a reader
@@ -1200,21 +1260,46 @@ const releaseCount = (n) => `${n} Release${n === 1 ? "" : "s"}`;
   const physicalCard = await cardBadge(titleOf(physical));
   check(`a disc release's badge is unchanged ("${physicalCard?.media || "no media chip"}")`,
         physicalCard?.media === "CD", JSON.stringify(physicalCard));
+  const variantCard = await cardBadge(titleOf(variant));
+  check(`a non-plain CD variant's card badge reads the short family word `
+        + `("${variantCard?.media || "no media chip"}")`,
+        variantCard?.media === "CD", JSON.stringify(variantCard));
+  check(`…and its card tooltip still names the pressing's full medium `
+        + `("${variantCard?.title || "no tooltip"}")`,
+        variantCard?.title === "Media: SHM-CD · Source: Web", String(variantCard?.title));
   await page.goto(`${base}/album/${encodeURIComponent(albumPath)}`);
   await page.waitForSelector("h1", { timeout: 30000 });
   await page.waitForTimeout(600);
-  const WANT_CHIP = "Digital · Bandcamp · US, CA";
+  const WANT_CHIP = "Digital Media · Bandcamp · US, CA";
   const albumChip = await page.evaluate((want) => {
     const seen = [...document.querySelectorAll("main span")].map((el) => (el.textContent || "").trim());
     // The chip itself, not a card's badge on the page's own shelf.
     return { hit: seen.includes(want) || null, digital: seen.filter((t) => t.startsWith("Digital")) };
   }, WANT_CHIP);
-  check(`…and the album page names the same release the same way, countries and all `
+  check(`…and the album page names the release's own FULL medium (not the card's "Digital"), countries and all `
         + `("${albumChip.digital.join(" / ") || "no chip"}")`,
         albumChip.hit === true, JSON.stringify(albumChip.digital));
+  // A CD VARIANT proves the split the other way round: the card above read the
+  // short "CD", and the page's own chip row still prints the tag's full
+  // "SHM-CD" — the shelf's word is not the page's.
+  album.media = "SHM-CD";
+  album.meta = { ...(album.meta || {}), MEDIA: "SHM-CD" };
+  album.source_summary = null;
+  await page.goto(`${base}/album/${encodeURIComponent(albumPath)}`);
+  await page.waitForSelector("h1", { timeout: 30000 });
+  await page.waitForTimeout(600);
+  const WANT_CD = "SHM-CD · US, CA";
+  const cdChip = await page.evaluate((want) => {
+    const seen = [...document.querySelectorAll("main span")].map((el) => (el.textContent || "").trim());
+    return { hit: seen.includes(want) || null, cd: seen.filter((t) => t.startsWith("SHM-CD") || t.startsWith("CD")) };
+  }, WANT_CD);
+  check(`an SHM-CD album's card reads "CD" while its page prints the full "SHM-CD" `
+        + `("${cdChip.cd.join(" / ") || "no chip"}")`,
+        cdChip.hit === true, JSON.stringify(cdChip.cd));
   console.log(`\n[digital badges] card "${sourcedCard?.media}" (tooltip "${sourcedCard?.title}") | `
     + `no source of its own "${unsourcedCard?.media}" | disc "${physicalCard?.media}" (countries "${physicalCard?.country}") | `
-    + `album page "${albumChip.digital.join(" / ")}"`);
+    + `variant card "${variantCard?.media}" (tooltip "${variantCard?.title}") | `
+    + `album page "${albumChip.digital.join(" / ")}" | SHM-CD page "${cdChip.cd.join(" / ")}"`);
 
   /* ---- 8b. Select mode's "Select all" -----------------------------------
    * The owner's ask: one click for the whole list, wherever the Select button

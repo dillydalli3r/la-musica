@@ -303,7 +303,7 @@ export default {
   "charts.no_plays_title": "まだ再生がありません",
   "charts.no_source_title": "この期間のチャートを持つ提供元がありません",
   "charts.unsupported_title": "チャートを読み取れませんでした",
-  "charts.empty_online": "問い合わせた提供元はすべて空でした。どれに聞いたかは上のチップに表示されます。別の期間や種類を試してください。Last.fm、Deezer、Apple は現在のチャートのみを公開し、RateYourMusic には月間・週間チャートがありません。",
+  "charts.empty_online": "問い合わせた提供元はすべて空でした。どれに聞いたかは上のチップに表示されます。別の期間や種類を試してください。Last.fm、Deezer、Apple は現在のチャートのみを公開し。",
   "charts.error_title": "チャートを読み取れませんでした",
   "browse.not_asked": "まだクエリを実行していません",
   "browse.error_title": "クエリを読み取れませんでした",

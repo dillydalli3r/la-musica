@@ -87,7 +87,7 @@ ARTIST_IMAGE = {"url": "https://providers.test/artist.jpg", "source": "deezer",
                 "label": "Meta Artist"}
 ARTIST_TEXT = {"text": "A band from nowhere.", "source": "wikipedia",
                "source_url": "https://providers.test/bio", "title": "Meta Artist"}
-ALBUM_TEXT = {"text": "A record of note.", "source": "rym",
+ALBUM_TEXT = {"text": "A record of note.", "source": "discogs",
               "source_url": "https://providers.test/album", "title": "Meta Album"}
 
 _image_buf = io.BytesIO()
@@ -145,7 +145,7 @@ assert {i: r["state"] for i, r in out.items()} == {
 # The item that answered says WHICH provider answered.
 assert out["artist_image"]["source"] == "deezer", out["artist_image"]
 assert out["artist_description"]["source"] == "wikipedia", out["artist_description"]
-assert out["album_description"]["source"] == "rym", out["album_description"]
+assert out["album_description"]["source"] == "discogs", out["album_description"]
 # ... and every provider was asked with the artist's NAME, MBID suffix gone.
 assert CALLS == [("artist_image", "Meta Artist"),
                  ("artist_description", "Meta Artist"),
@@ -168,7 +168,7 @@ assert prov.get("source_url") == ARTIST_IMAGE["url"], prov
 assert artistdata.read_description(ALBUM) == "A record of note.\n", \
     repr(artistdata.read_description(ALBUM))
 album_prov = artistdata.read_provenance(ALBUM, cfg=CFG)
-assert album_prov.get("description_source") == "rym", album_prov
+assert album_prov.get("description_source") == "discogs", album_prov
 assert album_prov.get("kind") == "album", album_prov
 assert artistdata.read_description(ARTIST) == "A band from nowhere.\n"
 artist_prov = artistdata.read_provenance(ARTIST, cfg=CFG)
@@ -192,7 +192,7 @@ assert {i: r["state"] for i, r in again.items()} == {
 # "present — deezer": who stored it is part of accounting for it.
 assert again["artist_image"]["source"] == "deezer", again["artist_image"]
 assert again["artist_description"]["source"] == "wikipedia", again["artist_description"]
-assert again["album_description"]["source"] == "rym", again["album_description"]
+assert again["album_description"]["source"] == "discogs", again["album_description"]
 assert CALLS == [], CALLS          # not one provider was asked again
 after = {p: (os.path.getmtime(p), os.path.getsize(p)) for p in before}
 assert after == before, (before, after)

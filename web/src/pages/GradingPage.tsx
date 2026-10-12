@@ -92,10 +92,9 @@ const GROUPS: Group[] = [
   {
     id: "links",
     title: "Identity links",
-    desc: "The two release-level identity links, graded per track.",
+    desc: "The release-level MusicBrainz identity link, graded per track.",
     keys: [
       "grade_check_mb_links",
-      "grade_check_rym_links",
     ],
   },
   {
@@ -171,10 +170,10 @@ const CHECK_DESC: Record<string, string> = {
   grade_check_mood: "Every track needs a MOOD tag — script 8 fills it (script 16 re-runs just that classifier), so no track should ship without one (issue code MOOD_MISSING).",
   grade_check_energy: "Every track needs an ENERGY tag (0-100, written with MOOD by script 8 or 16; issue code ENERGY_MISSING).",
   grade_check_genre: "Every track needs a GENRE tag. Graded on its own, independent of the required-tags sweep (issue code GENRE_MISSING).",
-  grade_check_genre_count: "A track may hold AT MOST the number of genres set by 'Genres per track' in Settings → Import & tags (mb_genre_count) — only an overflow fails (issue code GENRE_COUNT). Fewer is fine: the family is derived from the specific genre, so one specific genre is a complete answer and nothing is topped up with filler.",
-  grade_check_genre_structure: "A repeated genre, or a parent name stored beside its own child, anywhere in the list (the family slot older builds wrote, e.g. \"Pop; Art Pop\") fails (issue code GENRE_STRUCTURE). The level above a genre is derived by the app and never stored, so nothing else about the order matters.",
+  grade_check_genre_count: "A track may hold AT MOST the number of genres set by 'Genres per track' in Settings → Import & tags (mb_genre_count) — only an overflow fails (issue code GENRE_COUNT). Fewer is fine: one genre is a complete answer and nothing is topped up with filler.",
+  grade_check_genre_structure: "A repeated genre anywhere in the list fails (issue code GENRE_STRUCTURE). The names are held in ONE canonical (casefold-sorted) order, so any other order fails it too.",
   grade_check_genre_vocab: "Every GENRE name must be one MusicBrainz publishes (shoegaze, dream pop, …). A name it does not know fails with issue code GENRE_VOCAB and is named in the report — the writers keep what a source said, so grading is where it surfaces. Grading never rewrites the tag: run Auto tagging (8) or Format all (10) to canonicalize it.",
-  grade_check_web_rating: "Every audio track needs a WEBRATING tag — the public verdict script 24 gathers the FIRST source in the configured chain that answers (RateYourMusic, then Album of the Year, then MusicBrainz), on the app's 0-100 scale (issue code WEBRATING_MISSING when it is absent). The VALUE is graded too (WEBRATING_FORMAT): a whole number 0-100 in its one spelling, so a source's own score pasted in raw (RateYourMusic's 4.54 on a 0-5 scale) fails and names script 24 as the fixer, while a stray decimal point ('91.0') is the same rating spelled differently — the format pass rewrites it to '91' and the grade clears. ALBUMWEBRATING is judged by the same rule when a file carries it (ALBUMWEBRATING_FORMAT). It stands down while 'Web ratings' is off, since nothing would gather one, and a music video is never graded for it.",
+  grade_check_web_rating: "Every audio track needs a WEBRATING tag — the public verdict script 24 gathers from MusicBrainz, on the app's 0-100 scale (issue code WEBRATING_MISSING when it is absent). The VALUE is graded too (WEBRATING_FORMAT): a whole number 0-100 in its one spelling, so a source's own score pasted in raw (a 4.54 on a 0-5 scale) fails and names script 24 as the fixer, while a stray decimal point ('91.0') is the same rating spelled differently — the format pass rewrites it to '91' and the grade clears. ALBUMWEBRATING is judged by the same rule when a file carries it (ALBUMWEBRATING_FORMAT). It stands down while 'Web ratings' is off, since nothing would gather one, and a music video is never graded for it.",
   grade_check_sidecar_format: "The app's own text files must be in the exact form its writers produce: the release manifest (.mb_expected) and the artist/album description.txt — UTF-8, LF line endings, no trailing whitespace, one final newline. Graded on bytes: every writer already stores that form, so a file that differs is one this app did not write (a CRLF copy, a hand-edited note). Re-run Release tracklist (15) for the manifest or re-fetch the description to repair it.",
   grade_check_replaygain: "A file that carries any REPLAYGAIN_* tag must carry all four — REPLAYGAIN_TRACK_GAIN/_PEAK and _ALBUM_GAIN/_PEAK. A file with none is not graded (run the Loudness pass; the player can also analyse on demand).",
   grade_check_encoder: "The ENCODER_* markers switched on under Tagging → Encoder tags must be present (PROGRAM is off by default). Covers are graded by the same rule while image processing is on.",
@@ -209,7 +208,6 @@ const CHECK_DESC: Record<string, string> = {
   grade_check_accuraterip: "A .accurip whose verdict is not REAL marks the album's AUDIT FAKE (and each affected track red) — grading itself is reserved to tagging, so this key never costs a grade point. Turn on 'Require audit tag' for that verdict to fail the album.",
   grade_check_log_grade: "LOG_GRADE tag must exist and be 0–100.",
   grade_check_mb_links: "The MusicBrainz release (or its release group) must be tagged.",
-  grade_check_rym_links: "The RateYourMusic release page URL must be tagged.",
   grade_check_cover: "The album must have cover art meeting the configured size, squareness and crop rules.",
   grade_check_cover_crop: "The cover's width/height must be square within cover_crop_threshold — an aspect-ratio test, not crop detection (issue: 'Cover aspect ratio WxH not square').",
   grade_check_sidecar_cover: "Sidecar covers (01 - Song.jpg) must meet the same cover rules.",
@@ -392,7 +390,7 @@ export default function GradingPage() {
       "grade_check_lyrics_blank_lines", "grade_check_cue_blank_lines",
       "grade_check_filename_case", "grade_check_ext_case", "grade_check_excess_tags",
       "grade_check_alias_excess",
-      "grade_check_mb_links", "grade_check_rym_links",
+      "grade_check_mb_links",
       // content checks — nothing breaks if the library ships without them
       "grade_check_replaygain", "grade_check_album_description",
       "grade_check_artist_image", "grade_check_artist_description",

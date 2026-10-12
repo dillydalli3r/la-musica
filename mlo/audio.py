@@ -13,6 +13,26 @@ from .stats import _decode_mp4_value
 # same, and re-applied by script 10 over an existing library.
 from .tagtext import canonical_text, join_list, split_list
 
+
+def _queue_held(path, ops, exc):
+    """Record *ops* for *path* — a tag write Windows refused because another
+    handle holds the file — and return the error to raise instead.
+
+    Called from the ONE atomic-swap path every tag writer shares
+    (:meth:`AudioFile._save_container` / :meth:`AudioFile._set_video_tags_batch`),
+    with the op its entry point stamped. When *exc* is not a held rename, or
+    there is nothing to record, *exc* comes back unchanged — the honest answer
+    is then still that nothing was written. When it IS recorded, the message
+    keeps the diagnosis and drops that false claim (mlo.pending).
+    """
+    if not ops:
+        return exc
+    from . import atomic, pending
+    if not atomic.is_held_replace(exc):
+        return exc
+    return pending.queue_held_write(path, ops, exc)
+
+
 TAG_MAP = {
     # Standard sorting/display fields. These are semantic names; the
     # container-specific keys below keep tag editing safe across formats.
@@ -662,23 +682,14 @@ TAG_MAP = {
         "mp3": ("TXXX", "MusicBrainz Work Id"),
         "mp4": ("freeform", "com.apple.iTunes", "MusicBrainz Work Id"),
     },
-    # RateYourMusic links (URLs).
-    "RATEYOURMUSIC_ALBUM": {
-        "flac": "RATEYOURMUSIC_ALBUM",
-        "mp3": ("TXXX", "RATEYOURMUSIC_ALBUM"),
-        "mp4": ("freeform", "com.apple.iTunes", "RATEYOURMUSIC_ALBUM"),
-    },
-    "RATEYOURMUSIC_TRACK": {
-        "flac": "RATEYOURMUSIC_TRACK",
-        "mp3": ("TXXX", "RATEYOURMUSIC_TRACK"),
-        "mp4": ("freeform", "com.apple.iTunes", "RATEYOURMUSIC_TRACK"),
-    },
-    "RATEYOURMUSIC_ARTIST": {
-        "flac": "RATEYOURMUSIC_ARTIST",
-        "mp3": ("TXXX", "RATEYOURMUSIC_ARTIST"),
-        "mp4": ("freeform", "com.apple.iTunes", "RATEYOURMUSIC_ARTIST"),
-    },
 }
+
+# (The three RATEYOURMUSIC_* link tags lived here until 2026-10-12: the app no
+# longer carries RateYourMusic or Album of the Year data at all, so the names
+# are not in this map — meaning the app neither reads nor writes them, and a
+# file that still carries one is graded as holding an EXCESS tag (script 10 /
+# the Optimize strip pass remove it through the same vocabulary). The two
+# sites' tags never were anything but links, so nothing else moved.)
 
 # ID3 frames mutagen's v2.3 conversion DELETES rather than converts (see
 # ID3.update_to_v23's own list, minus the four it converts: TIPL/TMCL to
@@ -1257,7 +1268,19 @@ class AudioFile:
         # Positional: mutagen's save() is wrapped by @loadfile, which binds
         # its first parameter itself, so a ``filething=`` keyword collides.
         # The path handed to it is the COPY rewrite_via made.
-        rewrite_via(self.path, lambda tmp: self.audio.save(tmp, **kwargs))
+        #
+        # The op the entry point stamped (see set_tag / delete_tag /
+        # set_lyrics) is CONSUMED here, so a swap Windows refused carries the
+        # change into mlo.pending instead of losing it (see _queue_held).
+        ops = getattr(self, "_pending_ops", None)
+        self._pending_ops = None
+        try:
+            rewrite_via(self.path, lambda tmp: self.audio.save(tmp, **kwargs))
+        except PermissionError as exc:
+            queued = _queue_held(self.path, ops, exc)
+            if queued is exc:
+                raise
+            raise queued from exc
         self._invalidate_cache()
         return True
 
@@ -1502,6 +1525,9 @@ class AudioFile:
             clean[str(k).upper()] = v
         if not clean:
             return True
+        # Remember the change: a held-file denial on the swap inside the batch
+        # hands this op to mlo.pending (see _queue_held) instead of losing it.
+        self._pending_ops = [{"op": "set_video_tags", "tags": clean}]
         return self._set_video_tags_batch(_to_mkv_meta(clean))
 
     def _delete_video_tag(self, name):
@@ -1606,18 +1632,29 @@ class AudioFile:
             return False
 
         from .atomic import replace_locked
-        if in_place:
-            # *dest* is the temp: one rename puts the tagged stream in place.
-            replace_locked(dest, src)
-        else:
-            # The verified new container is placed FIRST and the source
-            # removed after, so a kill in between leaves both files (a
-            # duplicate the user can see) rather than neither.
-            replace_locked(dest, final)
-            try:
-                os.remove(src)
-            except OSError:
-                pass
+        # The op an entry point stamped (set_video_tags / delete_tag /
+        # delete_lyrics) is CONSUMED here, so a swap Windows refused carries
+        # the change into mlo.pending instead of losing it (see _queue_held).
+        ops = getattr(self, "_pending_ops", None)
+        self._pending_ops = None
+        try:
+            if in_place:
+                # *dest* is the temp: one rename puts the tagged stream in place.
+                replace_locked(dest, src)
+            else:
+                # The verified new container is placed FIRST and the source
+                # removed after, so a kill in between leaves both files (a
+                # duplicate the user can see) rather than neither.
+                replace_locked(dest, final)
+                try:
+                    os.remove(src)
+                except OSError:
+                    pass
+        except PermissionError as exc:
+            queued = _queue_held(src, ops, exc)
+            if queued is exc:
+                raise
+            raise queued from exc
 
         self.path = final
         self.ext = os.path.splitext(final)[1].lower()
@@ -2464,6 +2501,13 @@ class AudioFile:
         if self.kind == "video":
             return self._set_video_tag(name, value)
 
+        # Remember the change this write is making: a held-file denial on the
+        # atomic swap below hands THIS op to mlo.pending (see _queue_held)
+        # instead of throwing the user's edit away. A list value is kept as a
+        # list so it stays JSON-serialisable.
+        self._pending_ops = [{
+            "op": "set_tag", "name": str(name),
+            "value": list(value) if isinstance(value, (list, tuple, set)) else value}]
         name = str(name).upper()
         if name == "LYRICS":
             return self.set_lyrics(value)
@@ -2681,6 +2725,9 @@ class AudioFile:
             return False
 
         name = str(name).upper()
+        # Remember the change: a held-file denial on the swap hands this op to
+        # mlo.pending (see _queue_held) rather than losing the delete.
+        self._pending_ops = [{"op": "delete_tag", "name": name}]
         if self.kind == "video":
             return self._delete_video_tag(name)
         if name == "LYRICS":
@@ -2862,6 +2909,7 @@ class AudioFile:
                     return self.delete_lyrics()
                 return bool(self.set_video_tags({"LYRICS": text}))
 
+            self._pending_ops = [{"op": "set_lyrics", "text": text}]
             if self.kind in ("flac", "ogg", "opus"):
                 if self.audio.tags is None:
                     if hasattr(self.audio, "add_tags"):
@@ -2911,6 +2959,9 @@ class AudioFile:
 
     def delete_lyrics(self):
         self._invalidate_cache()
+        # Remember the change: a held-file denial on the swap hands this op to
+        # mlo.pending (see _queue_held) rather than losing the delete.
+        self._pending_ops = [{"op": "delete_lyrics"}]
         try:
             if self.kind == "video":
                 # Both lyric keys go in ONE ffmpeg rewrite (a video container

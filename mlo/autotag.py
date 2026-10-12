@@ -12,7 +12,9 @@ filled in by hand:
 
 2) INSTRUMENTAL, cross-referenced from every available source
    (`server.instrumental`: LRCLIB's own `instrumental` flag, Spotify
-   audio-features when configured, the track's own name, lyrics evidence):
+   audio-features when configured, the track's own name, lyrics evidence —
+   and, for a lyric-less track none of them states anything about, the
+   configured AI provider, one call per track):
        any source says instrumental -> 1
        else any source says not instrumental (lyrics count as that) -> 0
        else -> LEFT UNTOUCHED. A track no source can state anything about
@@ -47,7 +49,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from .audio import ALIAS_TAG_SUBJECTS, AudioFile
 from .config import DEFAULT_CONFIG, should_write_audio_tag
 # one genre list policy for every writer: the trimmer, the top-up below and
-# the import all keep order, drop case-insensitive repeats and cap the same way
+# the import all render the same list — canonical (casefold) order, no
+# case-insensitive repeat, no reordering — and cap it the same way
 from .genres import GENRE_COUNT_MAX, normalize_genres, split_stored
 # the app's RELEASETYPE spelling ("album+live" -> "Album; Live"), shared with
 # the organizer and the grader so one release_type reads the same everywhere;
@@ -215,12 +218,13 @@ def trim_genres(af, count):
 
     EVERY writer of the tag routes through this one helper (script 8, the
     genre import, script 10), so `mb_genre_count` means the same thing to all
-    of them. Values are stored in source-priority order (highest-voted source
-    first), so "keep the first N" IS "keep the N best" — the kept list is
+    of them. "Keep the first N" reads the FILE's own order — the kept list is
     built by the shared `mlo.genres.normalize_genres`, which drops a
     case-insensitive repeat as well as the overflow, so a file carrying
     ["Rock", "rock", "Pop"] leaves here with two genres and one removal
-    reported rather than a duplicate the grader fails.
+    reported rather than a duplicate the grader fails — and what survives
+    keeps the order it was stored in (the source's own rank; 2026-10-12), so
+    an over-long list written by an older build comes back in shape.
     """
     try:
         count = max(0, int(count))

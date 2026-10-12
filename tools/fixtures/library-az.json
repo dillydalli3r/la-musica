@@ -1,5 +1,5 @@
 {
- "note": "captured from a scratch server (MLO_MUSIC_FOLDER=F:/tmp/mlo-lib-az) over the synthetic library; the artists' own `grade` objects (and Artist Alpha/Beta's `has_image`) were added by hand afterwards for the artist-dot cases — server.library sends grade per row now, and these two carry the pass/fail pair the check needs",
+ "note": "captured from a scratch server (MLO_MUSIC_FOLDER=F:/tmp/mlo-lib-az) over the synthetic library; the artists' own `grade` objects (and Artist Alpha/Beta's `has_image`) were added by hand afterwards for the artist-dot cases — server.library sends grade per row now, and these two carry the pass/fail pair the check needs; the served album's own `meta` was given a LABEL/CATALOGNUMBER pair by hand too, so the album header's label · catalog fact is read off a release that states one — the check takes them away again for the other half of the rule",
  "album_path": "F:/tmp/mlo-lib-az/Artist Alpha/2020 - First Album",
  "library": {
   "folder": "F:/tmp/mlo-lib-az",
@@ -870,7 +870,7 @@
       "path": "F:/tmp/mlo-lib-az/Artist Gamma/2022 - Singles",
       "album_artist": "Artist Gamma",
       "audit_summary": "REAL",
-      "media": "Digital Media",
+      "media": "SHM-CD",
       "source_summary": "Web",
       "track_count": 1,
       "partial": false,
@@ -925,7 +925,7 @@
          "INSTRUMENTAL": "1",
          "INITIALKEY": null,
          "BPM": null,
-         "MEDIA": "Digital Media",
+         "MEDIA": "SHM-CD",
          "SOURCE": "Web",
          "AUDIOAUDITOR_OVERRIDE": null,
          "ALBUMITUNESADVISORY": "0",
@@ -951,7 +951,7 @@
          "GENRE": "Pop",
          "ITUNESADVISORY": "0",
          "INSTRUMENTAL": "1",
-         "MEDIA": "Digital Media",
+         "MEDIA": "SHM-CD",
          "SOURCE": "Web",
          "TRACKNUMBER": "01",
          "DISCNUMBER": null,
@@ -1029,7 +1029,7 @@
        "Missing RELEASETYPE tag (the naming script writes it into the path)": [
         "01 - Hit.flac"
        ],
-       "PATH: expected 'Artist Gamma/[?] 2022 - Singles {Digital Media}/1-01 01 - Hit.flac' (run organize)": [
+       "PATH: expected 'Artist Gamma/[?] 2022 - Singles {SHM-CD}/1-01 01 - Hit.flac' (run organize)": [
         "01 - Hit.flac"
        ],
        "Missing ENCODER_QUALITY (re-optimize)": [
@@ -1071,7 +1071,7 @@
        "MUSICBRAINZ_ALBUMARTISTID": null,
        "MUSICBRAINZ_RELEASEGROUPID": null,
        "RATEYOURMUSIC_ALBUM": null,
-       "MEDIA": "Digital Media",
+       "MEDIA": "SHM-CD",
        "CATALOGNUMBER": null,
        "LABEL": null,
        "BARCODE": null,
@@ -4677,8 +4677,8 @@
    "MUSICBRAINZ_RELEASEGROUPID": null,
    "RATEYOURMUSIC_ALBUM": null,
    "MEDIA": "Digital Media",
-   "CATALOGNUMBER": null,
-   "LABEL": null,
+   "CATALOGNUMBER": "7243 5 32093 0 8",
+   "LABEL": "Parlophone",
    "BARCODE": null,
    "RELEASETYPE": null,
    "RELEASESTATUS": null,

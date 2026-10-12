@@ -364,6 +364,107 @@ def album_discs(album_dir):
     return discs
 
 
+def disc_subdirs(child_names):
+    """``{folder name: disc number}`` for the child folders that ARE this
+    album's discs — ``CD1``/``Disc 2``/``Volume 1``, or a bare ``1``/``2``
+    only as part of a numbered set (see :func:`is_disc_parent`).
+
+    The layout the app itself calls legitimate puts a multi-disc release's
+    discs in SUBFOLDERS of the album folder ("only disc folders (CD1,
+    Disc 2, …) belong inside an album" — mlo.layout): ``<Album>/CD1/*`` +
+    ``<Album>/CD2/*`` is ONE album, its discs below it (spec R336). Anything
+    else — ``Extras``, ``Scans``, ``Log+Cue`` — is not a disc folder and is
+    not read as one."""
+    names = [str(n) for n in child_names or []]
+    out = {}
+    for n in names:
+        d = disc_dir_number(n)
+        if d:
+            out[n] = d
+    if out:
+        return out
+    # No folder NAMES a disc; a bare numbered set ("1"+"2") still does.
+    if is_disc_parent(names):
+        for n in names:
+            d = bare_disc_index(n)
+            if d:
+                out[n] = d
+    return out
+
+
+def album_audio(album_dir, exts=None):
+    """Every audio path an ALBUM holds: its own folder plus its disc
+    SUBFOLDERS (:func:`disc_subdirs`).
+
+    One album is one folder, and a multi-disc release keeps disc 1 at the
+    album root and disc 2 in a ``CD2``/``Disc 2`` subfolder (or every disc in
+    one). Reading only ``os.listdir(album_dir)`` truncated such an album to
+    its first medium — its second disc's tracks vanished from the library, the
+    album page and the grade — so the ONE reading lives here, next to the disc
+    vocabulary that names those folders. Sorted disc 1's files first, then by
+    name, so the album reads in playing order."""
+    exts = tuple(AUDIO_EXTS if exts is None else exts)
+    try:
+        entries = sorted(os.listdir(album_dir))
+    except OSError:
+        return []
+    found = []
+    for n in entries:
+        p = os.path.join(album_dir, n)
+        if os.path.isfile(p) and n.lower().endswith(exts):
+            found.append((1, n.lower(), p))
+    child_dirs = [n for n in entries if os.path.isdir(os.path.join(album_dir, n))]
+    for n, disc in disc_subdirs(child_dirs).items():
+        d = os.path.join(album_dir, n)
+        try:
+            names = sorted(os.listdir(d))
+        except OSError:
+            continue
+        for f in names:
+            p = os.path.join(d, f)
+            if os.path.isfile(p) and f.lower().endswith(exts):
+                found.append((disc, f"{n}/{f}".lower(), p))
+    found.sort(key=lambda row: (row[0], row[1]))
+    return [row[2] for row in found]
+
+
+def merge_disc_albums(album_dirs, artists_root):
+    """Fold every disc SUBFOLDER of an album back into the album folder.
+
+    The album walk yields every folder holding audio, so a multi-disc release
+    laid out the way the app itself calls legitimate (``<Album>/CD1`` +
+    ``<Album>/CD2`` — mlo.layout: only disc folders belong inside an album;
+    spec R336: a disc-subfolder release is ONE album) was listed as several
+    albums, one per disc. Folding them back is what makes every surface that
+    states an album's tracks — the library payload, the album page, the grade
+    — list EVERY disc under the one album.
+
+    A folder is folded only when the folder that would become the album is
+    neither *artists_root* nor one of its own children, so an artist folder
+    (or an album folder literally named ``CD1``) is never swallowed as a disc.
+    *artists_root* is the library's Artists folder (``mlo.paths.library_root``)
+    or "" when the caller does not know it — then nothing is folded."""
+    root = os.path.normcase(os.path.normpath(str(artists_root))) if artists_root else ""
+    merged, seen = [], set()
+    for alb in album_dirs:
+        target = alb
+        parent = os.path.dirname(alb)
+        if parent and root:
+            pn = os.path.normcase(os.path.normpath(parent))
+            if pn != root and os.path.normcase(os.path.normpath(os.path.dirname(pn))) != root:
+                try:
+                    siblings = os.listdir(parent)
+                except OSError:
+                    siblings = []
+                if os.path.basename(alb) in disc_subdirs(siblings):
+                    target = parent
+        key = os.path.normcase(os.path.normpath(target))
+        if key not in seen:
+            seen.add(key)
+            merged.append(target)
+    return sorted(merged)
+
+
 def read_log_text(path):
     """Decode an EAC/XLD log (UTF-16LE with BOM, or UTF-8)."""
     try:
@@ -489,6 +590,71 @@ def parse_log_checksums(text):
                     per_track[current] = m.group(1).upper()
                     priority[current] = 0
     return per_track
+
+
+# The AccurateRip verdict a rip log STATES about its own tracks. EAC and XLD
+# write a per-track line — the GOOD read is "Accurately ripped (confidence 5)
+# [XXXXXXXX] (AR v2)" (XLD's summary spells it "Track  1 : OK (confidence 3)")
+# and the BAD one is "Cannot be verified as accurate (confidence 5)
+# [XXXXXXXX], AccurateRip returned [YYYYYYYY]" / "Track  1 : NG" — plus an
+# aggregate footer ("All tracks accurately ripped" / "Some tracks could not be
+# verified as accurate"). Only AccurateRip's OWN words count as a failure: a
+# bare "mismatch" would also match whipper's "Status: Error, CRC mismatch" on a
+# failed TEST run, which says nothing about AccurateRip.
+_AR_FOOTER_OK_RE = re.compile(r"all tracks accurately ripped", re.IGNORECASE)
+_AR_FAIL_RE = re.compile(
+    r"cannot be verified as accurate|could not be verified as accurate|"
+    r"not accurately ripped|accuraterip returned", re.IGNORECASE)
+_AR_TRACK_LINE_RE = re.compile(r"^Track\s+(\d{1,3})\b(.*)$", re.IGNORECASE)
+
+
+def parse_log_accuraterip(text):
+    """The AccurateRip verdict a rip log STATES about its own tracks.
+
+    Returns ``(state, detail)`` with ``state`` one of:
+
+      * ``"fail"`` — the log asserts AccurateRip results and at least one of
+        them did not verify (a per-track "cannot be verified as accurate" /
+        XLD "NG", or an aggregate damage line). ``detail`` is the offending
+        line, so a rejection can quote the rip's own words.
+      * ``"ok"`` — the log states AccurateRip results and every one of them
+        verified ("All tracks accurately ripped", a per-track "accurately
+        ripped", or XLD's "Track N : OK").
+      * ``None`` — the log states no AccurateRip verdict at all (no summary
+        section, or every track "not present in database"). Nothing claimed,
+        nothing charged: AccurateRip is NEVER required, so a log that says
+        nothing about it is judged on its per-track CRCs.
+
+    This reads the LOG's own AccurateRip section; a CUETools `.accurip` is a
+    separate artefact (`mlo.accurip`). The per-track bracket a good AR line
+    carries is also the last-resort CRC source in `parse_log_checksums`.
+    """
+    fail = ""
+    ok = False
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        low = line.lower()
+        if "accurately ripped" in low or _AR_FOOTER_OK_RE.search(line):
+            ok = True
+            continue
+        if _AR_FAIL_RE.search(line):
+            fail = fail or line
+            continue
+        m = _AR_TRACK_LINE_RE.match(line)
+        if not m:
+            continue
+        rest = m.group(2).strip(" \t:.").lower()
+        if rest.startswith("ng"):
+            fail = fail or line
+        elif rest.startswith("ok"):
+            ok = True
+    if fail:
+        return "fail", fail[:200]
+    if ok:
+        return "ok", ""
+    return None, ""
 
 
 def parse_log_skip_zero_checksums(text):
@@ -739,11 +905,7 @@ def disk_rows(album_dir, audio_paths=None):
     1-13). A file whose TITLE is unreadable keeps "" rather than a guess.
     """
     if audio_paths is None:
-        try:
-            audio_paths = [os.path.join(album_dir, f) for f in os.listdir(album_dir)
-                           if f.lower().endswith(AUDIO_EXTS)]
-        except OSError:
-            return []
+        audio_paths = album_audio(album_dir)
     discs = album_discs(album_dir) or {}
     disc_of = {}
     for d, paths in discs.items():
@@ -751,7 +913,12 @@ def disk_rows(album_dir, audio_paths=None):
             disc_of[os.path.normcase(os.path.abspath(p))] = d
     out = []
     for p in audio_paths:
-        d = disc_of.get(os.path.normcase(os.path.abspath(p))) or disc_of_filename(p) or 1
+        # The file's OWN name first ('1-03 Title'), then the DISC FOLDER it
+        # sits in (…/CD2/01 - x.flac) — disc_number_of_path is that one
+        # reading, so an album whose disc 2 lives in a subfolder keys its rows
+        # on disc 2 instead of defaulting them all to disc 1.
+        d = (disc_of.get(os.path.normcase(os.path.abspath(p)))
+             or disc_number_of_path(p) or disc_of_filename(p) or 1)
         title = ""
         try:
             title = str(AudioFile(p).get_tag("TITLE") or "").strip()
@@ -1086,14 +1253,19 @@ def verify_album_checksums(ffmpeg_exe, album_dir, paths, config=None, workers=No
         if d is None or d < 1:
             d = 1
         if multi:
-            log_path = os.path.join(album_dir, _disc_expected_name(pattern, d, ".log"))
-            if not os.path.isfile(log_path):
+            # The disc's log: its canonical name first, else one that plainly
+            # names the disc differently, else the disc's ONLY log (a fresh
+            # download named rip.log/XLD.log must not fail as "missing
+            # CD-1.log" while its audio is otherwise verifiable).
+            log_path = _log_for_disc(album_dir, logs, pattern, d, discs)
+            if not log_path:
                 entries.append((p, f"missing {_disc_expected_name(pattern, d, '.log')}", None))
                 continue
+            log_name = os.path.basename(log_path)
             text = read_log_text(log_path)
             per_track = parse_log_checksums(text)
             if not per_track:
-                entries.append((p, f"{_disc_expected_name(pattern, d, '.log')} has no per-track CRCs", None))
+                entries.append((p, f"{log_name} has no per-track CRCs", None))
                 continue
             # The log's own numbering may be per disc while the files are
             # numbered release-wide (`2-14 …`): match by path, by number first
@@ -1477,6 +1649,40 @@ def _log_name_disc(name):
         return None
     d = int(raw)
     return d if 1 <= d <= 99 else None
+
+
+def _log_for_disc(album_dir, logs, pattern, disc, discs):
+    """The `.log` that belongs to `disc` in this album folder, or None.
+
+    The disc's canonical name first (`<pattern>.log`, e.g. ``CD-1.log``). When
+    that is absent, the folder's own logs are read for one that PLAINLY names
+    this disc differently — `CD1.log`, `Disc 2.log`, `2 - Album.log`
+    (`mlo.discs._log_name_disc`), a log whose name states another disc being
+    skipped. Failing both, a fresh download's single log (`rip.log`,
+    `XLD.log`, `Album.log`) is accepted when it is the ONLY log left for the
+    disc: a lone log IS the album's own log, and a name the ripper chose says
+    nothing about which disc it covers. A wrong guess would compare one disc's
+    audio against another disc's CRCs, so only a name that states no OTHER
+    disc, and only when nothing else remains, qualifies.
+
+    `logs` are absolute paths the caller already listed; `discs` is the
+    folder's `album_discs()` map (used for the single-disc case)."""
+    expected = os.path.join(album_dir, _disc_expected_name(pattern, disc, ".log"))
+    if os.path.isfile(expected):
+        return expected
+    same_named, unnamed = [], []
+    for lp in logs:
+        nd = _log_name_disc(os.path.basename(lp))
+        if nd is not None and nd != disc:
+            continue                      # plainly another disc's log
+        (same_named if nd == disc else unnamed).append(lp)
+    if len(same_named) == 1:
+        return same_named[0]              # names this disc, just not canonically
+    if len(same_named) > 1:
+        return None                       # several claim it: do not guess
+    if len(unnamed) == 1 and (len(discs) == 1 or len(logs) == 1):
+        return unnamed[0]                 # the disc's ONLY log, named freely
+    return None
 
 
 def rename_logs_for_discs(album_dir, discs=None, log_fn=None, config=None):

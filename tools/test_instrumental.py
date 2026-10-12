@@ -60,6 +60,7 @@ class FakeResponse:
 def clear():
     intg._ADVISORY_CACHE.clear()
     intg._SPOTIFY_TOKEN.clear()
+    inst._AI_CACHE.clear()
     inst._spotify_warned = False
 
 
@@ -675,6 +676,37 @@ try:
         assert out["updated"] == 2 and len(calls) == 2, (out, calls)
         assert {p: FakeAudio.files[p]["tags"].get("INSTRUMENTAL")
                 for p in pair} == {pair[0]: "1", pair[1]: "1"}, FakeAudio.files
+
+        # (j) a real answer is MEMOIZED per file (`_ai_cached`, keyed by path +
+        #     size + mtime): the detector, the import writer and a second pass
+        #     over one unchanged file all share ONE model call, while a file
+        #     the user edited is a different question and is asked again
+        clear()
+        stub_lrclib({})
+        calls = stub_ai("1")
+        cached = track("41 - Cached.flac", title="Cached", duration=200)
+        first = detect(cached, AI_CFG)
+        assert first["value"] == 1 and first["answers"] == {"ai": 1}, first
+        again = detect(cached, AI_CFG)
+        assert again["value"] == 1 and again["answers"] == {"ai": 1}, again
+        assert len(calls) == 1, calls
+        assert imports.fetch_instrumentals([cached], AI_CFG)["updated"] == 1
+        assert len(calls) == 1, "one file, one question, one call"
+        # the file changed on disk: the memo is not the answer to what it is
+        # now, so the model is asked afresh
+        with open(cached, "ab") as fh:
+            fh.write(b"x")
+        os.utime(cached, (1, 1))
+        edited = detect(cached, AI_CFG)
+        assert edited["value"] == 1, edited
+        assert len(calls) == 2, calls
+        # …but a failed/junk reply was never memoized: the next caller retries
+        clear()
+        stub_lrclib({})
+        stub_ai(TimeoutError("no answer"))
+        retried = track("42 - Retried.flac", title="Retried", duration=200)
+        assert detect(retried, AI_CFG)["value"] is None
+        assert detect(retried, AI_CFG)["value"] is None
     finally:
         ai_mod.ai_chat, ai_mod.ai_configured = _real_ai_chat, _real_ai_configured
 finally:

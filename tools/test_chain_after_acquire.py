@@ -205,18 +205,16 @@ def release(n, title, media="CD"):
 
 
 # The import chain, configured but never really run: `run_chain` is the seam
-# this suite watches, and the remote steps (RYM, advisories, metadata, cover)
+# this suite watches, and the remote steps (advisories, metadata, cover)
 # are stubbed so nothing here touches the network.
 CFG = {"music_folder": MF, "import_auto_scripts": True, "import_scripts": [4],
-       "import_bulk_concurrency": 1, "rym_links_auto": False,
+       "import_bulk_concurrency": 1,
        "advisory_auto_fetch": False, "instrumental_auto_fetch": False,
        "metadata_auto_fetch": False, "cover_auto_fetch": False,
        "import_autonomy": "automatic", "import_review_families": [],
        "soulseek_download_dir": DD, "wishes_auto_import": True}
 CFG_OFF = dict(CFG, import_auto_scripts=False)
 
-imports.stamp_rym_links = lambda path, cfg=None: {
-    "album": "", "artist": "", "note": "", "written": 0}
 imports.fetch_advisories = lambda paths, cfg=None, progress=None: {
     "updated": 0, "values": {}}
 imports.fetch_instrumentals = lambda paths, cfg=None: {
@@ -735,9 +733,8 @@ def check_prefetch_after_fill():
     ok(bool(pathmod.load_pending(folder)), "the framework album is pending")
 
     real_load = pathmod.load_pending
-    real_links, real_meta, real_cands = (imports.prefetch_links,
-                                         imports.run_metadata_step,
-                                         imports.cover_candidates)
+    real_meta, real_cands = (imports.run_metadata_step,
+                             imports.cover_candidates)
     armed, waiting, go = threading.Event(), threading.Event(), threading.Event()
     holder = {}
 
@@ -748,7 +745,6 @@ def check_prefetch_after_fill():
             go.wait(15)
         return info
 
-    imports.prefetch_links = lambda *a, **k: {}
     imports.run_metadata_step = lambda *a, **k: {}
     imports.cover_candidates = lambda *a, **k: None
     pathmod.load_pending = load_then_wait
@@ -771,8 +767,8 @@ def check_prefetch_after_fill():
         armed.clear()
         go.set()
         pathmod.load_pending = real_load
-        (imports.prefetch_links, imports.run_metadata_step,
-         imports.cover_candidates) = real_links, real_meta, real_cands
+        (imports.run_metadata_step,
+         imports.cover_candidates) = real_meta, real_cands
 
     ok(not real_load(folder),
        "and the finished album was NOT put back to pending by the prefetch")

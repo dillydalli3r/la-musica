@@ -73,10 +73,7 @@ CFG = {"music_folder": MF, "import_auto_scripts": False, "import_scripts": [],
        # the network steps an import reaches whatever the chain does (the
        # artist image / descriptions and the cover art): this suite runs
        # offline, and tools/test_add_to_library.py covers them stubbed
-       "metadata_auto_fetch": False, "cover_auto_fetch": False,
-       # the RateYourMusic link step is a network lookup too: this suite runs
-       # offline (tools/test_rym_links.py covers it with stubbed HTTP)
-       "rym_links_auto": False}
+       "metadata_auto_fetch": False, "cover_auto_fetch": False}
 
 # --------------------------------------------------------------------------- #
 # The chain a config describes
@@ -200,18 +197,17 @@ assert imports.chain_summary({"path": album}) == "", imports.chain_summary({"pat
 # --------------------------------------------------------------------------- #
 # There is no "stage and place, no tagging" flavour any more: that flavour is
 # what left auto-downloaded files without their optimization/tagging pass. The
-# same call stages the album (RYM links, metadata, cover) and then runs the
+# same call stages the album (metadata, cover) and then runs the
 # configured chain over the folder the organizer left it at.
 DF_CFG = {"music_folder": MF, "import_scripts": [4, 3],
-          "advisory_auto_fetch": True, "instrumental_auto_fetch": True,
-          "rym_links_auto": True}
+          "advisory_auto_fetch": True, "instrumental_auto_fetch": True}
 assert imports.chain_for(DF_CFG) == [4, 3], imports.chain_for(DF_CFG)
 
 defer_album = staging_album("Defer Album")
 DF_PATH = os.path.normpath(defer_album)
 _seen = {}
 _real_steps = {n: getattr(imports, n) for n in
-               ("stamp_rym_links", "fetch_advisories", "fetch_instrumentals",
+               ("fetch_advisories", "fetch_instrumentals",
                 "run_metadata_step", "run_cover_step", "_stamp_release")}
 _real_run_chain = script_runners.run_chain
 
@@ -224,8 +220,6 @@ def _spy(name, value):
 
 
 try:
-    imports.stamp_rym_links = _spy("rym", {"album": None, "artist": None,
-                                           "note": "", "written": 0})
     imports.fetch_advisories = _spy("advisory", {})
     imports.fetch_instrumentals = _spy("instrumental", {})
     imports.run_metadata_step = _spy("metadata", {})
@@ -250,9 +244,8 @@ finally:
 # fixture's files carry neither a release nor an artist/album tag, so it asks
 # nothing. The fetch it does make when there IS an identity is pinned in the
 # "no release identity" case above.
-assert default_seen == {"rym": 1, "metadata": 1, "cover": 1, "genres": 1,
+assert default_seen == {"metadata": 1, "cover": 1, "genres": 1,
                         "chain": 1}, default_seen
-assert default_args["rym"][0][0] == (DF_PATH, DF_CFG), default_args["rym"]
 assert default_args["metadata"][0][0] == (DF_PATH, DF_CFG), default_args["metadata"]
 assert default_args["chain"][0][0][1] == [4, 3], default_args["chain"]
 assert default_args["chain"][0][1]["targets"] == [DF_PATH], default_args["chain"]
@@ -300,7 +293,7 @@ order_album = staging_album("Order Album")
 _order_path = os.path.normpath(order_album)
 ORDER_CFG = {"music_folder": MF, "import_scripts": [13, 8],
              "import_auto_scripts": True, "advisory_auto_fetch": True,
-             "instrumental_auto_fetch": True, "rym_links_auto": False,
+             "instrumental_auto_fetch": True,
              "metadata_auto_fetch": False, "cover_auto_fetch": False,
              "genre_autofill": False, "import_autonomy": "automatic"}
 _ord_order = []
@@ -389,6 +382,141 @@ finally:
     script_runners.RUNNERS.update(_saved_runners)
     imports.fetch_advisories, imports.fetch_instrumentals = _saved_adv, _saved_inst
     _ord_stats.progress_hook = _saved_hook_order
+
+# --------------------------------------------------------------------------- #
+# The import's advisory step runs on the album where the CHAIN left it
+# --------------------------------------------------------------------------- #
+# Script 14 (beets) takes an album's audio OUT of the staging folder and
+# re-points the run (`_follow_moved_targets`); every SCRIPT follows it, and the
+# import's own advisory fetch is a NODE of that same run (`_import_extras`). It
+# used to keep reading the STAGING path — a folder with no audio left in it
+# once the mover ran — so it rated nothing (or only the tracks a mover failed to
+# take) while the wizard's "Auto-import advisory for all tracks" button, over
+# the album where it now is, rated every one. Measured with the REAL
+# `run_chain`: the step must be handed the run's CURRENT targets, the same
+# tracks the manual route reaches.
+print("== the import's advisory step follows the album the chain moved ==")
+
+import mlo.audio as _mlo_audio                     # noqa: E402
+from server import integrations as _intg           # noqa: E402
+
+
+class _FakeAudio:
+    """Tag stand-in for the files below (empty bytes on disk, exactly as
+    tools/test_advisory_pipeline.py does): the advisory pass reads TAGS, not
+    audio, so a real container is not what this case measures."""
+    written = {}
+
+    def __init__(self, path):
+        self.path = path
+        self.audio = object()
+        self.tags = dict(_FakeAudio.written.get(path) or {})
+
+    def get_tag(self, name):
+        return self.tags.get(name)
+
+    def get_lyrics(self):
+        return None
+
+    def set_tag(self, name, value):
+        self.tags[name] = value
+        _FakeAudio.written[self.path] = dict(self.tags)
+        return True
+
+
+_adv_root = os.path.join(ROOT, "advisory_move")
+_mv_mf = os.path.join(_adv_root, "music")
+_mv_cfg = {"music_folder": _mv_mf, "import_scripts": [14, 13],
+           "advisory_auto_fetch": True, "advisory_fallback": "none",
+           "instrumental_auto_fetch": False, "auto_advisory": True}
+_MV_MOVES = []
+
+
+def _mv_case(name, tracks=3):
+    """A staging album plus the folder the mover will leave it in."""
+    stage = os.path.join(_adv_root, "staging", name)
+    lib = os.path.join(_mv_mf, "Artists", name)
+    os.makedirs(stage)
+    os.makedirs(os.path.dirname(lib), exist_ok=True)
+    sfiles, lfiles = [], []
+    for i in range(1, tracks + 1):
+        sp = os.path.join(stage, f"1-{i:02d} - Track {i}.flac")
+        open(sp, "wb").close()
+        _FakeAudio.written[sp] = {"TITLE": f"Track {i}", "ARTIST": "Moved Artist",
+                                  "ALBUM": name, "TRACKNUMBER": str(i)}
+        sfiles.append(sp)
+        lfiles.append(os.path.join(lib, os.path.basename(sp)))
+    _MV_MOVES.append((sfiles, lfiles, lib))
+    return stage, lib, sfiles, lfiles
+
+
+def _mv_mover(cfg):
+    """Script 14 as beets behaves: the audio goes to the library folder, and
+    the runner DECLARES where (stats["moved_targets"]) — which is what re-points
+    the chain."""
+    sfiles, lfiles, lib = _MV_MOVES[-1]
+    os.makedirs(lib, exist_ok=True)
+    for src, dst in zip(sfiles, lfiles):
+        if os.path.exists(src):
+            shutil.move(src, dst)
+        _FakeAudio.written.setdefault(dst, _FakeAudio.written[src])
+    return {"moved_targets": [lib]}
+
+
+def _run_moved_chain(stage):
+    return script_runners.run_chain(
+        dict(_mv_cfg), [14, 13], targets=[stage],
+        extra=imports._import_extras(stage, _mv_cfg, _mv_cfg, [14, 13]))
+
+
+_saved_14, _saved_13 = script_runners.RUNNERS[14], script_runners.RUNNERS[13]
+_saved_route = _intg.resolve_advisory_route
+_saved_audiofile = _mlo_audio.AudioFile
+try:
+    _mlo_audio.AudioFile = _FakeAudio
+    script_runners.RUNNERS[14] = ("Mover", _mv_mover)
+    script_runners.RUNNERS[13] = ("Noop", lambda cfg: {})
+
+    # (a) the sources answer: EVERY non-instrumental track of the moved album is
+    # rated, at the folder the chain ended on — and the outcome is the manual
+    # route's own on the same files (one implementation, one answer).
+    _stage, _lib, _sfiles, _lfiles = _mv_case("Moved Album")
+    _intg.resolve_advisory_route = lambda **k: {
+        "value": 1, "source": "stub", "answers": {"stub": 1},
+        "checked": ["stub"]}
+    _res = _run_moved_chain(_stage)
+    _adv = next(e for e in _res if e.get("id") == "advisories")
+    _chain_values = dict((_adv.get("stats") or {}).get("values") or {})
+    assert _chain_values == {p: 1 for p in _lfiles}, (_chain_values, _lfiles)
+    for _p in _lfiles:
+        assert _FakeAudio.written[_p]["ITUNESADVISORY"] == "1", _FakeAudio.written[_p]
+    # the manual route the button uses (POST /api/mb/advisory/fetch →
+    # `imports.fetch_advisories`) over the album where it now is
+    for _p in _lfiles:
+        _FakeAudio.written[_p].pop("ITUNESADVISORY", None)
+        _FakeAudio.written[_p].pop("ALBUMITUNESADVISORY", None)
+    _manual = imports.fetch_advisories([_lib], dict(_mv_cfg))
+    assert dict(_manual.get("values") or {}) == _chain_values, (_manual, _chain_values)
+
+    # (b) a source that answers nothing: no per-track advisory is written and
+    # the chain still completes — the step reports the empty outcome, never an
+    # error (the album tag script 8 derives is its own business and is
+    # untouched by the fetch).
+    _stage2, _lib2, _sfiles2, _lfiles2 = _mv_case("Silent Album")
+    _intg.resolve_advisory_route = lambda **k: {
+        "value": None, "source": "", "answers": {}, "checked": []}
+    _res2 = _run_moved_chain(_stage2)
+    _adv2 = next(e for e in _res2 if e.get("id") == "advisories")
+    assert "error" not in _adv2, _adv2
+    assert not (_adv2.get("stats") or {}).get("values"), _adv2
+    for _p in _lfiles2:
+        assert "ITUNESADVISORY" not in _FakeAudio.written[_p], _FakeAudio.written[_p]
+    assert [e.get("id") for e in _res2] == [14, 13, "advisories"], _res2
+    print("moved-album advisories:", len(_chain_values), "track(s), matching the manual route")
+finally:
+    script_runners.RUNNERS[14], script_runners.RUNNERS[13] = _saved_14, _saved_13
+    _intg.resolve_advisory_route = _saved_route
+    _mlo_audio.AudioFile = _saved_audiofile
 
 # --------------------------------------------------------------------------- #
 # The metadata step WRITES what is missing (artist image + both descriptions)
@@ -736,6 +864,85 @@ assert queue_state["running"] == 0 and queue_state["queued"] == 0, queue_state
 assert os.path.isdir(os.path.join(LIB, "Queue Album 1")), os.listdir(LIB)
 
 # --------------------------------------------------------------------------- #
+# SEVERAL BATCHES, ONE JOB: the wizard's worklist, in order
+# --------------------------------------------------------------------------- #
+# The Import wizard stages multiple batches of files and starts them together
+# (spec R395): each batch is a drop/pick of its own, and its albums ride the ONE
+# bulk queue as items in batch order. What a surface reads back is therefore
+# each batch's own albums — this job's `items`, in order — with a batch that
+# cannot stage reported as its own `failed` row instead of stalling the batches
+# after it.
+batch_a = [staging_album("Batch A One"), staging_album("Batch A Two")]
+batch_b = [staging_album("Batch B One")]
+never_staged = os.path.join(STAGING, "Batch B Two (never staged)")
+batch_items = [{"path": p} for p in [*batch_a, *batch_b, never_staged]]
+multi = imports.start_bulk(batch_items, CFG)
+assert multi["ok"] is True and multi["job"]["total"] == 4, multi
+# Every album has its line from the start, in batch order — the order the
+# wizard staged the batches in.
+assert [r["path"] for r in multi["job"]["items"]] == \
+    [os.path.normpath(p) for p in [*batch_a, *batch_b, never_staged]], multi["job"]["items"]
+multi_state = _wait_job(multi["job"]["id"])
+assert multi_state["status"] == "done", multi_state
+assert multi_state["done"] == 4 and multi_state["total"] == 4, multi_state
+# The failing album did not stall the rest: every other row imported, and the
+# failure is that one row's own reason.
+assert [r["status"] for r in multi_state["items"]] == \
+    ["imported", "imported", "imported", "failed"], multi_state["items"]
+assert multi_state["items"][3]["error"] == "path not found", multi_state["items"][3]
+# Each batch's outcome is the rows its own albums got, in the same payload.
+assert [str(r["album_path"]).replace("\\", "/") for r in multi_state["items"][:3]] == [
+    os.path.join(LIB, name).replace("\\", "/")
+    for name in ("Batch A One", "Batch A Two", "Batch B One")], multi_state["items"]
+for name in ("Batch A One", "Batch A Two", "Batch B One"):
+    assert os.path.isdir(os.path.join(LIB, name)), os.listdir(LIB)
+assert not os.path.exists(never_staged)
+
+# TWO DISCS of one rip, added as two batches (the owner's report: "uploading
+# multi-disc cd releases to the importing sometimes gets rid of the second cd").
+# Each batch is a disc with its OWN track files; both ride the one queue and
+# both import, each library folder holding its own tracks — the second disc
+# neither vanishes nor is fused into (or overwrites) the first, because the
+# queue never merges two batches.
+disc_one = staging_album("Rip CD1", tracks=2)
+disc_two = staging_album("Rip CD2", tracks=2)
+disc_job = imports.start_bulk([{"path": disc_one}, {"path": disc_two}], CFG)
+disc_state = _wait_job(disc_job["job"]["id"])
+assert disc_state["status"] == "done", disc_state
+assert [r["status"] for r in disc_state["items"]] == ["imported", "imported"], disc_state["items"]
+for name, src in (("Rip CD1", disc_one), ("Rip CD2", disc_two)):
+    album = os.path.join(LIB, name)
+    assert os.path.isdir(album), os.listdir(LIB)
+    assert sorted(os.listdir(album)) == ["01 - track.wav", "02 - track.wav"], \
+        (name, os.listdir(album))
+    assert not os.path.exists(src), f"staging folder left behind: {src}"
+
+# TWO batches that resolve to the SAME album name — two discs or two editions
+# the wizard names alike — must not collide either. Each is a staging folder of
+# its own carrying the SAME track name, and the queue's own move gives the
+# second a folder of its own ("Same Name Batch", "Same Name Batch (2)": the
+# dedup `server.imports.unique_dir` is, and the rule the upload route follows
+# for a same-named batch too). Nothing is overwritten and nothing is fused.
+same_left = os.path.join(STAGING, "left", "Same Name Batch")
+same_right = os.path.join(STAGING, "right", "Same Name Batch")
+make_wav(os.path.join(same_left, "01 - track.wav"), 0.05)
+make_wav(os.path.join(same_right, "01 - track.wav"), 0.25)   # different bytes
+same_job = imports.start_bulk([{"path": same_left}, {"path": same_right}], CFG)
+same_state = _wait_job(same_job["job"]["id"])
+assert same_state["status"] == "done", same_state
+assert [r["status"] for r in same_state["items"]] == ["imported", "imported"], same_state["items"]
+same_names = sorted(os.path.basename(r["album_path"]) for r in same_state["items"])
+assert same_names == ["Same Name Batch", "Same Name Batch (2)"], same_names
+for name, src in (("Same Name Batch", same_left), ("Same Name Batch (2)", same_right)):
+    album = os.path.join(LIB, name)
+    assert os.path.isdir(album), os.listdir(LIB)
+    assert sorted(os.listdir(album)) == ["01 - track.wav"], (name, os.listdir(album))
+    assert not os.path.exists(src), f"staging folder left behind: {src}"
+assert open(os.path.join(LIB, "Same Name Batch", "01 - track.wav"), "rb").read() != \
+    open(os.path.join(LIB, "Same Name Batch (2)", "01 - track.wav"), "rb").read(), \
+    "the two same-named albums hold their OWN files, not one batch's bytes twice"
+
+# --------------------------------------------------------------------------- #
 # A pinned MusicBrainz link: the release the owner asked for, and no guessing
 # --------------------------------------------------------------------------- #
 # `POST /api/import/bulk` items may carry `mbid` — the Library's Import dialog
@@ -1014,9 +1221,11 @@ try:
     # The list goes in as REPEATED GENRE fields, not one "; "-joined value:
     # the grader counts the values a file carries, so a joined string would
     # read as one genre and fail the per-track count check. The names are
-    # canonicalised to MusicBrainz's own spelling and NOTHING is added — the
-    # stub above answers "Shoegaze / Noise Pop", and what lands is exactly those
-    # two, capitalized (the derived family is a view, never stored: R38/R38a).
+    # canonicalised to MusicBrainz's own spelling but KEPT IN THE SOURCE'S OWN
+    # ORDER (MusicBrainz publishes an entity's genres by vote count,
+    # most-voted first; 2026-10-12) and NOTHING is added — the stub above
+    # answers "Shoegaze / Noise Pop", and what lands is exactly those two
+    # names, capitalized, in that order.
     assert _written["01 - track.wav"]["GENRE"] == ["Shoegaze", "Noise Pop"], _written["01 - track.wav"]
     assert _written["02 - track.wav"]["GENRE"] == ["Shoegaze"], _written["02 - track.wav"]
 
@@ -1296,8 +1505,8 @@ _real_fetch_lyrics = _lyrics_fetch.fetch_lyrics
 _intg.genre_chain = lambda **kw: {"per_track": {(1, 1): ["Shoegaze"]},
                                   "sources": {}, "levels": {}}
 # What that stub's answer lands as: ONE name, capitalized, nothing added (the
-# derived parent is a view — R38/R38a). The assertion below reads it from here
-# so the stub and the expectation cannot drift.
+# source's names are stored as stated — 2026-10-12). The assertion below reads
+# it from here so the stub and the expectation cannot drift.
 expected_genres = "Shoegaze"
 # 1 states explicit — and the fixtures arrive rated 0, so a value that was NOT
 # replaced shows up as a 0 rather than as a coincidence.
@@ -1397,7 +1606,7 @@ try:
     wired = os.path.join(ARRIVED_ROOT, "Wired Album")
     wired_track = peer_flac(wired, lyric="peer lyric, plain")
     wired_cfg = {"music_folder": ARRIVED_ROOT, "import_auto_scripts": False,
-                 "import_scripts": [], "rym_links_auto": False,
+                 "import_scripts": [],
                  "metadata_auto_fetch": False, "instrumental_auto_fetch": False,
                  "genre_autofill": True, "cover_auto_fetch": True,
                  "advisory_auto_fetch": True}
@@ -1473,7 +1682,7 @@ try:
     e2e_cfg = {"music_folder": ARRIVED_ROOT, "import_scripts": [13],
                "advisory_auto_fetch": True, "instrumental_auto_fetch": False,
                "genre_autofill": True, "cover_auto_fetch": False,
-               "rym_links_auto": False, "metadata_auto_fetch": False}
+               "metadata_auto_fetch": False}
     _real_chain_fn = script_runners.run_chain
     _chain_ids = []
 
@@ -1712,7 +1921,7 @@ os.makedirs(DIG_ALBUM)
 DIG_CFG = {"music_folder": DIG_MF, "import_auto_scripts": False,
            "import_scripts": [], "advisory_auto_fetch": False,
            "metadata_auto_fetch": False, "cover_auto_fetch": False,
-           "rym_links_auto": False, "instrumental_auto_fetch": False}
+           "instrumental_auto_fetch": False}
 DIG_PLAIN = "Setting sun on the neon drift\na chrome horizon"
 DIG_MERGED = "[00:00.00][00:45.53]Setting  sun  on the neon drift\n[00:46.86]Against her skin"
 
@@ -1897,7 +2106,7 @@ os.makedirs(IDENT_MF, exist_ok=True)
 IDENT_CFG = {"music_folder": IDENT_MF, "import_auto_scripts": False,
              "import_scripts": [], "advisory_auto_fetch": False,
              "metadata_auto_fetch": False, "cover_auto_fetch": False,
-             "rym_links_auto": False, "instrumental_auto_fetch": False,
+             "instrumental_auto_fetch": False,
              "genre_autofill": False}
 
 
@@ -2168,7 +2377,7 @@ os.makedirs(PHASE_MF, exist_ok=True)
 PHASE_CFG = {"music_folder": PHASE_MF, "import_auto_scripts": True,
              "import_scripts": [4], "advisory_auto_fetch": True,
              "instrumental_auto_fetch": True, "metadata_auto_fetch": False,
-             "cover_auto_fetch": False, "rym_links_auto": False,
+             "cover_auto_fetch": False,
              "genre_autofill": True, "import_autonomy": "automatic"}
 PHASE_RELEASE = {"id": "phase-rel-1", "release_group_id": "phase-rg-1",
                  "title": "Phase Album", "date": "1996-06-11",
@@ -2383,7 +2592,7 @@ os.makedirs(DOUBLE_MF, exist_ok=True)
 DOUBLE_CFG = {"music_folder": DOUBLE_MF, "import_auto_scripts": True,
               "import_scripts": [4], "advisory_auto_fetch": False,
               "instrumental_auto_fetch": False, "metadata_auto_fetch": False,
-              "cover_auto_fetch": False, "rym_links_auto": False,
+              "cover_auto_fetch": False,
               "genre_autofill": False, "import_autonomy": "automatic"}
 double_album = os.path.join(DOUBLE_MF, "Double Album")
 for _i in (1, 2):
@@ -2604,3 +2813,73 @@ finally:
     shutil.rmtree(AUTO_ROOT, ignore_errors=True)
 
 print("autonomous lyric/advisory reach the manual outcome: all assertions passed")
+
+# --------------------------------------------------------------------------- #
+# Script 15 follows a RELEASE CHANGE: a manifest naming another release is the
+# leftover of a re-point and is fetched again, not kept
+# --------------------------------------------------------------------------- #
+# The owner's flow (2026-10-12): the library's Import menu — or the wizard's
+# Links step — re-points an album at another edition. The import rewrites the
+# tags, but the manifest is the RELEASE's own tracklist (what the album page
+# diffs its gaps against), and "writers fill, they do not overwrite" kept every
+# existing one. Measured live on a real re-point (deluxe → standard): every
+# file ended on the standard id while `.mb_expected` still named the deluxe, so
+# the album showed the gaps of the release it had just left. One rule fixes it:
+# a manifest that names a release the tracks no longer name is stale.
+RT_MF = tempfile.mkdtemp(prefix="mlo_release_tracklist_")
+RT_ALBUM = os.path.join(RT_MF, "Artists", "Test", "Album")
+RT_OLD = "11111111-1111-1111-1111-111111111111"
+RT_NEW = "22222222-2222-2222-2222-222222222222"
+from mutagen.flac import FLAC as _RTFLAC  # noqa: E402
+from mlo.paths import (load_expected_tracks as _rt_load,  # noqa: E402
+                       save_expected_tracks as _rt_save)
+from server import integrations as _rt_intg  # noqa: E402
+
+_rt_track = peer_flac(RT_ALBUM)
+_RT_TAGS = _RTFLAC(_rt_track)
+_RT_TAGS["MUSICBRAINZ_ALBUMID"] = RT_NEW
+_RT_TAGS.save()
+# What the album carried when it named the OLD release
+assert _rt_save(RT_ALBUM, RT_OLD, [
+    {"disc": 1, "position": 1, "title": "Old One"},
+    {"disc": 1, "position": 2, "title": "Old Two"},
+]), "the fixture manifest must be written"
+
+_rt_real_resolve = _rt_intg.resolve_release
+_rt_asked = []
+_rt_new_release = {"media": [
+    {"disc": 1, "position": 1, "title": "New One", "recording_mbid": "rec-1"},
+    {"disc": 1, "position": 2, "title": "New Two", "recording_mbid": "rec-2"},
+]}
+try:
+    _rt_intg.resolve_release = lambda mbid: (_rt_asked.append(mbid)
+                                             or (_rt_new_release, mbid))
+    with contextlib.redirect_stdout(io.StringIO()):
+        script_runners.run_release_tracklist({"music_folder": RT_MF})
+    _rt_after = _rt_load(RT_ALBUM)
+    assert _rt_asked == [RT_NEW], \
+        f"the manifest's own release must not be the one fetched: {_rt_asked}"
+    assert _rt_after["release_id"] == RT_NEW, _rt_after
+    assert [t["title"] for t in _rt_after["tracks"]] == ["New One", "New Two"], \
+        _rt_after
+
+    # A manifest naming the album's OWN release is kept — and costs no request
+    _rt_asked.clear()
+    with contextlib.redirect_stdout(io.StringIO()):
+        script_runners.run_release_tracklist({"music_folder": RT_MF})
+    assert _rt_asked == [], f"a current manifest must cost no request: {_rt_asked}"
+    assert _rt_load(RT_ALBUM)["release_id"] == RT_NEW, _rt_load(RT_ALBUM)
+
+    # …and a manifest naming NO release (a rip sheet wrote it) is kept too:
+    # it is evidence about the album, not a claim about a release.
+    assert _rt_save(RT_ALBUM, None, [{"disc": 1, "position": 1, "title": "Sheet One"}])
+    _rt_asked.clear()
+    with contextlib.redirect_stdout(io.StringIO()):
+        script_runners.run_release_tracklist({"music_folder": RT_MF})
+    assert _rt_asked == [], f"a sheet manifest must not trigger a fetch: {_rt_asked}"
+    assert _rt_load(RT_ALBUM)["release_id"] is None, _rt_load(RT_ALBUM)
+finally:
+    _rt_intg.resolve_release = _rt_real_resolve
+    shutil.rmtree(RT_MF, ignore_errors=True)
+
+print("a manifest from another release is refetched after a re-point: all assertions passed")

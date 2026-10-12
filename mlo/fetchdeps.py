@@ -97,11 +97,6 @@ DISPLAY_NAMES = {
     # server.soulseek.slskd_exe), which is why the Windows asset and the Linux
     # ones are both in the tables below.
     "slskd": "slskd",
-    # The Cloudflare solver: a TOOL like slskd (a service this app runs, see
-    # server/solver.py rather than one it invokes per file), and the only one
-    # that is OPT-IN — ~300 MB, and nothing else needs it, so the bulk install
-    # pass leaves it alone (see OPT_IN_TOOLS).
-    "flaresolverr": "FlareSolverr (Cloudflare solver)",
 }
 
 REPOS = {
@@ -117,7 +112,6 @@ REPOS = {
     "chromaprint": "acoustid/chromaprint",
     "yt-dlp": "yt-dlp/yt-dlp",
     "slskd": "slskd/slskd",
-    "flaresolverr": "FlareSolverr/FlareSolverr",
 }
 
 # Ordered asset-name preferences (regex, matched case-insensitively).
@@ -144,10 +138,6 @@ ASSET_PATTERNS = {
     # folder (a library two hosts read), which is why the two tables are the
     # only thing that decides which of them this host runs.
     "slskd": [r"^slskd-[\d.]+-win-x64\.zip$"],
-    # One zip, x64 only (upstream ships no ARM and no macOS build — Docker is
-    # the route there, see install_problem). The zip holds `flaresolverr.exe`
-    # beside the Chromium it drives, so the whole extract is kept.
-    "flaresolverr": [r"^flaresolverr_windows_x64\.zip$"],
 }
 
 INSTALL_PREFIX = {
@@ -166,7 +156,6 @@ INSTALL_PREFIX = {
     "chromaprint": "chromaprint",
     "yt-dlp": "yt-dlp",
     "slskd": "slskd",
-    "flaresolverr": "flaresolverr",
 }
 
 # Tools whose upstream releases ship a NATIVE Linux build, mapped to the asset
@@ -287,17 +276,6 @@ LINUX_BINARIES = {
             "arm64-musl": r"^slskd-[\d.]+-linux-musl-arm64\.zip$",
         },
         "markers": ("slskd",),
-    },
-    "flaresolverr": {
-        # One self-contained tarball, x64 ONLY: upstream publishes no ARM and
-        # no macOS build (the Docker image covers those — see install_problem,
-        # which names docker for this key). It holds the `flaresolverr` server
-        # beside the Chromium it drives, so the marker finds the folder and the
-        # whole extract — browser included — travels into the tools folder.
-        "patterns": {
-            "x64": r"^flaresolverr_linux_x64\.tar\.gz$",
-        },
-        "markers": ("flaresolverr",),
     },
 }
 
@@ -591,15 +569,6 @@ def install_problem(key, platform=None, machine=None):
                 f"platform - install it with your package manager "
                 f"(Debian/Ubuntu: apt-get install {LINUX_RUNNERS[key][1]})")
     if plat == "macos":
-        if key == "flaresolverr":
-            # Upstream ships precompiled binaries for Windows and Linux x64
-            # only; Docker is the documented macOS route (and the one the
-            # compose files ship), so the row points there instead of at a
-            # formula that does not exist.
-            return ("FlareSolverr publishes no macOS build - run it with "
-                    "Docker (docker run -d -p 127.0.0.1:8191:8191 "
-                    "ghcr.io/flaresolverr/flaresolverr:latest) and set the "
-                    "solver URL to http://127.0.0.1:8191")
         formula = BREW_PACKAGES.get(key)
         if formula:
             return (f"{display} installs with Homebrew on this platform - "
@@ -614,12 +583,6 @@ def install_problem(key, platform=None, machine=None):
                     f"it with your package manager (Debian/Ubuntu: apt-get "
                     f"install {pkg}); the Docker image already ships it.")
         if key in LINUX_BINARIES:
-            if key == "flaresolverr":
-                return ("FlareSolverr publishes no Linux build for this "
-                        "machine's architecture (x64 only) - run it with "
-                        "Docker (`docker run -d -p 127.0.0.1:8191:8191 "
-                        "ghcr.io/flaresolverr/flaresolverr:latest`) and point "
-                        "the solver URL at it.")
             return (f"{display} publishes no Linux build for this machine's "
                     f"architecture - install it with your package manager.")
         if key in LINUX_PACKAGES:
@@ -767,19 +730,18 @@ MARKER_EXES = {
     "chromaprint": ("fpcalc.exe",),
     "yt-dlp": ("yt-dlp.exe",),
     "slskd": ("slskd.exe",),
-    "flaresolverr": ("flaresolverr.exe",),
 }
 
 # Tools whose release asset is a single bare exe - no archive to extract.
 SINGLE_EXE_TOOLS = {"audioauditor", "logchecker", "yt-dlp"}
 
 # Tools the BULK install pass ("Install all", /api/dependencies/install with no
-# keys) must not fetch on its own. FlareSolverr is ~300 MB and is a service the
-# user opts into from Settings → Discovery, so pulling it on a press that means
-# "the missing encoders" is a surprise, not a service. It is still installed by
-# pressing its own row, and still UPDATED by the auto-update pass once it is
-# there (that pass only touches tools already installed).
-OPT_IN_TOOLS = {"flaresolverr"}
+# keys) must not fetch on its own. Empty today: the one opt-in tool this app
+# had (FlareSolverr, a ~300 MB Cloudflare-solving service) is gone with the
+# scraped sources it served — 2026-10-12. The set stays because the bulk pass
+# reads it by name (`tools/test_*` pins the rule), and a future service-style
+# tool belongs in it rather than in everyone's "install all".
+OPT_IN_TOOLS: "set[str]" = set()
 
 # Exact, pinned dependency versions. Every tool is downloaded from a specific
 # GitHub release tag (never "latest") so installs and CI builds are fully
@@ -844,15 +806,6 @@ PINNED = {
         "tag": "0.26.0",
         "asset": "slskd-0.26.0-win-x64.zip",
         "version": "0.26.0",
-    },
-    "flaresolverr": {
-        # A SERVICE, not a per-file tool: `asset` is the Windows zip's name
-        # (the pin's face — a Linux host takes the same tag's tarball through
-        # LINUX_BINARIES), and it bundles the Chromium its Selenium driver
-        # needs, which is why the asset is ~300 MB.
-        "tag": "v3.5.2",
-        "asset": "flaresolverr_windows_x64.zip",
-        "version": "3.5.2",
     },
     "librosa": {
         "tag": "0.11.0",

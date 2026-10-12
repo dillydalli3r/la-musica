@@ -304,7 +304,7 @@ export default {
   "charts.no_plays_title": "Todavía no hay reproducciones",
   "charts.no_source_title": "Ninguna fuente tenía una lista para esta ventana",
   "charts.unsupported_title": "No se pudo leer ninguna lista",
-  "charts.empty_online": "Todas las fuentes consultadas volvieron vacías, y los chips de arriba dicen cuáles se consultaron. Prueba otra ventana u otro tipo: Last.fm, Deezer y Apple solo publican una lista actual, y RateYourMusic no tiene lista mensual ni semanal.",
+  "charts.empty_online": "Todas las fuentes consultadas volvieron vacías, y los chips de arriba dicen cuáles se consultaron. Prueba otra ventana u otro tipo: Last.fm, Deezer y Apple solo publican una lista actual.",
   "charts.error_title": "No se pudieron leer las listas",
   "browse.not_asked": "aún no se ha ejecutado ninguna consulta",
   "browse.error_title": "No se pudo leer la consulta",

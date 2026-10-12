@@ -1573,8 +1573,20 @@ export default function NowPlayingView(p: Props) {
               upcomingClass={ink.wordNext}
             />
           ) : primary}
+          {/* The sub-line wears the SUNG LINE's own ink — no colour class, so
+              it inherits: the translation is the same words, and the table
+              already answered what a glyph on this cover must be. It used to
+              be `text-accent-soft/70`, which follows the ACCENT rather than
+              the cover: on a bright cover that is the shipped white accent at
+              70 % — the near-invisible grey the owner reported under the
+              Spanish line of "Latin Simone" — while every ink here flips with
+              the artwork. The `xlit` size and `font-normal` keep it distinct
+              from the (semibold) sung line, and when a transliteration
+              replaces the original (see `replaced`) it is the PRIMARY line and
+              already wears this ink. `data-lyric-trans` is the hook
+              tools/check_np_metadata_contrast.cjs reads this sub-line by. */}
           {trans && !transDup && (
-            <div className={`${size.xlit} font-normal text-accent-soft/70 mt-0.5 leading-snug`}>{trans}</div>
+            <div data-lyric-trans className={`${size.xlit} font-normal mt-0.5 leading-snug`}>{trans}</div>
           )}
         </div>
       </div>
@@ -1792,10 +1804,20 @@ export default function NowPlayingView(p: Props) {
                little over half the ink, under the user's full-strength stars —
                dim enough to be nobody's verdict of their own, solid enough to
                read on a cover — and the readout word is what actually says
-               whose number it is. */
+               whose number it is. At 80 % (not the 70 % it shipped with) the
+               words keep ~5.4:1 on the white cover's washed field: 70 % over
+               the light table's own 75 % ink composited to ~4.0:1, just under
+               AA for a 12 px readout (the owner's "more visible but still not
+               great"). */
             webEmptyClass="text-current opacity-30"
             webFillClass="fill-current opacity-60"
-            webTextClass="text-current opacity-70"
+            webTextClass="text-current opacity-80"
+            /* …and the reader's OWN number takes the row's ink at full
+               strength, like the stars beside it: the control's default is a
+               fixed zinc-400, which put the local rating a hair off a bright
+               cover while every other glyph in the block wore this table (the
+               owner's report — the "5" was the hard-to-see one). */
+            ownTextClass="text-current"
           />
         )}
       </div>

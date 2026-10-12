@@ -146,7 +146,6 @@ CHAIN_CFG = {"music_folder": MF, "import_auto_scripts": False,
              "metadata_auto_fetch": False, "cover_auto_fetch": False,
              "lyrics_format": "EMBEDDED"}
 
-imports.stamp_rym_links = lambda path, cfg=None: {"note": "stub", "album": "", "artist": ""}
 imports.run_metadata_step = lambda path, cfg=None: {"items": []}
 cover_step_saw = []
 
@@ -165,11 +164,8 @@ imports.run_cover_step = fake_cover_step
 # The ADD-time pre-fetch (`pending_albums.create` → `imports.prefetch_album`)
 # runs the import chain's own steps early — the metadata step and the cover
 # search. The artist image / description candidates are stubbed by
-# `imports.run_metadata_step` above; the two seams still left are the links
-# resolver and the cover finder, and neither may be reached for real here.
-intg_mod.rym_links = lambda artist="", album="", cfg=None, mbid=None: {
-    "album": "https://rateyourmusic.com/release/album/a/b/",
-    "artist": "https://rateyourmusic.com/artist/a", "note": "stub"}
+# `imports.run_metadata_step` above; the one seam still left is the cover
+# finder, and it may not be reached for real here.
 cover_searches = []
 
 
@@ -403,6 +399,78 @@ eq(album_row["track_count"], 1, "its track is counted")
 # ...and adding that same release again creates nothing at all
 again = pending_albums.create(release, cfg)
 ok(again["existing"] and not again["created"], "an album already in the library is not re-created")
+
+# --------------------------------------------------------------------------- #
+# 3b. a TWO-DISC release: every disc's tracks, everywhere the album states them
+# --------------------------------------------------------------------------- #
+print("\ntwo-disc release")
+two = dict(release)
+two["id"] = "77777777-1111-1111-1111-111111111111"
+two["release_group_id"] = "77777777-2222-2222-2222-222222222222"
+two["title"] = "Two Disc Album"
+two["artists"] = [{"name": "Two Disc Artist",
+                   "mbid": "77777777-3333-3333-3333-333333333333"}]
+# the release IS two media; every DISC lists its own tracks
+two["medium_count"] = 2
+two["media"] = [
+    {"disc": 1, "position": 1, "title": "One",
+     "recording_mbid": "77777777-4444-4444-4444-444444444444", "artist_credit": "Two Disc Artist"},
+    {"disc": 1, "position": 2, "title": "Two",
+     "recording_mbid": "77777777-5555-5555-5555-555555555555", "artist_credit": "Two Disc Artist"},
+    {"disc": 2, "position": 1, "title": "Three",
+     "recording_mbid": "77777777-6666-6666-6666-666666666666", "artist_credit": "Two Disc Artist"},
+    {"disc": 2, "position": 2, "title": "Four",
+     "recording_mbid": "77777777-7777-7777-7777-777777777777", "artist_credit": "Two Disc Artist"},
+]
+rowT = pending_albums.create(two, cfg)
+folderT = rowT["album_path"].replace("/", os.sep)
+ok(rowT["created"] and os.path.isdir(folderT),
+   "the two-disc framework album is created", folderT)
+
+manT = pathmod.load_expected_tracks(folderT)
+eq(manT["release_id"], two["id"], "its manifest records the release id")
+eq([(t["disc"], t["position"], t["title"]) for t in manT["tracks"]],
+   [(1, 1, "One"), (1, 2, "Two"), (2, 1, "Three"), (2, 2, "Four")],
+   "the manifest records BOTH discs — media are 2 and both are listed")
+null_row = pathmod.load_pending(folderT)
+eq(null_row.get("pending"), True, "and it is still the pending framework album")
+
+# The audio arrives in the layout the app itself calls legitimate for a
+# multi-disc release: disc 1's files at the album root, disc 2's in a "CD2"
+# disc subfolder (mlo.layout: only disc folders belong inside an album; spec
+# R336: a disc-subfolder release is ONE album).
+write_tagged_wav(os.path.join(folderT, "1-01 One.wav"),
+                 album_tags(two, DISCNUMBER="1", TRACKNUMBER="1", TITLE="One"))
+write_tagged_wav(os.path.join(folderT, "1-02 Two.wav"),
+                 album_tags(two, DISCNUMBER="1", TRACKNUMBER="2", TITLE="Two"))
+write_tagged_wav(os.path.join(folderT, "CD2", "2-01 Three.wav"),
+                 album_tags(two, DISCNUMBER="2", TRACKNUMBER="1", TITLE="Three"))
+write_tagged_wav(os.path.join(folderT, "CD2", "2-02 Four.wav"),
+                 album_tags(two, DISCNUMBER="2", TRACKNUMBER="2", TITLE="Four"))
+
+outT = finish(folderT, CHAIN_CFG)
+eq(outT["errors"], [], "the two-disc import finished without errors")
+
+payloadT = fresh_library(CHAIN_CFG)
+_artistT, albumT = find_album(payloadT, folderT)
+ok(albumT is not None, "the two-disc album is ONE library row")
+eq(albumT["track_count"], 4, "its track count is every disc's")
+_eq_tracks = sorted(albumT["tracks"],
+                    key=lambda t: (t.get("discnumber") or 0, t.get("tracknumber") or 0))
+eq([(t["discnumber"], t["tracknumber"], t["file"]) for t in _eq_tracks],
+   [(1, 1, "1-01 One.wav"), (1, 2, "1-02 Two.wav"),
+    (2, 1, "CD2/2-01 Three.wav"), (2, 2, "CD2/2-02 Four.wav")],
+   "the library payload carries EVERY disc's tracks")
+eq([(e["disc"], e["position"], e["missing"]) for e in albumT["expected_tracks"]],
+   [(1, 1, False), (1, 2, False), (2, 1, False), (2, 2, False)],
+   "and the manifest's disc-2 rows read as present")
+eq(albumT["partial"], False, "so the album is COMPLETE, not partial")
+ok(all(os.path.basename(str(a.get("path") or "")).lower() != "cd2"
+       for ar in payloadT["artists"] for a in ar["albums"]),
+   "the CD2 disc folder is not listed as an album of its own")
+# the album PAGE reads the same tracks as the library row (one reading)
+_pageT = mlo_main.get_album(path=albumT["path"])
+eq(len(_pageT.get("tracks") or []), 4, "the album page lists every disc's tracks too")
 
 # --------------------------------------------------------------------------- #
 # 4. a cover the import (or the user) wrote is never deleted

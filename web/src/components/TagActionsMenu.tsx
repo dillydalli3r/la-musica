@@ -163,7 +163,7 @@ export default function TagActionsMenu({
   };
   /** The genre chain's own answer: how many files it wrote, which sources
    *  contributed (and how many names each), and why each silent one stayed
-   *  silent — a blocked RateYourMusic reads as its own reason here instead of
+   *  silent — a source that answered nothing reads as its own reason here instead of
    *  as a bare "0 updated". */
   const genresDone = (r: {
     updated: number;

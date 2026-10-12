@@ -123,24 +123,38 @@ def run_release_tracklist(config):
     pbar = mlo_stats._make_pbar(len(albums), "Release tracklist", unit="album")
     for album in albums:
         rel = _relpath_guard(album, folder or album)
-        if not force and load_expected_tracks(album)["tracks"]:
-            # The manifest is already there, so nothing is fetched — but its
-            # BYTES are still this script's to put right: a library imported by
-            # an older build holds one written in text mode (CRLF endings, no
-            # final newline), and the grade fails exactly that. Rewriting it
-            # costs no request and is what makes this script the fix the grade
-            # names (`normalize_expected_tracks`).
-            if normalize_expected_tracks(album):
-                stats["skipped_count"] += 1
-                mlo_stats._pbar_skip(pbar, counts)
-                continue
-            log(f"{rel}: the manifest could not be rewritten — the folder is "
-                f"not writable")
-            stats["error_count"] += 1
-            mlo_stats._pbar_fail(pbar, counts)
-            continue
-
         mbid = _album_release_id(album)
+        manifest = load_expected_tracks(album)
+        if not force and manifest["tracks"]:
+            # A manifest naming a DIFFERENT release than the album's own tracks
+            # do is the leftover of a release change: re-pointing an album (the
+            # library's Import menu, the wizard's Links step) rewrites the
+            # tags, and the manifest — the RELEASE's own tracklist, which is
+            # what the album page diffs its gaps against — has to move with
+            # them, or the album keeps showing the gaps of the release it just
+            # left. That one is fetched again below. A manifest naming the
+            # album's own release, or naming none at all (a rip sheet wrote
+            # it, `record_sidecar_tracklist`), is kept exactly as before.
+            recorded = str(manifest.get("release_id") or "")
+            if not (recorded and mbid and recorded.lower() != mbid.lower()):
+                # The manifest is there and current, so nothing is fetched —
+                # but its BYTES are still this script's to put right: a library
+                # imported by an older build holds one written in text mode
+                # (CRLF endings, no final newline), and the grade fails exactly
+                # that. Rewriting it costs no request and is what makes this
+                # script the fix the grade names (`normalize_expected_tracks`).
+                if normalize_expected_tracks(album):
+                    stats["skipped_count"] += 1
+                    mlo_stats._pbar_skip(pbar, counts)
+                    continue
+                log(f"{rel}: the manifest could not be rewritten — the folder "
+                    f"is not writable")
+                stats["error_count"] += 1
+                mlo_stats._pbar_fail(pbar, counts)
+                continue
+            log(f"{rel}: the manifest names release {recorded}, the tracks "
+                f"name {mbid} — the tracklist is fetched again")
+
         if not mbid:
             log(f"{rel}: no MUSICBRAINZ_ALBUMID (or RELEASEGROUPID) on its "
                 f"tracks — no manifest written")

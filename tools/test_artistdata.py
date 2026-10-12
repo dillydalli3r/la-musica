@@ -166,10 +166,10 @@ try:
     # The description's provider lives under `description_source`: the entry is
     # shared with the folder's artist image, whose own `source` it must not
     # rename.
-    ad.write_description(ALBUM, "A record.", cfg=CFG, source="rym", kind="album")
+    ad.write_description(ALBUM, "A record.", cfg=CFG, source="lastfm", kind="album")
     prov = ad.read_provenance(ALBUM, cfg=CFG)
     check("album provenance kind", prov.get("kind") == "album", prov)
-    check("album provenance source", prov.get("description_source") == "rym", prov)
+    check("album provenance source", prov.get("description_source") == "lastfm", prov)
     check("description did not rename the image source",
           "source" not in prov, prov)
     check("provenance has updated stamp", bool(prov.get("updated")), prov)
@@ -178,9 +178,9 @@ try:
         raw = json.load(fh)
     key = ad._norm_key(ALBUM)
     check("artwork.json holds the lowercased folder key", key in raw, sorted(raw))
-    check("artwork.json entry matches", raw[key]["description_source"] == "rym", raw[key])
+    check("artwork.json entry matches", raw[key]["description_source"] == "lastfm", raw[key])
     check("cfg-less read finds the same map",
-          ad.read_provenance(ALBUM).get("description_source") == "rym",
+          ad.read_provenance(ALBUM).get("description_source") == "lastfm",
           ad.read_provenance(ALBUM))
     ad.delete_description(ALBUM, kind="album", cfg=CFG)
     check("delete_description drops provenance",

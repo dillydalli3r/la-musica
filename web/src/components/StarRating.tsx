@@ -125,6 +125,7 @@ export default function StarRating({
   webEmptyClass = WEB_EMPTY,
   webFillClass = WEB_FILL,
   webTextClass = WEB_TEXT,
+  ownTextClass = "text-zinc-400",
 }: {
   /** The rating in UI units: 0-5, step 0.5. */
   value: number;
@@ -181,6 +182,12 @@ export default function StarRating({
    *  same artwork surface needs it too: a text readout has to keep the ink
    *  rule its stars follow, and the sky it defaults to is a fixed colour. */
   webTextClass?: string;
+  /** The user's OWN number's ink — the readout's third colour, because the
+   *  artwork surface needs all three: it defaults to the app's muted grey, and
+   *  the fullscreen player overrides it with the row's own ink, where the grey
+   *  sat a hair off a bright cover while the stars beside it wore that ink
+   *  (the owner's report: the local rating number "can be very hard to see"). */
+  ownTextClass?: string;
 }) {
   const { t } = useI18n();
   const [hover, setHover] = useState<number | null>(null);
@@ -374,7 +381,7 @@ export default function StarRating({
           name already carries the value there. */}
       {(readout !== "" || slot) && (
         <span
-          className={`relative ml-1.5 shrink-0 tabular-nums ${READOUT[size]} ${ownNumber ? "text-zinc-400" : webTextClass}`}
+          className={`relative ml-1.5 shrink-0 tabular-nums ${READOUT[size]} ${ownNumber ? ownTextClass : webTextClass}`}
           title={!ownNumber && webWords ? webTip : undefined}
           aria-hidden={readoutEditable ? undefined : true}
         >

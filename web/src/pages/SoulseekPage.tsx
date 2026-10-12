@@ -4272,7 +4272,9 @@ export default function SoulseekPage() {
     try {
       const r = await api.soulseekTestLog(g.username, logs.map((f) => ({ filename: f.file, size: f.size })));
       const text = r.logs
-        .map((l) => `${l.file}: ${l.score ?? "?"}/100${l.checksum ? ` · ${l.checksum}` : ""}`)
+        .map((l) => `${l.file}: ${l.score == null ? "unscored" : `${l.score}/100`}`
+             + (l.checksum ? ` · ${l.checksum}` : "")
+             + (l.accuraterip ? ` · AccurateRip ${l.accuraterip}` : ""))
         .join("  ·  ");
       setLogTest((m) => ({ ...m, [g.key]: { ok: r.ok, text: `${r.ok ? "PASS" : "FAIL"} — ${text}` } }));
     } catch (e) {

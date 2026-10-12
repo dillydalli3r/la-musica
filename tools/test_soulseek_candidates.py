@@ -1241,16 +1241,22 @@ JOB_RELEASE_2D = dict(JOB_RELEASE, media=[
     {"disc": 2, "position": 2, "title": "Delta", "length": 230000}])
 
 
-def score_logs(*, low=(), invalid=(), why="gap handling"):
-    """A _score_logs stand-in: 'low'/'invalid' name the logs to grade badly.
+def score_logs(*, low=(), invalid=(), unscored=(), why="gap handling"):
+    """A _score_logs stand-in: 'low'/'invalid' name the logs to grade badly,
+    'unscored' the ones Logchecker could not score (score None — which is NOT
+    a rejection on its own; the per-track CRCs still decide).
 
     Five-tuples, the shape the real scorer returns: the fifth is Logchecker's
     own note about the log, which the rejection reason quotes."""
     def fake(paths, cfg):
-        return [(p, 50 if os.path.basename(p) in low else 100,
-                 "invalid" if os.path.basename(p) in invalid else "ok", None,
-                 why if os.path.basename(p) in low else "")
-                for p in sorted(paths)]
+        out = []
+        for p in sorted(paths):
+            b = os.path.basename(p)
+            score = None if b in unscored else (50 if b in low else 100)
+            out.append((p, score,
+                        "invalid" if b in invalid else "ok", None,
+                        why if b in low else ""))
+        return out
     return fake
 
 
@@ -1316,7 +1322,7 @@ def job_stage_patches(cfg, scores, verified, imported, calls, **over):
 
 def run_job(release, rows, cfg=None, scores=None, queries=None, stub_cls=AutoSlsk,
             confirm_lossy=False, answer=None, keep_dir=False, search_seconds=None,
-            **over):
+            bodies=None, **over):
     """Drive one whole _run() against a scripted slskd and planted downloads.
 
     Files are planted as finished downloads only where the job is supposed to
@@ -1357,7 +1363,11 @@ def run_job(release, rows, cfg=None, scores=None, queries=None, stub_cls=AutoSls
     ddir = tempfile.mkdtemp(prefix="mlo-run-")
     try:
         for f in rows:
-            put_file(ddir, *f["file"].split("/"))
+            # `bodies` gives a planted file real content (a rip log whose
+            # AccurateRip section the .log gate has to read); everything else
+            # is the usual placeholder byte.
+            put_file(ddir, *f["file"].split("/"),
+                     body=(bodies or {}).get(f["file"], b"x"))
         stub = stub_cls(ddir, rows)
         verified, imported = [], []
         calls = []
@@ -2107,6 +2117,192 @@ try:
     assert ok is True and problems == [], (ok, problems)
 finally:
     shutil.rmtree(_verify_dir, ignore_errors=True)
+
+# --------------------------------------------------------------------------- #
+# The .log gate is EVIDENCE-FIRST: per-track CRCs are the requirement, and the
+# only things that reject are a checksum the log carries that does not verify,
+# an AccurateRip section that says a track failed, and a score BELOW the bar —
+# and only when Logchecker COULD score it. AccurateRip is never required, a log
+# checksum that is absent is never required, and a fresh download's log named
+# rip.log/XLD.log is the disc's log when it is the only one. (spec R391-R393)
+# --------------------------------------------------------------------------- #
+from mlo import audit as _mlo_audit  # noqa: E402  (patched below)
+
+_EAC_AR_OK_LOG = """Exact Audio Copy V1.6 from 23. October 2018
+
+Track  1
+     Filename C:\\rip\\01 - A.wav
+     Copy CRC 11111111
+     Accurately ripped (confidence 5)  [11111111]  (AR v2)
+Track  2
+     Filename C:\\rip\\02 - B.wav
+     Copy CRC 22222222
+     Accurately ripped (confidence 5)  [22222222]  (AR v2)
+
+All tracks accurately ripped
+"""
+_EAC_AR_FAIL_LOG = """Exact Audio Copy V1.6 from 23. October 2018
+
+Track  1
+     Filename C:\\rip\\01 - A.wav
+     Copy CRC 11111111
+     Accurately ripped (confidence 5)  [11111111]  (AR v2)
+Track  2
+     Filename C:\\rip\\02 - B.wav
+     Copy CRC 22222222
+     Cannot be verified as accurate (confidence 5)  [22222222], AccurateRip returned [33333333]  (AR v2)
+
+Some tracks could not be verified as accurate
+"""
+_XLD_AR_NG_LOG = """X Lossless Decoder version 20151214 (149.1)
+
+AccurateRip Summary
+    Track  1 : OK (confidence 3)
+    Track  2 : NG (confidence 3)
+    All tracks accurately ripped
+"""
+# no EAC/XLD/whipper header at all — a format the toolchain does not recognise,
+# but whose per-track CRCs are plain EAC-style and therefore readable.
+_UNKNOWN_FORMAT_LOG = """Some Ripper v1.0
+
+Track  1
+     Copy CRC AAAAAAAA
+Track  2
+     Copy CRC BBBBBBBB
+"""
+
+# (a) AccurateRip ABSENT is not a penalty; a stated result that verified is ok.
+assert mlo_discs.parse_log_accuraterip("Exact Audio Copy V1.6\n\nTrack  1\n"
+                                       "     Copy CRC 11111111\n") == (None, ""), \
+    "a log with no AccurateRip section must not be charged"
+assert mlo_discs.parse_log_accuraterip(_EAC_AR_OK_LOG)[0] == "ok"
+assert soulseek_auto._log_passes(100, "ok", 100) is True          # no AR stated
+assert soulseek_auto._log_passes(100, "ok", 100, "ok") is True    # AR verified
+# ...even a track "not present in the database" states no verdict, so nothing
+# is charged for it (AccurateRip is never required).
+assert mlo_discs.parse_log_accuraterip(
+    "Track  1\n     Copy CRC 11111111\n"
+    "     Track not present in AccurateRip database\n") == (None, "")
+
+# (b) a STATED AccurateRip failure rejects — EAC/XLD per-track line AND the
+#     aggregate footer, both caught, with the rip's own words as the detail.
+_state, _detail = mlo_discs.parse_log_accuraterip(_EAC_AR_FAIL_LOG)
+assert _state == "fail" and "AccurateRip returned" in _detail, (_state, _detail)
+assert soulseek_auto._log_passes(100, "ok", 100, "fail") is False
+# XLD's own summary spelling (: NG) is the same failure, even beside a blanket
+# "All tracks accurately ripped" footer — the per-track failure wins.
+assert mlo_discs.parse_log_accuraterip(_XLD_AR_NG_LOG)[0] == "fail"
+# a bare "CRC mismatch" (whipper's failed TEST run) is NOT an AccurateRip
+# verdict and must never be read as one.
+assert mlo_discs.parse_log_accuraterip(
+    "Log created by: whipper 0.7.4\n\nTracks:\n  1:\n    Status: Error, "
+    "CRC mismatch\n") == (None, "")
+
+# (c) the score bar counts only when a score EXISTS; a log checksum that is
+#     absent is never required, one that is present-and-wrong always rejects.
+assert soulseek_auto._log_passes(None, "ok", 100) is True          # unscored, clean
+assert soulseek_auto._log_passes(None, "unsupported", 100) is True  # XLD: no checksum
+assert soulseek_auto._log_passes(60, "ok", 100) is False           # below the bar
+assert soulseek_auto._log_passes(100, "ok", 100) is True
+assert soulseek_auto._log_passes(100, "missing", 100) is True      # absent checksum
+assert soulseek_auto._log_passes(100, "invalid", 100) is False     # present and wrong
+assert soulseek_auto._log_passes(None, "invalid", 100) is False    # wrong checksum still wins
+
+# (d) end to end: a log that happens to STATE an AccurateRip failure rejects the
+#     candidate with AccurateRip's own words, and the album is never requested.
+job = run_job(JOB_RELEASE, ONE_DISC_ROWS,
+              bodies={"Music/Album/rip 1.log": _EAC_AR_FAIL_LOG.encode()})
+assert not job.imported, job.job["result"]
+assert len(job.job["attempts"]) == 1, job.job["attempts"]
+_reason = job.job["attempts"][0]["reason"]
+assert "AccurateRip section" in _reason and "AccurateRip returned" in _reason, _reason
+assert job.enqueued == [["Music/Album/rip 1.log"]], job.enqueued
+
+# ...a log whose AccurateRip results all verified is ACCEPTED (not over-tight).
+job = run_job(JOB_RELEASE, ONE_DISC_ROWS,
+              bodies={"Music/Album/rip 1.log": _EAC_AR_OK_LOG.encode()})
+assert job.imported and job.job["attempts"] == [], job.job
+
+# (e) a log Logchecker could NOT score is not rejected by itself: the album is
+#     downloaded and its per-track CRCs decide (the verify stage is stubbed
+#     "pass" here — the CRC pass itself is pinned above and in
+#     tools/test_grading_paths.py). The outcome names the format it could not
+#     read, and nothing else was held against it.
+job = run_job(JOB_RELEASE, ONE_DISC_ROWS, scores=score_logs(unscored=("rip 1.log",)))
+assert job.imported and job.job["attempts"] == [], job.job
+assert any("Logchecker could not score it" in e["msg"] for e in job.job["log"]), \
+    [e["msg"] for e in job.job["log"]][-6:]
+
+# --------------------------------------------------------------------------- #
+# R393: the disc's log is found by what it NAMES, not only by the pattern — and
+# a log the toolchain does not recognise is accepted when its per-track CRCs
+# verify (a mismatch still rejects).
+# --------------------------------------------------------------------------- #
+class _FakeAudio:
+    """Stands in for mlo.audio.AudioFile: a MEDIA=CD track with a playtime, so
+    verify_album_checksums reaches its CRC comparison with no real decode."""
+    def __init__(self, path):
+        self.audio = SimpleNamespace(info=SimpleNamespace(length=200.0))
+        self.tech = {"length": 200.0}
+    def get_tag(self, key):
+        return "CD" if str(key).upper() == "MEDIA" else ""
+
+
+_logpick_dir = tempfile.mkdtemp(prefix="mlo-logpick-")
+try:
+    _a1 = put_file(_logpick_dir, "1-01 A.flac")
+    _a2 = put_file(_logpick_dir, "1-02 B.flac")
+    _discs1 = {1: [_a1, _a2]}
+    _logs = lambda: [os.path.join(_logpick_dir, f) for f in
+                     sorted(os.listdir(_logpick_dir)) if f.lower().endswith(".log")]
+    # a lone rip.log IS the disc's log (it states no disc, and it is the only one)
+    put_file(_logpick_dir, "rip.log")
+    assert mlo_discs._log_for_disc(_logpick_dir, _logs(), "CD-{n}", 1, _discs1) \
+        == os.path.join(_logpick_dir, "rip.log")
+    # a log that plainly names ANOTHER disc is never lent to this one
+    os.remove(os.path.join(_logpick_dir, "rip.log"))
+    put_file(_logpick_dir, "CD-2.log")
+    assert mlo_discs._log_for_disc(_logpick_dir, _logs(), "CD-{n}", 1, _discs1) is None
+    # a log that names THIS disc differently is accepted
+    os.remove(os.path.join(_logpick_dir, "CD-2.log"))
+    put_file(_logpick_dir, "Disc 1.log")
+    assert mlo_discs._log_for_disc(_logpick_dir, _logs(), "CD-{n}", 1, _discs1) \
+        == os.path.join(_logpick_dir, "Disc 1.log")
+    # ...and the canonical name wins when it is there
+    put_file(_logpick_dir, "CD-1.log")
+    assert mlo_discs._log_for_disc(_logpick_dir, _logs(), "CD-{n}", 1, _discs1) \
+        == os.path.join(_logpick_dir, "CD-1.log")
+finally:
+    shutil.rmtree(_logpick_dir, ignore_errors=True)
+
+_vname_dir = tempfile.mkdtemp(prefix="mlo-vername-")
+try:
+    _v1 = put_file(_vname_dir, "1-01 A.flac")
+    _v2 = put_file(_vname_dir, "1-02 B.flac")
+    # the ONLY log, named rip.log, is an unknown format whose per-track CRCs ARE
+    # readable (EAC-style "Copy CRC" under "Track N") — it must verify by CRC.
+    put_file(_vname_dir, "rip.log", body=_UNKNOWN_FORMAT_LOG.encode())
+    _crcs = {_v1: "AAAAAAAA", _v2: "BBBBBBBB"}
+    _cfg_crc = {"audit_verify_cd_checksums": True}
+    with Patch(mlo_discs, AudioFile=_FakeAudio,
+               _audio_crc32=lambda _ff, p, skip_zero=False: _crcs.get(p)), \
+         Patch(_mlo_audit, recorded_crc=lambda *a, **k: "",
+               note_crc=lambda *a, **k: None):
+        _verdicts, _unverified = mlo_discs.verify_album_checksums(
+            "ffmpeg", _vname_dir, [_v1, _v2], dict(_cfg_crc), workers=1)
+    assert _verdicts == {_v1: "REAL", _v2: "REAL"} and _unverified == {}, \
+        (_verdicts, _unverified)
+    # a CRC that does NOT match the audio still rejects (never weakened)
+    _crcs[_v2] = "DEADBEEF"
+    with Patch(mlo_discs, AudioFile=_FakeAudio,
+               _audio_crc32=lambda _ff, p, skip_zero=False: _crcs.get(p)), \
+         Patch(_mlo_audit, recorded_crc=lambda *a, **k: "",
+               note_crc=lambda *a, **k: None):
+        _verdicts, _unverified = mlo_discs.verify_album_checksums(
+            "ffmpeg", _vname_dir, [_v1, _v2], dict(_cfg_crc), workers=1)
+    assert _verdicts[_v2] == "FAKE" and _unverified == {}, (_verdicts, _unverified)
+finally:
+    shutil.rmtree(_vname_dir, ignore_errors=True)
 
 # 18. A template slskd errored on is reported even while ANOTHER template
 #     found the album: "one query failed" must never be hidden behind the

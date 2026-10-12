@@ -93,11 +93,10 @@ Grade script (4) over an album and reading the report.
     `["discogs_token"]` in `server.sources_health._specs`, whose probe row
     reports "needs a … (Settings → Sources)" rather than a failure), and every
     provider is listed in `/api/discovery/sources` where the picker offers it.
-  - **Album of the Year is registered in the DISCOVER registry too**
-    (`server/discover.py`), as a metadata source: it states genres and user
-    scores (read by the genre and rating chains) and publishes no keyless list
-    or chart feed this app reads, so it is never a chart and its row names the
-    `aoty_cookie` it needs.
+  - **Album of the Year was removed from the DISCOVER registry on
+    2026-10-12**, with the other scraped host: its metadata row and the
+    `aoty_cookie` it needed are gone, and no scraped host is a discovery
+    source or a chart any more.
   Pinned by `tools/test_description_identity.py` (all four providers, their
   chains, the keyless/keyed gating and the Last.fm placeholder rule, stubbed
   offline) and verified live for the two keyless ones.
@@ -157,12 +156,12 @@ An issue is `{code, label, where, reason}` for album-level and artist problems
 | `UNREADABLE` | the file could not be opened/decoded |
 | `TITLE`, `ARTIST`, `ALBUM`, `ALBUMARTIST`, `DATE`, `TRACKNUMBER`, `DISCNUMBER`, `GENRE`, `MOOD`, `ENERGY`, `ITUNESADVISORY`, `INSTRUMENTAL`, `DYNAMIC RANGE`, `REPLAYGAIN_*`, `INITIALKEY`, `BPM`, `MEDIA`, `SOURCE`, `ENCODER_*`, `ACOUSTID_ID`, `ACOUSTID_FINGERPRINT`, `LOG_GRADE` | the tag (or its presence check) failed; the tag's own name is the code |
 | `MOOD_MISSING`, `ENERGY_MISSING`, `GENRE_MISSING` | the per-tag presence checks (`TAG_PRESENCE_CHECKS`) |
-| `GENRE_COUNT`, `GENRE_STRUCTURE`, `GENRE_VOCAB`, `GENRE_CASE` | genre count, structure (a repeat, or the derived parent slot older builds wrote), vocabulary, and the spelling every writer produces (`metal` → `Metal`) |
+| `GENRE_COUNT`, `GENRE_STRUCTURE`, `GENRE_VOCAB`, `GENRE_CASE` | genre count, structure (a repeated name), vocabulary, and the spelling every writer produces (`metal` → `Metal`) |
 | `TAGS` | excess tags |
 | `PATH`, `PATH_CASE` | naming-script mismatch / case-only mismatch |
 | `LYRICS` | lyrics missing, wrongly formatted, or present on an instrumental |
 | `XLIT_MISSING`, `XLIT_UNNEEDED` | a needed transform is absent / an unneeded one is stored |
-| `MB_LINK`, `RYM_LINK` | a required identity link is missing |
+| `MB_LINK` | a required identity link is missing (`RYM_LINK` was removed 2026-10-12 with the `RATEYOURMUSIC_*` vocabulary) |
 | `COVER` | cover missing or failing the size/square rules |
 | `CRC`, `CRC_MISMATCH` | a track is not covered by its disc's `.log` CRC / its CRC does not match |
 | `CD_FORMAT` | a CD track is not 16-bit/44.1 kHz FLAC |
@@ -497,7 +496,7 @@ group still renders (section *Other checks*).
 | `grade_check_energy` | Energy tag present | ON | `ENERGY` (0-100) exists (`ENERGY_MISSING`) |
 | `grade_check_genre` | Genre tag present | ON | `GENRE` exists (`GENRE_MISSING`) |
 | `grade_check_genre_count` | Genre count per track | ON | at most `mb_genre_count` genres (default 2, max 3) — a ceiling, never a quota (`GENRE_COUNT`) |
-| `grade_check_genre_structure` | Genre structure | ON | no repeated name and no derived parent slot in `GENRE` (`GENRE_STRUCTURE`) — the tag holds what a source stated, and the level above a name is derived, never stored |
+| `grade_check_genre_structure` | Genre structure (no repeated name) | ON | no REPEATED name in `GENRE` (`GENRE_STRUCTURE`). The derived-parent slot and the non-canonical-order defects it used to report went with the parent idea on 2026-10-12: a file's order is the source's own rank (MusicBrainz's vote count), so no grader can know what another order should have been |
 | `grade_check_genre_vocab` | Genre vocabulary | ON | every name is one MusicBrainz publishes (`GENRE_VOCAB`); grading never rewrites the tag |
 | `grade_check_web_rating` | Web rating present + in shape | ON | `WEBRATING` exists on every audio track (`WEBRATING_MISSING`) **and is a whole number 0-100** in its one spelling (`WEBRATING_FORMAT`; `ALBUMWEBRATING_FORMAT` when a file carries the album twin, judged only while it is there) — the public verdict script 24 gathers, required per track like the genre beside it. A source's own scale pasted in raw ("4.54") fails and names script 24; a stray decimal point ("91.0") is the same rating spelled differently and script 10/23 rewrite it (R358e). The check **stands down** with `web_ratings_enabled` off (nothing gathers a rating, so nothing is failed for its absence) and never applies to a music-video container, which carries no `WEBRATING` tag |
 | `grade_check_replaygain` | ReplayGain tags present | ON | opt-in per file: any `REPLAYGAIN_*` tag means all four must exist |
@@ -548,7 +547,7 @@ group still renders (section *Other checks*).
 | Check id | Label | Default | Asserts |
 | --- | --- | --- | --- |
 | `grade_check_mb_links` | MusicBrainz release link | ON | `MUSICBRAINZ_ALBUMID` (or a release-group id) is tagged (`MB_LINK`) |
-| `grade_check_rym_links` | RateYourMusic release link | ON | `RATEYOURMUSIC_ALBUM` is tagged (`RYM_LINK`) |
+| `grade_check_rym_links` | — | REMOVED | the check and its `RYM_LINK` issue code were removed on 2026-10-12, when `RATEYOURMUSIC_*` left the app's vocabulary: there is no key, no migration flip and no grader presence check, nothing reads, writes or displays a RateYourMusic link, and a file still carrying one of the tags fails `grade_check_excess_tags` until the strip pass (script 10 / Optimize) removes it |
 | `grade_check_cover` | Cover art | ON | the album has a cover (`cover.jpg`/`jpeg`/`png`/`jxl`) meeting the size rules (`COVER`) |
 | `grade_check_cover_crop` | Cover aspect ratio (squareness) | ON | `|w/h − 1| ≤ cover_crop_threshold` (an aspect test, not crop detection) |
 | `grade_check_sidecar_cover` | Per-track sidecar covers | ON | per-track covers meet the same rules |
@@ -677,7 +676,7 @@ graded, taggable track rather than an invisible one.
 The three presets are one-click starting points on the Grading page; they edit
 the local config copy and only take effect on **Save** (`POST /api/config`).
 **R18 — the SHIPPED defaults ARE Strict**: every `grade_check_*` and every
-`grade_include_*` key ships `true` (70 of 70), so a fresh install grades
+`grade_include_*` key ships `true` (69 of 69), so a fresh install grades
 strictly with nobody pressing anything. The two that used to ship off —
 `grade_check_audit` and `grade_include_other` — are named in
 `mlo/config.py::STRICT_DEFAULT_KEYS`, so the change is a readable fact rather
@@ -687,13 +686,13 @@ already has, and pressing it on an edited config restores it.
 **R19 — Balanced** is the pre-strict set: the defaults with `grade_check_audit`
 and `grade_include_other` off — the one-click way back to the old behaviour for
 a collection nobody has audited.
-**R20 — Relaxed** loads the defaults and then switches these 18 keys **off**:
+**R20 — Relaxed** loads the defaults and then switches these 17 keys **off**:
 `grade_check_tag_spaces`, `grade_check_tag_case`, `grade_check_lyrics_spaces`,
 `grade_check_cue_spaces`, `grade_check_cover_crop`, `grade_check_lyrics_zero`,
 `grade_check_tag_blank_lines`, `grade_check_lyrics_blank_lines`,
 `grade_check_cue_blank_lines`, `grade_check_filename_case`,
 `grade_check_ext_case`, `grade_check_excess_tags`, `grade_check_mb_links`,
-`grade_check_rym_links`, `grade_check_replaygain`,
+`grade_check_replaygain`,
 `grade_check_album_description`, `grade_check_artist_image`,
 `grade_check_artist_description`.
 
@@ -824,7 +823,7 @@ The default writer of everything else is *Beets tagging (14) · import*.
 | --- | --- | --- | --- |
 | `TITLE`, `ARTIST`, `ALBUM`, `ALBUMARTIST`, `TRACKNUMBER`, `DISCNUMBER`, `DATE` | identity | Beets tagging (14) · import | `grade_check_missing_tags` |
 | `TITLEALIAS`, `ARTISTALIAS` (identity), `ALBUMALIAS` (release) | identity / release | Beets tagging (14) · import (the album-level pair) · locale aliases · the tag editor | `grade_check_alias_needed` (missing where a name needs one), `grade_check_alias_excess` (present where none is needed), `grade_check_excess_tags` (the family is in `TAG_ALLOWLIST`, bare or locale-suffixed, so a legitimate alias is never a foreign tag) |
-| `GENRE` | identity | Auto tagging (8) · genre import · Format all (10) trims | `grade_check_genre`, `_genre_count`, `_genre_order`, `_genre_vocab` |
+| `GENRE` | identity | Auto tagging (8) · genre import · Format all (10) trims | `grade_check_genre`, `_genre_count`, `_genre_structure`, `_genre_vocab` |
 | `MEDIA`, `SOURCE` | release | Format lyrics (1) · media/source normalization | `grade_check_media`, `grade_check_source` |
 | `ITUNESADVISORY` | identity | Auto tagging (8) · advisory fetch | `grade_check_missing_tags` |
 | `WEBRATING`, `WEBRATING_SOURCE`, `ALBUMWEBRATING`, `ALBUMWEBRATING_SOURCE` | opinion | Web ratings (24) | `grade_check_web_rating` (the per-track `WEBRATING`; the album-level pair is carried, never graded) |
@@ -843,7 +842,7 @@ The default writer of everything else is *Beets tagging (14) · import*.
 | `TRANSLITERATION`, `TRANSLATION` | lyrics | Lyrics transliterate (AI) (17) | `grade_check_xlit_transliteration`, `_xlit_translation`, `_lyrics_lang_tags` |
 | `ACOUSTID_ID`, `ACOUSTID_FINGERPRINT` | provenance | the import wizard's AcoustID apply (fingerprint match) — the PAIR in one save, verified by re-read — and Fix AcoustID pairs (21), which every import chain runs over the album it just imported: it completes a half pair, and creates the pair for a file that names its recording but carries none (the id from the file, the fingerprint local) | `grade_check_acoustid` ; the pair is REQUIRED on every audio track (`grade_check_acoustid`), and BOTH spellings a tagger writes are read — this app's `ACOUSTID_ID` and beets/mediafile's `Acoustid Id` / `Acoustid Fingerprint`, the spelling its chroma plugin writes and this app's own import runs |
 | `ENCODER_PROGRAM`, `ENCODER_QUALITY`, `ENCODER_VERSION` | provenance | Optimize FLACs (3) | `grade_check_encoder` |
-| `MUSICBRAINZ_*`, `RATEYOURMUSIC_*`, `RELEASETYPE`, `CATALOGNUMBER`, `LABEL`, `BARCODE`, `ISRC`, `WORK`, `MOVEMENT`, … | release | Beets tagging (14) · import · MusicBrainz writes | `grade_check_album_tags`, `grade_check_mb_links`, `grade_check_rym_links`, `grade_check_naming` |
+| `MUSICBRAINZ_*`, `RELEASETYPE`, `CATALOGNUMBER`, `LABEL`, `BARCODE`, `ISRC`, `WORK`, `MOVEMENT`, … | release | Beets tagging (14) · import · MusicBrainz writes | `grade_check_album_tags`, `grade_check_mb_links`, `grade_check_naming` — the `RATEYOURMUSIC_*` tags left the vocabulary on 2026-10-12 (a file still carrying one is an EXCESS tag until the strip pass removes it) |
 | `PERFORMER`, `PRODUCER`, `ENGINEER`, `MIXER`, `ARRANGER`, `DJMIXER`, `CONDUCTOR`, `WRITER`, `DIRECTOR`, `COMPOSERSORT`, `MUSICBRAINZ_COMPOSERID` | release | Beets tagging (14, `beets_credits`) · Auto tagging (8) — the release's own artist/recording/work relations, fetched in ONE request per album | `grade_check_excess_tags` (allowlisted, never foreign) |
 | `ASIN`, `LANGUAGE`, `DISCSUBTITLE`, `LICENSE`, `ENCODEDBY` | release | Beets tagging (14) · Auto tagging (8) | `grade_check_excess_tags` |
 
@@ -941,107 +940,76 @@ rating.
   groups left by omitted conditionals are removed, runs of whitespace collapse,
   and trailing dots/spaces are stripped.
 
-### 7.2 Genre names, count and the derived hierarchy
+### 7.2 Genre names and the count
 
 - **R37** — at most `mb_genre_count` genre NAMES per track (default **2**, hard
   ceiling `GENRE_COUNT_MAX = 3`) — a ceiling, never a quota: nothing is padded,
-  and the cap counts only names a source STATED. The hierarchy above them is
-  free: a three-level genre costs one slot.
-- **R38 — a GENRE tag holds the names a source stated, and nothing else.** The
-  level above a name is DERIVED (`mlo.genre_vocab.path_of`), never written, so
-  position carries no meaning and a list in any order is in shape. Two things
-  remain defects, and they are what `GENRE_STRUCTURE` reports: a repeated name,
-  and ANY name another member of the same list sits under — the family SLOT
-  older builds wrote, and the same redundancy wherever a source put it
-  (`Pop; Art Pop` and `Art Pop; Pop` both mean `Art Pop`, where nobody stated
-  `Pop`). MEASURED on the owner's own library (2026-10-11): the rule used to
-  drop the redundant name only when it was FIRST, so the same pair in the
-  source's other order kept it, and 15 of 31 tracks carried an ancestor beside
-  its child while a sibling track did not — "the parent genres of some tracks
-  are the normal genre of others". The drop is now POSITION-FREE:
-  `mlo.genres.normalize_genres` removes every name that is a strict ancestor of
-  another name in the SAME list, `mlo.genres._drop_derived_parents` is that one
-  predicate (script 10, the import's canonical pass and the grader all call
-  it), a head a source really stated — alone, or beside a genre it does NOT
-  contain (`Rock` + `Jazz`, `Hip Hop` + `Electropop`) — is left exactly as it
-  came, and the check names the files the app has not rewritten yet. The old
-  `grade_check_genre_order` key is GONE (a saved copy is inert: nothing reads
-  it).
-- **R38a — the hierarchy is a three-level-deep VIEW of one node graph.** Every
-  name resolves to its IMMEDIATE parent and, through it, to one of the 28 heads:
-  `deep house` → `house` → `electronic` (`parent_of` / `path_of` / `top_of` in
-  `mlo/genre_vocab.py`). A name that is a parent in one place and a genre in
-  another needs no special case — `house` is one NODE, and a track may hold it
-  outright — because the app only ever asks "what is above X?". The rules come
-  from a curated middle table (`_PARENT_OF`, 268 edges) plus the 284-entry
-  `_FAMILY_OF`, then keyword rules: token matching first, prefix/suffix as a
-  second pass only, and no bare substring (MEASURED over MusicBrainz's 2 202
-  names: substring matching misfired on 21% of the names it answered —
-  `detroit techno` and `harsh noise` were `punk` from the `oi` inside
-  "detroit"/"noise", `graphical sound` was `hip hop`; after the two-pass rule
-  995 names have a head and `rocksteady` stays reggae rather than rock). Every
-  table name is a real MusicBrainz genre and every chain ends on a head
-  (`tools/test_genre_vocab.py`), a head has NO parent, and no parent is
-  preferred to a wrong one. Read by: `/api/genres/facets` (each row carries
-  `path` — the NAME with its chain above it, "Pop › Synth-Pop"), the browse
-  buckets (`genre_category` files by HEAD), the genre page's chips, the import
-  wizard's per-track row (which shows the PARENTS only, "under Hip Hop", since
-  a path printed beside the name repeats it: `genreParents` in
-  `web/src/lib/genres.ts` drops the tail, and each chip carries its own place
-  as its tooltip), and the recommendation shelves
+  and the cap counts only names a source STATED. The FIRST names win, because
+  the caller's order IS the rank: MusicBrainz publishes an entity's genres by
+  vote count (its most-voted first) and `normalize_genres` caps the list
+  WITHOUT reordering it, so a file stores the top `mb_genre_count` of the
+  source's own list.
+- **R38 — a GENRE tag holds the names a source stated, nothing else, in the
+  SOURCE's own order.** MusicBrainz publishes each entity's genres by vote
+  count (its most-voted first), `server.integrations._genres` preserves that
+  order, and `mlo.genres.normalize_genres` caps the list at `mb_genre_count`
+  WITHOUT sorting it — so a file stores the TOP `mb_genre_count` MusicBrainz
+  genres in MusicBrainz's own order, and a manually entered list is stored
+  exactly as typed. The ORDER is a RANKING, not an alphabetization, and the
+  rendering (`format_genres`) never reorders what a file stores; POSITION
+  carries no defect, because no check can know what another order should have
+  been. **The PARENT idea is REMOVED** (2026-10-12, the owner's call): it is
+  genuinely debatable what should sit above a name (`industrial rock`'s parent
+  could be `industrial` or `rock`, and no data settles it), so
+  `normalize_genres` no longer drops a name another member of the list sits
+  under, `mlo.genres._drop_derived_parents` and `family_of` are deleted, and
+  nothing derives or grades a "level above". `mlo.genres.issues()` now reports
+  only missing / too many / duplicate / unknown / spacing (the `derived parent
+  genre stored` and `genre order not canonical` lines are gone), and
+  `mlo/import_policy.py` no longer carries a `GENRE_ORDER` code.
+- **R38a — the genre hierarchy is REMOVED, and `mlo.genre_vocab` now serves
+  only two internal browse aids.** The three-level view this rule described —
+  `deep house` → `house` → `electronic` via `path_of`/`top_of` and the curated
+  `_PARENT_OF` / `_FAMILY_OF` tables — was retired with the parent idea on
+  2026-10-12: no tag, check, row or surface prints a "level above" a name any
+  more. `/api/genres/facets` rows carry no `path` field, the browse buckets no
+  longer file a name by a head, the genre page's chips are plain names, and the
+  import wizard's per-track row no longer shows "under …" parents
+  (`web/src/lib/genres.ts`'s `genreParents` is gone with it).
+  What survives is `parent_of` / `top_of` / `is_parent`
+  (`mlo/genre_vocab.py`), still used by EXACTLY two internal aids —
+  `server.recommend`'s artist bucketing and the keyword fallback's broad
+  family — and by nothing that writes, checks or displays a genre.
 - **R39** — every name must exist in MusicBrainz's 2 202-name list
   (`mlo/_genre_names.py`, canonicalized through `mlo/genre_vocab.py`); an alias
   table folds the spellings sources emit (`rnb` → `r&b`, `synthpop` →
   `synth-pop`). A name MusicBrainz does not publish is still stored (dropping
   what a source said is worse) and is what `GENRE_VOCAB` reports.
 - **R39a — the source list ships complete, and the ask stops when a track is
-  full.** `genre_sources` is a PRIORITY list: `GENRE_SOURCES`
-  (`server/integrations.py`) is the shipped order — **RateYourMusic,
-  MusicBrainz, Album of the Year** — and
-  `mlo.config.DEFAULT_CONFIG["genre_sources"]` IS that list
-  (`tools/test_genres.py` asserts the two are equal). The order is the owner's,
-  and it follows what each site can actually answer: RYM is the only one of the
-  three that classifies a TRACK (its release rows link each track's own
-  `/song/…` page), MusicBrainz answers per RECORDING and is keyless and
-  challenge-free, and AOTY publishes no per-track genre at all — its genre row
-  is the RELEASE's — so it is the album-level floor under both. The previous
-  order (AOTY second) is in `LEGACY_DEFAULT_GENRE_SOURCES`. `normalize_config`
-  migrates every order this app ever shipped — the four older chains and the
-  11-source order that preceded them (`LEGACY_DEFAULT_GENRE_SOURCES`,
-  `LEGACY_GENRE_SOURCES`) — to the current default, and DROPS every id this
-  build no longer knows (`_GENRE_SOURCE_IDS`), so an untouched install follows
-  the current default, a list the user edited is kept exactly as saved once its
-  dead ids are gone, and a source the app cannot ask is never carried. With
-  `ai_genre_inference` on and an AI endpoint configured the model is a LAST
-  RESORT rather than the first move: it is handed the merged list only when the
-  three sources did not settle the track themselves (they disagree, or answer
-  nothing at all); otherwise every field is exactly what the sources produced.
-  The sources are asked in that order until every track is SETTLED (`tracks_full`
-  — the early stop), which happens when either (a) the merged list reaches the
-  cap, or (b) ANY source answered at TRACK level for that track (`level ==
-  "track"`). A track-level answer is the strongest thing a source can say, so it
-  ends the search by itself; an ALBUM- or ARTIST-level answer does NOT, because
-  stopping on one is what kept the later sources' per-track tiers from ever
-  being asked. A source that could only repeat a classification already in hand
-  must not be paid a request for it, and the sources below are fallbacks rather
-  than a second opinion. The surfaces
-  offer ONE `Import genres` action with the source tray beside it: the tray
-  lists every source the app knows, ticks the enabled ones, says what each one
-  provides, and carries the reset back to the shipped default. An IMPORT runs
-  this chain by itself (`server.imports.finish_album`'s genres step, whose
-  release is the one the import resolved — no script is needed for it, and
-  script 8 only trims what it wrote): the unattended download therefore lands
-  with the genres its sources can supply, and a Genres family the user kept for
-  themselves is both left alone AND reported as a gap, so the prompt still says
-  what is waiting.
-- **R40** — the family is *derived*, never asked of a model and never stored
-  (R38/R38a); a genre with no known parent gets **no** level above it rather
-  than a wrong one. MEASURED live on the owner's own album: RYM's per-track rows
-  answered 15 of 16 tracks at `level: track` (`Orchestral Intro` → `Cinematic
-  Classical`, `White Flag` → `Experimental Hip Hop`), AOTY answered the RELEASE
-  only (`level: album`, 0 per-track rows — confirmed, see R93), and the derived
-  paths read `Classical › Cinematic Classical`, `Hip Hop › Experimental Hip
-  Hop`, `Pop › Synth-Pop`
+  full.** RETIRED 2026-10-12, with the two scraped hosts: the priority chain
+  this rule described — RateYourMusic, MusicBrainz, Album of the Year, asked in
+  that order until every track was SETTLED, with `normalize_config` migrating
+  every order the app ever shipped — existed to RANK the sites it scraped.
+  MusicBrainz is now the only genre source (`genre_sources` ships
+  `["musicbrainz"]`, `_GENRE_SOURCE_IDS` is that one id), so there is nothing
+  to order: R39's vocabulary rule and R92's recording → release group → release
+  → artist cascade are the whole policy, the source tray ticks the one source
+  it knows and carries the reset back to that default, and an import still
+  fills the genres its source can supply (`server.imports.finish_album`'s
+  genres step — no script is needed for it, and script 8 only trims what it
+  wrote), leaving a Genres family the user kept for themselves alone AND
+  reported as a gap. `ai_genre_inference` is unchanged: with an AI endpoint
+  configured the model is a LAST RESORT, handed the merged list only when the
+  source did not settle the track itself.
+- **R40 — the family above a name is REMOVED, and nothing is derived from a
+  genre list.** (2026-10-12, the owner's call.) The old rule derived a
+  three-level view above each name and never stored it; with the parent idea
+  gone, `mlo.genres.normalize_genres` only canonicalizes, de-duplicates, caps
+  and capitalizes — it ADDS nothing, reorders nothing and removes nothing for
+  being someone's parent. The names come from MusicBrainz alone — its
+  recording → release group → release → artist cascade (R92) — and a track
+  whose genres a MusicBrainz answer never supplies leaves the album FAILING
+  grading (`GENRE_MISSING`, `grade_check_genre`, default on).
 - **R41** — the stored value IS the display form, and it is title-cased with
   explicit exceptions (small connectives lowercased; `IDM`, `EDM`, `UK`, `R&B`,
   `DnB`, `DJ`, … upper-cased; each hyphenated chunk capitalized): every writer
@@ -1085,56 +1053,18 @@ rating.
   MusicBrainz source resolves the same way (recording → release → release group
   → artist, `_genre_source_answers`). Nothing is invented: an empty cascade is
   an empty answer, not a guessed genre.
-- **R93 — every source answers at the finest level it has.** The chain
-  (`integrations.genre_chain`, `mlo.config["genre_sources"]`) asks its three
-  sources in the configured priority order and stops once the writer's policy
-  can write a COMPLETE list, so the entries below the answering one are
-  fallbacks, not a second opinion. Each one answers at the FINEST level it has
-  and falls back track → album → artist, and each source's own level is fixed
-  and documented in `GENRE_SOURCES`: rateyourmusic per track — the release
-  page's rows LINK each track's own `/song/…` page, which is where the track's
-  own genre lives (its release-level list, then the artist page, behind it);
-  musicbrainz per recording (with the work's genres behind it), then the release
-  group/release, then artist; albumoftheyear at its finest GENRE level — the
-  release, then the artist page. **AOTY has NO per-track genre** (VERIFIED live,
-  2026-10-11: its album page carries only a release-level genre row, and its
-  song pages carry scores, never genres), so an AOTY answer is always
-  `level: album` and the chain never pretends otherwise. **The album's own
-  track TITLES decide the EDITION**: a release page whose own track list covers
-  less than `RYM_COVERAGE_MIN` of them is not trusted as this release, and the
-  page's OWN version list is walked — no search, no slug guess, each candidate
-  verified the same way — so a library holding the deluxe pressing reads the
-  edition that matches (MEASURED on the owner's album: the release page links
-  36 per-edition URLs; `tools/test_rym_links.py` pins the standard-vs-deluxe
-  case). RYM's genre extraction is scoped to the page MINUS its track rows: a
-  row's own genre is that track's and is never promoted to the release, and the
-  release's own list is read from the head — the 8 anchors on `Plastic Beach`
-  are RYM's own genre list for the record, byte-for-byte what the site prints. RateYourMusic and Album of the
-  Year are read LIVE through Cloudflare — a challenge needs a cleared
-  `rym_cookie`/`aoty_cookie` or the configured `cf_solver_url` — while
-  MusicBrainz is the keyless, challenge-free floor under both. A source
-  marked per-track that cannot answer per track answers nothing rather than
-  passing an album's list off as a track's.
-  **The per-track tier has its OWN clock.** RateYourMusic's release page and
-  each track's own `/song/…` page are separate budgets (`RYM_MAX_WALL` for the
-  release lookup, `RYM_TRACK_BUDGET` + `RYM_TRACK_PAGE_MAX` for the track
-  pages, every page cached 30 days): MEASURED 2026-10-11, the release page is
-  answered by the BROWSER route on a network where the plain client is refused,
-  and paying that route's challenge costs 30-50 s cold — a tier that inherited
-  the release lookup's 20 s wall stopped before its FIRST track page, and the
-  release's own genres silently became every track's answer. **And a DOCUMENT
-  path goes to the browser FIRST when no `rym_cookie` is stored**: `/release/`
-  and `/song/` answer `503` to an anonymous plain client (while `/artist/` and
-  `/search` answer `200`), so `_rym_document_refused_by_plain` skips a retry
-  chain that is already known to end in a refusal — with the borrowed session
-  in the browser those pages are `200`, and a `5xx` still falls back to the
-  browser once before it is allowed to count as "RYM unreachable". MEASURED
-  end to end on the owner's own album, no cookie stored: 15 of 16 tracks
-  answered at `level: track` (`Orchestral Intro` → `Cinematic Classical`,
-  `White Flag` → `Experimental Hip Hop`, `Glitter Freeze` → `Electroclash`),
-  and the files written with `Classical; Cinematic Classical`, `Hip Hop;
-  Experimental Hip Hop`, … (each name canonicalized, the derived parent NOT
-  written, capped at `mb_genre_count`).
+- **R93 — every source answers at the finest level it has.** RETIRED
+  2026-10-12, with the two scraped hosts: this rule fixed what each of the
+  chain's sources could answer — RateYourMusic per track through its `/song/…`
+  pages, Album of the Year at the release only — and how the chain read them
+  live through Cloudflare, the per-track tier's own clock, and the browser
+  route a refused document path fell back to.
+  MusicBrainz is now the only source, and R92 already describes it exactly:
+  it answers at the finest level it has (recording → release group → release →
+  artist, with the work's genres behind the recording) and nothing is passed
+  off as a level it did not state. The RYM edition/coverage rules, the
+  `rym_cookie`/`aoty_cookie` challenges and the browser clock they measured go
+  with the sites.
 
 ### 7.3 ReplayGain and dynamic range
 
@@ -1546,7 +1476,29 @@ rating.
     sits straight on the artwork, where a zinc-600 outline and an accent fill
     both blend into a bright cover. The outline keeps a little air, the filled
     halves take the ink at full strength — the polarity of R52c applied to a
-    control.
+    control. **The readout beside the stars is the same ink, all three
+    colours**: the reader's own number wears the row's ink at full strength
+    (`ownTextClass="text-current"` — the control's default `text-zinc-400` put
+    the local rating a hair off a bright cover while the stars beside it had
+    flipped, the owner's report, 2026-10-12: "the rating number text can be
+    very hard to see"), and the web reading's words wear the same ink at 80 %
+    (not the 70 % they shipped with: 70 % over the light table's own 75 % ink
+    composited to ~4.0:1, just under AA for a 12 px readout — "more visible but
+    still not great"). MEASURED over the four stubbed covers by
+    `tools/check_np_metadata_contrast.cjs`, which seeds the rating and the web
+    value through the app's own `/api/ratings` and `/api/tags` answers.
+  * **A translation sub-line wears the SUNG LINE's ink, never the accent's.**
+    The sub-line under a lyric line carries no colour class of its own and
+    inherits its row's ink (`renderLine`) — the translation is the same words,
+    and the table already answered what a glyph on this cover must be. It used
+    to read `text-accent-soft/70`, which follows the ACCENT rather than the
+    cover: on a bright cover that is the shipped white accent at 70 % — the
+    near-invisible grey the owner reported under the Spanish line of "Latin
+    Simone" (2026-10-12) while every ink beside it flipped with the artwork.
+    When a transliteration replaces the original (`replaced`) it IS the primary
+    line and already wears this ink. `data-lyric-trans` is the hook
+    `tools/check_np_metadata_contrast.cjs` reads the sub-line by; the `xlit`
+    size and `font-normal` keep it distinct from the (semibold) sung line.
 
 - **R266 — a lyric pane follows the SOUND, not the decoder.** Every element the
   app plays is routed through the WebAudio graph (`createMediaElementSource` →
@@ -1883,8 +1835,9 @@ rating.
   (`mlo/autotag.py::_country_upgrade` — a country the release does not state is
   never added to the list).
 - **R57e — `GENRE` is a list of names, and `%genre%` is that whole list on both
-  sides of an import.** The tag holds one repeated field per name (R57a),
-  broad-first per R38/R41, canonicalised and capped by the one genre policy. The
+  sides of an import.** The tag holds one repeated field per name (R57a), the
+  specific names a source stated in the SOURCE's own order per R38,
+  canonicalised and capped by the one genre policy. The
   naming variable is the `"; "`-joined list on the organizer's side
   (`mlo/naming.py::track_variables`, which passes `GENRE` through while
   `RELEASECOUNTRY` / `LABEL` are the two that reduce to their first value — R33)
@@ -2504,56 +2457,46 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   cookie file on write, capped at 512 KiB, and reported back with its cookie
   count and domains.
 - **R81 — the RateYourMusic credential can be imported from a cookies.txt.**
-  RYM has no API: `rym_cookie` is the user's own signed-in session cookie, and
-  RYM's `session` cookie is HttpOnly — no script and no "copy the Cookie header"
-  from devtools can ever see it, so a browser extension's Netscape `cookies.txt`
-  export is the only way most users can hand it over at all. Settings →
-  Discovery therefore takes the file (pasted or dropped) as well as the manual
-  header paste: `POST /api/rym/cookies` parses it with the SAME parser the
-  yt-dlp jar uses (`server/cookies.py`'s parser — one file-or-junk
-  rule for both), keeps ONLY the cookies whose host is `rateyourmusic.com` or a
-  subdomain of it (the export carries every site the profile holds), and writes
-  the survivors into `rym_cookie` in file order, as the exact
-  `name=value; name=value` string the manual box accepts, through the app's own
-  config writer — so `_rym_cookie`/`_rym_cookiejar` pick it up unchanged, the
-  box and the import cannot disagree, and a restart keeps it. `rym_cookie`
-  remains the ONE place the credential lives (no second file, no second config
-  key). A file with no `rateyourmusic.com` cookie stores NOTHING and says why
-  (a signed-out tab's export must not cost a working session); junk and an
-  oversize body are refused before any write; and no route — `GET
-  /api/rym/cookies` included — ever returns, logs or shows a cookie VALUE: the
-  panel is told the cookie NAMES, the count, whether `session` is among them
-  (without it RYM answers as a guest) and warnings as sentences.
+  RETIRED 2026-10-12, with the two scraped hosts: this rule documented the
+  `rym_cookie` import — Settings → Discovery took a Netscape `cookies.txt`
+  (pasted or dropped) or a manual `Cookie` header paste, `POST /api/rym/cookies`
+  parsed it with `server/cookies.py`'s parser and kept only
+  `rateyourmusic.com` cookies. The route, the `rym_cookie` config key and the
+  settings field are gone; nothing scrapes the site, so no session cookie is
+  asked for. The one cookie credential the app still has — the yt-dlp jar —
+  keeps the same jar model (R242). The retired page cache
+  (`<music>/.mlo/data/rym_cache`) is deleted once at boot, since nothing reads
+  it any more.
 - **R242 — every cookie login is one jar model, importable from a Netscape
   `cookies.txt` and annotatable per cookie.** The file format, its strictness,
   the atomic write and the per-cookie notes live in ONE module
-  (`server/cookies.py`) — the yt-dlp jar (`server/api_youtube.py`) and the
-  RateYourMusic `Cookie` header (`server/api_rym.py`) are the only two
-  cookie-bearing credentials the app has (a token or an API key is not a
-  cookie and gets no import), and both read the same file with the same rules,
-  so a jar one of them accepts cannot be junk the other refuses. An import is
-  narrowed to the hosts that credential is actually SENT to — `youtube.com`,
-  `googlevideo.com`, `google.com` and `googleapis.com` for the jar (yt-dlp is
-  sent nothing else), `rateyourmusic.com` for RYM — because a browser
-  extension's export is the whole profile; the cookie lines that stay are kept
-  byte for byte, and the number left out comes back as `filtered`. A file with
-  no cookie for that credential stores NOTHING and is refused (the jar) or says
-  why (RYM) in the provider's terms, rather than replacing a working credential
-  with one that cannot sign in. Every cookie can carry a COMMENT: it is keyed
-  by the cookie's identity (domain, path, name) in the `cookie_notes` config
-  value (one JSON object per source; a hidden key — no Settings row offers it)
-  and mirrored into a jar-backed credential's FILE as a `# mlo-comment:` line
-  directly above its cookie, which every Netscape reader skips (yt-dlp reads
-  the file unchanged) — so a note survives a re-import that re-orders the file,
-  cannot move to a same-named cookie on another domain, and never edits,
-  re-orders or drops a cookie (a jar written with notes parses to the identical
-  cookie set). `GET /api/cookies/{source}` is the panel's one per-cookie view
-  for both credentials (domain, path, name, expiry, `expires_at`, `expired`,
-  comment — never a cookie VALUE) and `POST /api/cookies/{source}/comments`
-  writes one note (an empty one clears it; a cookie the source does not hold is
-  a 404). One React panel (`web/src/components/CookieJarPanel.tsx`) draws it
-  wherever a cookie credential is offered — Settings → Sources, the setup
-  wizard's Keys step, Settings → Videos and Settings → Discovery.
+  (`server/cookies.py`) — since 2026-10-12 the yt-dlp jar
+  (`server/api_youtube.py`) is the only cookie-bearing credential the app has
+  (RateYourMusic's `Cookie` header went with the scraped hosts, and a token or
+  an API key is not a cookie and gets no import), and it reads that file with
+  those rules. An import is narrowed to the hosts that credential is actually
+  SENT to — `youtube.com`, `googlevideo.com`, `google.com` and `googleapis.com`
+  (yt-dlp is sent nothing else) — because a browser extension's export is the
+  whole profile; the cookie lines that stay are kept byte for byte, and the
+  number left out comes back as `filtered`. A file with no cookie for that
+  credential stores NOTHING and is refused (the jar) rather than replacing a
+  working credential with one that cannot sign in. Every cookie can carry a
+  COMMENT: it is keyed by the cookie's identity (domain, path, name) in the
+  `cookie_notes` config value (one JSON object per source; a hidden key — no
+  Settings row offers it) and mirrored into the jar-backed credential's FILE as
+  a `# mlo-comment:` line directly above its cookie, which every Netscape
+  reader skips (yt-dlp reads the file unchanged) — so a note survives a
+  re-import that re-orders the file, cannot move to a same-named cookie on
+  another domain, and never edits, re-orders or drops a cookie (a jar written
+  with notes parses to the identical cookie set). `GET /api/cookies/{source}`
+  is the panel's one per-cookie view (domain, path, name, expiry, `expires_at`,
+  `expired`, comment — never a cookie VALUE) and
+  `POST /api/cookies/{source}/comments` writes one note (an empty one clears
+  it; a cookie the source does not hold is a 404). One React panel
+  (`web/src/components/CookieJarPanel.tsx`) draws it wherever a cookie
+  credential is offered — Settings → Sources, the setup wizard's Keys step and
+  Settings → Videos (the `youtube` entry; the `rym` and `aoty` entries were
+  removed 2026-10-12).
 
 ### 7.11 MusicBrainz browsing
 
@@ -3217,8 +3160,8 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   every step it can and then reports what is left; it never stops to ask. What
   it decides on its own, each through the family's own writer (the same entry
   point the manual option in `mlo.import_policy.FAMILIES` calls, so the two can
-  never drift apart): the MusicBrainz/RateYourMusic **links**
-  (`imports._stamp_release`/`stamp_rym_links`), the **cover** (`cover_candidates`
+  never drift apart): the MusicBrainz **links** (`imports._stamp_release`), the
+  **cover** (`cover_candidates`
   → `mlo.cover_choice`, R163), the **genres** (`_stamp_release`), the
   **lyrics** — and, when the chain finds none, the **instrumental** mark that
   settles them (R162) — the **advisory** (`fetch_advisories`), the **artist
@@ -3338,7 +3281,8 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   measured on a bare-id add (`{"mbid": <release id>, "kind": "release"}`,
   scratch scope, real network) the reply took **13.4 s** wall clock, of which
   10.0–13.1 s was `prefetch_content`'s provider work in the request path —
-  `cover_search` 3.4–8.5 s, the RateYourMusic link lookup 2.7 s, the
+  `cover_search` 3.4–8.5 s, a RateYourMusic link lookup 2.7 s (that source was
+  removed 2026-10-12 and no longer runs), the
   MusicBrainz metadata step 3.0–5.3 s — for content only an OPENED album page
   reads, while the album row, its manifest and its cover were already
   on disk. The same add answers in **1.3 s** with that content fetched behind
@@ -3496,15 +3440,12 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   providers for the same answers a second time. Measured on one album through the
   real chain with the real network (`.pi/import_reuse.py`, one process per side,
   the pre-change sequence reproduced by stubbing the reuse seams off): the ADD
-  paid **1** `integrations.rym_links` and the IMPORT paid **1** of it AGAIN —
-  18.5 s of add, 73.9 s of import — for a RateYourMusic link the framework marker
-  already recorded. So `imports._marker_links` hands `stamp_rym_links` the links
-  the add resolved (the TAGS are still written — only the lookup is skipped, and
-  only for a link the marker really carries for THIS album: it must be a
-  framework marker, the release group the album's own tags state — when they
-  state one — must be the group the marker was created with, and the switch
-  `rym_links_auto` is checked here too, so "off" still writes no auto-resolved
-  link). The same rule covers the metadata step: with `metadata_review` on, the
+  paid for provider work the IMPORT then paid for AGAIN — 18.5 s of add,
+  73.9 s of import. The RYM half of that reuse — a RateYourMusic link the add
+  resolved, `imports._marker_links` handing `stamp_rym_links` the link it
+  already had (gated by `rym_links_auto`) — went with the scraped hosts on
+  2026-10-12. The rule that survives covers the metadata step: with
+  `metadata_review` on, the
   add staged the artist/description candidates for exactly this artist and album,
   and `imports._staged_metadata_held` lets `run_metadata_step` keep that record
   rather than fetch the same candidates again — it only skips when the entry's
@@ -4023,12 +3964,12 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
 - **R107 — the wizard's steps are the ones that need an answer.** Five:
   Folder (the music library), Account (the login gate), Tools (the dependency
   download), Keys (the source credentials and cookies: Spotify, Discogs,
-  Last.fm, RYM, AcoustID) and
+  Last.fm, AcoustID) and
   Done. Every quality/check knob — the grading switches, the audit and
   verification options, the script chain, the naming script, the interface
   preferences — is NOT asked here: those are `mlo/config.py` defaults, editable
   in Settings afterwards. The Keys step asks for the CREDENTIALS themselves
-  (the seven fields a first run has to paste, each with where it comes from and
+  (the fields a first run has to paste, each with where it comes from and
   a Save & test) and leaves the provider rows — statuses, notes, enable
   switches, Test buttons — to Settings → Sources or behind a per-row
   disclosure: asked with those visible it was 4,779 px tall, which is what "the
@@ -4936,12 +4877,12 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   read as "off" while the page shows it ticked). And the Keys surfaces name the
   programs behind the sources: **yt-dlp** with what it does for the app and that
   its cookies are a **Netscape-format `cookies.txt`** (a browser extension's
-  export, imported into the app's own jar on Settings → Videos), and
-  RateYourMusic's row points at the same kind of import for `rym_cookie`
-  (Settings → Discovery), whose help text names the Netscape file as well as the
-  devtools header. One limitation, stated: while the first-run wizard is up,
-  `/settings` is not routable (App.tsx's first-run gate), so the wizard's Keys
-  step NAMES both imports and the clickable jump appears once setup is finished.
+  export, imported into the app's own jar on Settings → Videos). The
+  RateYourMusic row and its `rym_cookie` import were removed on 2026-10-12,
+  with the scraped hosts. One limitation, stated: while the first-run wizard is
+  up, `/settings` is not routable (App.tsx's first-run gate), so the wizard's
+  Keys step NAMES that import and the clickable jump appears once setup is
+  finished.
 
 ### 7.38 Exporting what you chose, stopping it when you want, and seeing it
 
@@ -5173,9 +5114,9 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
     ahead of `Other`.
   * **grading** does not punish an episode for not being an album:
     `mlo.grader._podcast_effective_cfg` switches the MUSIC-only checks off for
-    that folder — `grade_check_lyrics`, `grade_check_rym_links`,
+    that folder — `grade_check_lyrics`,
     `grade_check_album_description`, `grade_check_genre`, `_genre_count`,
-    `_genre_order`, `_genre_vocab` — decided by ONE read of the folder's first
+    `_genre_structure`, `_genre_vocab` — decided by ONE read of the folder's first
     audio file's `PODCASTSERIES` tag. A folder without the tag (every music
     album, and anything whose podcast identity nobody derived) is graded by the
     config UNCHANGED, so the rule cannot weaken one existing check for a music
@@ -5934,7 +5875,7 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   rule. This is the existing `grade_check_lyrics_format` check (its
   idempotency comparison: re-running the formatter must change nothing), with
   the existing `grade_check_lyrics` presence check reading the corrected
-  `has_lyrics_text`; **no new check key is introduced, so the count stays 70**.
+  `has_lyrics_text`; **no new check key is introduced, so the count stays 69**.
   `tools/test_lyrics_fix.py` holds the case: a file carrying
   `[id:$00000000]`, an `[ar:]`-style header and a matching `TITLE - ARTIST`
   line formats to the timed lines only and grades as one failed check, the
@@ -6022,7 +5963,12 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   (`server.imports.fetch_instrumentals`, the detector's caller) from guessing
   and from crashing: the file keeps the state it had and the import continues.
   No call at all for a track with lyrics, one a source already answered for, an
-  unconfigured endpoint, or the switch off. `tools/test_instrumental.py` holds
+  unconfigured endpoint, or the switch off. A REAL answer is memoized per file
+  for the process (`_ai_cached`, keyed by path + size + mtime), so the two
+  passes one import makes over a lyric-less track — the instrumentals step and
+  the lyric-absent rule — cost ONE model call, while a file the user edited is
+  a different question and is asked afresh; a refusal or a failed call is never
+  memoized, so the next caller retries it. `tools/test_instrumental.py` holds
   every case, exercised through the import's own writer.
 
 ### 7.62 A stored preference is never evidence about this build
@@ -6098,18 +6044,22 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
 
 ### 7.63 The album badge names where its files came from, and the artist wears its own verdict
 
-- **R321 — a `Digital Media` album's badge names its SOURCE.** The badge order is
-  fixed: medium · source · countries (`Digital · Bandcamp · US`, the medium in
-  the badge's own short form — `mediaShort` prints the medium's first word, so a
-  `Digital Media` release wears `Digital`, exactly as a `Compact Disc` one wears
-  `CD`), built by `mediaSourceLabel`/`mediaCountryLabel` in
-  `web/src/components/Badges.tsx` from the album payload's `source_summary`
-  (`web/src/types.ts`). A source that only repeats the medium (the app's own
-  `Digital` default when nothing stated where the files came from) is dropped
-  rather than printed twice, `INCONSISTENT` — the server's word for files that
-  disagree — stays with the album page's Source readout instead of reading as a
-  shop, and every surface that wears the badge — the library's cards and the
-  album page header — names the same release the same way.
+- **R321 — a `Digital Media` album's badge names its SOURCE, and a CD's card
+  badge says "CD".** The badge order is fixed: medium · source · countries
+  (`Digital · Bandcamp · US`), built by
+  `mediaSourceLabel`/`mediaCountryLabel` in `web/src/components/Badges.tsx`
+  from the album payload's `source_summary` (`web/src/types.ts`). Which
+  spelling of the medium the badge names is the caller's: a CARD/icon wears the
+  short family word (`mediaCardLabel` — every value in the app's own CD family,
+  `mlo/tagtext.py`'s `CD_MEDIA_VALUES`, reads the one word "CD"; every other
+  value keeps `mediaShort`'s first word, so a `Digital Media` release wears
+  `Digital`, exactly as a `Compact Disc` one wore `CD`), while the ALBUM PAGE's
+  own chip row wears the tag's full value (`mediaFullLabel`), so a "SHM-CD" or
+  "Enhanced CD" pressing reads in full there and "CD" on the shelf. A source
+  that only repeats the medium (the app's own `Digital` default when nothing
+  stated where the files came from) is dropped rather than printed twice, and
+  `INCONSISTENT` — the server's word for files that disagree — stays with the
+  album page's Source readout instead of reading as a shop.
 - **R322 — an artist's own verdict is a dot beside the name, and its hero fades
   rather than cuts.** `mlo.grader.grade_artist` is what the artist's checks are
   (its image and its description), the library payload now carries that verdict
@@ -6831,7 +6781,7 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   whole API — no longer pulls `mlo.cli`, which imported every script module for
   a dict of strings; `mlo.cli` re-exports the table for the terminal. The
   server's own route surface is split into `server/api_*.py` routers by
-  surface (cover, trash, push, WebSockets, MusicBrainz/LRCLIB/RYM, playlists,
+  surface (cover, trash, push, WebSockets, MusicBrainz/LRCLIB, playlists,
   export, run-scripts) over a shared `server/api_common.py`, so `main.py` is
   the app wiring and the routes that have no home of their own rather than one
   file per everything; the route table is verified byte-identical across the
@@ -6895,76 +6845,30 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   `changed` are folded in submission order, so the reply is byte-identical to
   the serial one, error order included.
 - **R357 — RYM's refusal names the cookie it needs, and a 403 is checked for
-  the challenge.** rateyourmusic.com sits behind Cloudflare, and only a
-  `cf_clearance` cookie gets past it — bound to the SAME User-Agent and the
-  SAME egress IP that earned it. So `rym_user_agent` (empty = the built-in
-  Chrome UA) sets the UA the requests are sent with — and the client hints
-  (`sec-ch-ua`/`sec-ch-ua-mobile`/`sec-ch-ua-platform`) are derived from
-  whatever UA that is (`_rym_apply_ua`), because a User-Agent claiming Chrome
-  141 beside the built-in `sec-ch-ua` naming 124 is a shape no browser
-  produces; the UA override is exactly the setting a user reaches for to make
-  a foreign `cf_clearance` count, and leaving the hints contradicting it would
-  keep the request synthetic. A challenge while the app still sends the
-  built-in UA names that binding as the suspect too (`_rym_reason`): the cookie
-  may be fine and only its browser's UA missing. A stored cookie with
-  no `cf_clearance` says so in `_rym_reason` and in the credential warnings
-  the Sources panel renders, naming both halves of the pair AND how to come by
-  it — Cloudflare issues `cf_clearance` only to a browser that has PASSED its
-  challenge, so a browser it never challenged has none to export (clear the
-  site's cookies and reload until the challenge passes, then export that tab,
-  or set `cf_solver_url`). The status check
-  reads the interstitial out of a NON-200 body too — the live site serves the
-  challenge as HTTP 403, and only 200s used to be checked, so every blocked
-  request was reported as "refused without a Cloudflare challenge" and the 403
-  branch never used the detector at all (caught live: a 27-pair signed-in
-  cookie, 403 + `<title>Just a moment...</title>`).
+  the challenge.** RETIRED 2026-10-12, with the two scraped hosts: this rule
+  documented how a Cloudflare `cf_clearance` challenge was diagnosed — the
+  `rym_user_agent` override and the client hints derived from it, the
+  cookie/UA/IP binding such a clearance carries, and reading the interstitial
+  out of a 403 body rather than only a 200.
+  Nothing is scraped through Cloudflare any more: MusicBrainz answers over its
+  documented API, so no refusal, challenge or cookie is read at all.
 - **R358 — a web rating is a SECOND opinion, kept apart from your own, and it
-  is ONE SOURCE'S OWN NUMBER.** Script
-  24 (`mlo.web_ratings.run_web_ratings`) fetches the public score for an ALBUM
-  and for each TRACK and writes them to four tags on the same 0–100 Picard
-  scale as `RATING` (which stays yours): `WEBRATING` + `WEBRATING_SOURCE` per
-  track, `ALBUMWEBRATING` + `ALBUMWEBRATING_SOURCE` for the album — the album
-  value written to every track of the folder, the app's established way to
-  carry an album-level fact (`ALBUMITUNESADVISORY`), with the _SOURCE tag
-  naming the ONE source whose number the file carries. The two are separate
-  facts and neither is invented from the other: a track whose recording has no
-  rating keeps no `WEBRATING` even when the album has one. THE VALUE IS THE
-  FIRST SOURCE IN THE CHAIN THAT ANSWERED (`mlo.web_ratings.choose`): the
-  configured order IS the hierarchy, a TRACK-level answer beats an album-level
-  one whoever stated it, and within one level the earlier source wins — so the
-  number on the file is a score a reader can open the site and check. Every
-  source is normalised to 0–100 by the ONE conversion (`scale_to_100`:
-  MusicBrainz is 0–5 and ×20, RateYourMusic 0.5–5, Album of the Year already
-  0–100), which TRUNCATES to the app's grid — the tag never holds a number
-  ABOVE what the source published. That is what makes the one-decimal display
-  equal to the source's own reading: the grid points (0.05) are exactly the
-  boundaries a one-decimal rounding can land on, so a value that sat just
-  under one can never be carried over it. RateYourMusic's 4.54 is stored as 90
-  and prints "4.5" (91 → "4.6" was the double rounding the owner reported);
-  the IEEE tolerance in `scale_to_100` (1e-9) keeps a score that IS on the grid
-  — 4.35/5 is exactly 87 — from truncating to one step low on binary noise.
-  The walk STOPS at the answer that
-  settles the value: a source below the one that answered is not asked at all.
-  Nothing is invented and a miss writes nothing: absence is not a zero.
-  **NOT a mean.** The vote-count-weighted mean this replaced was unreproducible
-  for the person reading the tag — MEASURED 2026-10-11 on the owner's own
-  "Clint Eastwood": RateYourMusic 4.54 (3 458 ratings), Album of the Year 95
-  (1 394) and MusicBrainz 83 (20) averaged to 92, so the file read 4.6 while
-  the site the owner checked said 4.54. The file now carries RYM's own 91, its
-  `WEBRATING_SOURCE` reads `RateYourMusic` alone, and every track of the two
-  albums re-tagged that way took its number from RYM (31 of 31;
-  `tools/test_web_ratings.py` pins the choice, the level rule and the early
-  stop, and the owner's own figures are the case). Writing is
-  FILL-ONLY (an existing value survives every run unless `force_web_ratings` is
-  set by hand), the four tags are registered everywhere a tag must be declared
-  (`mlo.audio.TAG_MAP`, the allow-list and tag family in `mlo/config.py`,
-  `server/tags_registry.py`, `server/library.py`), and the whole family is
-  gated by `web_ratings_enabled` (`SCRIPT_GATES[24]` and the write-gate family
-  switch both read it, so an install with it off neither asks nor writes).
+  is ONE SOURCE'S OWN NUMBER.** RETIRED 2026-10-12: this rule narrated the
+  scraped half of the rating chain — RateYourMusic and Album of the Year, their
+  own 0.5–5 and 0–100 scales, the vote-count-weighted mean they replaced, and
+  the measured RYM figures — and the two scraped hosts are gone.
+  The `RATING`/`WEBRATING` semantics it stated survive unchanged, written by
+  script 24 (`mlo.web_ratings.run_web_ratings`) from the one source left:
+  `WEBRATING` + `WEBRATING_SOURCE` per track and `ALBUMWEBRATING` +
+  `ALBUMWEBRATING_SOURCE` for the album carrier, on the same 0–100 Picard scale
+  as `RATING` (which stays yours), FILL-ONLY and gated by `web_ratings_enabled`,
+  with the one value being a source's own number — `mlo.web_ratings.choose`
+  still means "the first source that answered", which is now MusicBrainz alone,
+  normalised ×20 by `scale_to_100` and TRUNCATED to the app's grid so the tag
+  never holds a number above what the source published. The whole-number shape
+  and its grading live in R358e, and the per-track presence check in R358d.
   On the WEB the tag is drawn at ONE decimal, rounded half-up (`web/src/lib/
-  ratings.ts` `webText`, applied to the rounded tenths of a unit — never to the
-  raw float, whose binary representation can print "4.5" for one value and
-  "4.6" for its neighbour): 89 → "4.5 Web", 92 → "4.6 Web", 78 → "3.9 Web".
+  ratings.ts` `webText`): 89 → "4.5 Web", 92 → "4.6 Web", 78 → "3.9 Web".
 
 - **R358e — a rating on a file is a WHOLE number 0-100, and that SHAPE is
   graded and canonicalised.** One rule, `mlo.tagtext.rating_problem` /
@@ -6972,8 +6876,8 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   (`RATING_TAGS`): the grader asks `rating_problem` and the writers ask
   `canonical_rating` through `CANONICAL_CASE`, so a value can never be wrong to
   one of them and fine to the other.
-  * **A source's own scale is not this scale.** RateYourMusic's "4.54" is a
-    perfectly good 0-5 average and a meaningless 0-100 rating, and no formatter
+  * **A source's own scale is not this scale.** A 0-5 average like "4.54" is a
+    perfectly good 0-5 rating and a meaningless 0-100 one, and no formatter
     may GUESS which scale it meant — `canonical_rating("4.54")` is None,
     `canonical_text` leaves it exactly as it came, and grading fails it with
     `WEBRATING_FORMAT` (or `ALBUMWEBRATING_FORMAT` on the album carrier, judged
@@ -6984,204 +6888,61 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
     to "91" (a pure spelling change), so script 10's canonical pass rewrites
     them and the grade agrees — a formatted file passes, and a file that has not
     been through the pass is flagged once.
-  On the web the readout is one decimal (R358), so the tag is the thing that
-  carries the extra precision and the grade is the thing that keeps it honest.
+  On the web the readout is one decimal (the star field's `webText`), so the tag
+  is the thing that carries the extra precision and the grade is the thing that
+  keeps it honest.
   Pinned by `tools/test_grading_paths.py` (the rule, the two codes, the counted
   check) and `tools/test_web_ratings.py` (the conversion's truncation).
 - **R358a — RateYourMusic leads the shipped sources, and all three are read
-  LIVE.** `web_ratings_sources` ships
-  `["rateyourmusic", "albumoftheyear", "musicbrainz"]` (`normalize_config`
-  migrates the previous four-source default that included Discogs to this list).
-  RYM leads because it is the widest public verdict the app can read — one score
-  from tens of thousands of ratings — and its ALBUM rating rides the SAME page
-  fetch its genres already make (one request, one cache entry, one refusal
-  latch); the list's order is the HIERARCHY R358 describes, so the first source
-  that answers supplies the number and `WEBRATING_SOURCE` names it alone. A
-  source below the one that answered is never asked, which is also what makes a
-  run cheaper than it used to be: MEASURED on the owner's two albums (2026-10-11),
-  31 of 31 tracks took their score from RateYourMusic and Album of the Year and
-  MusicBrainz were asked for nothing. All three answer per track and fall back to
-  the album when
-  the track itself is unrated. RateYourMusic and Album of the Year are scraped
-  LIVE through Cloudflare — a cleared `rym_cookie`/`aoty_cookie` (or the
-  solver), with RYM's `cf_clearance` bound to the configured `rym_user_agent` —
-  cached 30 days, misses included, so an album costs seconds on the first run
-  rather than every run. MusicBrainz stays on as the fast floor: it is the only
-  source that needs no credential and the only one whose track answer costs a
-  single throttled request with no slug guess.
+  LIVE.** RETIRED 2026-10-12, with the two scraped hosts: this rule recorded
+  that `web_ratings_sources` shipped three sources with RateYourMusic first,
+  that its album rating rode the same page fetch its genres made, and that
+  RYM/AOTY were scraped live through Cloudflare with cleared cookies.
+  The list now ships MusicBrainz alone (`web_ratings_sources` =
+  `["musicbrainz"]`, `_WEB_RATING_IDS` that one id), so there is nothing to
+  rank; MusicBrainz needs no credential, its track answer costs a single
+  throttled request, and `WEBRATING_SOURCE` names it alone.
 - **R358b — every source is asked at the level it actually rates.** Verified
   against the sources themselves, not assumed:
   - **MusicBrainz** — a RELEASE GROUP for the album and a RECORDING for each
     track, with the recording's WORK behind it (`inc=ratings`; confirmed live:
     OK Computer's group 4.55 from 89 votes, Airbag 3.85 from 25, Paranoid
     Android 4.35 from 31, and the works behind them rated or empty).
-  - **RateYourMusic** — the release page for the album (schema.org
-    `ratingValue`/`ratingCount`, e.g. OK Computer 4.23 from 66,965) AND a SONG
-    page for each track: `rateyourmusic.com/song/<artist-slug>/<title-slug>/`
-    states its own aggregate (Paranoid Android 4.67 from 17,654 — verified in a
-    2026 capture). The release page does NOT publish per-track community
-    averages: its `track_rating` markup is the personal rating control and
-    per-reviewer scores. The song walk tries the bare title slug and, if
-    needed, one `-1` spelling, each read LIVE (no archive route — a refused
-    page is a miss, never filled from a snapshot). A page is believed only when
-    its own title and artist match the asked track — a mismatch is a miss,
-    never a guess. Measured end-to-end with all three sources on a two-track OK
-    Computer scratch album: **48.5 s**; Paranoid Android was answered by RYM +
-    MusicBrainz, Airbag fell back to MusicBrainz. That first pass included
-    misses; each miss is cached for 30 days, so it is not paid on the next run.
-  - **Album of the Year** — the ALBUM page for the album (a 0-100 user score)
-    and the same page for a TRACK: AOTY states a score for every row of its
-    album page, so that row IS the track's score. The song-page lookup is tried
-    first and, when the site has no page for that track (the common case), the
-    row from the album payload the caller already fetched answers — at TRACK
-    level, never demoted to the album's score
-    (`mlo.web_ratings.track_row`; a title match folds case and punctuation).
-    Only when NO row matches does the album-wide value stand in, marked
-    `album` in `levels`. VERIFIED live, 2026-10-11, on the owner's own album
-    (`Plastic Beach`, no cookie stored, hidden browser): ALBUM → 78 from
-    RYM + AOTY + MusicBrainz (all album level), TRACK `Stylo` → 88 from the
-    SAME three sources, ALL THREE at `level: track` (RYM's song page, AOTY's
-    own album row, MusicBrainz's recording) — and the file's own tags now read
-    `RateYourMusic; Album of the Year; MusicBrainz` where they carried
-    MusicBrainz alone.
-  - Consequence for the star field: a TRACK is rated by every source that
-    states one of its own and its `WEBRATING_SOURCE` reads e.g.
-    `RateYourMusic; Album of the Year; MusicBrainz`; the album's score still
-    comes from every source that answered.
+  - The two entries this rule also covered — RateYourMusic's release page and
+    per-track `/song/` pages, and Album of the Year's album page and per-row
+    track score with its `track_row` fallback, both scraped live through
+    Cloudflare — were RETIRED 2026-10-12 with the hosts themselves. MusicBrainz
+    is the only source left, so `WEBRATING_SOURCE` reads `MusicBrainz` alone
+    and every answer is at the level the bullet above states.
 - **R358c — the two scraped sources are read LIVE, and the Wayback routes are
-  gone.** RateYourMusic and Album of the Year — their genres and their ratings
-  alike — are fetched from the live pages; no Internet Archive snapshot stands
-  behind a refusal any more (the removed `aoty_archive_fallback` switch is
-  dropped from a saved config). A Cloudflare challenge therefore needs the
-  browser route (`cf_browser_fetch`, R385 — the one that clears both), a
-  cleared cookie (`rym_cookie`/`aoty_cookie`) or the configured
-  `cf_solver_url`; without one the source reports its refusal honestly and
-  contributes nothing rather than filling the value from a stale capture.
-  "Honestly" is enforced: the genre chain has no archive route at all, so its
-  report never blames a snapshot for a refusal (a config carrying
-  `rym_archive_fallback` — True by default — used to make the note claim "no
-  archived snapshot answered" for a snapshot nobody asked for); a refusal is
-  named in the source's own words (RateYourMusic names `rym_cookie`, Album of
-  the Year names the challenge) rather than showing as "no data"; and a
-  transient refusal is NEVER remembered as the 30-day "no answer" a real miss
-  is — so pasting the cleared cookie fixes the source on the next run, not a
-  month later. Album of the Year has no refusal latch (RateYourMusic's is
-  `_rym_blocked`), so its challenge is re-reported each run until a credential
-  or a solver answers.
-  MusicBrainz, keyless, is unaffected.
+  gone.** RETIRED 2026-10-12, with the two scraped hosts: this rule stated that
+  RateYourMusic and Album of the Year — genres and ratings alike — were fetched
+  from live pages with no Internet Archive fallback, and that a Cloudflare
+  challenge needed the browser route, a cleared `rym_cookie`/`aoty_cookie` or
+  the configured `cf_solver_url`.
+  Nothing is scraped at all any more: MusicBrainz is the only genre and rating
+  source (`genre_sources` and `web_ratings_sources` both ship it alone), over
+  its documented API, so there is no challenge, cookie, refusal latch or
+  archive route to resolve.
 - **R384 — the Cloudflare solver is a DEPENDENCY the app installs and runs,
-  not a URL the user must find.** RYM and AOTY sit behind a challenge that
-  refuses every plain client this project can run (measured: HTTP, curl_cffi,
-  headless Chromium, headed Chrome), so the cookie route is the one the user
-  actually feels — a `cf_clearance` bound to one browser's UA and network, and
-  a browser Cloudflare never challenged has none to export at all. So
-  FlareSolverr is installable like any other tool (`mlo/fetchdeps`:
-  `flaresolverr`, pinned v3.5.2, Windows x64 zip / Linux x64 tarball;
-  `install_kind` reports `unsupported` on macOS and ARM and names Docker
-  there), the app RUNS it (`server/solver.py` — the same CREATE_NO_WINDOW
-  supervisor rule as slskd, `HOST`/`PORT` pinned to loopback:8191, a
-  `/health` wait, adopt-not-duplicate, and Stop that only ever kills the child
-  it started), and `cfchallenge.solver_url` resolves the endpoint in ONE order:
-  `cf_solver_url`, then `MLO_SOLVER_URL`/`FLARESOLVERR_URL`, then the managed
-  child, then anything already answering on the default port (cached, so the
-  per-album skip checks never pay a probe each). The Docker setup ships the
-  sidecar (`flaresolverr` service on both compose files, pinned to the same
-  release, loopback-published on the real install, unlabeled so watchtower does
-  not move it under a running import) and the app is told its URL by
-  environment. The bulk "Install all" never fetches the ~300 MB service
-  (`OPT_IN_TOOLS`) — it is installed from its own row or the Settings →
-  Discovery card, which also carries Start/Stop and the autostart switch
-  (`cf_solver_autostart`, ON; it does nothing when FlareSolverr is absent) —
-  and when a solver answers from the environment or a sidecar, the Dependencies
-  row says so instead of asking for a local install it does not need.
-  **No URL is ever typed in for the normal case**: `cf_solver_url` has no
-  Settings row (a field is exactly what made it look required), the card shows
-  the effective URL and which of the four sources supplied it, and the one
-  field that exists is an "advanced" disclosure for a solver on another
-  machine. **Installing also starts it** (`solver.start_after_install`, called
-  by `/api/dependencies/install`): installing is the user saying they want it,
-  so no Start press is needed and `cf_solver_autostart` — which governs BOOT,
-  not this — does not veto a fresh install. A solver already answering (the
-  sidecar) makes that a no-op, never a second process.
-  **A solve the solver LOSES is remembered per host** (`cfchallenge._FAILED`,
-  `FAIL_TTL` = 10 min, `host_of` normalizes `www.` because AOTY's search page
-  is `www.albumoftheyear.org` while its bare domain is what the checks ask
-  about): measured live, FlareSolverr 3.5.2 boots and serves but cannot pass
-  either host's challenge from this network ("Error solving the challenge.
-  Timeout after 60.0 seconds."), and the genre chain used to pay that 60 s
-  once per album — AOTY asked again for every page. A latched host is skipped
-  BEFORE any request, with the solver's own words in the note; the Sources
-  panel's Test, Start, and a credential change clear the latch. **The app finds
-  out at boot instead of during an import** (`cfchallenge.warm_solver`, fired
-  by both solver-start paths): one request per host, in the background, and the
-  first genre import afterwards is seconds rather than minutes — measured on
-  the owner's own library: 135 s of warm-up, then 0.7 s for Plastic Beach with
-  the two sources skipped and MusicBrainz supplying the genres. **A clearance
-  the solver won is USED, not re-bought** (`_adopt_solved_clearance`): RYM
-  builds its own jar and headers, so it did not inherit `fetch_page`'s fast
-  path and solved the challenge again for every page; the cookies now join that
-  jar and `_rym_user_agent` sends the solver's UA with them, which is what a
-  clearance is bound to. The card reports which hosts the solver could not pass
-  (`solver.blocked_hosts`) — "running" alone must not imply "working".
+  not a URL the user must find.** RETIRED 2026-10-12, with the two scraped
+  hosts: this rule documented the FlareSolverr sidecar the app installed and
+  ran (`server/solver.py`, the Settings → Discovery card, the
+  `cf_solver_url`/`cf_solver_autostart`/`cf_solver_timeout` settings, the
+  per-host failure latch and the boot-time warm-up) to clear the challenge that
+  refused every plain client at RateYourMusic and Album of the Year.
+  Nothing is scraped through a challenge any more, so the dependency, the
+  service, the card and the three config keys are gone; MusicBrainz is reached
+  over its documented API with no solver in the path.
 - **R385 — the browser the two scraped hosts are fetched with is never seen, and
-  what it wins is reused.** `server/browserfetch.py` is the route that clears
-  both challenges (R358c/R384 name why a cookie alone cannot do it for RYM and
-  why the solver cannot do it for either); R385 is how it stays out of the way.
-  **It is HEADED on a desktop the user never sees** — `CreateDesktopW` +
-  `CreateProcessW` with `lpDesktop` — because MEASURED, 2026-10-11, true
-  `--headless=new` is detected by BOTH hosts in every spelling tried: real
-  Chrome UA, a matching `userAgentData` override, the anti-automation JS
-  patches (webdriver, `window.chrome`, plugins, WebGL) and a profile that
-  already HOLDS a valid `cf_clearance`. Headless is a fingerprint the WAF reads;
-  where the browser is DRAWN is not. Nothing appears on any display, in the
-  taskbar, or on the alt-tab list. **Off-screen positioning is NOT this** — a
-  multi-monitor layout can put `-3200,-3200` back on a real display, which is
-  the browser window the owner reported. **A UA override breaks the route on its
-  own**: a `--user-agent` that disagrees with Chrome's own `userAgentData` build
-  never clears the challenge (measured; neither host answered until the flag was
-  gone), and Chrome's own UA is what the clearance it earns is bound to.
-  **The user's session travels IN.** A stored `rym_cookie`/`aoty_cookie` paste
-  wins. If it is blank, `_browser_session` reads the user's local browser jar
-  through yt-dlp — its Python reader (`yt_dlp.cookies`) IN PROCESS, because the
-  app's own install is a pip folder (`bin/yt-dlp`, no `.exe`) that an
-  executable-only lookup misses entirely; the executable is the fallback
-  (MEASURED 2026-10-11: with the empty read, every RYM page was anonymous and
-  `/release/` was refused, which is what per-track genres look like when they
-  "stop working") — filters to the requested host, caches only that host's cookie
-  string in memory for 45 minutes, and never writes it to config. It is sent
-  only to its own site as a host-scoped session cookie for that navigation, then
-  removed in `browserfetch.fetch`'s `finally`; Chrome's own clearance and site-set
-  cookies remain in the app-owned profile. Cloudflare's OWN cookies from the
-  user's paste (`cf_clearance`, `__cf_bm`, `__cfruid`, `__cfuvid`) are dropped
-  before Chrome receives them — a clearance is bound to the browser+UA that
-  earned it and can never validate here — while the site's own signed-in
-  tokens, RYM's `sec_*` rotation included, travel with the session (MEASURED
-  2026-10-11: dropping them fails the release page).
-  This is what reads a RYM *release* page: MEASURED, an anonymous browser clears
-  the challenge and is still refused `/release/` (a `503`, i.e. a `chrome-error`
-  page) while `/artist/` and `/search` answer `200`; with the signed-in session
-  the same page is `200` with its genres and its rating on it.
-  **The clearance travels BACK OUT:** after every fetched page the browser's
-  cookies and its own UA are published to `cfchallenge`
-  (`remember_clearance`), so `fetch_page`'s plain fast path and RYM's own jar
-  (`_adopt_solved_clearance`, which no longer requires a solver URL) reuse
-  them — the pages after the first are plain GETs wherever the WAF allows one,
-  not another navigation. **The exits stay failures**: `Page.navigate`'s
-  `errorText` and a `chrome-error:` location are a failed fetch, never "a page
-  with no genres". **The challenge is taken at BOOT, not by the user's first
-  import** (`cfchallenge.warm_browser`, fired beside the solver's own warm-up):
-  MEASURED, 2026-10-11 — the first navigation to a host after the profile goes
-  cold spends the whole challenge (~27 s Album of the Year, ~49 s
-  RateYourMusic), which read as "no data" for a host that answers in a second
-  once the clearance is in the profile. One successful background navigation per
-  host (retrying once only if the first returns no page), skipped if the managed
-  profile already has its own clearance or the browser route is off. The
-  per-page wait is 75 s so a cold fetch that is still clearing is not lost by
-  seconds (45 s lost the RYM page on the first try). The browser is a child of
-  the app — one per app (adopted by
-  `MANAGED_PORT`, never two), stopped by `main.py`'s lifespan — and its profile
-  is the app's own under `<music>/.mlo/data/browser`, which is where the
-  clearance lives so later runs pay no challenge.
+  what it wins is reused.** RETIRED 2026-10-12, with the two scraped hosts:
+  `server/browserfetch.py` drove a headed-but-hidden Chrome on its own desktop
+  to clear the rateyourmusic.com and albumoftheyear.org challenges, travelled
+  the user's stored `rym_cookie`/`aoty_cookie` session in, and published the
+  clearance it won back to `cfchallenge` so the plain fetches could reuse it.
+  The route, the borrowed browser session, the clearance publishing and the
+  `cf_browser_fetch` switch are all gone: nothing scrapes a challenged host, so
+  nothing borrows a browser.
 - **R386 — OS fullscreen hides the app title bar, and the player keeps the exit.**
   The fullscreen-player button in Tauri desktop calls the window's
   `setFullscreen`, not `documentElement.requestFullscreen` (which WebView2 does
@@ -7208,7 +6969,8 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   never applies to a music-video container: script 24 writes `WEBRATING` only
   in the audio shapes `mlo.audio.TAG_MAP` declares, so `VIDEO_SKIP_TAGS`
   excludes it rather than failing every video for a tag nothing put there. And
-  it is a PRESENCE check only — R358 still holds, absence is not a zero and
+  it is a PRESENCE check only — the rule that survives R358 still holds,
+  absence is not a zero and
   nothing is invented to satisfy it; the report names the track and the fix is
   to run script 24 (Web ratings). The album-level `ALBUMWEBRATING` is carried,
   never graded.
@@ -7249,13 +7011,13 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   to.** Album-level genres come from the RELEASE GROUP (the album is the group,
   not the pressing), and a track's come from its recording, with the WORK's
   genres merged behind it — the work is the "release group" a track does not
-  have, and it is the same tiering R358a applies to ratings. The recording is
-  never dropped in the work's favour: measured, works carry no genres at all
-  for a mainstream album, so a work-first-without-fallback reading would have
-  LOST data the app already had. Album of the Year is a SHIPPED genre source —
-  one of the three in `GENRE_SOURCES` — read LIVE on the same footing as
-  RateYourMusic: its album page states the genre row, a challenge needs a
-  cleared `aoty_cookie` or the solver, and there is no archive route (R358c).
+  have, and it is the same tiering that once applied to the rating chain.
+  The recording is never dropped in the work's favour: measured, works carry no
+  genres at all for a mainstream album, so a work-first-without-fallback
+  reading would have LOST data the app already had. Album of the Year was a
+  shipped genre source beside RateYourMusic until 2026-10-12; both scraped
+  hosts are gone, so MusicBrainz is the only one (`GENRE_SOURCES` and
+  `genre_sources` ship it alone).
 
 - **R361 — the Library's batch bar runs the import pipeline, and MANY batches
   run at once.** With albums, artists or tracks selected, the selection toolbar
@@ -7348,8 +7110,10 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   so is the configured source ORDER — answers are parsed and aggregated in
   `provider_order`, and the writes visit the rows in sorted-name order, so a
   thread-pool completion order never reaches a tag. What changes is only the
-  waiting: a track's RYM wait no longer blocks the next track's
-  MusicBrainz ask, because those two hosts have separate 1 req/s locks. One
+  waiting: a track's ask no longer blocks the next track's, and each source's
+  own 1 req/s lock is still honoured (with MusicBrainz the only rating source
+  since 2026-10-12 there is one such lock, and the pool still overlaps that
+  host's per-track asks). One
   album is one lane and its tracks share that lane's slice of the shared budget
   — the policy `mlo.accurip.run_generate_accurip` documents for its transport —
   so a Run All over N albums cannot multiply the requests in flight; a
@@ -7706,7 +7470,7 @@ checks see or how they judge it.
 | `encoder_tags` | per-format map | which `ENCODER_*` markers `grade_check_encoder` requires and the skip checks compare (`ENCODER_QUALITY` — the LEVEL — on; `ENCODER_VERSION` and `ENCODER_PROGRAM` off, per format; see R329) |
 | `strip_unknown_tags` | ON | whether `grade_check_excess_tags` reports junk tags |
 | `mb_genre_count` | 2 (max 3) | `grade_check_genre_count` ceiling, and what script 8/10 trim to |
-| `genre_autofill` / `genre_sources` | ON / `[rateyourmusic, albumoftheyear, musicbrainz]` | which writers can satisfy the genre checks. The list is a PRIORITY list, asked in order and stopped as soon as a track's list is complete, and the shipped default is the three sources the app knows (R39a) |
+| `genre_autofill` / `genre_sources` | ON / `[musicbrainz]` | which writers can satisfy the genre checks. MusicBrainz is the only source since 2026-10-12 (the two scraped hosts are gone), shipped as the one-entry default (R39a) |
 | `mood_enabled` / `mood_source` | ON / `hybrid` | whether script 8/16 writes `MOOD`/`ENERGY` at all |
 | `ai_effort` / `ai_genre_effort` | `high` / `high` | the reasoning budget every AI call sends, and the genre ranking's own: `minimal` (no thinking field), `low`, `medium`, `high`, `max` — `max` reaches a provider's ceiling by ladder (`max` → `high` → no field, R62a) |
 | `naming_script` | the shipped pattern | what `grade_check_naming` / `grade_check_filename_case` compare against |
@@ -7729,6 +7493,7 @@ checks see or how they judge it.
 | `audit_check_cd_format` | ON | whether a `CD_FORMAT` failure turns the album audit FAKE |
 | `audit_verify_cd_checksums` / `audit_integrity` / `audit_cd_require_both` | ON | what script 6 verifies on a CD rip |
 | `audit_log_score_threshold` | 100 | the log score the audit accepts |
+| `soulseek_auto_log_min_score` | 100 | the Logchecker score a candidate's `.log` must reach before its album is downloaded — judged only when Logchecker COULD score it, so an unscored log's album is still tried and judged on its per-track CRCs (R391) |
 | `audit_fail_on_unscorable_log` | ON | whether an unscorable log fails where a scorer exists |
 | `audit_thorough`, `audit_clipping`, `audit_scaled_clipping`, `audit_mqa`, `audit_ai`, `audit_fake_stereo`, `audit_silence`, `audit_dynamic_range`, `audit_true_peak`, `audit_lufs`, `audit_bpm`, `audit_cutoff_allow` | ON (`0` for the cutoff) | which AudioAuditor detectors run — they decide the verdict, not the grade directly |
 | `write_audit_tag` / `write_log_grade` / `write_replaygain_tags` / `write_dynamic_range_tags` | ON | whether the scripts write the tags the checks require |
@@ -7791,6 +7556,256 @@ Settings row offers it).
   `Artists/Radiohead [a74b1b7f-…]/[Album] 1997-05-21 …`, the emptied bare folder
   pruned. `tools/test_import_pipeline.py` pins both, plus the multi-credit and
   unknown-artist guards.
+
+---
+
+### 7.78 The acquisition `.log` gate is about evidence: per-track CRCs first
+
+The auto-importer used to reject a candidate whose rip log Logchecker could not
+score at all (every install without the phar or `php`, and every format
+Logchecker does not know), and its post-download verifier demanded the log be
+named `CD-{n}.log` whenever the folder used the `D-TT` convention — so a fine
+rip delivered as `rip.log` or `XLD.log` was turned away as "missing `CD-1.log`"
+while its audio was otherwise verifiable. The three rules below reset the gate
+to the owner's own: **per-track CRCs are the requirement; the rest only charges
+when the log itself says something is wrong.** Pinned in
+`tools/test_soulseek_candidates.py`.
+
+- **R391 — the bar is judged only when a score exists.** `_log_passes`
+  (`server/soulseek_auto.py`) rejects a log for exactly three things: (1) a
+  checksum it CARRIES that does not verify (`check_log_checksum` = `invalid`;
+  absent/unverifiable is not required, R30), (2) an AccurateRip section that
+  reports a failed track (R392), and (3) a Logchecker score **below**
+  `soulseek_auto_log_min_score` — and only when Logchecker COULD produce a
+  score. A log with `score = None` (an unrecognised format, or no
+  Logchecker/`php` on this machine) is **not** a rejection by itself: the log
+  is accepted and the outcome says which format the toolchain could not read
+  (`<name>: Logchecker could not score it (XLD) — accepted; its per-track CRCs
+  are still checked against the log`). The same rule governs
+  `POST /api/soulseek/test-log`, whose per-log row now carries `accuraterip`
+  and whose `ok` follows the same three things (a log that timed out is
+  nothing checked, so it is still not a pass). A CRC mismatch discovered after
+  download still rejects the candidate, because the per-track CRCs remain the
+  hard requirement.
+- **R392 — AccurateRip in the rip log is not required, but a failure it states
+  is charged.** `mlo.discs.parse_log_accuraterip` reads a log's OWN AccurateRip
+  section (EAC/XLD's per-track "accurately ripped" or "Cannot be verified as
+  accurate … AccurateRip returned […]", XLD's `Track N : OK` / `: NG`, and the
+  aggregate "All tracks accurately ripped" / "Some tracks could not be
+  verified as accurate"): a log that states no AccurateRip verdict reads
+  `None` and is charged nothing (AccurateRip is never required), a log whose
+  stated results all verified reads `ok`, and a log that states a track it
+  could not verify — or an aggregate damage line — reads `fail` and rejects the
+  candidate with the rip's own words in the reason. Only AccurateRip's own
+  phrases count as a failure: a bare "mismatch" would also match whipper's
+  `Status: Error, CRC mismatch` on a failed TEST run, which says nothing about
+  AccurateRip. A CUETools `.accurip` is a separate artefact (R229, `mlo.accurip`)
+  and is never what this reads.
+- **R393 — the disc's log is found by what it names, not only by the pattern.**
+  `mlo.discs.verify_album_checksums` used to demand `<discs_rename_pattern>.log`
+  (`CD-1.log`) for every disc of a `D-TT`-named folder and reject the rest as
+  "missing `CD-1.log`". `mlo.discs._log_for_disc` now resolves the disc's log in
+  three steps: the canonical `<pattern>.log` first; else the folder's own log
+  that PLAINLY names this disc differently (`CD1.log`, `Disc 2.log`,
+  `2 - Album.log` — `_log_name_disc`), skipping any log whose name states
+  another disc; else the disc's ONLY log (a fresh download's `rip.log` /
+  `XLD.log` / `Album.log`, which states no disc at all) when it is the only log
+  left for the disc. Every message names the log actually used
+  (`rip.log has no per-track CRCs`). A wrong guess is not possible by
+  construction — only a name stating no OTHER disc, only when nothing else
+  remains — and the CRC comparison still has the last word. This is a strictly
+  additive relaxation of a shared verifier (script 6's audit reaches it too),
+  so it can only accept a log that was previously called missing.
+- **R394 — playback never blocks a tag write, and a write that cannot land is
+  QUEUED, never silently lost.** The owner's report: rating a track WHILE IT
+  PLAYED failed the write with `set_tag: … could not be replaced … [WinError 5]
+  … '.mlo_tmp_…' -> '…Clint Eastwood….flac'` — on a file that was not
+  read-only. The app's own media routes served the file through a plain
+  `open()` (share read+write, NOT delete), so `os.replace` onto it was denied
+  for the whole playback, and the bounded ~1.5 s retry could not outlast a
+  stream. Two things now hold, in order:
+  1. **The long-lived media routes serve from a delete-sharing handle.**
+     `/api/stream`, `/api/videos/stream`, `/api/soulseek/local-file`,
+     `/api/soulseek/preview-stream` (native branch), the download variants
+     (`/api/stream?download=1`, `/api/track/download`, `/api/track/export`
+     `copy`) and `api_media.full_body_response` open the file through
+     `mlo.atomic.open_shared_read` (Windows `CreateFileW` with
+     `FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE`; a plain
+     `open(path, "rb")` elsewhere) and stream from that handle via
+     `api_media.SharedFileResponse` (Starlette's `FileResponse` cannot take a
+     file object), with the same headers and single-`Range` 206 a player
+     needs. The reader keeps the OLD bytes on its handle until it closes,
+     which is the streaming contract. Short-lived responses (covers,
+     thumbnails) keep the plain `FileResponse`.
+     A tag swap onto such a file lands through
+     `mlo.atomic.replace_over_open_handle`: Windows' `MoveFileEx` refuses a
+     replace onto ANY open destination — the classic delete keeps the old NAME
+     reserved — so the writer moves the old file out of the name first (a
+     rename an open file allows only when its holder shares delete), places
+     the new one, and unlinks the old; a holder that does NOT share delete
+     makes that first rename fail, so a plain reader still gets the honest
+     refusal below.
+  2. **A write that still cannot land is recorded and retried, not thrown
+     away.** `mlo/pending.py` keeps a small, locked, atomic JSON queue under
+     the app's own state dir (`mlo.paths.app_data_dir` — `pending_tag_writes.json`),
+     keyed by path so repeated denials COALESCE into the newest op per field.
+     The tag-write entry points (`AudioFile.set_tag` / `delete_tag` /
+     `set_lyrics` / `delete_lyrics` and the video writer `set_video_tags`,
+     which share one atomic-swap path) hand the op to the queue when the swap
+     is denied, and the error's message then says so instead of claiming
+     nothing happened: *"… could not be replaced: Windows denied the rename —
+     another program has it open (a player, a scanner, antivirus, or another
+     job) or the file is read-only; the change is QUEUED and will be written
+     when the file is free."* The server lifespan drains the queue once at
+     startup and on an interval (plus one fire-and-forget attempt per enqueue),
+     replaying each op through `AudioFile`, DROPPING an op whose file has
+     vanished, KEEPING one that is still held (with an attempt count and a
+     bounded drop-after window), and logging a per-drain summary. The user's
+     edit is therefore never lost to a busy file. Pinned in
+     `tools/test_interrupt_safety.py` (§1e).
+
+- **R395 — the import wizard stages MANY batches and starts them through the
+  one bulk queue.** The owner's ask: *"the importing menu should allow me to
+  put in multiple 'batches' of files … upload multi-disc cd rips easier and
+  multiple albums at once for auto-importing."* The Select step therefore keeps
+  a WORKLIST. Each drop or pick builds one batch of files/folders/archives
+  exactly as it always has — `detectAlbums` still separates a drop into albums
+  and still merges that drop's own `CD1/` / `Disc 2/` disc folders into one
+  album — and **Add as another batch** banks it and clears the drop zone for
+  the next one; the banked batches render as rows in one list, each removable
+  before the import starts. A new selection also BANKS the one being built
+  first (auto-bank), so the second drop can never REPLACE — and lose — the
+  first: that replacement was the owner's own report, *"uploading multi-disc cd
+  releases to the importing sometimes gets rid of the second cd"*. **Import** /
+  **Auto-import** act on the whole
+  worklist in order: every batch is staged (uploaded/ingested) and the albums of
+  every batch are handed to the ONE bulk queue (`POST /api/import/bulk`,
+  `server.imports.start_bulk`) as items in batch order, so each batch imports as
+  its own release(s) and the queue's per-album rows (`queued` / `running` /
+  `imported` / `skipped` / `failed`, `already_importing`) — the same status
+  payload the panel already polls (`GET /api/import/bulk/status?job=<id>`) — are
+  the per-batch outcome.
+
+  Batches are never FUSED: several disc folders added as several batches stay
+  several albums. No cross-batch merge is guessed — a multi-disc rip is ONE
+  batch (the folder that HOLDS its disc folders), which is the only place discs
+  merge — and there is no control to fuse two batches, because the wizard never
+  decides that for the user. A batch that stages nothing is KEPT (a banked one,
+  or the selection still in the drop zone) so it can be retried, and a failing
+  batch never stalls the batches after it. Pinned by
+  `tools/test_import_pipeline.py` (one job, several batches' albums in order, a
+  failing album that does not stall the rest, TWO discs of one rip added as two
+  batches both importing with their own files intact, every batch's outcome read
+  back from the one status payload) and by `tools/check_import_minimum.mjs` (two
+  drops added back-to-back both reaching the queue as their own album, a pair
+  banked as rows with one removed before start, the remaining batch's items
+  offered to `/api/import/bulk` — driven on the real page).
+
+  Two batches that resolve to the SAME album name never overwrite one another.
+  `POST /api/import/upload` gives an album whose name is already taken by a
+  folder holding DIFFERENT bytes of the same names a folder of its own — "Name
+  (2)", the `server.imports.unique_dir` dedup the bulk queue uses, with
+  `collided` in the reply — so two batches, two discs or two editions that the
+  wizard names alike become two albums on disk. A RETRY (files byte-identical
+  to the ones its own first go placed) and an album the library already HOLDS
+  (filled by `server.imports.merge_into_album`, which never replaces a file it
+  has, now naming what it kept in `kept`) keep their place, and
+  `server.main._place_staged` refuses a differing name outright rather than
+  moving onto it: an import can never destroy another's bytes. The bulk queue's
+  own move carries the same name rule and RETRIES the dedup when a sibling
+  batch claims the folder between the check and the rename
+  (`server.imports._move_into_library`): the pool runs up to
+  `import_bulk_concurrency` albums at once, so two same-named batches were
+  otherwise reported as "a file inside is still in use" and one of them never
+  imported at all. Pinned by
+  `tools/test_import_archives.py` (two batches, one album name, a same-named
+  track each: two folders, both files byte for byte, both albums listed by the
+  library; a retried batch reuses the folder it made; a differing name handed
+  straight to `_place_staged` is refused), by
+  `tools/test_import_pipeline.py` (two same-named staging batches queued
+  together both import, each into its own folder, with its own bytes) and by
+  `tools/test_single_song_import.py` (a same-named file with different bytes is
+  kept, not replaced, and the reply names it).
+
+- **R396 — an album's release can be CHANGED, and its tracks added to, from the
+  import menu.** The owner's report (2026-10-12): *"I'm not able in the app to
+  update a release to another MBID … the app won't let me update to it from the
+  standard edition it thinks i have because the id is already in tags … also, I
+  should be able to add more tracks in the importing menu in the import & link
+  section to the album / release."* What answers it, and nothing here guesses:
+
+  * the wizard opened on an album the library holds (`?album=…` — the album
+    page's "Import & link") states that the album IS linked to the release its
+    files name, and that fetching another one re-links it: `nextFromLinks`
+    resolves the pasted link FIRST and commits the release it resolves TO, so
+    the stored id is rewritten and the Match step cannot write the PREVIOUS
+    release's id back over it (the "the link will not change" bug);
+  * the Match step now NAMES the release's own tracks that no local file was
+    matched to ("N tracks of this release are not in the folder", each as
+    `disc.position title`) — a deluxe pressing's second disc used to be
+    invisible, because only the local rows were listed;
+  * **Add tracks…** (the same step) uploads audio INTO that album:
+    `POST /api/import/upload?album=<path>` uses the caller's path AS-IS —
+    fill-only through `server.imports.merge_into_album`, reported as `merged`
+    with `kept` naming what the album would not give up, no `(2)` folder opened
+    — and the step re-scans and re-matches, so the arriving files become rows to
+    map onto the release;
+  * a row with NO release track keeps its own identity. The step's writer used
+    to send `TITLE`/`TRACKNUMBER`/`DISCNUMBER` as `null`, and the server's
+    per-key writer (`POST /api/mb/assign`) reads `null` as DELETE — saving the
+    step stripped the title of exactly the extra tracks a user had added by
+    hand. Only the album-level fields are written for such a row now, and
+    `TRACKTOTAL` is the file's OWN disc's track count (a two-disc release wrote
+    both discs' total onto every file);
+  * **the link field names the release; Continue is what makes it one.** The
+    wizard's Links step resolves whatever its MusicBrainz field holds — not
+    what the tags said — and writes that release's id to every file, then
+    records the release's own tracklist (`.mb_expected`, id + rows) in the same
+    breath, so leaving the wizard after the Links step cannot leave the folder
+    describing the release it just left. The field itself asks nobody (a
+    half-typed id would only earn a 404, and MusicBrainz is 1 req/s);
+    "Fetch release & auto-match" beside it is the explicit press that fetches
+    the release early, without committing;
+  * **a manifest naming another release is stale, and script 15 refetches it.**
+    "Writers fill, they do not overwrite" used to keep every existing
+    `.mb_expected`, so a re-point through the import (the Library's menu) — which
+    rewrites the tags but leaves the manifest, the RELEASE's own tracklist the
+    album page diffs its gaps against — ended with the new id on every file and
+    the OLD release's tracklist recorded (measured 2026-10-12: tags on the
+    standard, `.mb_expected` on the deluxe, so the album showed the gaps of a
+    release it no longer was). A manifest whose `release_id` differs from the
+    album's tracks' id is now fetched again; one naming the album's own release,
+    or naming none at all (a rip sheet wrote it), is kept exactly as before.
+
+  Pinned by `tools/check_import_minimum.mjs` (the unmapped release tracks named
+  on the step; "Add tracks…" posting `album=<the album's own path>`; the
+  unmatched row's payload carrying no per-track key while its album-level id
+  lands; `TRACKTOTAL` from the file's own disc; and Continue sending the id
+  the FIELD names — not the one the tags did — while recording that release's
+  own tracklist), by `tools/test_import_archives.py` (adding a track to a held
+  album fills THAT album with no `(2)` folder beside it, a same-named file keeps
+  the album's own bytes, and a path outside the music folder or one that is not
+  an album is refused), and by `tools/test_import_pipeline.py` (script 15
+  refetches a manifest that names another release, and costs no request when the
+  manifest is current or names none).
+
+- **R397 — the Import menu lists EVERY selected album, on the release its own
+  files name.** The dialog the Import button opens used to ask only about
+  albums with NO release in their files ("_N already name their release in the
+  files_"), so a release change needed a second, separate control — the wall
+  the owner hit ("the id is already in tags"), then named again from the other
+  side: *"just changing the musicbrainz link in the import menu should change
+  the release too."* One dialog does both now: every selected album is a row,
+  each opened on the release its files name now, and **editing a row IS the
+  re-point** — the pin goes through `_stamp_release(…, force_ids=True)` in
+  `server.imports.bulk_import`, so the album's release id, expected tracklist,
+  metadata and cover are re-derived from the release the row names. A row left
+  ALONE sends no pin, so the press is exactly the plain import it was before
+  (and a selection whose albums all name a release no longer skips the dialog —
+  the review is the point); an album whose files name nothing opens BLANK, and
+  blank is allowed (matched by name): the dialog is a chance to be sure, never a
+  wall. The separate "Change release…" button and the two-mode split are gone —
+  one menu, one press.
 
 ---
 

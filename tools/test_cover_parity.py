@@ -107,7 +107,7 @@ CFG = {"music_folder": MUSIC,
        # spotify is deliberately not named by it at all
        "cover_sources": ["qobuz", "deezer", "itunes", "tidal"],
        "cover_auto_fetch": True, "cover_review": False,
-       "metadata_auto_fetch": False, "rym_links_auto": False}
+       "metadata_auto_fetch": False}
 
 mlo_main.load_config = lambda *a, **k: dict(CFG)
 # The image probe's memo, and the catalogue COV answers /api/info with: both

@@ -115,8 +115,6 @@ TAG_FAMILY = {
     "MUSICBRAINZ_RELEASEGROUPID": "release",
     "MUSICBRAINZ_RELEASETRACKID": "release",
     "MUSICBRAINZ_WORKID": "release",
-    "RATEYOURMUSIC_ALBUM": "release", "RATEYOURMUSIC_TRACK": "release",
-    "RATEYOURMUSIC_ARTIST": "release",
     # What the analysis passes measured on the audio itself.
     "MOOD": "audio", "ENERGY": "audio", "BPM": "audio", "INITIALKEY": "audio",
     "DYNAMIC RANGE": "audio", "ALBUM DYNAMIC RANGE": "audio",
@@ -205,7 +203,7 @@ TAG_INFO = {
     "TRACKNUMBER": ("Track #", "Position on the disc; part of the file name the naming script computes."),
     "DISCNUMBER": ("Disc #", "Which disc of a multi-disc release — required only when the album has several."),
     "COMPILATION": ("Compilation", "1 on a various-artists release, so players group it as one album."),
-    "GENRE": ("Genre", "A LIST: the specific genres first, the family last. Names are MusicBrainz spellings."),
+    "GENRE": ("Genre", "A LIST: one entry per name a source stated, held in one canonical order. Names are MusicBrainz spellings."),
     "WORK": ("Work", "The classical composition this track performs."),
     "MOVEMENT": ("Movement", "Movement title within the work."),
     "MOVEMENTNUMBER": ("Movement #", "Movement position within the work."),
@@ -261,9 +259,6 @@ TAG_INFO = {
     "MUSICBRAINZ_RELEASEGROUPID": ("MB release group id", "The release group the album belongs to."),
     "MUSICBRAINZ_RELEASETRACKID": ("MB release track id", "This track's own position id on this release."),
     "MUSICBRAINZ_WORKID": ("MB work id", "MusicBrainz work id the classical tags sit beside."),
-    "RATEYOURMUSIC_ALBUM": ("RYM album link", "RateYourMusic release page URL."),
-    "RATEYOURMUSIC_TRACK": ("RYM track link", "RateYourMusic track page URL."),
-    "RATEYOURMUSIC_ARTIST": ("RYM artist link", "RateYourMusic artist page URL."),
     "MOOD": ("Mood", "The mood word the classifier derived from the track's own audio."),
     "ENERGY": ("Energy", "0-100 arousal the MOOD verdict was scored from."),
     "BPM": ("BPM", "Tempo in beats per minute."),
@@ -536,7 +531,6 @@ TAG_CHECKS = {
     "TRANSLATION": ("grade_check_xlit_translation",),
     "TRANSLITERATION": ("grade_check_xlit_transliteration",),
     "MUSICBRAINZ_ALBUMID": ("grade_check_mb_links",),
-    "RATEYOURMUSIC_ALBUM": ("grade_check_rym_links",),
     # Tags whose VALUE has a canonical spelling (mlo.tagtext.CANONICAL_CASE)
     # are graded by grade_check_tag_case, beside whatever checks already
     # graded them.
@@ -559,13 +553,12 @@ TAG_CHECKS = {
 # page marks a value with. The presence halves come from the grader's tables;
 # these are the ones a specific check appends on its own.
 TAG_ISSUE_CODES = {
-    "GENRE": ("GENRE_COUNT", "GENRE_ORDER", "GENRE_VOCAB"),
+    "GENRE": ("GENRE_COUNT", "GENRE_STRUCTURE", "GENRE_VOCAB"),
     "INSTRUMENTAL": ("LYRICS",),
     "LYRICS": ("XLIT_MISSING", "XLIT_UNNEEDED"),
     "TRANSLATION": ("XLIT_MISSING", "XLIT_UNNEEDED"),
     "TRANSLITERATION": ("XLIT_MISSING", "XLIT_UNNEEDED"),
     "MUSICBRAINZ_ALBUMID": ("MB_LINK",),
-    "RATEYOURMUSIC_ALBUM": ("RYM_LINK",),
     "ACOUSTID_ID": ("ACOUSTID_ID",),
     "ACOUSTID_FINGERPRINT": ("ACOUSTID_FINGERPRINT",),
     # The alias tag whose absence the check names, and the COMMENT value the
@@ -593,7 +586,7 @@ CHECK_LABELS = {
     "grade_check_energy": "Energy tag present",
     "grade_check_genre": "Genre tag present",
     "grade_check_genre_count": "Genre count per track",
-    "grade_check_genre_structure": "Genre structure (no duplicates, no derived parent)",
+    "grade_check_genre_structure": "Genre structure (no repeated name)",
     "grade_check_genre_vocab": "Genre vocabulary",
     "grade_check_web_rating": "Web rating present (per track)",
     "grade_check_sidecar_format": "Sidecar text files canonically formatted",
@@ -630,7 +623,6 @@ CHECK_LABELS = {
     "grade_check_accuraterip": "AccurateRip verified (audit only)",
     "grade_check_log_grade": "Log grade present & in range",
     "grade_check_mb_links": "MusicBrainz release link",
-    "grade_check_rym_links": "RateYourMusic release link",
     "grade_check_cover": "Cover art",
     "grade_check_cover_crop": "Cover aspect ratio (squareness)",
     "grade_check_sidecar_cover": "Per-track sidecar covers",

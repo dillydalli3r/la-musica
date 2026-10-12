@@ -1834,7 +1834,6 @@ def _ambiguous_lrc_stems(filenames):
 # so this rule cannot weaken one existing check for a music release.
 _PODCAST_MUSIC_ONLY_CHECKS = (
     "grade_check_lyrics",
-    "grade_check_rym_links",
     "grade_check_album_description",
     "grade_check_genre",
     "grade_check_genre_count",
@@ -1887,7 +1886,14 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
         log(f"Cannot list album directory: {album_dir} ({e})", Color.YELLOW)
         return _unreadable_folder_result(album_dir, e)
     files = sorted(f for f in all_files if is_audio_file(f))
-    audio_paths = [os.path.join(album_dir, f) for f in files]
+    # The album's audio is its own folder PLUS the disc SUBFOLDERS the layout
+    # allows inside it (<Album>/CD1, <Album>/Disc 2, <Album>/1+2 — spec R336:
+    # a disc-subfolder release is ONE album). Reading only the album folder
+    # truncated a multi-disc release to its first medium: disc 2's tracks were
+    # a separate "album" of their own and the album's own list, its expected
+    # tracklist diff and the grade all lost them. mlo.discs owns the reading.
+    from .discs import album_audio
+    audio_paths = album_audio(album_dir, exts=LIB_AUDIO_EXTS)
 
     if not audio_paths:
         return None
@@ -2045,7 +2051,11 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
             multi_disc = _multi_disc_from_tags(af)
 
         track = {
-            "file": basename,
+            # The path RELATIVE to the album folder, so a track in a disc
+            # subfolder ("CD2/01 - x.flac") is found by every reader that
+            # joins it back (server.library._enrich_track, the cover lookup).
+            # A flat album's file is its own name, exactly as before.
+            "file": os.path.relpath(ap, album_dir).replace("\\", "/"),
             "issues": [],
             "values": {},
             "lyrics_embedded": False,
@@ -2235,8 +2245,9 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
         # scripts apply (mb_genre_count, Settings → Import). Only an OVERFLOW
         # fails: one specific genre is a complete answer, so there is no
         # exact-count quota and nothing is ever topped up to fill a slot (the
-        # slot would be filler, and the family is derived by the writers
-        # anyway — see mlo.genres). A filetype the genre write gate excludes
+        # slot would be filler, and no family slot exists any more — the level
+        # above a name is a derived view, never stored — see mlo.genres). A
+        # filetype the genre write gate excludes
         # is never failed for a genre this app was told never to write, and
         # with the toggle off nothing is counted — same rule as every other
         # check.
@@ -2266,14 +2277,15 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                           basename)
                 track["issues"].append("GENRE_COUNT")
 
-        # Genre STRUCTURE (grade_check_genre_structure) — the two defects a list can
-        # carry that no other check sees: a repeated name, and a parent name stored
-        # beside its own child, anywhere in the list — the derived parent slot
-        # this app used to WRITE (`Pop; Art Pop` — the `Pop` was never stated
-        # by anyone). The vocabulary owns unknown names, the count owns the
-        # overflow, and the presence check owns `missing`, so this one reports
-        # only the structural lines `mlo.genres.issues` produces — the same
-        # predicate Format All's canonical pass removes them with.
+        # Genre STRUCTURE (grade_check_genre_structure) — the one defect a
+        # list can carry that no other check sees: a REPEATED name. It used to
+        # report two more — a parent stored beside its own child, and a list in
+        # any order but the app's canonical one — and both are gone with the
+        # parent idea itself (owner's call, 2026-10-12): the order a file holds
+        # is the SOURCE's own rank (MusicBrainz publishes an entity's genres by
+        # vote count, and the top `mb_genre_count` of that list are what gets
+        # stored), so no grader can know what another order should have been,
+        # and what sits above a name is not something any data settles.
         if cfg.get("grade_check_genre_structure", True) \
                 and should_write_audio_tag(cfg, "GENRE", filepath=ap):
             total_checks += 1
@@ -2286,7 +2298,7 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                 values = [p.strip() for p in values[0].split(";") if p.strip()]
             struct_issues = [
                 msg for msg in genre_issues(values, want)
-                if msg == "duplicate" or msg == "derived parent genre stored"
+                if msg in ("duplicate",)
             ]
             if struct_issues:
                 failed_checks += 1
@@ -2303,11 +2315,13 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
         if cfg.get("grade_check_genre_vocab", True) \
                 and should_write_audio_tag(cfg, "GENRE", filepath=ap):
             total_checks += 1
-            # Read through the SAME splitter the order check uses
-            # (mlo.genres.split_stored): a file whose single value is the
-            # rendered "Shoegaze / Rock" holds two names, and testing it as
-            # one would fail this check while the order check passed the same
-            # file — two checks, two readings of one list.
+            # Read through the SAME splitter the structure check uses
+            # (mlo.genres.iter_names / split_stored): a file whose single
+            # value is the rendered "Shoegaze / Rock" holds two names, and
+            # testing it as one would fail this check while the structure
+            # check passed the same file — two checks, two readings of one
+            # list. That check owns the order, the duplicates and the derived
+            # parent.
             values = iter_names(af.tag_values("GENRE"))
             unknown = [n for n in values if genre_canonical(n) is None]
             if unknown:
@@ -2857,7 +2871,6 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
         ).strip()
         if mb_release:
             album_has_mbid = True
-        rym_release = str(af.get_tag("RATEYOURMUSIC_ALBUM") or "").strip()
         if should_write_audio_tag(cfg, "MUSICBRAINZ_ALBUMID", filepath=ap) and cfg.get(
             "grade_check_mb_links", True
         ):
@@ -2866,14 +2879,6 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                 failed_checks += 1
                 add_issue("Missing MusicBrainz release link (import from MusicBrainz)", basename)
                 track["issues"].append("MB_LINK")
-        if should_write_audio_tag(cfg, "RATEYOURMUSIC_ALBUM", filepath=ap) and cfg.get(
-            "grade_check_rym_links", True
-        ):
-            total_checks += 1
-            if not rym_release:
-                failed_checks += 1
-                add_issue("Missing RateYourMusic release link", basename)
-                track["issues"].append("RYM_LINK")
 
         # Rip-log score (MEDIA=CD releases only, checked once MEDIA is
         # known - read here, graded in the CD section below).
@@ -5537,6 +5542,11 @@ def run_grade_library(config):
         # exit so a library of nothing but empty folders still reports them.
         dir_scan = {}
         albums = _find_albums(folder, dir_scan)
+        # A multi-disc release's disc SUBFOLDERS are part of ONE album, not
+        # albums of their own (mlo.discs.merge_disc_albums, spec R336), so the
+        # run grades the release as one album holding every disc's tracks.
+        from .discs import merge_disc_albums
+        albums = merge_disc_albums(albums, library_root(folder) or "")
         empty_folders = (_find_empty_folders(folder, dir_scan)
                          if config.get("grade_check_empty_folders", True) else [])
         # An album an import is writing RIGHT NOW is left out of the sweep:

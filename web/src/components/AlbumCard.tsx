@@ -92,8 +92,9 @@ export default function AlbumCard({ al, artistName, selectable, selected, onSele
   const artist = artistName ?? al.artist ?? al.album_artist ?? al.path.split(/[\\/]/).slice(0, -1).pop() ?? "";
   const media = al.media || al.meta?.MEDIA;
   /* The medium AND, for a download, its provenance ("Digital · Bandcamp") —
-   * the same words the album page's own chip prints, built by the same
-   * helper, so a card and the page it opens cannot name one release two ways.
+   * the CARD's own label, so every CD family value reads the one short word
+   * "CD" (mediaCardLabel) while the tag's full value stays in the tooltip
+   * below and on the album page this card opens (mediaFullLabel).
    * The countries stay their own badge below (one long list wraps inside its
    * own line instead of stretching the medium). */
   const mediaLabel = mediaSourceLabel(media, al.source_summary);

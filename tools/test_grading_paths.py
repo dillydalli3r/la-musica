@@ -593,7 +593,7 @@ set_tags(flac, dict(NO_MOOD, MOOD="melancholic"))
 
 # ----------------------------------------------------------------------
 # Rating FORMAT (spec R358e) — a whole number on the 0-100 scale, and the one
-# spelling of it. The value a source publishes on ITS scale (RYM's 4.54) is
+# spelling of it. The value a source publishes on ITS own 0-5 scale (4.54) is
 # not a rating this app can hold, and no formatter may guess which scale it
 # meant; a stray decimal point on the app's own scale ("91.0") is the SAME
 # rating spelled differently, which script 10 rewrites and this check agrees
@@ -688,7 +688,7 @@ ok(res_off["total_checks"] == res["total_checks"] - 1
    f"the check counts while on and disappears with the toggle off "
    f"({res['total_checks']} vs {res_off['total_checks']})")
 
-set_multi(flac, "GENRE", ["shoegaze", "dream pop"])
+set_multi(flac, "GENRE", ["dream pop", "shoegaze"])
 res = _grade_album(album, "EMBEDDED", cnt_cfg)
 ok(res["tracks"][0]["issues"] == ["GENRE_COUNT"],
    f"two genres pass the presence check and fail only the count "
@@ -722,52 +722,46 @@ ok("GENRE_COUNT" not in res["tracks"][0]["issues"],
 set_tags(flac, dict(NO_MOOD, MOOD="melancholic"))
 
 # ----------------------------------------------------------------------
-# Genre STRUCTURE (grade_check_genre_structure) — duplicates, and the
-# derived parent slot older builds wrote
+# Genre STRUCTURE (grade_check_genre_structure) — a REPEAT, and nothing else
 # ----------------------------------------------------------------------
 print("== genre structure ==")
-# The old ORDER rule ("the family, if present, comes first") graded a slot the
-# app itself wrote. The tag now holds the names a source stated and the level
-# above them is DERIVED (mlo.genre_vocab.path_of), so position means nothing;
-# what is still a defect is a REPEAT and that old derived slot, and that is what
-# this check reports. The count and the vocabulary own their own lines, so both
-# are off in these fixtures.
+# The ORDER a file holds is the SOURCE's own rank (MusicBrainz publishes an
+# entity's genres by vote count, and the top `mb_genre_count` of that list are
+# what gets stored), so no grader can say what another order should have been —
+# any order passes. Nor can it report a PARENT beside its own child: what sits
+# above a name is not something any data settles (owner's call, 2026-10-12).
+# The one defect left is a REPEATED name.
+# The count and the vocabulary own their own lines, so both are off in these
+# fixtures.
 struct_cfg = dict(mood_cfg, grade_check_genre_count=False, mb_genre_count=3,
                   grade_check_genre_structure=True)
-# Any order of specific names is fine, so long as no name is an ancestor of
-# another in the same list.
-set_multi(flac, "GENRE", ["shoegaze", "dream pop", "idm"])
+# A list in the app's canonical order passes…
+set_multi(flac, "GENRE", ["dream pop", "idm", "shoegaze"])
 res = _grade_album(album, "EMBEDDED", struct_cfg)
 ok(res["tracks"][0]["issues"] == [] and res["pass_count"] == res["total_checks"],
-   f"a list with no ancestor edge passes ({res['tracks'][0]['issues']})")
+   f"an in-order list passes ({res['tracks'][0]['issues']})")
+# …and so do the SAME names in ANY other order: there is no order line.
+set_multi(flac, "GENRE", ["shoegaze", "idm", "dream pop"])
+res = _grade_album(album, "EMBEDDED", struct_cfg)
+ok(res["tracks"][0]["issues"] == [] and res["pass_count"] == res["total_checks"],
+   f"the same names reversed pass too ({res['tracks'][0]['issues']})")
 
-# The OLD shape: a parent name stored beside its own child is the family slot
-# this app wrote (`Pop; Art Pop` — nobody stated "Pop"), and it is exactly what
-# Format All's canonical pass drops — wherever in the list it sits.
+# A parent stored beside its own child is just another name now — no defect,
+# wherever in the list it sits.
 set_multi(flac, "GENRE", ["rock", "shoegaze", "dream pop"])
 res = _grade_album(album, "EMBEDDED", struct_cfg)
-ok(res["tracks"][0]["issues"] == ["GENRE_STRUCTURE"],
-   f"a derived parent in front of a name it contains fails "
-   f"(got {res['tracks'][0]['issues']})")
-ok(any(i.startswith("derived parent genre stored") for i in res["issues"]),
-   f"the issue names the defect (got {res['issues']})")
-ok(res["total_checks"] - res["pass_count"] == 1,
-   f"and costs exactly one grade point ({res['pass_count']}/{res['total_checks']})")
-
-# The head's position stops mattering: mid-list it is the same defect.
+ok(res["tracks"][0]["issues"] == [],
+   f"a parent beside its own child passes (got {res['tracks'][0]['issues']})")
 set_multi(flac, "GENRE", ["shoegaze", "rock", "dream pop"])
 res = _grade_album(album, "EMBEDDED", struct_cfg)
-ok(res["tracks"][0]["issues"] == ["GENRE_STRUCTURE"]
-   and any(i.startswith("derived parent genre stored") for i in res["issues"]),
-   f"a mid-list ancestor fails too (got {res['issues']})")
-
-# A head a source really stated, with nothing under it in the list, is data.
-set_multi(flac, "GENRE", ["rock", "jazz"])
+ok(res["tracks"][0]["issues"] == [],
+   f"a mid-list parent passes too (got {res['tracks'][0]['issues']})")
+set_multi(flac, "GENRE", ["jazz", "rock"])
 res = _grade_album(album, "EMBEDDED", struct_cfg)
 ok(res["tracks"][0]["issues"] == [],
    f"a stated head nobody sits under passes (got {res['tracks'][0]['issues']})")
 
-# A repeat is a repeat, wherever it sits.
+# A repeat is the one defect left, wherever it sits.
 set_multi(flac, "GENRE", ["shoegaze", "shoegaze", "dream pop"])
 res = _grade_album(album, "EMBEDDED", struct_cfg)
 ok(res["tracks"][0]["issues"] == ["GENRE_STRUCTURE"]
@@ -778,23 +772,21 @@ ok(res["tracks"][0]["issues"] == ["GENRE_STRUCTURE"]
 # it as the names inside it, the same way the writers do.
 set_tags(flac, {"GENRE": "rock; shoegaze; dream pop"})
 res = _grade_album(album, "EMBEDDED", struct_cfg)
-ok(res["tracks"][0]["issues"] == ["GENRE_STRUCTURE"]
-   and any(i.startswith("derived parent genre stored") for i in res["issues"]),
-   f"a '; '-joined value is read as the names inside it (got {res['issues']})")
-set_tags(flac, {"GENRE": "shoegaze; rock; dream pop"})
+ok(res["tracks"][0]["issues"] == [],
+   f"a '; '-joined value with a parent passes (got {res['issues']})")
+set_tags(flac, {"GENRE": "shoegaze; shoegaze; dream pop"})
 res = _grade_album(album, "EMBEDDED", struct_cfg)
 ok(res["tracks"][0]["issues"] == ["GENRE_STRUCTURE"]
-   and any(i.startswith("derived parent genre stored") for i in res["issues"]),
-   f"a mid-list ancestor in a '; '-joined value fails too (got {res['issues']})")
-set_tags(flac, {"GENRE": "idm; dream pop; shoegaze"})
+   and any(i.startswith("duplicate") for i in res["issues"]),
+   f"a repeat inside a '; '-joined value fails too (got {res['issues']})")
+set_tags(flac, {"GENRE": "dream pop; idm; shoegaze"})
 res = _grade_album(album, "EMBEDDED", struct_cfg)
 ok(res["tracks"][0]["issues"] == [],
-   f"a '; '-joined list with no ancestor edge passes in any order "
-   f"(got {res['tracks'][0]['issues']})")
+   f"a '; '-joined list passes in any order (got {res['tracks'][0]['issues']})")
 
 # The OVERFLOW is the count check's business, not this one's: two checks may
 # not both fail one track over the same list.
-set_multi(flac, "GENRE", ["shoegaze", "dream pop", "post-britpop", "idm"])
+set_multi(flac, "GENRE", ["dream pop", "idm", "post-britpop", "shoegaze"])
 res = _grade_album(album, "EMBEDDED", struct_cfg)
 ok(res["tracks"][0]["issues"] == [],
    f"with the count check off an overflow is not re-reported here "
@@ -837,7 +829,7 @@ print("== genre vocabulary ==")
 # A name MusicBrainz does not publish is reported, one line per name: the
 # writers keep what a source said (dropping evidence is worse) and this is
 # where it surfaces.
-set_multi(flac, "GENRE", ["shoegaze", "Nonsense"])
+set_multi(flac, "GENRE", ["Nonsense", "shoegaze"])
 voc_cfg = dict(mood_cfg, grade_check_genre_count=False, grade_check_genre_vocab=True)
 res = _grade_album(album, "EMBEDDED", voc_cfg)
 ok(res["tracks"][0]["issues"] == ["GENRE_VOCAB"],
@@ -849,21 +841,22 @@ ok(res["total_checks"] - res["pass_count"] == 1,
 # A spelling the vocabulary DOES know is not a failure, whatever its case: the
 # writers canonicalize it (mlo.genres.canonical), so a library tagged by an
 # older build does not start failing.
-set_multi(flac, "GENRE", ["Shoegaze", "IDM"])
+set_multi(flac, "GENRE", ["IDM", "Shoegaze"])
 res = _grade_album(album, "EMBEDDED", voc_cfg)
 ok("GENRE_VOCAB" not in res["tracks"][0]["issues"]
    and res["pass_count"] == res["total_checks"],
    f"'Shoegaze' is a known name ({res['pass_count']}/{res['total_checks']})")
 # The switch: with it off the same file passes and one check leaves the
 # denominator.
-set_multi(flac, "GENRE", ["shoegaze", "Nonsense"])
+set_multi(flac, "GENRE", ["Nonsense", "shoegaze"])
 res_off = _grade_album(album, "EMBEDDED", dict(voc_cfg, grade_check_genre_vocab=False))
 ok("GENRE_VOCAB" not in res_off["tracks"][0]["issues"]
    and res_off["total_checks"] == res["total_checks"] - 1
    and res_off["pass_count"] == res_off["total_checks"],
    f"grade_check_genre_vocab=False stops grading it ({res_off['total_checks']})")
-# …and with the ORDER check off too, the vocabulary is not re-reported under
-# the other code (a disabled check never reappears elsewhere).
+# …and the removed ORDER switch is inert: the code it named is gone, so a
+# stored `grade_check_genre_order=True` changes nothing (there is no GENRE_ORDER
+# issue to raise any more).
 res = _grade_album(album, "EMBEDDED",
                    dict(voc_cfg, grade_check_genre_vocab=False,
                         grade_check_genre_order=True))
@@ -878,9 +871,9 @@ print("== genre capitalization ==")
 # an OPEN, MULTI-VALUE tag, so its canonical form is per NAME (one call of
 # mlo.genres.display_name each) and it is deliberately absent from
 # CANONICAL_CASE. Nothing else reports a name stored the vocabulary's own way —
-# the vocabulary check folds case and the order check only looks at the family
-# slot — so "metal; shoegaze" graded clean while every genre writer would have
-# stored "Metal; Shoegaze".
+# the vocabulary check folds case and the structure check only reports the
+# duplicate line — so "metal; shoegaze" graded clean
+# while every genre writer would have stored "Metal; Shoegaze".
 case_cfg = dict(mood_cfg, grade_check_genre_count=False,
                 grade_check_tag_case=True)
 set_multi(flac, "GENRE", ["metal", "shoegaze"])

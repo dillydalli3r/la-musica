@@ -7,7 +7,7 @@ Every claim below is about the real code, not a copy of it:
     extension exports the whole profile) and reports how many cookie lines
     stayed out; a file with nothing for that credential is REFUSED in the
     provider's own words rather than stored — the yt-dlp jar by the endpoint
-    that writes it, RYM by storing nothing and saying why;
+    that writes it;
   * a per-cookie comment is keyed by the cookie's IDENTITY (domain, path,
     name), not by position: it survives a re-import that re-orders the file,
     and a same-named cookie on another domain keeps its own (empty) comment;
@@ -18,10 +18,10 @@ Every claim below is about the real code, not a copy of it:
   * the note round-trips through the FILE: a jar this app wrote carries its
     comments, and importing it again (into a config that lost them) brings
     them back, keyed the same way;
-  * `GET/POST /api/cookies/{source}` are the panel's one idiom for both
-    credentials (domain, path, name, expiry, expired, comment), they refuse an
-    unknown source and a comment for a cookie the source does not hold, and no
-    answer of theirs ever carries a cookie VALUE;
+  * `GET/POST /api/cookies/{source}` are the panel's one idiom (domain, path,
+    name, expiry, expired, comment), they refuse an unknown source and a
+    comment for a cookie the source does not hold, and no answer of theirs ever
+    carries a cookie VALUE;
   * an expired export is named as expired — the failure that otherwise looks
     green: the jar parses, the panel is happy, and the provider answers as a
     guest.
@@ -58,7 +58,7 @@ for _mod in (cfgmod, pathmod):
 
 from fastapi import HTTPException  # noqa: E402
 
-from server import api_cookies, api_rym, api_youtube  # noqa: E402
+from server import api_cookies, api_youtube  # noqa: E402
 from server import cookies as cookie_mod  # noqa: E402
 
 HEADER = "# Netscape HTTP Cookie File\n"
@@ -94,22 +94,12 @@ REORDERED = HEADER + GOOGLE_SID + GOOGLE_NID + YT_SID
 # still asks the user to sign in.
 GOOGLE_ONLY = HEADER + GOOGLE_NID
 
-# And the mirror case for RYM: a file with no rateyourmusic.com cookie in it.
-YOUTUBE_ONLY = HEADER + YT_SID
-
 # A session cookie that expired years ago: the export that "just stopped
 # working".
 EXPIRED = HEADER + ".youtube.com\tTRUE\t/\tTRUE\t1000000000\tSID\tYT-OLD\n"
 
-# RYM's own export: the HttpOnly session cookie (the reason the import exists)
-# next to the Cloudflare one, with YouTube's cookies in the same profile.
-RYM_SESSION = "#HttpOnly_.rateyourmusic.com\tTRUE\t/\tTRUE\t1893456000\tsession\tRYM-VALUE\n"
-RYM_CLEARANCE = ".rateyourmusic.com\tTRUE\t/\tTRUE\t1893456000\tcf_clearance\tCF-VALUE\n"
-RYM_PROFILE = HEADER + RYM_SESSION + RYM_CLEARANCE + YT_SID
-
 # The cookie VALUES in the fixtures: none may ever appear in an API answer.
-SECRETS = ["YT-VALUE", "G-VALUE", "NOPE-VALUE", "YT-OLD", "RYM-VALUE",
-           "CF-VALUE", "523=abc"]
+SECRETS = ["YT-VALUE", "G-VALUE", "NOPE-VALUE", "YT-OLD", "523=abc"]
 
 
 def assert_no_values(payload, where):
@@ -149,10 +139,6 @@ def without_notes(text):
 
 def post_youtube(text):
     return api_youtube.youtube_cookies_post(api_youtube.CookieUpload(text=text))
-
-
-def post_rym(text):
-    return api_rym.rym_cookies_post(api_rym.CookieUpload(text=text))
 
 
 def comment(source, domain, path, name, text):
@@ -292,80 +278,16 @@ try:
     assert cookie_data(jar_text()) == cookie_data(REORDERED), "a long note changed the cookies"
     comment("youtube", "youtube.com", "/", "SID", "the main one")
 
-    # ----------------------------------------------------------------- #
-    # 4. The same view for RYM, whose credential is a header, not a file
-    # ----------------------------------------------------------------- #
-    saved = post_rym(RYM_PROFILE)
-    assert saved["stored"] == 2 and saved["session"] is True, saved
-    assert saved["filtered"] == 1, saved  # the youtube.com cookie in the file
-    assert_no_values(saved, "the RYM import's answer")
-    assert cfgmod.load_config()["rym_cookie"] == \
-        "session=RYM-VALUE; cf_clearance=CF-VALUE"
-    state = api_cookies.cookies_get("rym")
-    assert state["present"] is True and len(state["cookies"]) == 2, state
-    assert state["hosts"] == ["rateyourmusic.com"], state
-    assert [c["name"] for c in state["cookies"]] == ["session", "cf_clearance"], state
-    assert_no_values(state, "RYM's per-cookie view")
-    # The header has nowhere to carry the expiry, so the import REMEMBERED what
-    # the file stated — the panel can still say when the session dies.
-    assert row(state, "session", "rateyourmusic.com")["expiry"] == "1893456000", state
-    assert row(state, "session", "rateyourmusic.com")["expires_at"] == "2030-01-01", state
-
-    state = comment("rym", "rateyourmusic.com", "/", "session", "the signed-in one")
-    assert row(state, "session", "rateyourmusic.com")["comment"] == "the signed-in one", state
-    assert row(state, "cf_clearance", "rateyourmusic.com")["comment"] == "", state
-    assert_no_values(state, "RYM's comment answer")
-    # The credential itself is untouched by a comment: RYM is still sent the
-    # exact header the import stored.
-    assert cfgmod.load_config()["rym_cookie"] == \
-        "session=RYM-VALUE; cf_clearance=CF-VALUE"
-
-    # A re-import (the same cookies, another order) keeps the comment and
-    # refreshes the expiries without losing the user's note.
-    saved = post_rym(HEADER + RYM_CLEARANCE + RYM_SESSION)
-    assert saved["stored"] == 2, saved
-    state = api_cookies.cookies_get("rym")
-    assert row(state, "session", "rateyourmusic.com")["comment"] == "the signed-in one", state
-    assert [c["name"] for c in state["cookies"]] == ["cf_clearance", "session"], state
-
-    # A file with no RYM cookie still stores nothing and says why, so the
-    # credential that was working survives it.
-    before = cfgmod.load_config()["rym_cookie"]
-    saved = post_rym(YOUTUBE_ONLY)
-    assert saved["stored"] == 0 and saved["filtered"] == 1, saved
-    assert "rateyourmusic.com" in saved["warnings"][0], saved
-    assert cfgmod.load_config()["rym_cookie"] == before, \
-        "a foreign jar replaced RYM's cookie"
-
-    # Clearing the comment leaves the remembered expiry in place (it describes
-    # the cookie, not the note).
-    state = comment("rym", "rateyourmusic.com", "/", "session", "")
-    assert row(state, "session", "rateyourmusic.com")["comment"] == "", state
-    assert row(state, "session", "rateyourmusic.com")["expiry"] == "1893456000", state
+    # The notes store is shared, sliced per source: the yt-dlp jar's notes
+    # carry the comment the user wrote and no expiry of their own to remember.
     notes = json.loads(cfgmod.load_config()["cookie_notes"])
-    # The import also stamps WHEN the file arrived (`imported_at`, shared by
-    # every cookie of one import) — the panel groups the rows of one import
-    # under one dated section with it. Value not pinned here: it is "now".
-    _rym_note = dict(notes["rym"]["rateyourmusic.com\t/\tsession"])
-    assert _rym_note.pop("expiry", None) == "1893456000", notes
-    assert _rym_note.pop("imported_at", ""), notes
-    assert _rym_note == {}, notes
-    _cf_note = dict(notes["rym"]["rateyourmusic.com\t/\tcf_clearance"])
-    assert _cf_note.get("expiry") == "1893456000" and _cf_note.get("imported_at"), notes
-    assert notes["rym"]["rateyourmusic.com\t/\tsession"]["imported_at"] == \
-        notes["rym"]["rateyourmusic.com\t/\tcf_clearance"]["imported_at"], \
-        "one import, one stamp — the panel groups on it"
-    # …and the yt-dlp jar's notes are a different slice of the same store, with
-    # the comment the user wrote and no expiry of their own to remember.
     assert notes["youtube"]["youtube.com\t/\tSID"] == {"comment": "the main one"}, notes
 
     # ----------------------------------------------------------------- #
-    # 5. The route refuses what it cannot attach a note to
+    # 4. The route refuses what it cannot attach a note to
     # ----------------------------------------------------------------- #
     refused(lambda: api_cookies.cookies_get("bandcamp"), 404,
             "unknown cookie source")
-    refused(lambda: comment("rym", "rateyourmusic.com", "/", "nope", "x"),
-            404, "no nope cookie")
     refused(lambda: comment("youtube", "youtube.com", "/", "nope", "x"),
             404, "no nope cookie")
     # A cookie on a path the jar does not hold is not that cookie either:
@@ -384,7 +306,7 @@ try:
         "a comment did not survive the jar being deleted and re-imported"
 
     print("PASS  cookie import: filtering, per-cookie comments, identity keys, "
-          "jar round-trip, both credentials")
+          "jar round-trip")
 finally:
     if OUT:
         os.environ["MLO_MUSIC_FOLDER"] = OUT

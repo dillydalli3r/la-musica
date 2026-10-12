@@ -39,7 +39,10 @@
               trimming is the answer, anything else (prose, "maybe", a stray
               digit inside a sentence, an empty reply, a failed or timed-out
               call) is NO answer — the tag is left exactly as it was and the
-              reason is recorded (`answer["ai"]`), never guessed
+              reason is recorded (`answer["ai"]`), never guessed. A real 0/1
+              is memoized per file (`_ai_cached`: path + size + mtime), so a
+              track asked twice in a run — the import's instrumentals step and
+              the lyric-less rule both reach here — costs ONE model call
 
 MusicBrainz is deliberately NOT a source here. Probed live on 2026-09-17:
 a recording lookup carries no instrumental field at all (only id / title /
@@ -59,6 +62,7 @@ because the alternative is a LYRICS grading failure the import parks for a
 person to answer for every instrumental track in the library.
 """
 import os
+import threading
 from concurrent.futures import ThreadPoolExecutor
 
 from mlo.stats import worker_count
@@ -93,6 +97,35 @@ _SPOTIFY_AF = "https://api.spotify.com/v1/audio-features/"
 # One line per process when Spotify refuses audio-features (403/404 on apps
 # the endpoint has been removed for), never one per track.
 _spotify_warned = False
+
+# The AI's verdict, memoized for the process by the FILE it was asked about —
+# `(normcase(path), size, mtime_ns)`, the key shape `server/api_cover` uses for
+# a per-file answer. The same track asked again in one run (the instrumentals
+# step and the lyrics-absent rule both reach `detect_instrumental` for a
+# lyric-less track, and a second press of the tag action asks again) costs no
+# second model call, while a file the user edited is a different key and is
+# asked afresh. ONLY a real 0/1 is stored: a failed or junk reply is not a fact
+# and the next caller retries it. The advisory ladder's own `_advisory_cached`
+# is the same mechanism for the network sources; this one is keyed by the file
+# because that is what the question is about.
+_AI_CACHE: dict = {}
+_AI_CACHE_LOCK = threading.Lock()
+_AI_CACHE_MAX = 20000
+
+
+def _ai_cache_key(path):
+    """`(normcase(path), size, mtime_ns)` for this file, or None.
+
+    A path the filesystem cannot stat (or one that is not there) has no
+    identity to cache a verdict under: the caller asks the model directly and
+    nothing outlives the call.
+    """
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (os.path.normcase(str(path)), int(st.st_size),
+            int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9))))
 
 
 def merge_instrumental(answers):
@@ -274,6 +307,9 @@ def _ai_answer(cfg, artist, title, album):
     configured (or `server/` unimportable, as in the CLI) nothing is asked and
     nothing is recorded — an unconfigured app behaves exactly as it did
     before this source existed.
+
+    This is the UNCACHED ask; `_ai_cached` is the wrapper `detect_instrumental`
+    actually calls, and it is the one that keeps a real answer per file.
     """
     if not (cfg or {}).get("instrumental_ai_classify", True):
         return None, ""
@@ -299,6 +335,31 @@ def _ai_answer(cfg, artist, title, album):
         what = "instrumental" if answer == "1" else "has vocals"
         return int(answer), f"ai says the track {what} (replied {answer!r})"
     return None, (f"ai replied {answer!r} — not a lone 0 or 1, nothing written")
+
+
+def _ai_cached(cfg, path, artist, title, album):
+    """`_ai_answer` memoized per file — one model call per track, not per ask.
+
+    Keyed by `_ai_cache_key`, so a track already asked about in this process is
+    answered from the memo (the import step and the lyric-less rule can both
+    reach it), while a file whose bytes/mtime changed is a different key and is
+    asked again. Only a real 0/1 is kept: a refusal, a junk reply or a failure
+    is retried by the next caller rather than frozen into the process.
+    """
+    key = _ai_cache_key(path)
+    if key is None:
+        return _ai_answer(cfg, artist, title, album)
+    with _AI_CACHE_LOCK:
+        hit = _AI_CACHE.get(key)
+    if hit is not None:
+        return hit
+    answer = _ai_answer(cfg, artist, title, album)
+    if answer[0] in (0, 1):
+        with _AI_CACHE_LOCK:
+            if len(_AI_CACHE) >= _AI_CACHE_MAX:
+                _AI_CACHE.clear()
+            _AI_CACHE[key] = answer
+    return answer
 
 
 def _alias_substitutions(get_tag, cfg, artist, title, album, tags=None):
@@ -406,11 +467,13 @@ def detect_instrumental(paths, cfg=None):
     The AI provider (`_ai_answer`, source key `AI`) is the LAST resort, and
     the only source gated on the others: it is asked exactly once for a track
     that states no lyrics at all AND whose other sources all stated nothing —
-    the one case where the merged value would otherwise be None. Its strict
-    0/1 is merged like any other answer; a reply that is not a lone 0 or 1 (or
-    a failed/timeout call) writes nothing at all and its reason is `ai` in the
-    result — `None` when no endpoint is configured, so an app without one
-    behaves exactly as before this source existed.
+    the one case where the merged value would otherwise be None. A real answer
+    is memoized per file for the process (`_ai_cached`: path + size + mtime),
+    so a second pass over the same unchanged file costs no second call. Its
+    strict 0/1 is merged like any other answer; a reply that is not a lone 0 or
+    1 (or a failed/timeout call) writes nothing at all and its reason is `ai`
+    in the result — `None` when no endpoint is configured, so an app without
+    one behaves exactly as before this source existed.
 
     LRCLIB that states nothing under the stored names is retried under the
     MusicBrainz alias names (`_alias_substitutions`), the original names first:
@@ -511,7 +574,7 @@ def detect_instrumental(paths, cfg=None):
                and not _lyrics_present(track[1], track[0])]
 
     def _ai(job):
-        return _ai_answer(cfg, job[1], job[2], job[3])
+        return _ai_cached(cfg, job[0], job[1], job[2], job[3])
 
     ai_workers = worker_count(cfg, maximum=8, items=len(pending))
     if len(pending) > 1 and ai_workers > 1:

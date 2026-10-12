@@ -1,20 +1,16 @@
-import { useState, type DragEvent, type ReactNode } from "react";
+import { useState, type DragEvent } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Check, Globe, Loader2, Trash2, X } from "lucide-react";
-// RymCookiesSaveReply and AotyCookiesSaveReply are the same shape (one cookie
-// header in a config value), so the rym type covers both credential branches.
-import { api, type CookieEntry, type RymCookiesSaveReply, type YoutubeCookiesSaveReply } from "../api";
+import { Check, Loader2, Trash2, X } from "lucide-react";
+import { api, type CookieEntry, type YoutubeCookiesSaveReply } from "../api";
 import ConfirmButton from "./ConfirmButton";
 import { toast } from "../store";
 import { fmtBytes } from "../lib/fmt";
 import { useI18n } from "../lib/i18n";
 
-/** The cookie logins, by the id the server knows them by
- *  (`server/api_cookies.py`). All three are a cookies.txt: the yt-dlp jar
- *  (`youtube`) and the RateYourMusic (`rym`) and Album of the Year (`aoty`)
- *  `Cookie` headers. A token or an API key is not one of these — a credential
- *  that is not a cookie has no jar to import. */
-export type CookieSource = "youtube" | "rym" | "aoty";
+/** The cookie login the app keeps: the yt-dlp jar (`youtube`). A token or an
+ *  API key is not one of these — a credential that is not a cookie has no jar
+ *  to import. */
+export type CookieSource = "youtube";
 
 /** A cookie's identity, exactly as the server keys its notes: domain, path and
  *  name. Two cookies can share a name on two domains, and the note has to
@@ -22,16 +18,11 @@ export type CookieSource = "youtube" | "rym" | "aoty";
 const identity = (c: { domain: string; path: string; name: string }) =>
   `${c.domain}\t${c.path}\t${c.name}`;
 
-/** One cookie login, in one panel: import a cookies.txt, see what was kept,
- *  write a note against any cookie, clear the credential.
+/** The YouTube cookie jar, in one panel: import a cookies.txt, see what was
+ *  kept, write a note against any cookie, clear the jar.
  *
- *  ONE component for every credential (and for every place they are offered —
- *  Settings → Sources, the wizard's Keys step, Settings → Videos and Settings
- *  → Discovery), because the panels used to be a copy each and the copy is how
- *  they would drift apart. What differs between them is the credential, not
- *  the job: where it lands (a jar file the app owns, or the `rym_cookie` /
- *  `aoty_cookie` config value), how the file is narrowed (only the hosts that
- *  credential is sent to), and the one sentence that says so.
+ *  ONE component for every place the jar is offered — Settings → Videos, the
+ *  wizard's Keys step and Settings → Sources.
  *
  *  Every import arrives here as TEXT — a paste or a dropped file, never a
  *  path — and the server validates it as a Netscape cookie file BEFORE it
@@ -39,29 +30,16 @@ const identity = (c: { domain: string; path: string; name: string }) =>
  *  doing their job. Nothing here ever shows, posts or toasts a cookie VALUE;
  *  the server does not send one.
  *
- *  `compact` is the Sources/Keys row (a disclosure, closed until asked) and
- *  `onStored` hands the fresh config value back to a caller that keeps the
- *  credential in its own form field (the Discovery tab's `rym_cookie` box
- *  would otherwise post the old value over an import on the next Save).
- */
+ *  `compact` is the Sources/Keys row (a disclosure, closed until asked). */
 export default function CookieJarPanel({
   source,
-  onStored,
   compact = false,
 }: {
   source: CookieSource;
-  onStored?: (value: string) => void;
   compact?: boolean;
 }) {
   const qc = useQueryClient();
   const { t } = useI18n();
-  const isYoutube = source === "youtube";
-  const isAoty = source === "aoty";
-  // The non-youtube credentials differ only in where they land and which host
-  // they are sent to, so they share one branch: these pick the pieces.
-  const summaryKey = isAoty ? "aotyCookies" : "rymCookies";
-  const configKey = isAoty ? "aoty_cookie" : "rym_cookie";
-  const host = isAoty ? "albumoftheyear.org" : "rateyourmusic.com";
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
   const [dragging, setDragging] = useState(false);
@@ -70,32 +48,19 @@ export default function CookieJarPanel({
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState("");
 
-  // The credential's own state (what the file/config holds) and the per-cookie
-  // view are two reads: the first is the jar's summary, the second the list
-  // with each cookie's note.
-  const yt = useQuery({ queryKey: ["youtubeCookies"], queryFn: api.youtubeCookies, retry: false, enabled: isYoutube });
-  const cred = useQuery({
-    queryKey: [summaryKey],
-    queryFn: isAoty ? api.aotyCookies : api.rymCookies,
-    retry: false,
-    enabled: !isYoutube,
-  });
+  // The jar's own state (what the file holds) and the per-cookie view are two
+  // reads: the first is the jar's summary, the second the list with each
+  // cookie's note.
+  const yt = useQuery({ queryKey: ["youtubeCookies"], queryFn: api.youtubeCookies, retry: false });
   const { data: list } = useQuery({
     queryKey: ["cookieList", source],
     queryFn: () => api.cookieList(source),
     retry: false,
   });
-  const active = isYoutube ? yt.data : cred.data;
-  const browsers = useQuery({
-    queryKey: ["cookieBrowsers"],
-    queryFn: api.cookieBrowsers,
-    retry: false,
-    enabled: !isYoutube,
-  });
-  const present = active?.present ?? false;
-  const lines = active?.lines ?? 0;
-  const maxBytes = active?.max_bytes ?? 524288;
-  const warnings = active?.warnings ?? [];
+  const present = yt.data?.present ?? false;
+  const lines = yt.data?.lines ?? 0;
+  const maxBytes = yt.data?.max_bytes ?? 524288;
+  const warnings = yt.data?.warnings ?? [];
 
   const save = async (body: string) => {
     if (!body.trim()) {
@@ -103,45 +68,18 @@ export default function CookieJarPanel({
       return;
     }
     setBusy(true);
-    let said: string[] = [];
     try {
-      if (isYoutube) {
-        const r: YoutubeCookiesSaveReply = await api.youtubeCookiesSave(body);
-        setText("");
-        toast.success(
-          `Cookie file saved — ${r.lines} cookie(s)${r.sites.length ? ` for ${r.sites.join(", ")}` : ""}` +
-            (r.filtered ? ` · ${r.filtered} cookie line(s) for other sites left out` : "")
-        );
-        said = r.warnings;
-        qc.invalidateQueries({ queryKey: ["youtubeCookies"] });
-      } else {
-        const r: RymCookiesSaveReply = isAoty
-          ? await api.aotyCookiesSave(body)
-          : await api.rymCookiesSave(body);
-        setText("");
-        if (r.stored > 0) {
-          toast.success(
-            `Cookie saved — ${r.stored} ${host} cookie${r.stored === 1 ? "" : "s"}${r.session ? ", session included" : ""}`
-          );
-          // The import wrote the config, so the form that owns the credential
-          // has to follow it: the box on the Discovery tab (and the next "Save
-          // all settings") must agree with what the site is sent from now on.
-          // The value comes from the config, never from the import's answer,
-          // which is names and counts only.
-          const fresh = await api.config();
-          onStored?.(String(fresh[configKey] ?? ""));
-        } else {
-          toast.error(`No ${host} cookie in that file — nothing was stored`);
-        }
-        said = r.warnings;
-        qc.invalidateQueries({ queryKey: [summaryKey] });
-        qc.invalidateQueries({ queryKey: ["config"] });
-      }
-      // The server's own sentences about what the credential now holds come
-      // through as warnings: a stored cookie with no `session` pair means RYM
-      // answers as a guest, and a jar that expired means every download asks
-      // the user to sign in — a plain "saved!" would hide exactly that.
-      for (const w of said) toast(w);
+      const r: YoutubeCookiesSaveReply = await api.youtubeCookiesSave(body);
+      setText("");
+      toast.success(
+        `Cookie file saved — ${r.lines} cookie(s)${r.sites.length ? ` for ${r.sites.join(", ")}` : ""}` +
+          (r.filtered ? ` · ${r.filtered} cookie line(s) for other sites left out` : "")
+      );
+      // The server's own sentences about what the jar now holds — a jar that
+      // expired means every download asks the user to sign in, and a plain
+      // "saved!" would hide exactly that.
+      for (const w of r.warnings) toast(w);
+      qc.invalidateQueries({ queryKey: ["youtubeCookies"] });
       qc.invalidateQueries({ queryKey: ["cookieList", source] });
     } catch (e) {
       toast.error(String(e));
@@ -165,49 +103,9 @@ export default function CookieJarPanel({
   const remove = async () => {
     setBusy(true);
     try {
-      if (isYoutube) {
-        await api.youtubeCookiesDelete();
-        toast("Cookie file removed — downloads run anonymously again");
-        qc.invalidateQueries({ queryKey: ["youtubeCookies"] });
-      } else {
-        // Clearing goes through the ordinary config route: `rym_cookie` /
-        // `aoty_cookie` IS the credential, so "remove it" is "save it empty" —
-        // no second endpoint and no second place it could live. The notes
-        // stay: they are keyed by identity, and the next import of the same
-        // session finds them again.
-        await api.saveConfig({ [configKey]: "" });
-        onStored?.("");
-        toast(isAoty ? "Cookie cleared — Album of the Year is asked without one" : "Cookie cleared — RYM is asked as a guest again");
-        qc.invalidateQueries({ queryKey: [summaryKey] });
-        qc.invalidateQueries({ queryKey: ["config"] });
-      }
-      qc.invalidateQueries({ queryKey: ["cookieList", source] });
-    } catch (e) {
-      toast.error(String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  /** Take the credential out of a browser the user is ALREADY signed in to.
-   *
-   *  The whole export-and-paste dance, one click: the server asks the yt-dlp
-   *  it ships for that browser's cookies, keeps only this source's, stores
-   *  them AND that browser's own User-Agent (Cloudflare binds a `cf_clearance`
-   *  to the UA that earned it — the same jar answers 200 with Firefox's UA and
-   *  403 with the built-in Chrome one). Measured 2026-10-10: RateYourMusic
-   *  serves `503` to an anonymous client on every release page, so without a
-   *  session read from somewhere the source cannot answer at all. */
-  const fromBrowser = async (browser: string, label: string) => {
-    setBusy(true);
-    try {
-      const r = await api.cookiesFromBrowser(source as "rym" | "aoty", browser);
-      toast.success(t("cookies.fromBrowserDone", { count: r.stored, browser: label }));
-      const fresh = await api.config();
-      onStored?.(String(fresh[configKey] ?? ""));
-      for (const w of r.warnings ?? []) toast(w);
-      qc.invalidateQueries({ queryKey: [summaryKey] });
-      qc.invalidateQueries({ queryKey: ["config"] });
+      await api.youtubeCookiesDelete();
+      toast("Cookie file removed — downloads run anonymously again");
+      qc.invalidateQueries({ queryKey: ["youtubeCookies"] });
       qc.invalidateQueries({ queryKey: ["cookieList", source] });
     } catch (e) {
       toast.error(String(e));
@@ -246,7 +144,7 @@ export default function CookieJarPanel({
     }
   };
 
-  const title = isYoutube ? "Cookie file" : isAoty ? "Import Album of the Year cookies" : "Import from cookies.txt";
+  const title = "Cookie file";
   const chip = present ? `${lines} cookie${lines === 1 ? "" : "s"}` : "none saved";
 
   const header = (
@@ -259,7 +157,7 @@ export default function CookieJarPanel({
       >
         {chip}
       </span>
-      {isYoutube && present && (
+      {present && (
         <span className="text-[10px] text-zinc-500">
           {fmtBytes(yt.data?.bytes ?? 0)}
           {yt.data?.saved_at ? ` · saved ${new Date(yt.data.saved_at).toLocaleString()}` : ""}
@@ -268,7 +166,7 @@ export default function CookieJarPanel({
       {present && (
         <ConfirmButton
           className="btn-ghost !py-0.5 text-[11px] tap ml-auto"
-          confirmLabel={isYoutube ? "Delete the cookie file?" : isAoty ? "Delete the Album of the Year cookie?" : "Delete the RateYourMusic cookie?"}
+          confirmLabel="Delete the cookie file?"
           onConfirm={remove}
           disabled={busy}
         >
@@ -278,7 +176,7 @@ export default function CookieJarPanel({
     </div>
   );
 
-  const intro = isYoutube ? (
+  const intro = (
     <div className="text-[11px] text-zinc-600">
       In the browser you are signed in to YouTube with, export its cookies to a <span className="text-zinc-400">cookies.txt</span>{" "}
       (a "Get cookies.txt" extension writes exactly this file, in Netscape format — the only shape this box accepts), then paste its
@@ -286,33 +184,18 @@ export default function CookieJarPanel({
       jar belongs to this app, at{" "}
       <span className="text-zinc-400">{yt.data?.path ?? "<music folder>/.mlo/data/cookies.txt"}</span>.
     </div>
-  ) : isAoty ? (
-    <div className="text-[11px] text-zinc-600">
-      Signed in to albumoftheyear.org, export the browser's cookies to a <span className="text-zinc-400">cookies.txt</span> in Netscape
-      format — the Firefox extension <span className="text-zinc-400">"cookies.txt"</span> by Rob W writes exactly that file, and it is
-      the only shape this box accepts — then paste its contents below or drop the file onto the box. Cloudflare hands the site a{" "}
-      <span className="text-zinc-400">cf_clearance</span> cookie once a browser passes its challenge; keeping it is what lets the app
-      read albumoftheyear.org instead of being challenged.
-    </div>
-  ) : (
-    <div className="text-[11px] text-zinc-600">
-      Signed in to rateyourmusic.com, export the browser's cookies to a <span className="text-zinc-400">cookies.txt</span> in Netscape
-      format — the Firefox extension <span className="text-zinc-400">"cookies.txt"</span> by Rob W writes exactly that file, and it is
-      the only shape this box accepts — then paste its contents below or drop the file onto the box. RYM's{" "}
-      <span className="text-zinc-400">session</span> cookie is HttpOnly, so this export is the only way to hand it over.
-    </div>
   );
 
   // What the import KEEPS is the one thing a user should be able to see without
-  // reading the server's code: the hosts this credential is actually sent to,
-  // and nothing else from a browser profile's export.
+  // reading the server's code: the hosts the jar is actually sent to, and
+  // nothing else from a browser profile's export.
   const cookies = list?.cookies ?? [];
   // ONE SECTION PER IMPORT. Every row the same cookies.txt produced carries
   // the same `imported_at`, so an import reads as the event it was — the
   // header "Imported 09/10/2026, 23:35 · 27 cookies" — instead of 27 loose
   // rows that say nothing about when they arrived. The section is closed
   // until asked, so a fresh import is one line, not a wall; the per-cookie
-  // notes are still there inside it. Newest import first; a credential that
+  // notes are still there inside it. Newest import first; a jar that
   // predates the stamp (so no row carries one) keeps its older grouping.
   const groups: { at: string; rows: CookieEntry[] }[] = [];
   for (const c of cookies) {
@@ -377,37 +260,6 @@ export default function CookieJarPanel({
     </div>
   );
 
-  const sampleHost = isYoutube ? ".youtube.com" : `.${host}`;
-  const sampleName = isYoutube ? "LOGIN_INFO" : isAoty ? "cf_clearance" : "session";
-
-  /** The one-click alternative to the box below: read the session out of a
-   *  browser this machine already has, signed in. Hidden for the yt-dlp jar,
-   *  which has browsers of its own to choose from in Settings. */
-  const browserRow: ReactNode = !isYoutube ? (
-    <div className="flex items-center gap-2 flex-wrap">
-      <span className="text-[11px] text-zinc-600">
-        {t("cookies.fromBrowserHint", { host })}
-      </span>
-      {(browsers.data?.browsers ?? []).map((b) => (
-        <button
-          key={b.id}
-          className="btn-ghost !py-0.5 text-[11px] tap"
-          onClick={() => fromBrowser(b.id, b.label)}
-          disabled={busy}
-          title={t("cookies.fromBrowserTitle")}
-        >
-          {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Globe className="h-3 w-3" />}{" "}
-          {t("cookies.fromBrowser", { browser: b.label })}
-        </button>
-      ))}
-      {browsers.data && browsers.data.browsers.length === 0 && (
-        <span className="text-[11px] text-amber-400/90">
-          {t("cookies.fromBrowserNone", { host })}
-        </span>
-      )}
-    </div>
-  ) : null;
-
   const dropZone = (
     <div
       onDragOver={(e) => {
@@ -420,7 +272,7 @@ export default function CookieJarPanel({
     >
       <textarea
         className="input w-full h-24 font-mono text-[10px] tap"
-        placeholder={`# Netscape HTTP Cookie File\n${sampleHost}\tTRUE\t/\tTRUE\t…\t${sampleName}\t…\n\n(paste here, or drop cookies.txt on this box)`}
+        placeholder={`# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t…\tLOGIN_INFO\t…\n\n(paste here, or drop cookies.txt on this box)`}
         value={text}
         onChange={(e) => setText(e.target.value)}
         spellCheck={false}
@@ -432,7 +284,7 @@ export default function CookieJarPanel({
           disabled={busy || !text.trim()}
         >
           {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Check className="h-3 w-3" />}{" "}
-          {isYoutube ? "Save cookie file" : "Save cookies"}
+          Save cookie file
         </button>
         {text.trim() && (
           <button className="btn-ghost !py-1 text-xs tap" onClick={() => setText("")} disabled={busy}>
@@ -440,18 +292,15 @@ export default function CookieJarPanel({
           </button>
         )}
         <span className="text-[10px] text-zinc-600">
-          Up to {fmtBytes(maxBytes)} — {isYoutube
-            ? "a jar is a few dozen lines, so anything bigger is a browser profile folder, not a cookies.txt."
-            : "the export is the cookies.txt itself; a whole browser profile is bigger than that."}
+          Up to {fmtBytes(maxBytes)} — a jar is a few dozen lines, so anything bigger is a browser profile folder, not a cookies.txt.
         </span>
       </div>
     </div>
   );
 
-  const rest: ReactNode = (
+  const rest = (
     <>
       {intro}
-      {browserRow}
       {kept}
       {warnings.map((w) => (
         <div key={w} className="text-[10px] text-amber-400/90 border border-amber-900/40 bg-amber-950/20 rounded px-2 py-1">

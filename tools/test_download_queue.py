@@ -385,10 +385,20 @@ check("a non-http scope passes through untouched",
       media.without_range({"type": "websocket"}) == {"type": "websocket"})
 check("an http scope without headers is safe",
       media.without_range({"type": "http"})["headers"] == [])
+# `full_body_response` now serves through a delete-sharing handle (the media
+# routes do too — see server/api_media.shared_file_response), so it opens the
+# path: give it a real one. The checks read only the headers, then release it.
+import tempfile  # noqa: E402
+_body_fixture = os.path.join(tempfile.mkdtemp(prefix="mlo-dlq-"), "x.flac")
+with open(_body_fixture, "wb") as _fh:
+    _fh.write(b"x" * 32)
+_body_resp = media.full_body_response(_body_fixture, "audio/flac")
 check("the response tells the client ranges are not on offer",
-      media.full_body_response("/tmp/x.flac", "audio/flac").headers["accept-ranges"] == "none")
+      _body_resp.headers["accept-ranges"] == "none")
 check("the body is never handed to the gzip middleware as compressible",
-      media.full_body_response("/tmp/x.flac", "audio/flac").headers["content-encoding"] == "identity")
+      _body_resp.headers["content-encoding"] == "identity")
+_body_resp.close()
+os.remove(_body_fixture)
 
 # --------------------------------------------------------------------------- #
 print("\nthe endpoint: routing and the refusals it answers with")

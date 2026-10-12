@@ -182,6 +182,18 @@ When they do ask for one:
 
 ## House rules that came from real bugs
 
+- **Playback never blocks a tag write, and a refused write is QUEUED, not
+  lost.** The owner rated a track while it played and the write failed
+  (`[WinError 5] … could not be replaced`): the media routes served the file
+  through a plain `open()`, which shares read+write but NOT delete, so
+  `os.replace` onto it was denied for the whole playback. A LONG-LIVED media
+  route opens the file through `mlo.atomic.open_shared_read` and serves it via
+  `server.api_media.SharedFileResponse`; a SWAP onto such a file lands through
+  `mlo.atomic.replace_over_open_handle`; and anything still denied is recorded
+  in `mlo/pending` (drained by the server lifespan) and reported as *QUEUED*,
+  never as "nothing was written". So a new streaming route must go through
+  `open_shared_read`, and a new tag writer must flow through `AudioFile`'s one
+  atomic swap (never a hand-rolled `os.replace`) so it is covered. Spec R394.
 - **Stage files explicitly.** Never `git add -A` while other writers are active —
   a sweep mid-flight once committed a half-finished file.
 - **Stay album-scoped.** A script or import that walks the music folder must check
@@ -194,36 +206,49 @@ When they do ask for one:
   bar whose controls do nothing. The app commands additionally need the manifest
   in `build.rs`, which is what gives them a permission to be granted at all, so
   its command list and `generate_handler!` must stay equal.
-- **GENRE holds the names a SOURCE stated; the level above them is derived,
-  never written.** `mlo.genre_vocab.path_of` walks `deep house` → `house` →
-  `electronic` (three levels, one node per name — a parent in one place and a
-  genre in another is the same node), `normalize_genres` drops EVERY name that
-  is a strict ancestor of another name in the SAME list — wherever the source
-  put it, so order can never decide what a tag holds — and ADDS nothing, and
-  grading's `GENRE_STRUCTURE` reports the two defects that remain (a repeat,
-  that redundant parent). `mlo.genres._drop_derived_parents` is that one
-  predicate; script 10, the import and the grader all call it. The genre chain
-  is RYM (per TRACK, through the release page's own `/song/` links) →
-  MusicBrainz (per recording) → AOTY (album level ONLY: the site publishes no
-  per-track genre), a track is settled by a track-level answer or the cap, and
-  a RYM page is trusted only for the EDITION whose track list covers the
-  album's own titles. See spec R37/R38/R38a/R93.
+- **GENRE holds the names a SOURCE stated, in the SOURCE's own order, and the
+  parent idea is REMOVED.** MusicBrainz publishes each entity's genres by vote
+  count (most-voted first), `server.integrations._genres` keeps that order, and
+  `mlo.genres.normalize_genres` caps at `mb_genre_count` (2) WITHOUT sorting —
+  so a file stores the TOP TWO MusicBrainz genres in MusicBrainz's order, a
+  manually entered list is stored as typed, and the order is a ranking, never
+  an alphabetization (`format_genres` never reorders what a file holds). The
+  hierarchy is gone (2026-10-12, the owner's call): `normalize_genres` no
+  longer drops a name another member sits under, `_drop_derived_parents` and
+  `family_of` are deleted, `mlo.genres.issues()` reports only missing / too
+  many / duplicate / unknown / spacing, and `GENRE_STRUCTURE` fails ONLY a
+  repeated name. `mlo.genre_vocab.parent_of`/`top_of`/`is_parent` survive for
+  exactly two internal browse aids (the artist recommender's bucketing and the
+  keyword fallback's family) — no tag, check or row reads them. The genre chain
+  is MusicBrainz ALONE since the same date — per recording, then the release
+  group/release, then the artist — because the two scraped hosts
+  (RateYourMusic, Album of the Year) and their cookie, solver and browser
+  machinery were removed; a track's genres a MusicBrainz answer never supplies
+  leave the album FAILING grading (`GENRE_MISSING`, `grade_check_genre`,
+  default on). **The `RATEYOURMUSIC_*` tags left the app's vocabulary on the
+  same date** — `RATEYOURMUSIC_ALBUM`/`_ARTIST`/`_TRACK` are in no registry
+  (`mlo.audio.TAG_MAP`, `server/library.py`, `server/api_query.py`,
+  `server/tags_registry.py`), nothing reads, writes, displays or grades them,
+  `grade_check_rym_links` and its `RYM_LINK` issue code are gone, and a file
+  still carrying one fails `grade_check_excess_tags` until the strip pass
+  (script 10 / Optimize) removes it through that same vocabulary. See spec
+  R37/R38/R38a/R39/R40/R92/R93.
 - **A web rating is ONE SOURCE'S OWN number, never a blend.** `WEBRATING` /
   `ALBUMWEBRATING` (0-100, Picard's scale) carry the FIRST source in the
-  configured chain that answered — the order IS the hierarchy (RYM → AOTY →
-  MusicBrainz), a TRACK-level answer beats an album-level one whoever stated
-  it, and the walk STOPS there (`mlo.web_ratings.choose`), so the number is a
-  score a reader can open the site and check. The tag holds a WHOLE number, and
-  the conversion TRUNCATES to the app's 0.05 grid (`scale_to_100`) so the
-  one-decimal readout equals the source's own reading (RYM's 4.54 → 90 →
-  "4.5"; rounding to 91 would show 4.6 — the double rounding the owner
-  reported). The SHAPE is graded and canonicalised through ONE rule
-  (`mlo.tagtext.rating_problem` / `canonical_rating`, spec R358e): a source's
-  own 0-5 score pasted in raw ("4.54") fails as `WEBRATING_FORMAT` and is
-  never "fixed" by a guess, while "91.0" is the same rating spelled
-  differently and script 10 rewrites it. All three answer per track (AOTY's
-  own album rows are its per-track scores); `*_SOURCE` names the one source
-  whose number the file carries. See spec R358/R358a/R358b.
+  configured chain that answered — the order IS the hierarchy, a TRACK-level
+  answer beats an album-level one, and the walk STOPS there
+  (`mlo.web_ratings.choose`), so the number is a score a reader can open the
+  source and check. Since 2026-10-12 that chain is MusicBrainz alone (the two
+  scraped hosts were removed), so it answers from the recording's rating with
+  the release group's behind it. The tag holds a WHOLE number, and the
+  conversion TRUNCATES to the app's 0.05 grid (`scale_to_100`, MusicBrainz
+  0-5 ×20) so the one-decimal readout equals the source's own reading. The
+  SHAPE is graded and canonicalised through ONE rule
+  (`mlo.tagtext.rating_problem` / `canonical_rating`, spec R358e): a 0-5 score
+  pasted in raw ("4.54") fails as `WEBRATING_FORMAT` and is never "fixed" by a
+  guess, while "91.0" is the same rating spelled differently and script 10
+  rewrites it. `*_SOURCE` names the one source whose number the file carries.
+  See spec R358/R358a/R358b.
 - **The chain is a graph: one album-lane step at a time, the free lane beside
   it.** `mlo.scripts.SCRIPT_DEPS`/`SCRIPT_LANES` + `run_chain(..., extra=...)`
   (spec R388). Every script that reads or writes the album's own files is
@@ -291,12 +316,62 @@ When they do ask for one:
   and so does the Rust helper's own ffmpeg child (`rust/src/main.rs`,
   `ffmpeg_cmd()`): the helper is spawned windowed, so an unflagged ffmpeg under it
   would allocate a console of its own.
+- **A tag write must survive a file the app itself is playing.** MEASURED
+  2026-10-12 (Windows 11 build 26200): `os.replace` onto a file that is OPEN
+  fails with WinError 5 whatever the holder's share mode — including a reader
+  opened WITH `FILE_SHARE_DELETE` — while renaming the HELD file out of its name
+  succeeds with share-delete and fails (32) without it. So the long-lived media
+  routes serve library files through `mlo.atomic.open_shared_read`
+  (`server/api_media.SharedFileResponse`, single-Range), a plain replace that
+  meets an open file falls back to `atomic.replace_over_open_handle`'s
+  rename-away swap, and a write a non-sharing holder still refuses is QUEUED in
+  `mlo/pending.py` (drained from the lifespan; the error says queued, not
+  "nothing was written") — the owner's "Rated, but the RATING tag was not
+  written" while the track played. Spec R394.
+- **A disc subfolder belongs to its album.** `CD1/`, `Disc 2/`, `1/` inside a
+  release folder are the SAME release (spec R336): `mlo.discs.disc_subdirs` /
+  `album_audio` / `merge_disc_albums` are the ONE rule, and the grader
+  (`_grade_album`), the library builder and the artist payload all read through
+  it. MEASURED 2026-10-12 on a 2-disc release: reading only the album's own
+  folder listed disc 1's tracks plus a phantom `CD2` album, while the real
+  library held every disc.
+- **An album's release can be changed, and its tracks added to, without a
+  re-import.** `POST /api/import/upload?album=<path>` fills THAT album —
+  fill-only (`merge_into_album`), `kept` naming what it would not give up, no
+  `(2)` folder opened — and the wizard's Match step "Add tracks…" posts it and
+  re-matches. The Match step's writer must NEVER send `null`/`""` for a
+  per-track tag on a row with no release match: `/api/mb/assign` reads those as
+  DELETE, and that stripped the TITLE of exactly the extra tracks a user had
+  added ("add more tracks to the album" lost their names the moment the matches
+  were saved); `TRACKTOTAL` is the file's OWN disc's count, never both discs'
+  (a 2-disc release wrote 19 onto a disc of 11). **Changing the MusicBrainz
+  link IS the release change, in both menus** (spec R396/R397): the wizard's
+  Links step fetches what its field names when the field is LEFT (no Fetch
+  press; the album's own id is short-circuited) and Continue writes the id AND
+  the release's own `.mb_expected` tracklist; the Library's Import menu lists
+  EVERY selected album on the release its files name now, and an edited row is
+  a bulk pin — `_stamp_release(force_ids=True)` stamps it OVER the existing id —
+  while a row left alone sends nothing. A manifest whose `release_id` differs
+  from the album's tracks' id is STALE and script 15 refetches it: without that
+  rule a re-point through the import left the old release's tracklist recorded
+  (measured: tags on the standard, `.mb_expected` on the deluxe, so the album
+  showed the gaps of a release it no longer was).
 - **The desktop shell is undecorated, and the web app draws its window.**
   `web/src/components/TitleBar.tsx` is the only title bar in WINDOWED desktop
   mode: every screen owes it room and it owns dragging/minimize/maximize/close.
   When Tauri's window is fullscreen, the bar and its controls disappear and
   `--mlo-titlebar-h` becomes 0; the fullscreen player's own `Leave fullscreen`
-  control remains the way out, and leaving restores the bar/inset. Links that
+  control remains the way out, and leaving restores the bar/inset. **A
+  maximized window is fullscreen's trap** (MEASURED 2026-10-12, the owner's
+  report): `setFullscreen(true)` from a maximized window leaves Windows in the
+  MAXIMIZED state — the client area stays the work area (1920x1040 of a 1080p
+  screen), no resize fires, so the bottom of the window paints as black and
+  the in-page bar never hides. `web/src/lib/windowFullscreen.ts` therefore
+  `unmaximize`s before entering and `maximize`s again on exit (tao restores the
+  placement it captured, which is the restored one), and the page is granted
+  `core:window:allow-unmaximize` / `allow-maximize` beside
+  `allow-set-fullscreen` in `desktop/src-tauri/capabilities/default.json` —
+  tools/check_window_fullscreen.mjs pins the sequence. Links that
   leave the app go through the shell (`web/src/lib/externalLinks.ts` →
   `open_external`): a webview drops `window.open` and `target="_blank"` alike.
   And no window the app did not open may appear.
@@ -312,82 +387,13 @@ When they do ask for one:
   the packaged `mlo-server.exe` or the desktop app for scratch work, and never
   post a wizard flip to a port you have not just checked is both free and yours
   (`netstat -ano | findstr LISTENING`).
-- **A route someone is watching never spends an unbounded solve.** FlareSolverr
-  drives ONE browser, and on this network it cannot pass either scraped host's
-  challenge, so a cold solve costs its whole `cf_solver_timeout` — MEASURED
-  60-75 s, with the two hosts in series: "Importing genres…" sat for 124 s, and
-  the first import also raced the boot warm-up, which was solving the same host
-  at the same time. `server/cfchallenge.solve` now runs ONE solve per host at a
-  time (a second caller gets `None` — not a browser queued behind the first) and
-  honours a per-thread deadline (`cfchallenge.budget`, which the genre route
-  sets from `integrations.GENRE_IMPORT_BUDGET_S`); `warm_solver` caches a
-  clearance it WON as well as the failures it met. Any new user-facing path that
-  can touch a browser must set a budget too, or it inherits the same stall.
-- **The two scraped hosts are fetched by a REAL browser, and that is not a
-  fallback to be "simplified" away.** MEASURED, 2026-10-10: FlareSolverr cannot
-  pass either challenge; a cleared cookie read out of the owner's own Firefox —
-  fresh, unexpired, sent with that browser's exact User-Agent — still gets
-  `403 Just a moment…` from RateYourMusic over `httpx` AND over `curl_cffi`
-  impersonating Firefox 135/144/157 (AOTY accepts it, RYM does not); and
-  HEADLESS is detected by both Chrome and Firefox — re-measured 2026-10-11 and
-  still true, so the route below runs a headed browser on a desktop no one can
-  see instead (see the release-page rule). `server/browserfetch.py`
-  drives this machine's own Chrome/Edge over DevTools, is preferred to the
-  solver inside `cfchallenge.fetch_page`, and keeps the clearance in a profile
-  under the app's state dir (`<music>/.mlo/data/browser`, ~280 MB) so later
-  fetches never meet the challenge. It is gated on `cf_browser_fetch`, and that
-  gate reads "no cfg, or no key ⇒ OFF" — so a suite's own cfg can never launch
-  a browser on the machine running it, and a suite that DOES exercise the route
-  patches the module (see `tools/test_browserfetch.py`). A smoke run with the
-  live config opens NO window and needs none: the browser is launched onto a
-  hidden Windows desktop (`browserfetch`'s `CreateDesktopW` route), so nothing
-  appears on any display — and whatever started it must still stop it
-  (`main.py`'s lifespan does). The challenge itself is taken at BOOT
-  (`cfchallenge.warm_browser`, fired by the lifespan): the first navigation to
-  a host after the profile goes cold spends it all (~27 s AOTY, ~49 s RYM
-  measured 2026-10-11), which read as "no data" when the user's first import
-  was what paid it.
-- **A signed-in session is the ONLY thing that reads a RYM release page.**
-  MEASURED, 2026-10-10: `/release/album/...` answers `503` — Chrome renders an
-  error page for it — to every client with no session, while `/artist/` and
-  `/search` answer `200`; with the owner's own cookie set the release page is
-  `200` and 654 KB. The Settings cookie import (`POST /api/cookies/{source}/from-browser`)
-  remains the explicit way to STORE that session. When `rym_cookie` is blank
-  and browser fetching is on, `server/browserfetch._browser_session` lazily
-  reads only rateyourmusic.com cookies from local browser profiles through
-  yt-dlp's own reader — `yt_dlp.cookies`, imported IN PROCESS
-  (`mlo.tools.python_pkg_path("yt-dlp")`), because the install the app itself
-  makes is a pip folder whose entry point is `bin/yt-dlp` with no `.exe` beside
-  it: an executable-only lookup finds nothing and reads an EMPTY jar, which is
-  what "per-track genres never arrive" looked like (MEASURED 2026-10-11; a PATH
-  or `.dependencies` executable is still the fallback) — filters to that host,
-  caches the cookie string in memory for 45 minutes, and
-  never writes it to config or sends it elsewhere. Each page fetch injects the
-  borrowed pairs as host-scoped session cookies and deletes them in `finally`;
-  Chrome keeps its own clearance/site-set cookies in the managed profile. The
-  user-supplied UA still travels with a stored cookie for plain HTTP; managed
-  Chrome keeps its own UA and drops only Cloudflare's own cookies
-  (`cf_clearance`, `__cf_bm`, `__cfruid`, `__cfuvid` — bound to the browser+UA
-  that earned them), while the site's signed-in tokens, `sec_*` included,
-  travel with the session.
-  **HEADLESS is not an option, and no longer
-  attempted.** RE-MEASURED 2026-10-11: `--headless=new` ends on the
-  interstitial for BOTH hosts even with a real Chrome UA, a matching
-  `userAgentData` override, the anti-automation JS patches and a profile that
-  HOLDS a valid persisted `cf_clearance`. What does work, invisibly, is a
-  HEADED Chrome on a desktop this process creates and never shows
-  (`server/browserfetch.py`: `CreateDesktopW` + `CreateProcessW` with
-  `lpDesktop`): the same launch clears both hosts and returns real pages with
-  no window on any display. Positioning a real window off-screen is NOT that —
-  a multi-monitor layout can put `-3200,-3200` back on a real display, which is
-  the window the owner saw; the hidden desktop is invisible on every layout.
-  A `--user-agent` flag (or any UA override) breaks it on its own: a UA that
-  disagrees with Chrome's own `userAgentData` build stops the challenge
-  clearing, which is how the first version of this route failed. RYM also
-  THROTTLES this client (a burst of requests turns into `403 Just a moment…`
-  for a while, credentials or not) and rotates its own `sec_*` tokens in
-  `Set-Cookie`, so a jar read before the burst is not a jar that works during
-  it. And `Page.navigate`'s `errorText` (and a `chrome-error:` location) must
-  be treated as a FAILED fetch: Chrome's error page carries no challenge
-  marker, so it was being returned as "a page with no genres" and reported as
-  "no data".
+- **Sites whose terms forbid scraping are not scraped, and MusicBrainz is read
+  through its documented API.** RateYourMusic and Album of the Year were
+  REMOVED on 2026-10-12: their terms forbid being scraped, and the
+  cookie/challenge machinery two scraped hosts needed — the FlareSolverr
+  sidecar, the borrowed browser session, the stored session cookies — was
+  unmaintainable, which is why the rules above it (an unbounded solve, a real
+  browser for a scraped host, a signed-in session to read a RYM page) are gone
+  with them. MusicBrainz is the only genre and web-rating source, reached over
+  its own public API with its 1 req/s etiquette; no new path may scrape a site
+  whose terms forbid it.

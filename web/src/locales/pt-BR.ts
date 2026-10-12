@@ -304,7 +304,7 @@ export default {
   "charts.no_plays_title": "Ainda não há reproduções",
   "charts.no_source_title": "Nenhuma fonte tinha uma parada para esta janela",
   "charts.unsupported_title": "Nenhuma parada pôde ser lida",
-  "charts.empty_online": "Todas as fontes consultadas voltaram vazias, e os chips acima dizem quais foram consultadas. Tente outra janela ou outro tipo: Last.fm, Deezer e Apple publicam apenas a parada atual, e o RateYourMusic não tem parada mensal nem semanal.",
+  "charts.empty_online": "Todas as fontes consultadas voltaram vazias, e os chips acima dizem quais foram consultadas. Tente outra janela ou outro tipo: Last.fm, Deezer e Apple publicam apenas a parada atual,.",
   "charts.error_title": "Não foi possível ler as paradas",
   "browse.not_asked": "nenhuma consulta executada ainda",
   "browse.error_title": "Não foi possível ler a consulta",

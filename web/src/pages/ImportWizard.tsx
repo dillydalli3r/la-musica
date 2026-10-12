@@ -4,7 +4,7 @@ import { useSearchParams, Link } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   UploadCloud, ExternalLink, Check, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, Wand2,
-  Plus, Trash2, Disc3, FolderOpen, X, Search, Loader2, Image as ImageIcon, AlertTriangle,
+  Plus, Trash2, Disc3, FolderOpen, X, Loader2, Image as ImageIcon, AlertTriangle,
   Languages, FileArchive, Fingerprint,
 } from "lucide-react";
 import { api, answerSources, replyFor, IN_MOBILE_SHELL, IN_TAURI } from "../api";
@@ -13,7 +13,6 @@ import { toast, useStore } from "../store";
 import {
   advisoryLine, advisoryOutcome, allowPlainOf, LyricsKindChip,
 } from "../components/Badges";
-import { LinkValidChip } from "../components/Links";
 import LyricsViewer, { lyricsKindOf, parseLrc } from "../components/LyricsViewer";
 import CoverSearchModal from "../components/CoverSearchModal";
 import GenreSourcesTray from "../components/GenreSourcesTray";
@@ -32,7 +31,7 @@ import type {
 import { DEFAULT_RUN_ALL, SCRIPT_LABEL } from "../lib/scripts";
 import { forceDict } from "../lib/force";
 import { fmtCounts, fmtSteps } from "../lib/fmt";
-import { GENRE_COUNT_MAX, GENRE_FAMILIES, canonicalGenre, genreParents, splitGenres } from "../lib/genres";
+import { GENRE_COUNT_MAX, GENRE_FAMILIES, canonicalGenre, splitGenres } from "../lib/genres";
 import { dismiss as dismissNotification, importSessionNotificationId } from "../lib/notifications";
 
 const STEPS = ["Select & separate", "Links", "Match", "Covers", "Genres", "Lyrics", "Advisory", "Finish"];
@@ -229,6 +228,36 @@ interface UnpackSummary {
   files: number;
   audio: number;
   error?: string;
+}
+
+/** One staged BATCH: the files/folders/archives the user added together, held
+ *  client-side until they start the import. The wizard's own selection state
+ *  (`albums`, `excluded`, …) is the batch being BUILT; a `StagedBatch` is a
+ *  banked copy of it, so adding batch 2 does not throw batch 1 away. Each batch
+ *  imports as its own release(s) through the ONE bulk queue — batches are never
+ *  fused, and several disc folders added as several batches stay several
+ *  albums (discs dropped together as one folder merge by the selection's own
+ *  detection, `detectAlbums`, exactly as before). */
+interface StagedBatch {
+  id: string;
+  albums: AlbumGroup[];
+  excluded: string[];
+  albumName: string;
+  mediaType: string;
+  source: "web" | "native";
+  nativeRoot: string | null;
+  unpacked: UnpackSummary[];
+}
+
+/** A short row label for a staged batch: its album names, or a fallback. */
+function batchLabel(batch: StagedBatch, index: number): string {
+  const names = batch.albums
+    .filter((g) => g.files.length)
+    .map((g) => g.name.trim())
+    .filter(Boolean);
+  if (!names.length) return `Batch ${index + 1}`;
+  if (names.length <= 2) return names.join(" + ");
+  return `${names[0]} + ${names.length - 1} more`;
 }
 
 /** One track of `/api/album/scan-tracks` — the folder-scan payload the wizard
@@ -444,26 +473,16 @@ export default function ImportWizard() {
   // folder (empty when it was refused) — what the import discards when it is
   // done with it.
   const [unpacked, setUnpacked] = useState<UnpackSummary[]>([]);
+  // Banked batches: the drop zone builds ONE batch at a time, and "Add as
+  // another batch" banks it here so the next drop builds a second. Together
+  // with the selection being built they are the import's worklist, in order.
+  const [stagedBatches, setStagedBatches] = useState<StagedBatch[]>([]);
   // relPaths the user unticked: PARTIAL import. Excluded files are never
   // uploaded or moved, and the release tracklist recorded at match time lets
   // the album page grey out exactly those tracks.
   const [excluded, setExcluded] = useState<Set<string>>(new Set());
 
   const [mbLink, setMbLink] = useState("");
-  const [rymLink, setRymLink] = useState("");
-  const [rymValid, setRymValid] = useState<boolean | null>(null);
-  // Which page /api/rym/validate recognized: only an album page belongs in
-  // RATEYOURMUSIC_ALBUM (a song/artist page stored there looks resolved
-  // forever and blocks the automatic album lookup).
-  const [rymKind, setRymKind] = useState<string | null>(null);
-  const [rymNote, setRymNote] = useState("");
-  const [rymArtistLink, setRymArtistLink] = useState("");
-  // The artist field's own verdict, the same way the album field keeps one:
-  // only an ARTIST page may be written as RATEYOURMUSIC_ARTIST.
-  const [rymArtistValid, setRymArtistValid] = useState<boolean | null>(null);
-  const [rymArtistKind, setRymArtistKind] = useState<string | null>(null);
-  const [rymArtistNote, setRymArtistNote] = useState("");
-  const [findingLinks, setFindingLinks] = useState(false);
   const [detectedFromTags, setDetectedFromTags] = useState(false);
   const [mbSearch, setMbSearch] = useState("");
   const [searchHits, setSearchHits] = useState<any[]>([]);
@@ -480,9 +499,9 @@ export default function ImportWizard() {
   const [sourceDraft, setSourceDraft] = useState("");
   const [sourceNotice, setSourceNotice] = useState<string | null>(null);
   const [sourceBusy, setSourceBusy] = useState(false);
-  // Per-track genre LIST (the derived family first, the specific genres after
-  // it) — a track's GENRE tag is repeated fields, so a joined string here
-  // would collapse three genres into one tag on save.
+  // Per-track genre LIST (one entry per name a source stated, held in the
+  // app's canonical order) — a track's GENRE tag is repeated fields, so a
+  // joined string here would collapse three genres into one tag on save.
   const [genres, setGenres] = useState<Record<string, string[]>>({});
   const [discGenres, setDiscGenres] = useState<Record<number, string>>({});
   const [genreAddValues, setGenreAddValues] = useState<Record<string, string>>({});
@@ -491,7 +510,7 @@ export default function ImportWizard() {
   const [genreLimit, setGenreLimit] = useState<number | null>(null); // null = the configured cap
   /** What the last genre import answered: how many tracks it updated, the
    *  names it wrote, which source wrote what, and each source's own note when
-   *  it stayed silent (a blocked RateYourMusic says so here). */
+   *  it stayed silent (a source that answered nothing says so here). */
   const [genreJobResult, setGenreJobResult] = useState<{
     updated: number;
     genres: string[];
@@ -608,7 +627,6 @@ export default function ImportWizard() {
   const [identify, setIdentify] = useState<{
     staged: { name: string; path: string }[];
     albums: IdentifyAlbum[];
-    identified: number;
   } | null>(null);
 
   // ---- Bulk queue (several albums at once) ------------------------------
@@ -1093,83 +1111,6 @@ export default function ImportWizard() {
     pickRelease(id);
   };
 
-  // Debounced RYM link validation. The server reports WHICH page it is, so an
-  // artist paste is routed to the artist field instead of being written as the
-  // album link, and a song page is refused with the reason.
-  useEffect(() => {
-    if (!rymLink.trim()) {
-      setRymValid(null);
-      setRymKind(null);
-      return;
-    }
-    const t = setTimeout(async () => {
-      try {
-        const r = (await api.rymValidate(rymLink.trim())) as { valid: boolean; kind?: string | null };
-        if (r.kind === "artist") {
-          // Not a wrong paste, just the wrong field — move it, say so, and
-          // leave the album field empty so auto-find can fill it.
-          setRymArtistLink(rymLink.trim());
-          setRymLink("");
-          setRymValid(null);
-          setRymKind(null);
-          setRymNote("That is a RateYourMusic artist page — moved to the artist link");
-          return;
-        }
-        // `valid` from the server just means "a RYM URL"; for the ALBUM field
-        // only an album page counts, so a song/other page reads as invalid
-        // here (the chip and the note say which).
-        setRymValid(r.valid && (r.kind == null || r.kind === "album"));
-        setRymKind(r.kind ?? null);
-        setRymNote(
-          r.kind === "song"
-            ? "That is a RateYourMusic song page, not an album"
-            : r.kind === "other"
-              ? "That is a RateYourMusic page, but not an album"
-              : ""
-        );
-      } catch {
-        setRymValid(false);
-        setRymKind(null);
-        setRymNote("Could not check the link");
-      }
-    }, 400);
-    return () => clearTimeout(t);
-  }, [rymLink]);
-
-  // The artist field validates through the same call, and accepts only an
-  // artist page: a song or album paste here would be written to every track as
-  // RATEYOURMUSIC_ARTIST and never resolve to the artist.
-  useEffect(() => {
-    if (!rymArtistLink.trim()) {
-      setRymArtistValid(null);
-      setRymArtistKind(null);
-      setRymArtistNote("");
-      return;
-    }
-    const t = setTimeout(async () => {
-      try {
-        const r = (await api.rymValidate(rymArtistLink.trim())) as { valid: boolean; kind?: string | null };
-        const kind = r.kind ?? null;
-        setRymArtistValid(r.valid && (kind == null || kind === "artist"));
-        setRymArtistKind(kind);
-        setRymArtistNote(
-          kind === "artist" || kind == null
-            ? ""
-            : kind === "album"
-              ? "That is a RateYourMusic album page — paste the artist page"
-              : kind === "song"
-                ? "That is a RateYourMusic song page, not an artist"
-                : "That is a RateYourMusic page, but not an artist"
-        );
-      } catch {
-        setRymArtistValid(false);
-        setRymArtistKind(null);
-        setRymArtistNote("Could not check the link");
-      }
-    }, 400);
-    return () => clearTimeout(t);
-  }, [rymArtistLink]);
-
   const defaultTrackName = (p: string) => {
     const base = p.split("/").pop() ?? "";
     return base.replace(/^\d+\s*[-._]\s*/, "").replace(/\.[^.]+$/, "").trim();
@@ -1398,6 +1339,7 @@ export default function ImportWizard() {
   /** The picker's own entry: individual files (one or many, in any mix) and
    *  archives, all of them a SELECTION the wizard shows before it commits. */
   const handleFiles = async (list: FileList | File[]) => {
+    bankActiveSelection();
     setUnpacked([]);
     const arr = await collectSelection(list);
     if (!arr.length) nothingHere();
@@ -1421,6 +1363,7 @@ export default function ImportWizard() {
       else nothingHere();
       return;
     }
+    bankActiveSelection();
     setUnpacked([]);
     const out: ImportFile[] = [];
     const archives: File[] = [];
@@ -1443,6 +1386,7 @@ export default function ImportWizard() {
       toast("A phone cannot read dropped files — use Browse individual files, or the web UI.");
       return;
     }
+    bankActiveSelection();
     setUnpacked([]);
     const out: ImportFile[] = [];
     let folders = 0;
@@ -1482,6 +1426,7 @@ export default function ImportWizard() {
       const picker = (window as any).showDirectoryPicker;
       if (picker) {
         const dir = await picker({ mode: "read" });
+        bankActiveSelection();
         setUnpacked([]);
         const out: ImportFile[] = [];
         const archives: File[] = [];
@@ -1532,6 +1477,7 @@ export default function ImportWizard() {
       const picked = await invoke<string | null>("pick_folder");
       if (!picked) return;
       const scan = await api.importScan(picked);
+      bankActiveSelection();
       setSource("native");
       setNativeRoot(picked);
       setUnpacked([]);
@@ -1605,60 +1551,145 @@ export default function ImportWizard() {
     });
   };
 
+  // ---- Staged batches: the wizard's own worklist --------------------------
+  /** The batch the user is BUILDING right now, as a bankable snapshot. */
+  const activeBatch = (): StagedBatch => ({
+    id: `active-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    albums, excluded: [...excluded], albumName, mediaType, source, nativeRoot, unpacked,
+  });
+
+  /** Does the selection being built hold anything to import? */
+  const activeHasContent = () => albums.some((g) => g.files.length && g.name.trim());
+
+  /** Bank the selection being built (if any) so a NEW selection can never throw
+   *  it away — the owner's "the second cd vanished" was exactly this: the
+   *  second drop REPLACED the first batch. Every entry point that starts a new
+   *  selection calls this first. */
+  const bankActiveSelection = () => {
+    if (!activeHasContent()) return;
+    setStagedBatches((bs) => [...bs, activeBatch()]);
+  };
+
+  /** Bank the selection being built as a batch of its own and clear the drop
+   *  zone for the next one. Nothing is uploaded here — the batches are staged
+   *  together (in this order) when the user starts the import. */
+  const addStagedBatch = () => {
+    if (!activeHasContent()) {
+      toast("Nothing to add — pick files or a folder first");
+      return;
+    }
+    setStagedBatches((bs) => [...bs, activeBatch()]);
+    setAlbums([]);
+    setExcluded(new Set());
+    setUnpacked([]);
+    setAlbumName("");
+    // The unpacked trees belong to the banked batch now: its snapshot carries
+    // them, and doImport discards them once that batch is imported.
+    setSource("web");
+    setNativeRoot(null);
+  };
+
+  /** Clear the selection being built after it has been staged. */
+  const clearActiveSelection = () => {
+    setAlbums([]);
+    setExcluded(new Set());
+    setUnpacked([]);
+    setAlbumName("");
+    setSource("web");
+    setNativeRoot(null);
+  };
+
   const doImport = async (auto = false) => {
-    // Excluded files are dropped here, before anything is uploaded or placed:
-    // that is what makes a PARTIAL album import (one track of twelve) work.
-    // A native/folder group is committed AS-IS — its whole folder goes to the
-    // ingest route in one call (which COPIES it into the library, leaving the
-    // user's own folder alone), so there is no per-file subset to drop;
-    // exclusion only exists for the files the app places one by one (an
-    // upload, an unpacked archive, a file the shell handed over).
-    const asIs = (g: AlbumGroup) =>
-      !g.files.some((f) => f.file || f.staged || f.native) && g.files.some((f) => f.nativeRoot);
-    const included = (g: AlbumGroup) =>
-      asIs(g) ? g.files : g.files.filter((f) => !excluded.has(f.relPath));
-    const groups = albums.filter((g) => g.name.trim() && included(g).length);
-    if (!groups.length) {
+    // The worklist, in order: the banked batches, then the selection being
+    // built. One press stages every one of them and queues them together.
+    const pending = [...stagedBatches, ...(activeHasContent() ? [activeBatch()] : [])];
+    if (!pending.length) {
       toast("Nothing to import — add files first");
       return;
     }
     setUploading(true);
-    // The staging folders the archives were unpacked into, discarded whatever
-    // the import above did with them (a failure leaves a copy of an archive's
-    // contents nobody needs — the file the user dropped is untouched).
-    const unpackDirs = [...new Set(unpacked.filter((u) => u.dir).map((u) => u.dir))];
+    // The staging folders the archives were unpacked into, across EVERY batch
+    // the import consumes, discarded whatever the import above did with them
+    // (a failure leaves a copy of an archive's contents nobody needs — the
+    // file the user dropped is untouched). A batch that staged NOTHING keeps
+    // its trees: its snapshot still points at them for another go.
+    const unpackDirs = new Set<string>();
+    // Which batches staged at least one album — a batch that staged nothing is
+    // kept (banked ones) or left in the drop zone (the one being built) so it
+    // can be retried; a failing batch never stalls the ones after it.
+    const okIds = new Set<string>();
+    // The selection being built, when there is one, is the LAST entry in the
+    // worklist; it is the one cleared from the drop zone once it stages.
+    const active = activeHasContent() ? pending[pending.length - 1] : null;
     try {
       const results: { name: string; path: string }[] = [];
       const failed: { name: string; error: unknown }[] = [];
-      for (const g of groups) {
-        const name = g.name.trim();
-        const keep = included(g);
-        const filesToSend = keep.filter((f) => f.file) as { file: File; relPath: string }[];
-        // Files the server already holds: an archive it unpacked, or a file the
-        // desktop shell named. They are moved into the album, never re-uploaded.
-        const stagedPaths = keep.map((f) => f.staged).filter((p): p is string => !!p);
-        const onDisk = keep.map((f) => f.native).filter((p): p is string => !!p);
-        const folder = keep.find((f) => f.nativeRoot)?.nativeRoot ?? nativeRoot;
-        try {
-          if (filesToSend.length || stagedPaths.length) {
-            const res = await api.importUpload(name, filesToSend, stagedPaths);
-            // A single song is placed on the album it belongs to, so the name
-            // that comes back is the album's, not the track's: show what the
-            // album ended up being called (server/imports.import_album_target).
-            results.push({ name: res.album_name || name, path: res.album_path });
-          } else if (onDisk.length === keep.length) {
-            // Every file here is a path on this server's disk (an OS drop of
-            // single files): the one-file case of the ingest, once per file.
-            let last: { album_name?: string; path: string } | null = null;
-            for (const p of onDisk) last = await api.importIngest(p, name);
-            if (last) results.push({ name: last.album_name || name, path: last.path });
-          } else if (folder) {
-            const src = g.root ? `${folder}/${g.root}` : folder;
-            const res = await api.importIngest(src, name);
-            results.push({ name: res.album_name || name, path: res.path });
+      for (const batch of pending) {
+        // Excluded files are dropped here, before anything is uploaded or
+        // placed: that is what makes a PARTIAL album import (one track of
+        // twelve) work. A native/folder group is committed AS-IS — its whole
+        // folder goes to the ingest route in one call (which COPIES it into
+        // the library, leaving the user's own folder alone), so there is no
+        // per-file subset to drop; exclusion only exists for the files the app
+        // places one by one (an upload, an unpacked archive, a file the shell
+        // handed over).
+        const excludedHere = new Set(batch.excluded);
+        const asIs = (g: AlbumGroup) =>
+          !g.files.some((f) => f.file || f.staged || f.native) && g.files.some((f) => f.nativeRoot);
+        const included = (g: AlbumGroup) =>
+          asIs(g) ? g.files : g.files.filter((f) => !excludedHere.has(f.relPath));
+        const groups = batch.albums.filter((g) => g.name.trim() && included(g).length);
+        for (const g of groups) {
+          const name = g.name.trim();
+          const keep = included(g);
+          const filesToSend = keep.filter((f) => f.file) as { file: File; relPath: string }[];
+          // Files the server already holds: an archive it unpacked, or a file
+          // the desktop shell named. They are moved into the album, never
+          // re-uploaded.
+          const stagedPaths = keep.map((f) => f.staged).filter((p): p is string => !!p);
+          const onDisk = keep.map((f) => f.native).filter((p): p is string => !!p);
+          const folder = keep.find((f) => f.nativeRoot)?.nativeRoot ?? batch.nativeRoot;
+          try {
+            if (filesToSend.length || stagedPaths.length) {
+              const res = await api.importUpload(name, filesToSend, stagedPaths);
+              // A single song is placed on the album it belongs to, so the name
+              // that comes back is the album's, not the track's: show what the
+              // album ended up being called (server/imports.import_album_target).
+              const landed = res.album_name || name;
+              // Two batches of one press can name the SAME album. The server
+              // gives the second a folder of its own rather than replacing the
+              // first's files (server/main.py import_upload), and an album that
+              // was already there keeps its own copy of a same-named file: say
+              // both out loud, so neither is a silent surprise.
+              if (res.collided) {
+                toast(`“${name}” is taken by another album — this batch imported as “${landed}”`);
+              }
+              if (res.kept?.length) {
+                toast(
+                  `${res.kept.length} file${res.kept.length === 1 ? "" : "s"} ` +
+                    `already in “${landed}” ${res.kept.length === 1 ? "was" : "were"} kept, not replaced`
+                );
+              }
+              results.push({ name: landed, path: res.album_path });
+            } else if (onDisk.length === keep.length) {
+              // Every file here is a path on this server's disk (an OS drop of
+              // single files): the one-file case of the ingest, once per file.
+              let last: { album_name?: string; path: string } | null = null;
+              for (const p of onDisk) last = await api.importIngest(p, name);
+              if (last) results.push({ name: last.album_name || name, path: last.path });
+            } else if (folder) {
+              const src = g.root ? `${folder}/${g.root}` : folder;
+              const res = await api.importIngest(src, name);
+              results.push({ name: res.album_name || name, path: res.path });
+            }
+          } catch (e) {
+            failed.push({ name, error: e });
+            continue;
           }
-        } catch (e) {
-          failed.push({ name, error: e });
+          okIds.add(batch.id);
+        }
+        if (okIds.has(batch.id)) {
+          for (const d of batch.unpacked) if (d.dir) unpackDirs.add(d.dir);
         }
       }
       if (!results.length) {
@@ -1668,6 +1699,12 @@ export default function ImportWizard() {
       setUploaded(results);
       setAlbumIndex(0);
       setAlbumPath(results[0].path);
+      // The batches that staged are consumed; a batch that staged nothing is
+      // kept for a retry (see okIds above). The selection being built is
+      // cleared only when it staged — a fully failed one stays in the drop
+      // zone to be fixed and tried again.
+      setStagedBatches((bs) => bs.filter((b) => !okIds.has(b.id)));
+      if (active && okIds.has(active.id)) clearActiveSelection();
       qc.invalidateQueries({ queryKey: ["library"] });
       // Auto-import: the staged batch goes to the autonomous pipeline instead
       // of the 8-step wizard. The albums that name no release are asked about
@@ -1706,12 +1743,12 @@ export default function ImportWizard() {
       toast.error(String(e));
     } finally {
       setUploading(false);
-      // Nothing points at the unpacked trees any more: their files were either
-      // moved into the library above or left behind by a failure. The archive
-      // the user chose is untouched either way.
-      if (unpackDirs.length) {
-        setUnpacked((u) => u.map((s) => (s.dir ? { ...s, dir: "" } : s)));
-        api.importUnpackDiscard(unpackDirs).catch(() => {});
+      // Nothing points at the unpacked trees of a batch that STAGED any more:
+      // their files were either moved into the library above or left behind by
+      // a failure. The archive the user chose is untouched either way. A batch
+      // that staged nothing keeps its trees — it is still in the worklist.
+      if (unpackDirs.size) {
+        api.importUnpackDiscard([...unpackDirs]).catch(() => {});
       }
     }
   };
@@ -1749,7 +1786,6 @@ export default function ImportWizard() {
     setIdentify({
       staged,
       albums: unknown.sort((a, b) => a.path.localeCompare(b.path)),
-      identified: staged.length - unknown.length,
     });
   };
 
@@ -1783,6 +1819,7 @@ export default function ImportWizard() {
       setUnpacked([]);
       setAlbums([]);
       setExcluded(new Set());
+      setStagedBatches([]);
       setUploaded([]);
       setIdentify(null);
       qc.invalidateQueries({ queryKey: ["queue"] });
@@ -1870,9 +1907,9 @@ export default function ImportWizard() {
    *  `sources` is omitted, so the server walks `genre_sources` — every source
    *  ticked in the tray beside the button — top to bottom, and STOPS as soon
    *  as a track's list is complete, which is what makes asking all of them
-   *  cost nothing on an album RateYourMusic and MusicBrainz can already
-   *  answer. The reply reports what each source wrote (`per_source`) and why
-   *  one stayed silent (`notes`), so a blocked RateYourMusic is visible here
+   *  cost nothing on an album MusicBrainz can already answer. The reply
+   *  reports what each source wrote (`per_source`) and why
+   *  one stayed silent (`notes`), so a source that answered nothing is visible here
    *  instead of being swallowed by a merged list, and the step re-reads the
    *  files so what Continue would save is what actually landed. */
   const importGenres = async () => {
@@ -1910,7 +1947,7 @@ export default function ImportWizard() {
       qc.invalidateQueries({ queryKey: ["library"] });
       // Every source that stayed silent, its own reason — the report below
       // lists them one per line, and this puts them in the toast as well so a
-      // blocked RateYourMusic is not only a toast that says "0 updated".
+      // silent source is not only a toast that says "0 updated".
       const silent = Object.values(res.notes ?? {});
       toast(
         res.updated
@@ -1931,49 +1968,6 @@ export default function ImportWizard() {
   const albumTargets = (): string[] =>
     uploaded.length ? uploaded.map((a) => a.path) : albumPath ? [albumPath] : [];
 
-  /** Ask RYM for this album's and this artist's pages and PREFILL both fields.
-   *  Nothing is written here: an empty field is filled for review, and a field
-   *  the user already typed in is left alone. False = nothing to look up yet. */
-  const findRymLinks = async (): Promise<boolean> => {
-    // Who and what RYM is asked about: the fetched release first, else the
-    // album's own tags — the only source an auto-imported album has.
-    const artist =
-      (release?.artists ?? []).map((a) => a.name).join(", ").trim() ||
-      (stepTracks.length ? trackArtist(stepTracks[0].path) : "");
-    const album = trackAlbum ?? currentAlbumName;
-    if (!artist && !album) return false;
-    setFindingLinks(true);
-    try {
-      const r = await api.rymResolve(artist, album);
-      const foundAlbum = r.album;
-      const foundArtist = r.artist;
-      if (foundAlbum) setRymLink((cur) => (cur.trim() ? cur : foundAlbum));
-      if (foundArtist) setRymArtistLink((cur) => (cur.trim() ? cur : foundArtist));
-      setRymNote(
-        foundAlbum || foundArtist
-          ? "found on RateYourMusic — review, then Continue saves it"
-          : r.note || "nothing found on RateYourMusic — paste the URLs"
-      );
-    } catch {
-      setRymNote("Lookup failed — paste the URLs instead");
-    } finally {
-      setFindingLinks(false);
-    }
-    return true;
-  };
-
-  // Once per album on entering the Links step: an auto-imported album lands
-  // here with no links at all, so the lookup waits for the tags/release that
-  // give it a name, then runs itself.
-  const linksAutoFound = useRef<string | null>(null);
-  useEffect(() => {
-    if (step !== 1 || !albumPath || linksAutoFound.current === albumPath) return;
-    findRymLinks().then((ran) => {
-      if (ran) linksAutoFound.current = albumPath;
-    });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [step, albumPath, stepTracks, release]);
-
   const nextFromLinks = async () => {
     const typed = extractMbid(mbLink) || "";
     const rid = typed || releaseId || "";
@@ -1993,16 +1987,15 @@ export default function ImportWizard() {
       // null only after saying why.
       const rel = await pickRelease(rid, albumPath);
       if (!rel) return;
-      // Only an ALBUM page may be stored as the album link — rymValid is
-      // already false for a song/other page, and an artist paste never lands
-      // in this field at all. The artist page is artist-level, so it goes on
-      // every track as RATEYOURMUSIC_ARTIST — and only a link the server
-      // confirmed as an ARTIST page: a song or album paste in this field would
-      // be a wrong artist link forever. Both ride along on the commit, which
-      // is the step's ONE pass over the album.
-      const albumLink = rymValid ? rymLink.trim() : undefined;
-      const artistLink = rymArtistValid ? rymArtistLink.trim() : "";
-      await api.importCommit(albumPath, `https://musicbrainz.org/release/${rel.id}`, albumLink, staged, artistLink || undefined);
+      // The release link is the step's ONE pass over the album: MusicBrainz
+      // only — the app carries no RateYourMusic or Album of the Year data at
+      // all any more (2026-10-12), so there is no second link to write.
+      await api.importCommit(albumPath, `https://musicbrainz.org/release/${rel.id}`, staged);
+      // The release became this album's, so its OWN tracklist is recorded in
+      // the same breath: the album page diffs the folder against it, and a
+      // re-link that stopped at the id would leave the gaps of the release
+      // the album just left (the release changed, the tracklist did not).
+      await recordExpectedTracks(albumPath, rel, "Links saved");
       toast("Links saved to album");
       setStep(2);
     } catch (e) {
@@ -2013,6 +2006,12 @@ export default function ImportWizard() {
     }
   };
 
+  /** The link field holds ONE album's release, and Continue is what makes it
+   *  that album's: the press resolves whatever the field names (`nextFromLinks`
+   *  → `pickRelease`), writes the id, and records the release's own tracklist.
+   *  The field itself asks nobody — a half-typed id would only earn a 404, and
+   *  MusicBrainz is 1 req/s. "Fetch release & auto-match" beside the field is
+   *  the explicit press that fetches it early, without committing. */
   // ---------------- AcoustID: fingerprint the staged audio ----------------
   /** Stage 2 of the AcoustID step: what the audio actually is. Says so and
    *  leaves the manual MusicBrainz search alone when it cannot run. */
@@ -2201,6 +2200,61 @@ export default function ImportWizard() {
     setSuggestions((ss) => ss.map((s) => (s.local === path ? { ...s, matched: !!m, confidence: 1, release_track: m ?? null } : s)));
   };
 
+  /** The release's own tracks that no local file was matched to — the album's
+   *  gaps, named. A deluxe pressing carries a second disc nobody has ripped
+   *  yet, and this step listed only the LOCAL rows: what the release still
+   *  wants was invisible, and so was the fact that "Add tracks…" is how it
+   *  arrives. */
+  const missingTracks = useMemo(() => {
+    if (!release) return [];
+    const taken = new Set(
+      suggestions.filter((s) => s.release_track)
+        .map((s) => `${s.release_track!.disc}-${s.release_track!.position}`));
+    return (release.media ?? []).filter((m) => !taken.has(`${m.disc}-${m.position}`));
+  }, [release, suggestions]);
+
+  /** "Add tracks…": audio the user picks joins THIS album —
+   *  `/api/import/upload?album=…`, fill-only, so nothing the album holds is
+   *  replaced — and the step re-scans and re-matches, so the new files arrive
+   *  as rows to map. The album's own folder is the target: no name is guessed
+   *  and no `(2)` folder is opened. This is how a second disc (or one track a
+   *  rip left behind) reaches an album that is already in the library. */
+  const [addBusy, setAddBusy] = useState(false);
+  const addFilesRef = useRef<HTMLInputElement>(null);
+  const addTracks = async (files: File[]) => {
+    const target = albumPath;
+    if (!target || !files.length) return;
+    setAddBusy(true);
+    setAct({ label: `Adding ${files.length} track${files.length === 1 ? "" : "s"} to the album…` });
+    try {
+      const res = await api.importUpload(
+        currentAlbumName || target.split(/[\\/]/).pop() || "Album",
+        files.map((f) => ({ file: f, relPath: f.name })),
+        undefined,
+        target
+      );
+      const added = res.saved?.length ?? 0;
+      if (res.kept?.length) {
+        toast(`“${res.album_name ?? currentAlbumName}” already had ${res.kept.length} of those file(s) — kept, not replaced`);
+      }
+      qc.invalidateQueries({ queryKey: ["album", target] });
+      qc.invalidateQueries({ queryKey: ["library"] });
+      // Re-match: the arriving files must land as ROWS, mapped wherever the
+      // release puts them, instead of sitting in the folder unmapped.
+      const rid = release?.id || releaseId || "";
+      if (rid) {
+        const matched = await api.mbMatch(target, rid, staged);
+        setSuggestions(matched.suggestions);
+      }
+      toast(`Added ${added} file${added === 1 ? "" : "s"} — check the matches below`);
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setAddBusy(false);
+      setAct(null);
+    }
+  };
+
   /** Write ONE album's matched rows to its files. The wizard's only tag
    *  writer: the single-album Confirm calls it for the album on screen, the
    *  queue's "match to release" calls it once per queued album. */
@@ -2210,10 +2264,39 @@ export default function ImportWizard() {
     const mediumFormat = release?.medium_formats?.[0] || mediaType || null;
     for (const s of suggestions) {
       const t = s.release_track;
+      // An UNMATCHED row keeps its own identity. These keys used to be written
+      // as `null`, and the server's per-key writer reads `null` as DELETE:
+      // saving the step stripped TITLE and TRACKNUMBER from exactly the tracks
+      // a user had added by hand — a bonus track lost its name the moment the
+      // matches were saved. The album-level fields below are still written for
+      // it: the file is part of this album whether or not the release lists it.
+      const perTrack: Record<string, string | null> = t
+        ? {
+            // links / IDs — stated values only; a release track that states
+            // none clears the stale id it replaced.
+            MUSICBRAINZ_TRACKID: t.recording_mbid ?? null,
+            MUSICBRAINZ_ARTISTID: t.artist_mbids?.[0] ?? null,
+            // metadata — the release's own answer for THIS track. A field the
+            // release states nothing about is left alone rather than cleared.
+            ...(t.title ? { TITLE: t.title } : {}),
+            ...(t.artist_credit || (release?.artists ?? [])[0]?.name
+              ? { ARTIST: t.artist_credit || (release?.artists ?? [])[0]?.name || "" }
+              : {}),
+            // UNPADDED: a file tag stores "1", never "01". Zero-padding is a
+            // FILENAME/display convention (the naming script's pattern), not a
+            // metadata one — MusicBrainz, Picard, beets and every player write
+            // the bare integer, and a padded tag sorts and diffs wrong against
+            // them.
+            TRACKNUMBER: String(t.position),
+            // The track count of the file's OWN disc: `release.media.length`
+            // is every disc together, so a two-disc deluxe wrote 19 onto a
+            // disc that holds 11.
+            TRACKTOTAL: String((release?.media ?? []).filter((m) => m.disc === t.disc).length),
+            DISCNUMBER: String(t.disc),
+          }
+        : {};
       writes[s.local] = {
-        // links / IDs
-        MUSICBRAINZ_TRACKID: t?.recording_mbid ?? null,
-        MUSICBRAINZ_ARTISTID: t?.artist_mbids?.[0] ?? null,
+        ...perTrack,
         // Album-level identity is written ONLY when the release is known. A
         // `null` here means the server's per-key writer writes nothing, so a
         // Match step that lost its release can never CLEAR a MusicBrainz link
@@ -2230,19 +2313,9 @@ export default function ImportWizard() {
           ? { MUSICBRAINZ_ALBUMARTISTID: release.artists[0].mbid }
           : {}),
         // metadata
-        TITLE: t?.title ?? null,
-        ARTIST: t?.artist_credit || (release?.artists ?? [])[0]?.name || null,
         ALBUM: release?.title ?? null,
         ALBUMARTIST: albumArtist,
         DATE: release?.date || null,
-        // UNPADDED: a file tag stores "1", never "01". Zero-padding is a
-        // FILENAME/display convention (the naming script's pattern), not a
-        // metadata one — MusicBrainz, Picard, beets and every player write
-        // the bare integer, and a padded tag sorts and diffs wrong against
-        // them.
-        TRACKNUMBER: t ? String(t.position) : null,
-        TRACKTOTAL: release?.media?.length ? String(release.media.length) : null,
-        DISCNUMBER: t ? String(t.disc) : null,
         DISCTOTAL: release?.medium_count ? String(release.medium_count) : null,
         MEDIA: mediumFormat,
         RELEASETYPE: release?.release_type || null,
@@ -2263,11 +2336,24 @@ export default function ImportWizard() {
     // is absent, so the album page diffs against this list and greys out
     // the missing rows. A failure here must not lose the tag writes that
     // just succeeded, so it is reported and the caller moves on.
+    await recordExpectedTracks(path, release, "Metadata saved");
+  };
+
+  /** Record the fetched release's OWN tracklist on the album folder
+   *  (`api.importExpected`). Called at both moments a release becomes this
+   *  album's — the Match step's save and the Links step's commit — so the
+   *  album's release state moves as ONE thing: the id, the metadata and this
+   *  tracklist. Without the Links-step call, re-linking an album and leaving
+   *  the wizard before Match left the folder's tracklist describing the OLD
+   *  release (the release changed, the gaps it shows did not).
+   *  A failure is reported and never fatal: the writes that just succeeded
+   *  must not be lost with it. */
+  const recordExpectedTracks = async (path: string, rel: MBRelease, savedLabel: string) => {
     try {
       await api.importExpected(
         path,
-        release.id,
-        (release.media ?? []).map((m) => ({
+        rel.id,
+        (rel.media ?? []).map((m) => ({
           disc: m.disc,
           position: m.position,
           title: m.title,
@@ -2276,7 +2362,7 @@ export default function ImportWizard() {
         staged
       );
     } catch (e) {
-      toast(`Metadata saved, but the release tracklist could not be recorded: ${e}`);
+      toast(`${savedLabel}, but the release tracklist could not be recorded: ${e}`);
     }
   };
 
@@ -2535,15 +2621,6 @@ export default function ImportWizard() {
     return byName;
   }, [genreFacets]);
 
-  // The facets rows as ONE lookup: the genre rows ask for each chip's parents,
-  // and a linear scan per chip would be O(names) per row for a payload that
-  // already arrived as a list.
-  const genrePathByName = useMemo(
-    () => new Map((genreFacets?.genres ?? []).map(
-      (g) => [g.name.toLowerCase(), g.path] as const)),
-    [genreFacets],
-  );
-
   // When the Genres step opens, prefill untouched tracks with their existing
   // GENRE tags so they are visible and editable right away.
   useEffect(() => {
@@ -2660,9 +2737,10 @@ export default function ImportWizard() {
     try {
       // GENRE goes as a LIST, so the server writes one field per name. Sent as
       // the joined string it used to be, every genre list became ONE tag
-      // literally named "shoegaze; rock". Nothing is added or reordered here:
-      // the names are the track's own genres, and the level above them is
-      // derived by the server (mlo.genre_vocab.path_of), never stored.
+      // literally named "shoegaze; rock". Nothing is added here — the names are
+      // the track's own genres — but the SAVE path normalizes them on the
+      // server (mlo.genres.normalize_genres), and nothing above a name is
+      // derived or stored.
       const writes: Record<string, Record<string, string | string[] | null>> = {};
       for (const [p, list] of Object.entries(genres))
         writes[p] = { GENRE: list.length ? list : null };
@@ -3359,15 +3437,7 @@ const finish = async (closeByNavigation: boolean) => {
     setSuggestions([]);
     setGenres({});
     setDiscGenres({});
-    setRymLink("");
-    setRymValid(null);
-    setRymKind(null);
-    setRymArtistValid(null);
-    setRymArtistKind(null);
-    setRymArtistNote("");
     setLyrOpen(new Set());
-    setRymNote("");
-    setRymArtistLink("");
     setSearchHits([]);
     // reset per-track drafts so album B never inherits album A's data
     setLyricsDrafts({});
@@ -3455,6 +3525,13 @@ const finish = async (closeByNavigation: boolean) => {
   // later steps open on it too — a step past the first needs an album.
   const albumsReady =
     totalFiles > 0 && albums.length > 0 && albums.every((g) => g.name.trim() || g.files.length === 0);
+  // The whole worklist the Start buttons act on: the banked batches plus the
+  // selection being built, and the albums that adds up to across both.
+  const stagedAlbumCount = stagedBatches.reduce(
+    (n, b) => n + b.albums.filter((g) => g.files.length && g.name.trim()).length, 0);
+  const activeAlbumCount = albums.filter((g) => g.files.length && g.name.trim()).length;
+  const pendingAlbums = stagedAlbumCount + activeAlbumCount;
+  const pendingBatchCount = stagedBatches.length + (activeAlbumCount ? 1 : 0);
   const canNext =
     step === 0
       ? albumsReady
@@ -3815,6 +3892,10 @@ const finish = async (closeByNavigation: boolean) => {
               drop one or more folders (even from different artists) — they are separated into albums below
             </div>
             <div className="text-xs text-zinc-600">
+              adding several rips? press <b className="text-zinc-500">Add as another batch</b> after each drop —
+              they queue together, each as its own album(s)
+            </div>
+            <div className="text-xs text-zinc-600">
               multi-disc folders (<b className="text-zinc-500">CD1/</b>, <b className="text-zinc-500">Disc 2/</b>) merge into one album
             </div>
             <div className="text-[11px] text-zinc-600 mt-1">
@@ -3856,6 +3937,39 @@ const finish = async (closeByNavigation: boolean) => {
               onChange={(e) => e.target.files && handleFiles(e.target.files)}
             />
           </div>
+
+          {stagedBatches.length > 0 && (
+            <div className="panel p-3 space-y-1">
+              <div className="flex items-center gap-2 flex-wrap">
+                <Disc3 className="h-4 w-4 text-accent shrink-0" />
+                <span className="text-sm font-semibold text-zinc-200">
+                  Batches to import — {stagedBatches.length}
+                </span>
+                <span className="text-xs text-zinc-500">
+                  {stagedAlbumCount} album(s) staged. Each batch imports as its own
+                  album(s), in this order — batches are never merged.
+                </span>
+              </div>
+              {stagedBatches.map((b, i) => (
+                <div key={b.id} className={`${ROW} text-xs`}>
+                  <Disc3 className="h-3.5 w-3.5 text-zinc-500 shrink-0" />
+                  <span className="flex-1 min-w-0 truncate text-zinc-300" title={batchLabel(b, i)}>
+                    {batchLabel(b, i)}
+                  </span>
+                  <span className="text-zinc-500 shrink-0">
+                    {b.albums.filter((g) => g.files.length).length} album(s)
+                  </span>
+                  <button
+                    className="btn-danger !px-2 !py-1 shrink-0 tap"
+                    onClick={() => setStagedBatches((bs) => bs.filter((x) => x.id !== b.id))}
+                    title="Remove this batch — it is not imported"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
 
           <div className="flex items-center gap-2 flex-wrap">
             <button className="btn-ghost tap" onClick={pickFolderNative}>
@@ -3918,8 +4032,9 @@ const finish = async (closeByNavigation: boolean) => {
             </div>
           )}
 
-          {totalFiles > 0 && (
+          {(totalFiles > 0 || stagedBatches.length > 0) && (
             <div className="space-y-3">
+              {totalFiles > 0 && (
               <div className="flex flex-wrap items-center gap-2">
                 <span className="text-sm font-semibold">Separate into albums</span>
                 <span className="text-xs text-zinc-500">
@@ -3929,6 +4044,7 @@ const finish = async (closeByNavigation: boolean) => {
                   <Plus className="h-3.5 w-3.5" /> Add album
                 </button>
               </div>
+              )}
               {albums.map((g, gi) => (
                 <div key={gi} className="panel p-3">
                   <div className="flex flex-wrap items-center gap-2 mb-2">
@@ -3983,26 +4099,42 @@ const finish = async (closeByNavigation: boolean) => {
                   </div>
                 </div>
               ))}
-              <button
-                className="btn-primary tap"
-                onClick={() => void doImport()}
-                disabled={uploading || autoBusy || !albums.some((g) => g.name.trim() && g.files.length)}
-              >
-                {uploading ? "Importing…" : `Import ${albums.filter((g) => g.files.length).length} album(s) into library`}
-              </button>
+              {activeAlbumCount > 0 && (
               <button
                 className="btn-ghost tap"
-                onClick={() => void doImport(true)}
-                disabled={uploading || autoBusy || !albums.some((g) => g.name.trim() && g.files.length)}
-                title="Stage the selection, then run the whole import for every album automatically — the app decides everything a source can answer and only asks about albums whose files name no release"
+                onClick={addStagedBatch}
+                disabled={uploading || autoBusy}
+                title="Bank this selection as a batch of its own and clear the drop zone for the next one — add as many batches as you like, then start them together"
               >
-                {autoBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Wand2 className="h-4 w-4" />}
-                Auto-import {albums.filter((g) => g.files.length).length} album(s) — decide everything and queue
+                <Plus className="h-4 w-4" /> Add as another batch
               </button>
+              )}
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  className="btn-primary tap"
+                  onClick={() => void doImport()}
+                  disabled={uploading || autoBusy || !pendingAlbums}
+                >
+                  {uploading
+                    ? "Importing…"
+                    : `Import ${pendingAlbums} album(s)${pendingBatchCount > 1 ? ` from ${pendingBatchCount} batches` : ""} into library`}
+                </button>
+                <button
+                  className="btn-ghost tap"
+                  onClick={() => void doImport(true)}
+                  disabled={uploading || autoBusy || !pendingAlbums}
+                  title="Stage every batch, then run the whole import for each album automatically — the app decides everything a source can answer and only asks about albums whose files name no release"
+                >
+                  {autoBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Wand2 className="h-4 w-4" />}
+                  Auto-import {pendingAlbums} album(s){pendingBatchCount > 1 ? ` from ${pendingBatchCount} batches` : ""} — decide everything and queue
+                </button>
+              </div>
               <p className="text-[11px] text-zinc-500">
-                Auto-import runs the full pipeline for each album without the 8 steps: releases, links, metadata,
-                covers, genres and lyrics are fetched and written, and whatever nothing can supply comes back as a
-                prompt to answer later. Drop another folder while it runs to queue more batches.
+                Add each drop as its own batch (a multi-disc rip is ONE batch: drop the album folder holding
+                its disc folders and they merge into one album) and start them together — every batch imports
+                as its own album(s), in order, through the one queue below. Auto-import runs the full pipeline
+                for each album without the 8 steps: releases, links, metadata, covers, genres and lyrics are
+                fetched and written, and whatever nothing can supply comes back as a prompt to answer later.
               </p>
             </div>
           )}
@@ -4042,7 +4174,12 @@ const finish = async (closeByNavigation: boolean) => {
                   className={`input flex-1 ${releaseId ? "!border-emerald-700" : ""} tap`}
                   placeholder="MusicBrainz release URL or ID (e.g. https://musicbrainz.org/release/…)"
                   value={mbLink}
-                  onChange={(e) => setMbLink(e.target.value)}
+                  onChange={(e) => {
+                    setMbLink(e.target.value);
+                    // The badge describes how the FIELD was filled; a value
+                    // the user is typing is not "detected from track tags".
+                    setDetectedFromTags(false);
+                  }}
                 />
                 {releaseId ? (
                   <span className="chip bg-emerald-900/60 text-emerald-300 border border-emerald-800 shrink-0">
@@ -4091,6 +4228,14 @@ const finish = async (closeByNavigation: boolean) => {
               {detectStatus === "found" && releaseId && (
                 <div className="text-xs text-emerald-400 flex items-center gap-1.5">
                   <Check className="h-3 w-3" /> Release detected in track tags — fetched automatically
+                </div>
+              )}
+              {detectStatus === "found" && releaseId && !staged && (
+                <div className="text-xs text-zinc-500">
+                  This album is linked to that release. Paste another one above — an edition or a
+                  deluxe pressing — and Fetch re-links the album to it: the release id, the
+                  metadata and the tracklist are rewritten from what you fetch, and every track
+                  re-matches against it.
                 </div>
               )}
               <div className="text-xs text-zinc-600">or search:</div>
@@ -4158,46 +4303,7 @@ const finish = async (closeByNavigation: boolean) => {
                   <span className="font-semibold text-zinc-200">{release.title}</span> · {release.artists.map((a) => a.name).join(", ")} · {release.date} · {release.medium_count} disc(s) · {release.media.length} tracks
                 </div>
               )}
-              <div className="text-sm font-semibold text-zinc-300 pt-2">RateYourMusic links (optional)</div>
-              <div className="flex flex-wrap items-center gap-2">
-                <input
-                  className={`input flex-1 ${rymValid === true ? "!border-emerald-700" : rymValid === false ? "!border-red-800" : ""} tap`}
-                  placeholder="Album: https://rateyourmusic.com/release/…"
-                  value={rymLink}
-                  onChange={(e) => {
-                    setRymLink(e.target.value);
-                    setRymNote(""); // a stale "That is an artist page" must not outlive the paste it described
-                  }}
-                />
-                <LinkValidChip state={rymValid} kind={rymKind} />
-                <button
-                  className="btn-ghost shrink-0 tap"
-                  onClick={findRymLinks}
-                  disabled={findingLinks || busy}
-                  title="Ask RateYourMusic for this album's and this artist's pages and fill both fields for review"
-                >
-                  {findingLinks ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Search className="h-3.5 w-3.5" />}{" "}
-                  Find links
-                </button>
               </div>
-              {rymNote && <div className="text-[10px] text-amber-300/80">{rymNote}</div>}
-              <div className="flex flex-wrap items-center gap-2">
-                <input
-                  className={`input flex-1 ${rymArtistValid === true ? "!border-emerald-700" : rymArtistValid === false ? "!border-red-800" : ""} tap`}
-                  placeholder="Artist: https://rateyourmusic.com/artist/…"
-                  value={rymArtistLink}
-                  onChange={(e) => {
-                    setRymArtistLink(e.target.value);
-                    setRymArtistNote("");
-                  }}
-                />
-                <LinkValidChip state={rymArtistValid} kind={rymArtistKind} />
-              </div>
-              <div className="text-[10px] text-zinc-600">
-                Written to every track as RATEYOURMUSIC_ARTIST — only an artist page is accepted.
-              </div>
-              {rymArtistNote && <div className="text-[10px] text-amber-300/80">{rymArtistNote}</div>}
-            </div>
             <div className="flex flex-wrap items-center gap-2">
               <button className="btn-primary tap" onClick={handleFetch} disabled={busy}>
                 <Wand2 className="h-4 w-4" /> Fetch release & auto-match
@@ -4218,8 +4324,43 @@ const finish = async (closeByNavigation: boolean) => {
       {/* ---------------- Step 2: matching ---------------- */}
       {step === 2 && (
         <div className="space-y-4">
-          <div className="text-sm text-zinc-400">
-            Confirm each local track's MusicBrainz track/disc. Unmatched rows stay blank — you can also fix them manually later on the track page.
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="text-sm text-zinc-400 flex-1 min-w-[16rem]">
+              Confirm each local track's MusicBrainz track/disc. Unmatched rows stay blank — you can also fix them manually later on the track page.
+            </div>
+            {/* Adding audio to the album the wizard is ON. Shown here because
+                this is the step that decides which tracks the album holds: a
+                second disc, one track a rip left behind, or the audio of a
+                release track listed below as not in the folder. Files join
+                the album's own folder (fill-only — nothing it holds is
+                replaced) and are re-matched into rows. */}
+            {albumPath && !staged && (
+              <>
+                <input
+                  ref={addFilesRef}
+                  type="file"
+                  multiple
+                  data-add-tracks-input=""
+                  className="hidden"
+                  accept=".flac,.mp3,.m4a,.mp4,.ogg,.oga,.opus,.wav,.wv,.ape,.aiff,.aif,.dsf,.dff,.wma,.mpc,.tta"
+                  onChange={(e) => {
+                    const files = Array.from(e.target.files ?? []);
+                    e.target.value = "";
+                    if (files.length) void addTracks(files);
+                  }}
+                />
+                <button
+                  className="btn-ghost tap shrink-0"
+                  data-add-tracks=""
+                  onClick={() => addFilesRef.current?.click()}
+                  disabled={addBusy}
+                  title="Add audio files to this album — they join its folder and are matched here"
+                >
+                  {addBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />}
+                  Add tracks…
+                </button>
+              </>
+            )}
           </div>
           {suggestions.length === 0 && <div className="text-xs text-zinc-500">No data — go back and fetch the release.</div>}
           {groupByDisc(suggestions, discOfSuggestion).map((g) => (
@@ -4258,6 +4399,30 @@ const finish = async (closeByNavigation: boolean) => {
               })}
             </DiscSection>
           ))}
+          {/* What the release still wants, named. A deluxe pressing carries a
+              second disc nobody has ripped yet, and this step used to show the
+              local rows alone — the gaps were invisible. */}
+          {missingTracks.length > 0 && (
+            <div className="panel px-3 py-2 space-y-1.5" data-missing-tracks={missingTracks.length}>
+              <div className="text-xs text-zinc-400">
+                {missingTracks.length === 1
+                  ? "1 track of this release is not in the folder"
+                  : `${missingTracks.length} tracks of this release are not in the folder`}
+                {release?.media?.length ? ` (of ${release.media.length})` : ""} — “Add tracks…” puts
+                their audio into this album and they come back here to match.
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {missingTracks.map((m) => (
+                  <span
+                    key={`${m.disc}-${m.position}`}
+                    className="chip bg-raise border border-border text-zinc-400 font-mono text-[10px]"
+                  >
+                    {m.disc}.{m.position} {m.title}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
           {/* SOURCE — the one tag a Digital Media release must carry and the
               audio cannot state: where the rip came from. Shown on the step
               that decides the medium, because the medium is what makes it
@@ -4747,20 +4912,16 @@ const finish = async (closeByNavigation: boolean) => {
                   {jobGenres.length ? "" : " — no genres returned"}
                 </div>
                 {/* What the run wrote: one chip per name, exactly the names
-                    the sources stated. This printed the union as one
-                    comma-joined line in the sources' own spelling, so three
-                    genres read as one name. The level above each chip is
-                    derived (`/api/genres/facets` carries each name's `path`),
-                    so nothing here is labelled as a slot. */}
+                    the sources stated, top genre first. This printed the union
+                    as one comma-joined line in the sources' own spelling, so
+                    three genres read as one name. Nothing here is labelled as
+                    a slot or a level. */}
                 {jobGenres.length > 0 && (
                   <div className="flex flex-wrap items-center gap-1.5">
                     {jobGenres.map((g) => (
                       <span
                         key={g}
                         className="chip bg-accent/10 text-accent-soft border border-accent/25"
-                        title={genreFacets?.genres.find(
-                          (row) => row.name.toLowerCase() === g.toLowerCase()
-                        )?.path || undefined}
                       >
                         {g}
                       </span>
@@ -4809,9 +4970,9 @@ const finish = async (closeByNavigation: boolean) => {
               Genres are not fetched automatically — set the per-track limit, then Import genres asks every source
               ticked in the tray beside it, top to bottom, and stops as soon as a track's list is full (a source
               that needs a login is skipped and says so until you set it).
-              Only the specific names a source states are WRITTEN: the level above each one (its parent genre, up to
-              the family head) is derived by the app and shown as “under …”, never stored — at most {genreCap} genre
-              value{genreCap === 1 ? "" : "s"} per track (Settings → Import).
+              Only the specific names a source states are WRITTEN, top genre first — nothing above a name is
+              derived or shown — at most {genreCap} genre value{genreCap === 1 ? "" : "s"} per track
+              (Settings → Import).
             </span>
           </MinBlock>
           <MinBlock min={minMode} here={missingHere} mine="genres">
@@ -4886,15 +5047,9 @@ const finish = async (closeByNavigation: boolean) => {
               >
                 {g.rows.map((t) => {
                   const list = genreList(t.path);
-                  // WHERE A NAME SITS, in the app's genre tree — the PARENTS
-                  // only ("Hip Hop"), straight from the facets payload, which is
-                  // why the arrow is not a mystery: the name itself is the chip
-                  // beside the line (or the chip being hovered), never repeated
-                  // here. Derived, never written (`genreParents`, spec
-                  // R38/R38a).
-                  const parents = list.length
-                    ? genreParents(genrePathByName.get(list[0].toLowerCase()))
-                    : "";
+                  // ONE CHIP PER NAME, exactly the genres the tag holds, top
+                  // genre first — no level above a name is derived or shown
+                  // (the parent idea is gone, spec R38).
                   const typed = genreAddValues[t.path] ?? "";
                   const unknown = !!typed.trim() && !genreSuggestions.has(typed.trim().toLowerCase());
                   return (
@@ -4902,23 +5057,11 @@ const finish = async (closeByNavigation: boolean) => {
                       <TrackNoBadge disc={discNoOf(t.path)} track={trackNoOf(t.path)} />
                       <span className="flex-1 truncate text-sm">{displayTitle(t.path)}</span>
                       <div className="flex items-center gap-1.5 flex-wrap justify-end">
-                        {parents && (
-                          <span
-                            className="text-[10px] text-zinc-500 truncate max-w-[16rem]"
-                            title={`${list[0]} sits under ${parents} in the app's genre tree — the level above a name is derived (mlo.genre_vocab.path_of), never written to the file. The tag holds ${list.map((n) => `“${n}”`).join(", ")}.`}
-                          >
-                            under {parents}
-                          </span>
-                        )}
                         {list.map((gen) => {
-                          const above = genreParents(genrePathByName.get(gen.toLowerCase()));
                           return (
                             <span
                               key={gen}
                               className="chip bg-accent/10 text-accent-soft border border-accent/25"
-                              title={above
-                                ? `${gen} sits under ${above} — a level the app derives, never written to the file`
-                                : undefined}
                             >
                               {gen}
                               <button
@@ -5525,7 +5668,6 @@ const finish = async (closeByNavigation: boolean) => {
       {identify && (
         <ImportIdentifyDialog
           albums={identify.albums}
-          identified={identify.identified}
           onClose={() => setIdentify(null)}
           onStart={async (pins) => {
             const staged = identify.staged;

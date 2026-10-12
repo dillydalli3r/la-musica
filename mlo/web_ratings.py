@@ -2,34 +2,26 @@
 
 The app already stores ONE rating: ``RATING``, the listener's own stars.
 The owner asked for the OTHER kind — the aggregated public score a person
-sees on MusicBrainz, RateYourMusic, Album of the Year or Discogs — and this
-module is that layer:
+sees on MusicBrainz — and this module is that layer:
 
-  * the SOURCE layer, one parser per provider turning the payload the app
-    would already have fetched into ``(value, count, label)`` on the app's
-    own 0-100 scale;
+  * the SOURCE layer, one parser turning the payload the app would already
+    have fetched into ``(value, count, label)`` on the app's own 0-100 scale;
   * the CHOICE, the FIRST source that answered — the configured order IS the
-    hierarchy (RateYourMusic, then Album of the Year, then MusicBrainz), so
-    the number on the file is a score a reader can open the site and check,
-    never a blend no site publishes;
+    hierarchy, so the number on the file is a score a reader can open the site
+    and check, never a blend no site publishes;
   * the WRITER, which fills the four tags and never replaces a value the file
     already holds unless it is forced to;
   * the SCRIPT runner (id 24), album-scoped like its neighbours.
 
+MusicBrainz is the ONLY source left (2026-10-12, the owner's decision — no
+scraped site; see ``mlo.config``). Its rating is read through the same cached,
+throttled client as every other MusicBrainz call.
+
 THE SCALE is Picard's 0-100 — the very scale ``RATING`` uses, one half-star =
 10 — because that is what a player shows beside the user's own stars and it
-is what makes the two comparable at a glance. Every source here publishes on
-a different scale and each is converted in ONE place (``SOURCE_PARSERS``):
-
-  * MusicBrainz 0-5 (``{"value": 4.35, "votes-count": 31}``, VERIFIED live)
-  * RateYourMusic 0.5-5 (``<meta itemprop="ratingValue" content="4.18" />``,
-    VERIFIED live against a real release page, and the
-    ``page_section_main_info_music_rating_value`` component a 2026 page serves
-    instead — see ``rym_rating_from_html``; a release page answers for the
-    album, a SONG page for the track)
-  * Discogs 0-5 (``community.rating = {"average": 4.72, "count": 3809}``,
-    VERIFIED live)
-  * Album of the Year 0-100 — see the note on that source below.
+is what makes the two comparable at a glance. MusicBrainz publishes on 0-5
+(``{"value": 4.35, "votes-count": 31}``, VERIFIED live), converted in ONE
+place (``SOURCE_PARSERS``).
 
 THE ALBUM VALUE is written to EVERY track of the album, exactly the way
 ``ALBUMITUNESADVISORY`` carries an album-wide answer; the TRACK value is the
@@ -45,28 +37,14 @@ contributed, the app's own convention for a joined list (``RELEASECOUNTRY``).
 WHERE THE ANSWERS COME FROM. Nothing here talks to the network: mlo must not
 import server, so the whole HTTP side is an INJECTED fetcher — a single
 callable ``fetch(source, kind, ident, cfg)`` returning the raw payload (or
-None), supplied by ``server.integrations.web_rating_fetchers()`` and by
-``server.discovery`` for the Discogs release. That is what makes the parsers
-and the aggregation testable with saved fixtures, and it is why a source that
-cannot answer costs nothing: it returns None and the mean is taken over the
-sources that did.
-
-ALBUM OF THE YEAR IS READ LIVE, through the same Cloudflare path the RYM
-readers use (`server.aoty`, via `cfchallenge`): a cleared `aoty_cookie` (or a
-solver, `cf_solver_url`) reads the real page. The site answers Cloudflare's JS
-challenge to every automated client without one — MEASURED 2026-10-10: a plain
-HTTP client, curl_cffi, headless Chromium and a headed real Chrome all got the
-403 — so with no credential the source reports the challenge instead of
-inventing a value. ``server.integrations.aoty_page`` resolves the album's own
-page through the site's search and confirms it by slug. The markup this parser
-reads is pinned against a real capture in `tools/test_aoty.py`, so the parse is
-pinned to a real payload rather than guessed.
+None), supplied by ``server.integrations.web_rating_fetchers()``. That is what
+makes the parser and the walk testable with saved fixtures, and it is why a
+source that cannot answer costs nothing: it returns None and the walk moves on.
 """
 from __future__ import annotations
 
 import math
 import os
-import re
 
 from .audio import AudioFile
 from .config import should_write_audio_tag
@@ -82,7 +60,7 @@ from .ui import print_header, log, c, Color
 # --------------------------------------------------------------------------- #
 # Picard's own, the same one RATING uses (mlo/audio.py) — one half-star = 10.
 RATING_MAX = 100
-# The scale every source but Album of the Year publishes on.
+# The scale MusicBrainz publishes on.
 SOURCE_SCALE_MAX = 5.0
 
 # The four tags, per level. The VALUE tags hold the integer; the SOURCE tags
@@ -109,51 +87,31 @@ FORCE_KEY = "force_web_ratings"
 # --------------------------------------------------------------------------- #
 # A PRIORITY LIST, exactly like GENRE_SOURCES: it fixes the order the sources
 # are ASKED in, which is the order their names appear in the SOURCE tag, and
-# the order a tie is reported in. The VALUE is not a pick-the-first answer —
-# every source that answers contributes to the weighted mean — so the order
-# only decides presentation.
+# the order a tie is reported in. The order only decides presentation.
 #
-#   a. rateyourmusic   the release page's average (0.5-5) and its vote count
-#                      for the album, the SONG page's own average and count
-#                      for the track (RYM rates both).
-#                      FIRST because it is the score this app's owner already
-#                      reads, and because its album answer is the one the
-#                      genre chain also wants (one page read, two answers).
-#   b. albumoftheyear  the album page's user score (0-100) for the album and
-#                      EACH of its tracks (AOTY states a score per row), the
-#                      song page's own for a track looked up on its own.
-#   c. musicbrainz     the release group's rating for the album, the
+#   musicbrainz        the release group's rating for the album, the
 #                      recording's own for the track (a WORK's rating is the
 #                      fallback — see `parse_musicbrainz_track`).
-SOURCES = ["rateyourmusic", "albumoftheyear", "musicbrainz"]
+# MusicBrainz is the ONLY source (2026-10-12, the owner's decision — no scraped
+# site; see `mlo.config`). Its rating is read through the same cached, throttled
+# client as every other MusicBrainz call.
+SOURCES = ["musicbrainz"]
 
 SOURCE_LABELS = {
-    "rateyourmusic": "RateYourMusic",
-    "albumoftheyear": "Album of the Year",
     "musicbrainz": "MusicBrainz",
 }
 
-# Which level each source can answer at. ALL THREE have a per-track
-# statement of their own — RateYourMusic keeps a page (and a separate community
-# average) per SONG, MusicBrainz rates the recording, and AOTY states a score
-# per track row on the album page — so all three may fill WEBRATING. When a
-# source states nothing for the TRACK, its ALBUM answer is used for that track
-# (still attributed to the source); the album's own value is written to
-# ALBUMWEBRATING as before.
-ALBUM_SOURCES = ("rateyourmusic", "albumoftheyear", "musicbrainz")
-TRACK_SOURCES = ("rateyourmusic", "albumoftheyear", "musicbrainz")
+# Which level each source can answer at. MusicBrainz states a per-track rating
+# of its own (the recording — see `parse_musicbrainz_track`), so it may fill
+# WEBRATING. When it states nothing for the TRACK, its ALBUM answer is used for
+# that track (still attributed to the source); the album's own value is written
+# to ALBUMWEBRATING as before.
+ALBUM_SOURCES = ("musicbrainz",)
+TRACK_SOURCES = ("musicbrainz",)
 
 # One honest line per source for a settings list, exactly like the lyrics and
 # genre chains carry: the coverage it is good at, and the caveat it comes with.
 SOURCE_NOTES = {
-    "rateyourmusic": "The release page's community average (0.5-5) and its "
-                     "vote count for the album, the song page's own for the "
-                     "track. Live pages need a rym_cookie (or a solver, "
-                     "cf_solver_url).",
-    "albumoftheyear": "The album's user score (0-100) and each track's own, "
-                      "plus its genre list. Live pages need an aoty_cookie "
-                      "(or a solver, cf_solver_url) — the site refuses an "
-                      "automated client otherwise.",
     "musicbrainz": "Open data: the release group's community rating for the "
                    "album, the recording's own for the track. Free, no key, "
                    "MBID-native.",
@@ -187,7 +145,7 @@ def scale_to_100(value, scale_max=SOURCE_SCALE_MAX):
     (`web/src/lib/ratings.ts` `webText`). Rounding the source UP to the
     nearest grid point puts values that sit just under a tenth's boundary ON
     the boundary, and the second rounding then carries them the rest of the
-    way: MEASURED 2026-10-11 on the owner's "Clint Eastwood", RateYourMusic's
+    way: MEASURED 2026-10-11 on the owner's "Clint Eastwood", a scraper's
     4.54 became 91 = 4.55 and the tag read 4.6, while 4.54 at one decimal is
     4.5 — the rounding the site itself shows. Truncating keeps the display
     equal to the source's own one-decimal reading for EVERY value: the grid
@@ -301,221 +259,11 @@ def parse_musicbrainz_track(payload):
     return parse_musicbrainz(payload.get("work"))
 
 
-# The RYM release page states its community average as schema.org microdata —
-# VERIFIED live on a real release page: <div itemprop="aggregateRating"
-# itemscope itemtype="http://schema.org/AggregateRating"> <meta
-# itemprop="ratingValue" content="4.18" /> <meta itemprop="bestRating"
-# content="5.0" /> <meta itemprop="worstRating" content="0.5" /> <meta
-# itemprop="ratingCount" content="49366" />. The visual twin
-# (<span class="avg_rating">4.18</span>) is read as the fallback, because it is
-# the same number on a page whose microdata is missing.
-_RYM_VALUE_RE = re.compile(
-    r'itemprop="ratingValue"[^>]*content="([0-9]+(?:\.[0-9]+)?)"', re.I)
-_RYM_COUNT_RE = re.compile(
-    r'itemprop="ratingCount"[^>]*content="([0-9]+)"', re.I)
-_RYM_AVG_RE = re.compile(
-    r'class="avg_rating"[^>]*>\s*([0-9]+(?:\.[0-9]+)?)\s*<', re.I)
-# RYM's 2026 design states the same number in its own component, with NO
-# microdata at all — the release page's rating and a SONG page's rating are the
-# same component. VERIFIED on the archived song page of Radiohead's "Paranoid
-# Android" (web.archive.org/web/20260814042836id_/…/song/radiohead/
-# paranoid-android/), which carries neither an `itemprop` nor an `avg_rating`
-# span:
-#   <div class="page_section_main_info_music_rating_value has_tip">
-#     <div class="page_section_main_info_music_rating_value_rating">
-#       <img alt="rating bolded" alt="bold star" class="metadata-star-bold" /> 4.67
-#     </div>
-#     <div class="page_section_main_info_music_rating_value_number">
-#       17,654
-#       ratings
-#     </div>
-#   </div>
-# The star image's tags are skipped before the value is read, so a digit inside
-# an attribute can never be mistaken for the score.
-_RYM_SECTION_VALUE_RE = re.compile(
-    r'page_section_main_info_music_rating_value_rating[^>]*>\s*'
-    r'(?:<[^>]*>\s*)*([0-9]+(?:\.[0-9]+)?)', re.I)
-_RYM_SECTION_COUNT_RE = re.compile(
-    r'page_section_main_info_music_rating_value_number[^>]*>\s*'
-    r'([0-9][0-9,]*)\s*ratings', re.I)
-
-
-def rym_rating_from_html(html):
-    """``{"value", "count"}`` for a RYM release OR song page, or None.
-
-    Called by ``server.integrations._rym_album_answer`` for a release page and
-    by ``server.integrations.rym_song_rating`` for a song page — so a rating
-    read from a LIVE page and one read from an ARCHIVED snapshot go through the
-    same parser, whichever design the page is in.
-
-    TWO designs are accepted, in this order: the schema.org microdata a 2021
-    page publishes, the visual ``avg_rating`` twin that sits beside it, and the
-    ``page_section_main_info_music_rating_value`` component the 2026 design
-    uses instead (see above). The microdata is tried first so a page carrying
-    both is read exactly as it always was. The scale is RYM's own
-    worst-to-best 0.5-5, whose maximum is what the conversion needs (a 0.5 floor
-    would only matter to a reader that rescales the bottom).
-    """
-    text = html or ""
-    if not text:
-        return None
-    match = (_RYM_VALUE_RE.search(text) or _RYM_AVG_RE.search(text)
-             or _RYM_SECTION_VALUE_RE.search(text))
-    if not match:
-        return None
-    value = _to_int(match.group(1))
-    if value is None:
-        return None
-    count = 0
-    found = _RYM_COUNT_RE.search(text) or _RYM_SECTION_COUNT_RE.search(text)
-    if found:
-        count = int(found.group(1).replace(",", ""))
-    return {"value": value, "count": count}
-
-
-def parse_rateyourmusic(payload):
-    """A RYM answer (or a release/song page's HTML) -> its community average.
-
-    Two shapes are accepted because the routes that produce them differ: the
-    app's own scrape answers with a parsed dict carrying ``{"rating": {"value",
-    "count"}}`` (``_rym_album_answer`` for a release, ``rym_song_rating`` for a
-    song), while a raw page body is parsed here. Both end on RYM's 0.5-5
-    average, converted by the one scale helper.
-    """
-    if isinstance(payload, dict):
-        rating = payload.get("rating")
-        if not isinstance(rating, dict):
-            return None
-        pair = _rating_pair(rating.get("value"), rating.get("count"))
-    elif isinstance(payload, str):
-        parsed = rym_rating_from_html(payload)
-        if not parsed:
-            return None
-        pair = _rating_pair(parsed.get("value"), parsed.get("count"))
-    else:
-        return None
-    if pair is None:
-        return None
-    return pair[0], pair[1], SOURCE_LABELS["rateyourmusic"]
-
-
-# Album of the Year: the album page's USER SCORE, 0-100 (AOTY's own scale, so
-# no conversion — the identity case of `scale_to_100`). The page states it
-# twice and both are needed: the anchor's `title` attribute is the exact
-# average and its text is the rounded integer AOTY displays.
-# VERIFIED against a real page (Neko Case, Middle Cyclone — the archived
-# capture this project's AOTY reader replays):
-#   <div class="albumUserScoreBox"><div class="heading">User Score</div>
-#   <div class="albumUserScore"><a href="#users" title="76.7">77</a>…
-#   <div class="text numReviews">Based on <a href="…/user-reviews/?type=ratings">
-#   <strong>152</strong>&nbspratings</a></div>
-# The critic score (`class="albumCriticScore"`, "Based on <strong>27</strong>
-# reviews") is a DIFFERENT number and is deliberately never read: the owner
-# asked for the USER score, and reading the critic anchor by mistake would
-# write a number nobody asked for under a name that says "web rating".
-_AOTY_USER_RE = re.compile(
-    r'class="albumUserScore"[^>]*>\s*<a[^>]*title="([0-9]+(?:\.[0-9]+)?)"[^>]*>'
-    r'\s*([0-9]+)\s*<', re.I)
-# `&nbspratings` is AOTY's own unclosed entity (`&nbsp` + "ratings") — matched
-# verbatim, because the safe-looking `&nbsp;ratings` is not what the page says.
-_AOTY_COUNT_RE = re.compile(
-    r'Based on\s*<a[^>]*>\s*<strong>([0-9,]+)</strong>\s*&nbspratings', re.I)
-
-
-def _aoty_pair(rating):
-    """AOTY's ``{"value", "count"}`` (0-100) as our triple, or None."""
-    if not isinstance(rating, dict):
-        return None
-    pair = _rating_pair(rating.get("value"), rating.get("count"), RATING_MAX)
-    if pair is None:
-        return None
-    return pair[0], pair[1], SOURCE_LABELS["albumoftheyear"]
-
-
-def parse_aoty(payload):
-    """An AOTY album answer -> its user score, on the app's own scale.
-
-    Two shapes are accepted: the PARSED dict the live fetcher returns
-    (``server/aoty.parse_album`` — ``{"genres", "rating", "tracks"}``), and a
-    raw album page body (kept for fixtures and any caller holding HTML). The
-    score is already 0-100, so its conversion is the identity — it still goes
-    through `_rating_pair` with an explicit ``scale_max=100``, because "which
-    scale is this" belongs to the parser.
-
-    Returns None when the page states no user score at all — never a zero.
-    """
-    if isinstance(payload, dict):
-        return _aoty_pair(payload.get("rating"))
-    text = payload or ""
-    if not text:
-        return None
-    match = _AOTY_USER_RE.search(text)
-    if not match:
-        return None
-    count = 0
-    found = _AOTY_COUNT_RE.search(text)
-    if found:
-        count = int(found.group(1).replace(",", ""))
-    pair = _rating_pair(match.group(1) or match.group(2), count, RATING_MAX)
-    if pair is None:
-        return None
-    return pair[0], pair[1], SOURCE_LABELS["albumoftheyear"]
-
-
-def parse_aoty_track(payload):
-    """An AOTY song answer -> that song's own score, or None.
-
-    The payload is the parsed dict from ``server/aoty.parse_song``
-    (``{"title", "rating"}``). AOTY rates each track on its album page and on
-    its own song page; either way the number is the song's, on AOTY's 0-100
-    scale.
-    """
-    if not isinstance(payload, dict):
-        return None
-    return _aoty_pair(payload.get("rating"))
-
-
-def _fold_title(text):
-    """A track title folded for matching: case, punctuation and spacing gone.
-
-    "Welcome to the World of the Plastic Beach", "Welcome To The World Of The
-    Plastic Beach!" and "welcome to the world of the plastic beach" are one
-    song; AOTY and the file agree on the words, not on the trimmings.
-    """
-    return re.sub(r"[^a-z0-9]+", "", str(text or "").casefold())
-
-
-def track_row(source, payload, title):
-    """A TRACK's own score inside a source's ALBUM answer, or None.
-
-    Album of the Year states EVERY track's score on the album page (its
-    per-track rows), so when the track-level lookup comes back empty — the
-    site has no separate page for that song, which is the common case — the
-    album payload the caller already fetched answers for this track, and at
-    TRACK level: the number IS that song's, not the album's. Any other source's
-    album payload carries no per-track rows and answers None, which leaves the
-    caller's own album-level fallback in charge.
-    """
-    if str(source or "").strip().lower() != "albumoftheyear":
-        return None
-    if not isinstance(payload, dict):
-        return None
-    want = _fold_title(title)
-    if not want:
-        return None
-    for row in payload.get("tracks") or []:
-        if isinstance(row, dict) and _fold_title(row.get("title")) == want:
-            return parse_aoty_track(row)
-    return None
-
-
 # The one dispatch: source id -> parser. A source absent from here cannot
 # answer at all, so adding a source is one entry in SOURCES, one parser and one
 # entry here.
 SOURCE_PARSERS = {
-    "rateyourmusic": parse_rateyourmusic,
     "musicbrainz": parse_musicbrainz,
-    "albumoftheyear": parse_aoty,
 }
 
 
@@ -524,11 +272,7 @@ def parse_source(source, payload, kind="album"):
 
     The MUSICBRAINZ entry is level-aware: an album payload is a release-group
     node, a track payload is ``{"recording", "work"}`` (see
-    ``parse_musicbrainz_track``). ALBUM OF THE YEAR is level-aware too: a track
-    payload is the song's own score, an album payload the album's. RATEYOURMUSIC
-    needs no branch here: the fetcher already answers a track with the SONG
-    page's own rating and an album with the release page's, and
-    ``parse_rateyourmusic`` reads both shapes.
+    ``parse_musicbrainz_track``).
     """
     source = str(source or "").strip().lower()
     parser = SOURCE_PARSERS.get(source)
@@ -536,8 +280,6 @@ def parse_source(source, payload, kind="album"):
         return None
     if kind == "track" and source == "musicbrainz":
         parser = parse_musicbrainz_track
-    elif kind == "track" and source == "albumoftheyear":
-        parser = parse_aoty_track
     try:
         return parser(payload)
     except Exception:
@@ -561,15 +303,11 @@ def choose(answers):
       value on a track is the track's own score, and an album's score standing
       in for it is a fallback, not a verdict;
     * within one level the ORDER decides, so the configured chain
-      (``web_ratings_sources``, RateYourMusic first) is a true hierarchy: the
-      first source that answers is the value on the file.
+      (``web_ratings_sources``) is a true hierarchy: the first source that
+      answers is the value on the file.
 
-    NOT a mean. The weighted mean this replaced was unreproducible for the
-    person reading the tag — MEASURED 2026-10-11 on the owner's "Clint
-    Eastwood": RYM 4.54 (91, 3 458 votes), AOTY 95 (1 394), MusicBrainz 83
-    (20), whose vote-weighted mean is 92, i.e. the file read 4.6 while the
-    site the owner checked said 4.54. A score a person can open and verify
-    beats a blend no site publishes.
+    NOT a mean. A score a person can open and verify beats a blend no site
+    publishes.
 
     Returns ``{"value": int, "sources": [label]}`` or None when no source
     answered. ``sources`` is the one name whose number the file carries — it
@@ -619,8 +357,8 @@ def _rate(kind, ident, cfg, fetch, album=None):
     the first answer that can decide the value — `choose`'s two rules: a
     TRACK-level answer settles a track, and the first answer settles an album
     — so a source below the one that answered is never asked at all. That is
-    both the rule and the speed: an album whose RYM page answers costs one
-    request, not three.
+    both the rule and the speed: an album whose MusicBrainz node answers costs
+    one request.
 
     The callable is allowed to raise — this is where a caller's fetcher meets
     a stranger's network — and a raise is that source's miss, not the
@@ -646,22 +384,16 @@ def _rate(kind, ident, cfg, fetch, album=None):
             payload = None
         got = parse_source(source, payload, kind)
         if got is None and kind == "track" and album is not None:
-            # This source cannot answer for the TRACK: its ALBUM answer is
-            # fetched — and the album's own per-track rows are read first,
-            # because a row for this title IS this track's score (AOTY states
-            # one for every row of its album page). Only when no row matches
-            # does the album-wide value stand in, marked album level.
+            # This source states nothing for the TRACK: its ALBUM answer is
+            # fetched and only an album-wide value can stand in, marked album
+            # level. MusicBrainz's album payload carries no per-track rows.
             try:
                 payload = fetch(source, "album", album, cfg)
             except Exception:
                 payload = None
-            row = track_row(source, payload, ident.get("title"))
-            if row is not None:
-                got = row
-            else:
-                got = parse_source(source, payload, "album")
-                if got is not None:
-                    level = "album"
+            got = parse_source(source, payload, "album")
+            if got is not None:
+                level = "album"
         if got is None:
             continue
         answers.append((got, level))
@@ -692,13 +424,12 @@ def track_rating(artist, title, recording_mbid, cfg, fetch, album=None):
     """The TRACK's web rating — the track's own score when any source states
     one, else the first source's ALBUM score for it.
 
-    Every source is asked for the TRACK first (RYM's song page, AOTY's song
-    page, MusicBrainz's recording), and a source that states nothing for the
-    track falls back to its ALBUM answer — `album` is the album's identity
-    (``{"artist", "album", "mbid"}``) when the caller has it. The walk stops
-    at the first TRACK-level answer; an album-level one is kept only while
-    nothing better arrives. The level each source answered at is on the
-    result's ``levels`` map.
+    Every source is asked for the TRACK first (MusicBrainz's recording), and a
+    source that states nothing for the track falls back to its ALBUM answer —
+    `album` is the album's identity (``{"artist", "album", "mbid"}``) when the
+    caller has it. The walk stops at the first TRACK-level answer; an
+    album-level one is kept only while nothing better arrives. The level each
+    source answered at is on the result's ``levels`` map.
     """
     return _rate("track", {"artist": str(artist or "").strip(),
                            "title": str(title or "").strip(),
@@ -836,10 +567,10 @@ def run_web_ratings(config, fetch=None):
     identity is read ONCE (the release-group id and the names the sources are
     asked by), its ALBUM rating is fetched once and written to every track,
     and each track's own rating is fetched for that track — the album answer
-    and every track answer of one album ride the SAME bounded pool, so a
-    track's RYM wait no longer blocks the next track's MusicBrainz ask (the
-    two hosts have separate 1 req/s locks; only the waits overlap, the request
-    COUNT per host is unchanged).
+    and every track answer of one album ride the SAME bounded pool, so the
+    per-track network waits overlap instead of queueing (MusicBrainz serves
+    one request per second; the request COUNT is unchanged, only the waits
+    overlap).
 
     Nothing is invented: a track whose recording has no rating keeps no
     WEBRATING, an album no source answered for keeps no ALBUMWEBRATING, and
@@ -908,14 +639,13 @@ def run_web_ratings(config, fetch=None):
         shape mlo.lyrics_fetch uses for its tracks, applied one level up
         because the ALBUM answer is fetched once for the whole folder.
 
-        The overlap is the point: MusicBrainz (1 req/s) and RYM/Wayback
-        (1 req/s) are separate hosts with separate locks, so a strictly serial
-        track loop let one track's RYM wait block the next track's MB ask and
-        vice versa. Per-host request COUNT is unchanged — still one ask per
-        source per entity — only the WAITS overlap. Order is unchanged too:
-        each answer is parsed and aggregated in the configured source order
-        (see ``_rate``), and the writes below visit ``rows`` (sorted file
-        names) in order, so a ThreadPool completion order can never reach a
+        The overlap is the point: every ask is against MusicBrainz, which serves
+        one request per second, so a strictly serial track loop paid that wait
+        once per track — only the WAITS overlap. Request COUNT is unchanged —
+        still one ask per source per entity. Order is unchanged too: each
+        answer is parsed in the configured source order (see ``_rate``), and
+        the writes below visit ``rows`` (sorted file names) in order, so a
+        ThreadPool completion order can never reach a
         tag.
         """
         out = {"album": album_dir, "album_rating": None, "tracks": 0,

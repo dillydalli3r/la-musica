@@ -304,7 +304,7 @@ export default {
   "charts.no_plays_title": "Noch keine Wiedergaben",
   "charts.no_source_title": "Keine Quelle hatte eine Chartliste für diesen Zeitraum",
   "charts.unsupported_title": "Keine Chartliste konnte gelesen werden",
-  "charts.empty_online": "Jede gefragte Quelle kam leer zurück — die Chips oben sagen, welche gefragt wurden. Versuche einen anderen Zeitraum oder eine andere Art: Last.fm, Deezer und Apple veröffentlichen nur eine aktuelle Chartliste, und RateYourMusic hat keine Monats- oder Wochenliste.",
+  "charts.empty_online": "Jede gefragte Quelle kam leer zurück — die Chips oben sagen, welche gefragt wurden. Versuche einen anderen Zeitraum oder eine andere Art: Last.fm, Deezer und Apple veröffentlichen nur eine aktuelle Chartliste.",
   "charts.error_title": "Die Chartlisten konnten nicht gelesen werden",
   "browse.not_asked": "noch keine Abfrage ausgeführt",
   "browse.error_title": "Die Abfrage konnte nicht gelesen werden",

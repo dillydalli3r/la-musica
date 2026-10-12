@@ -669,16 +669,13 @@ ok(discover.BY_ID["lastfm"]["entity_kinds"] == ("artists", "tracks")
    "…and the registry says so: `entity_kinds` is the ROW kinds a feed really "
    "produces, not the genre `rec_kinds` it was defaulted from")
 # The seed KIND is the rule's other half: a similar-tracks feed answers a track
-# page, and a chart narrowed by an artist answers an artist page.
+# page, and a feed seeded by another page is asked only there.
 ok(discover.entity_limit(discover.BY_ID["lastfm"], "album", "tracks")[0]
    == "track pages only"
-   and discover.entity_limit(discover.BY_ID["rym"], "album", "tracks")[1]
-   == ("RateYourMusic charts filter by GENRE and by ARTIST — it states no "
-       "similar-tracks feed")
    and discover.entity_limit(discover.BY_ID["lastfm"], "album", "albums")[0]
    == "artist & track pages only",
    "a feed that does exist but is seeded by another page says which page that "
-   "is (Last.fm's similar-tracks feed, RYM's artist chart)")
+   "is (Last.fm's similar-tracks feed)")
 # `not_applicable` is the entity shelf's own field: the genre and library
 # seeds keep the payload they always had.
 fresh()
@@ -697,7 +694,7 @@ ok(seed_rows(seed_kind="artist", seed_mbid=ARTIST_SLOWDIVE, seed_name="Slowdive"
 fresh()
 track_page = seed_rows(seed_kind="track", seed_mbid=TRACK_ALISON,
                        seed_name="Alison", seed_artist="Slowdive", kind="tracks")
-ok([one["id"] for one in track_page["not_applicable"]] == ["listenbrainz", "rym"]
+ok([one["id"] for one in track_page["not_applicable"]] == ["listenbrainz"]
    and not [one for one in track_page["not_applicable"]
             if one["id"] in track_page["notes"]]
    and track_page["items"],
@@ -747,7 +744,7 @@ ok(tracks["Soon"]["reason"] == "Genre: Dream Pop (MusicBrainz)",
    f"({tracks['Soon']['reason']})")
 ok(unkeyed["notes"]["lastfm"] == "skipped: no lastfm_api_key"
    and "musicbrainz" not in unkeyed["notes"]
-   and [one["id"] for one in unkeyed["not_applicable"]] == ["listenbrainz", "rym"],
+   and [one["id"] for one in unkeyed["not_applicable"]] == ["listenbrainz"],
    "a keyed source without its key is still skipped by name, while the "
    "artist-only feeds are information")
 
@@ -865,88 +862,6 @@ ok(unknown["notes"]["spotify"] == 'skipped: Spotify knows no artist called "Lush
    f"({unknown['notes']['spotify']})")
 CFG.pop("spotify_client_id", None)
 CFG.pop("spotify_client_secret", None)
-
-# --------------------------------------------------------------------------- #
-# 6b) RateYourMusic — an artist's OWN ranked songs, and nothing else
-# --------------------------------------------------------------------------- #
-print("== RateYourMusic as an entity source ==")
-# `integrations.rym_chart_rows`' own row shape, as the scrape states it.
-RYM_SONGS = [
-    {"kind": "track", "title": "Star Roving", "artist": "Slowdive",
-     "link": "https://rateyourmusic.com/song/slowdive/star-roving/",
-     "rym_path": "/song/slowdive/star-roving/", "rank": 1,
-     "popularity": None, "popularity_label": None, "source": "rym"},
-]
-
-
-def stub_rym(rows=None, chart="Best Slowdive songs of all time", error=None):
-    """The RateYourMusic scrape seam. That SCRAPE is pinned by
-    `tools/test_discover.py` and `tools/test_rym_archive.py`; what is pinned
-    here is what an entity SHELF does with it."""
-    payload = {"chart": chart, "total": None,
-               "rows": RYM_SONGS if rows is None else rows}
-
-    def fake(kind="tracks", period="all", limit=50, cfg=None, now=None,
-             genre="", artist=""):
-        CALLS.append(("rym_charts", kind, period, genre, artist))
-        if error:
-            raise error
-        return payload
-    intg.rym_charts = fake
-
-
-def rym_calls():
-    return [call for call in CALLS if call[0] == "rym_charts"]
-
-
-fresh()
-# RYM is read LIVE: a cleared cookie (or a solver) is what asks it — without
-# either the app skips it before any request (`_genre_source_skip`).
-CFG["rym_archive_fallback"] = True
-CFG["rym_cookie"] = "cf_clearance=test"
-stub_rym()
-artist_tracks = seed_rows(seed_kind="artist", seed_mbid=ARTIST_SLOWDIVE,
-                          seed_name="Slowdive", kind="tracks")
-ok(rym_calls() == [("rym_charts", "tracks", "all", "", "Slowdive")],
-   f"an artist page asks RateYourMusic for THAT ARTIST's own chart "
-   f"({rym_calls()})")
-rym_rows = [row for row in artist_tracks["items"] if row["source"] == "rym"]
-ok(rym_rows and all(set(row) == ROW_KEYS for row in rym_rows)
-   and rym_rows[0]["reason"] == "More from Slowdive (RateYourMusic chart)",
-   f"…and its rows arrive in the shelf's shape, naming the relationship they "
-   f"state ({rym_rows[0]['reason'] if rym_rows else None})")
-
-# A chart that came back withOUT the artist filter names other artists: it is
-# not "more from this page", so it is refused rather than relabelled.
-fresh()
-stub_rym(rows=[{"kind": "track", "title": "Teardrop", "artist": "Massive Attack",
-                "link": "https://rateyourmusic.com/song/massive-attack/teardrop/",
-                "rym_path": "/song/massive-attack/teardrop/", "rank": 1,
-                "popularity": None, "popularity_label": None, "source": "rym"}])
-wrong_artist = seed_rows(seed_kind="artist", seed_mbid=ARTIST_SLOWDIVE,
-                         seed_name="Slowdive", kind="tracks")
-ok(not [row for row in wrong_artist["items"] if row["source"] == "rym"]
-   and wrong_artist["notes"]["rym"].startswith(
-       'skipped: RateYourMusic knows no artist called "Slowdive"'),
-   f"a chart naming other artists is not 'more from this page' "
-   f"({wrong_artist['notes'].get('rym')})")
-
-# RYM's chart filters are a genre and an ARTIST, so a page that is neither is
-# told its own limit instead of being answered with somebody else's rows.
-fresh()
-stub_rym()
-album_tracks = seed_rows(seed_kind="album", seed_mbid=RG_SOUVLAKI,
-                         seed_name="Souvlaki", seed_artist="Slowdive",
-                         kind="tracks")
-ok(rym_calls() == []
-   and [one for one in album_tracks["not_applicable"] if one["id"] == "rym"]
-   and album_tracks["not_applicable"][-1]["why"].startswith(
-       "RateYourMusic charts filter by GENRE and by ARTIST")
-   and "rym" not in album_tracks["notes"],
-   f"an album page's track shelf states RYM's own limit as information "
-   f"({album_tracks['not_applicable'][-1]['why']})")
-CFG.pop("rym_archive_fallback", None)
-CFG.pop("rym_cookie", None)
 
 # --------------------------------------------------------------------------- #
 # 7) The merge rule itself: an mbid is an identity, and a reason is never lost

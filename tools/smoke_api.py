@@ -5,7 +5,7 @@ Usage:  python tools/smoke_api.py [base_url]
 Exits non-zero when any GET route answers >=400, when a real script id does
 not come back from POST /api/run, or when an unknown script id is not
 rejected. Transient upstream failures (429/502/503/504) on the MusicBrainz
-and RateYourMusic proxies are tolerated — those services are not ours.
+proxy are tolerated — that service is not ours.
 """
 import json
 import os
@@ -16,10 +16,10 @@ import urllib.request
 
 BASE = (sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8000").rstrip("/")
 
-# Routes that proxy a third-party service (MusicBrainz, RateYourMusic): a
-# transient upstream failure — rate limit, timeout, firewall — is not a
-# broken route. Our own 5xx still fails: only these statuses, only here.
-UPSTREAM_PREFIXES = ("/api/mb/", "/api/rym/")
+# Routes that proxy a third-party service (MusicBrainz): a transient upstream
+# failure — rate limit, timeout, firewall — is not a broken route. Our own 5xx
+# still fails: only these statuses, only here.
+UPSTREAM_PREFIXES = ("/api/mb/",)
 TRANSIENT_UPSTREAM = {429, 502, 503, 504}
 
 
@@ -86,7 +86,6 @@ def main():
         (f"/api/lyrics/search?artist={q(artist_name)}&track={q(track_title)}", "GET", None),
         ("/api/mb/search/artists?q=test", "GET", None),
         ("/api/mb/search/releases?q=test", "GET", None),
-        ("/api/rym/validate?url=https://rateyourmusic.com/release/album/x/y", "GET", None),
         ("/api/stream?path=" + q(tpath), "GET", None),
         ("/api/videos/stream?path=" + q(tpath), "GET", None),
         ("/api/track/download?path=" + q(tpath), "GET", None),

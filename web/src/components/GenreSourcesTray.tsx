@@ -7,12 +7,11 @@ import Popover from "./Popover";
 
 /** The credential a source needs, in the words a person uses.
  *
- *  The server names the CONFIG KEY it reads (`rym_cookie`, `discogs_token`),
+ *  The server names the CONFIG KEY it reads (`lastfm_api_key`, `discogs_token`),
  *  which is right for the request builder and wrong to show: the tray says
  *  which login is missing, and a key with no entry here falls back to its own
  *  name with the underscores opened up. */
 const NEED_LABEL: Record<string, string> = {
-  rym_cookie: "RYM cookie",
   lastfm_api_key: "Last.fm API key",
   discogs_token: "Discogs token",
   spotify_client_id: "Spotify client id",
@@ -136,9 +135,8 @@ export default function GenreSourcesTray({
                   {/* A source that needs a credential says so HERE and stays
                       tickable: the chain skips an unconfigured one and says
                       why, and unticking it for the user would quietly change
-                      the list they saved. A need with a SECOND route (RYM's
-                      archived snapshot) is named but not called "skipped":
-                      the source still answers. */}
+                      the list they saved. A need with a SECOND route is named
+                      but not called "skipped": the source still answers. */}
                   {r.needs.length > 0 && !r.configured && (() => {
                     const optional = r.optional_needs ?? [];
                     const blocked = r.needs.filter((k) => !optional.includes(k));

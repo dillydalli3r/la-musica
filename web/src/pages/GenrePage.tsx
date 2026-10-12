@@ -79,11 +79,11 @@ export default function GenrePage() {
   };
 
   const chip = (name: string, count?: number) => {
-    // A family is the HEAD of the genre tree (mlo.genre_vocab.FAMILIES) — a
-    // level, not a slot: a track's own genre can BE one ("Rock" alone is an
-    // answer), so it is marked here rather than shown as one more specific
-    // name. The level above any name is derived (mlo.genre_vocab.path_of) and
-    // never stored, which is why nothing depends on position.
+    // A family is one of the names the vocabulary publishes (mlo.genre_vocab
+    // .FAMILIES): a track's own genre can BE one ("Rock" alone is an answer),
+    // so it is marked here rather than shown as one more specific name.
+    // Nothing above a name is derived or stored any more, so no position is
+    // implied.
     const family = GENRE_FAMILIES[name.toLowerCase()];
     // The CHIP prints the reader's form; `open()` and the filter match keep the
     // stored lower-case name (see `titleCaseGenre` — the app's genre buckets

@@ -26,9 +26,7 @@ const SOURCE_LABELS: Record<string, string> = {
   wikipedia: "Wikipedia",
   wikidata: "Wikidata",
   discogs: "Discogs",
-  rateyourmusic: "RateYourMusic",
   bandcamp: "Bandcamp",
-  rym: "RateYourMusic",
 };
 
 /** The name to print for a source: what the server called it, else the table
@@ -42,10 +40,10 @@ export function sourceLabel(id: string, reported?: string | null): string {
 }
 
 /** The notes keys that are NOT source ids — the whole request's own verdict
- *  ("no recommendation source had anything to suggest for this seed", "no
- *  chart source had anything to rank for this week"). They are printed as
- *  their own sentences, without a provider name in front of them. */
-const PLAIN_NOTES: Record<string, true> = { recommended: true, charts: true };
+ *  ("no recommendation source had anything to suggest for this seed"). They
+ *  are printed as their own sentences, without a provider name in front of
+ *  them. */
+const PLAIN_NOTES: Record<string, true> = { recommended: true };
 
 /** How long a chip's label may be before the outcome word stands in for it.
  *  A label is NEVER clipped to fit: it is the note's lead clause when that is

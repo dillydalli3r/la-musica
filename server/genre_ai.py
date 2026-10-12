@@ -4,9 +4,10 @@
 other configured sources first and hands their answers here; this module
 turns them — plus, when ``ai_genre_research`` is on, the model's own
 knowledge of the release — into at most ``mb_genre_count - 1`` SPECIFIC
-genres, most specific first. The family is NOT asked for and a family answer
-is dropped: the app derives it (`mlo.genre_vocab.parent_of`) and puts it
-first, see ``mlo.genres``.
+genres. The app STORES the specific names a source stated, so a family answer
+adds nothing — and one sitting beside its own child is dropped as redundant;
+the level above a name is not something the app stores or derives any more
+stored — see ``mlo.genres``.
 
 Optional end to end: no endpoint configured, a refusal, a timeout, an
 unparseable answer or an answer with nothing usable in it all mean ``None``,
@@ -34,8 +35,7 @@ import re
 
 from server import ai as ai_client
 from mlo.genre_vocab import FAMILIES
-from mlo.genres import (DEFAULT_GENRE_COUNT, GENRE_COUNT_MAX, canonical,
-                        is_parent)
+from mlo.genres import DEFAULT_GENRE_COUNT, GENRE_COUNT_MAX, canonical
 
 SYSTEM = (
     "You are a music taxonomist naming the genres a release is filed under. "
@@ -46,7 +46,7 @@ SYSTEM = (
 
 # The shape the answer must have, spelled out in full: the model answers with
 # the SPECIFIC genres only, most specific first — the level above them is the
-# app's to derive (`mlo.genre_vocab.parent_of`), so asking for it would be
+# app does not derive at all (2026-10-12), so asking for it would be
 # asking for a slot the caller has to throw away, and a model left to itself
 # answers with a flat bag of near-synonyms plus a family.
 # Kept in the prompt rather than re-derived from the reply, because "which
@@ -57,8 +57,9 @@ _SLOTS = (
     "  at most {count} genre(s) that describe this release, e.g. Post-Britpop, "
     "Shoegaze, Melodic Death Metal.\n"
     "Do NOT name a broad family (Rock, Pop, Electronic, Hip Hop, Jazz, "
-    "Classical, Folk, Metal…) in any slot: the app derives the family from the "
-    "specific genre and appends it itself, so a family here is discarded.\n"
+    "Classical, Folk, Metal…) in any slot: the tag stores the specific names "
+    "a source stated, so a family adds nothing there — and one sitting beside "
+    "its own child is dropped as redundant.\n"
     "Every name must be a genre RateYourMusic or MusicBrainz actually "
     "PUBLISHES, in a spelling one of them uses — the kind their own genre "
     "pages list. Never invent a name, a compound of two genres, or a "
@@ -239,7 +240,7 @@ def _specifics(names, candidates, limit):
 
     A name that IS a family is dropped rather than returned: a family is a
     LEVEL, not a genre this app stores (mlo.genres keeps the tag to what a
-    source stated, and `mlo.genre_vocab.path_of` derives the level above it),
+    source stated, and the ORDER is the model's own ranking),
     so a family here would take a specific genre's place. A name the app
     cannot resolve — neither a published MusicBrainz/
     RateYourMusic genre nor one of the fetched candidates — is DROPPED too:
@@ -256,7 +257,7 @@ def _specifics(names, candidates, limit):
             continue
         name = canonical(text) or text
         key = name.casefold()
-        if key in seen or is_parent(name):
+        if key in seen:
             continue
         if canonical(text) is None and key not in allowed:
             continue

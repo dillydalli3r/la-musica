@@ -63,21 +63,6 @@ const KEY_INFO: Record<string, { label: string; hint: string; url?: string; link
     url: "https://www.last.fm/api/account/create",
     link: "last.fm API account",
   },
-  rym_cookie: {
-    label: "RateYourMusic cookie",
-    hint:
-      "Two ways in: a cookies.txt in Netscape format — what a browser-extension exporter like \"Get cookies.txt\" writes — is imported by the cookie box below, or by the same box on Settings' Discovery tab (paste it or drop the file; only its rateyourmusic.com cookies are kept), " +
-      "or sign in to rateyourmusic.com in your browser → F12 (dev tools) → Network → reload the page → click any request to rateyourmusic.com → Headers → Request Headers → copy everything after \"Cookie:\" and paste it in the field above. " +
-      "Either way take the WHOLE value — every name=value pair it shows. Cloudflare's `cf_clearance` must be one of them: it is the pair the challenge hands the browser that solved it, and RYM honours it only alongside the same `rym_user_agent` (Settings → Discovery) and the same network, so export from one signed-in tab and set that browser's User-Agent if it is not the built-in Chrome one. The app normalises the paste for you (newlines, a stray \"Cookie:\" label). " +
-      "Its `session` cookie is HttpOnly, so a browser extension's export is the only way to hand that one over at all. " +
-      "It is a session credential: keep it to yourself, and set a fresh one when RYM starts refusing — signing out or clearing cookies invalidates it, and Test asks RYM again even after a refusal. " +
-      "MusicBrainz already states the RYM page for many releases, so this is only needed for the rest.",
-    url: "https://rateyourmusic.com",
-    link: "rateyourmusic.com",
-    secret: true,
-    tab: "discovery",
-    tabLink: "Import from cookies.txt — Settings → Discovery",
-  },
   // The AcoustID pair belongs HERE, in the wizard's Keys step: the application
   // key is what makes fingerprint matching work at all, and the user key is
   // what publishing a match needs — telling someone to go to Settings → Import
@@ -98,22 +83,6 @@ const KEY_INFO: Record<string, { label: string; hint: string; url?: string; link
     secret: true,
   },
 };
-
-/** The RYM rows carry the last response RYM gave the backend (`rym_last`):
- *  `detail` is the sentence the probe built, and this is the response behind
- *  it. "403" and "403 with no challenge marker" are a stale cookie and a
- *  blocked network — the panel shows which one it was. Only those rows have
- *  it, and it is not part of the shared `SourceHealth` shape. */
-type RymLast = {
-  status?: number | null;
-  challenge?: boolean;
-  url?: string;
-  at_iso?: string;
-  reason?: string;
-};
-
-const rymLastOf = (row: SourceHealth): RymLast | undefined =>
-  (row as SourceHealth & { rym_last?: RymLast }).rym_last;
 
 /** The config keys this panel can prompt for, in a stable order — every one of
  *  those settings has exactly one control, and it is this panel, wherever the
@@ -140,9 +109,9 @@ const KEY_HOME: Record<string, string> = {
  *  in the panel's own copy wherever it is not (the wizard's Keys step draws
  *  only the rows that ask for a key). Both halves of the YouTube cookie story
  *  are in the note: yt-dlp is what searches, fetches and captions, and its
- *  cookies are a Netscape-format cookies.txt like RYM's — `tab`/`tabLink` jump
- *  to the box that imports them, where Settings is a page this render can
- *  reach (see KEY_INFO). */
+ *  cookies are a Netscape-format cookies.txt — `tab`/`tabLink` jump to the box
+ *  that imports them, where Settings is a page this render can reach (see
+ *  KEY_INFO). */
 const TOOL_INFO: Record<string, { label: string; hint: string; tab?: string; tabLink?: string }> = {
   "yt-dlp": {
     label: "yt-dlp",
@@ -163,9 +132,9 @@ type PanelRow = SourceHealth & { kinds: SourceKind[] };
 
 /** Fold the endpoint's one-row-per-ROLE list into one row per PROVIDER.
  *
- *  The same service is often reachable in more than one role — RateYourMusic
- *  is a genre source AND the album-link source, Deezer and iTunes are genre
- *  and metadata providers — and each role is its own row with its own `needs`.
+ *  The same service is often reachable in more than one role — Deezer and
+ *  iTunes are genre and metadata providers — and each role is its own row
+ *  with its own `needs`.
  *  Listed as-is, that is the SAME key asked for twice on one screen (and the
  *  section reads as a duplicate). The first role that lists a provider owns the
  *  row; the others become role chips on it, the needs are the union, and the
@@ -226,8 +195,7 @@ function StatusChip({ row }: { row: SourceHealth }) {
  *  Keys step and Settings → Sources.
  *
  *  `only` narrows the panel to one family (or a list of them) — the wizard
- *  shows the credential rows plus the links row that carries the RYM cookie,
- *  instead of the whole source list.
+ *  shows the credential rows instead of the whole source list.
  *
  *  `askKeys` is that wizard view: the key FIELDS, with each row's status
  *  chips, failure detail, provider notes, live-test report and Test button
@@ -367,17 +335,14 @@ export default function SourcesPanel({ only, askKeys }: { only?: SourceKind | So
         </div>
       )}
 
-      {/* The cookie logins: every credential whose auth is a cookies.txt gets
-          its import box HERE too, so a first run (this step) and Settings →
-          Sources can hand the file over without hunting for the tab that owns
-          the credential — and so the box that asks for the value is the box
-          that accepts the export for it. ONE component for both (and for the
-          Videos/Discovery tabs), never a second paste box to keep in step. */}
+      {/* The YouTube cookie login: its import box lives HERE too, so a first
+          run (this step) and Settings → Sources can hand the file over without
+          hunting for the Videos tab that owns the jar — and so the box that
+          asks for the value is the box that accepts the export for it. ONE
+          component for both, never a second paste box to keep in step. */}
       <div className="rounded-md border border-border bg-zinc-950/40 px-3 py-2 space-y-1.5">
         <div className="text-[10px] uppercase tracking-widest text-zinc-500">{t("cookies.sectionTitle")}</div>
         <CookieJarPanel source="youtube" compact />
-        <CookieJarPanel source="rym" compact />
-        <CookieJarPanel source="aoty" compact />
       </div>
 
       {groups.map(([kind, list]) => (
@@ -389,14 +354,7 @@ export default function SourcesPanel({ only, askKeys }: { only?: SourceKind | So
               // Programs this row needs (`needs yt-dlp`): no field to type, so
               // the note under the row is where it is named and explained.
               const toolNeeds = row.needs.filter((k) => !(k in KEY_INFO) && k in TOOL_INFO);
-              // The RYM rows need exactly one key — the cookie — so the chip
-              // names it: "cookie missing" is what the fix (paste a logged-in
-              // Cookie header) hangs off. The live failure reason arrives in
-              // `row.detail` from the probe below.
-              const stateLabel = promptKeys.includes("rym_cookie")
-                ? row.configured ? "cookie set" : "cookie missing"
-                : row.configured ? "configured" : "not configured";
-              const rymLast = rymLastOf(row);
+              const stateLabel = row.configured ? "configured" : "not configured";
               const chips = (
                 <>
                   <span className="text-[13px] text-zinc-200" title={row.notes}>
@@ -459,24 +417,11 @@ export default function SourcesPanel({ only, askKeys }: { only?: SourceKind | So
                 </>
               );
               // What a key BUYS: the provider's own line from the backend
-              // registry, plus why RYM said no — the status code, whether
-              // Cloudflare's challenge marker was in the body, the URL that was
-              // asked for and when. A stale cookie and a blocked network both
-              // read as "403" without it.
+              // registry, its failure detail from the last probe, and its notes.
               const report = (
                 <>
                   {row.detail && <div className="text-[11px] text-zinc-500 break-words">{row.detail}</div>}
                   {row.provides && <div className="text-[11px] text-zinc-400 break-words">{row.provides}</div>}
-                  {rymLast && (
-                    <div className="text-[11px] text-zinc-600 break-all">
-                      Last RYM reply:{" "}
-                      {typeof rymLast.status === "number" ? `HTTP ${rymLast.status}` : "no answer"}
-                      {" · "}
-                      {rymLast.challenge ? "challenge marker seen" : "no challenge marker"}
-                      {rymLast.url ? ` · ${rymLast.url}` : ""}
-                      {rymLast.at_iso ? ` · ${rymLast.at_iso}` : ""}
-                    </div>
-                  )}
                   {row.notes && <div className="text-[11px] text-zinc-600">{row.notes}</div>}
                 </>
               );

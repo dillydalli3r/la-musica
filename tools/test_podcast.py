@@ -24,7 +24,7 @@ providers (no network):
   * `server.library.podcast_info` turns the tags into the album row's
     `podcast` block a scan reads (never MusicBrainz again).
   * a podcast episode is NOT graded as a music CD: the music-only checks
-    (lyrics, RateYourMusic link, album description, genre) are off for it —
+    (lyrics, album description, genre) are off for it —
     and a release that is not an episode is graded with its config UNCHANGED,
     which is the half that proves no music check was weakened.
 
@@ -324,7 +324,7 @@ try:
     cfg = {"music_folder": ""}  # no naming check: this is about the tag families
     res = _grade_album(ep_dir, "EMBEDDED", dict(cfg))
     codes = {text for text in (res.get("issues") or {})}
-    music_only = ("Missing lyrics", "RateYourMusic", "Album description",
+    music_only = ("Missing lyrics", "Album description",
                   "GENRE_MISSING", "Missing GENRE")
     for needle in music_only:
         ok(not any(needle in text for text in codes),
@@ -357,8 +357,11 @@ try:
     plain_codes = {text for text in (plain.get("issues") or {})}
     ok(any("Missing lyrics" in text for text in plain_codes),
        "the same folder without the marker still fails for missing lyrics")
-    ok(any("RateYourMusic" in text for text in plain_codes),
-       "…and for the RateYourMusic link")
+    # The RateYourMusic link check and its tag went with the scraped hosts
+    # (2026-10-12): the folder above carries no RYM tag and must NOT be failed
+    # for one — nothing in the app names that check any more.
+    ok(not any("RateYourMusic" in text for text in plain_codes),
+       "…and nothing fails for a RateYourMusic link any more")
     ok(any("Album description" in text for text in plain_codes),
        "…and for the missing album description")
     ok(any("GENRE" in text for text in plain_codes),

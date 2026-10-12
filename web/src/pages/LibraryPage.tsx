@@ -484,9 +484,11 @@ export default function LibraryPage() {
     ? (lib?.artists ?? []).flatMap((a) => a.albums).find((al) => al.path === detailTrack.albumPath)
     : undefined;
   const [bulkTagsOpen, setBulkTagsOpen] = useState(false);
-  // The albums the Import button has to ASK about: a selection whose files
-  // all name a release never opens this (see `importSelection`).
-  const [identify, setIdentify] = useState<{ albums: IdentifyAlbum[]; identified: number } | null>(null);
+  // The Import button's own menu: EVERY album in the selection, each row
+  // opened on the release its files name now, so the same dialog both asks
+  // about an album with no release and re-points one that has a release
+  // (see `importSelection`).
+  const [identify, setIdentify] = useState<{ albums: IdentifyAlbum[] } | null>(null);
 
   const [fullDates, setFullDates] = useLocalPref("full-dates", false);
   // User-added tag columns ride in the same visible/width prefs as the
@@ -898,11 +900,13 @@ export default function LibraryPage() {
   // may be in flight at once — the server refuses only an album another import
   // already holds.
   //
-  // What it DOES ask (the owner's ask): which release each album is, for the
-  // albums whose files do not already name one. A selection whose files all
-  // carry a MusicBrainz release id goes straight through — there is nothing to
-  // ask — and the rest open the identify dialog, where a link, an AcoustID
-  // detection or a catalogue number can pin the release before anything runs.
+  // The menu it opens is the ONE place a release is named: every selected
+  // album gets a row, opened on the release its files name NOW. Editing a row
+  // is the re-point — the pipeline stamps a pin OVER the id the files already
+  // carry (`force_ids`) — and a row left alone keeps the release it names, so
+  // the recurring "run the chain again" import costs nothing but the press.
+  // An album whose files name nothing opens blank; blank is allowed (matched
+  // by name), because the dialog is a chance to be sure, never a wall.
   const startImport = async (paths: string[], pins: Record<string, string>) => {
     try {
       const res = await api.importBulk(
@@ -940,24 +944,26 @@ export default function LibraryPage() {
       toast("Select albums, artists or tracks to import");
       return;
     }
+    // One row per selected album, each opened on the release its own files
+    // name — an identified album included. That is what makes "change the
+    // link" the same act as "run the import": the row the user edits is sent
+    // as a pin, and `_stamp_release` writes a pin over an existing id (the
+    // explicit choice `force_ids` is for), so the album's release id,
+    // metadata and tracklist are rewritten from what the row names.
     const byPath = new Map(flat.albums.map((al) => [al.path, al]));
-    const unknown: IdentifyAlbum[] = [];
-    for (const p of paths) {
-      const al = byPath.get(p);
-      const pin = al?.meta?.MUSICBRAINZ_ALBUMID ?? al?.album_values?.MUSICBRAINZ_ALBUMID ?? "";
-      if (!pin) {
-        unknown.push({
+    setIdentify({
+      albums: paths.map((p) => {
+        const al = byPath.get(p);
+        const meta = al?.meta ?? {};
+        return {
           path: p,
           artist: al?.album_artist ?? "",
-          album: al?.meta?.ALBUM || p.split(/[\\/]/).pop() || "",
-        });
-      }
-    }
-    if (!unknown.length) {
-      void startImport(paths, {});
-      return;
-    }
-    setIdentify({ albums: unknown, identified: paths.length - unknown.length });
+          album: meta.ALBUM || p.split(/[\\/]/).pop() || "",
+          current: meta.MUSICBRAINZ_ALBUMID || al?.album_values?.MUSICBRAINZ_ALBUMID
+            || meta.MUSICBRAINZ_RELEASEGROUPID || "",
+        };
+      }),
+    });
   };
 
   const organizeSelection = async () => {
@@ -1692,9 +1698,9 @@ export default function LibraryPage() {
             )}
             <button
               className="btn-ghost !py-1 text-xs tap"
-              onClick={importSelection}
+              onClick={() => importSelection()}
               disabled={!selectionAlbumDirs.length}
-              title="Run the import pipeline on the selected albums: match and stamp the release, then links, metadata, covers, genres, lyrics, advisories and the configured script chain. As many batches as you start run at once — only an album another import already holds is refused."
+              title="Run the import pipeline on the selected albums: its menu lists each album with the release its files name now — change a link there to re-point that album (release id, metadata and tracklist are rewritten from what you name), or leave every row alone and the press is simply the chain: match and stamp the release, then links, metadata, covers, genres, lyrics, advisories and the configured script chain. As many batches as you start run at once — only an album another import already holds is refused."
             >
               <Import className="h-3.5 w-3.5" /> Import
             </button>
@@ -1761,7 +1767,6 @@ export default function LibraryPage() {
       {identify && (
         <ImportIdentifyDialog
           albums={identify.albums}
-          identified={identify.identified}
           onClose={() => setIdentify(null)}
           onStart={async (pins) => {
             setIdentify(null);

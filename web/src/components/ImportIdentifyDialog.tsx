@@ -5,12 +5,16 @@ import { api } from "../api";
 import { toast } from "../store";
 import type { AcoustidAlbumMatch } from "../types";
 
-/** One album the import dialog asks about: the files in it do NOT name a
- *  MusicBrainz release, so the pipeline would have to guess. */
+/** One album the import dialog asks about: the release it names (prefilled in
+ *  its row, and what a row left alone keeps) or nothing, when its files name
+ *  no release at all. */
 export interface IdentifyAlbum {
   path: string;
   artist: string;
   album: string;
+  /** The release id the album's files already carry, when they carry one.
+   *  Prefills the row and is what an untouched row keeps. */
+  current?: string;
 }
 
 /** "Which release is this?" — the one question the import pipeline cannot
@@ -19,9 +23,8 @@ export interface IdentifyAlbum {
  *  The owner's ask: an import must not be a guess. That is what it was — the
  *  audio is matched by name (or not at all), so an album like Toxicity could
  *  take another pressing's identity and cover and quietly import the wrong
- *  thing. Here the albums whose files name no release are listed, one row
- *  each, and each row offers the three ways a person actually knows which
- *  release it is:
+ *  thing. Every album in the selection gets a row here, and each row offers
+ *  the three ways a person actually knows which release it is:
  *
  *  * paste a MusicBrainz link (or the bare ID) — a release URL, a release-group
  *    URL, either is accepted and the server resolves it;
@@ -32,19 +35,20 @@ export interface IdentifyAlbum {
  *    `catno:` search comes back with the releases that carry it, each one click
  *    from being the pin.
  *
- *  An album with nothing filled in imports exactly as it would have (matched
- *  by name) — the dialog is a chance to be sure, never a wall. "_N already
- *  identified_" in the header is the albums the caller did NOT ask about,
- *  because their files carry the release id already. */
+ *  The row IS the release change: a row opens on the release the album's files
+ *  name now, and editing it re-points that album — the pipeline stamps a pin
+ *  OVER an existing id (`force_ids`, `server.imports._stamp_release`), so the
+ *  release id, the metadata and the tracklist are rewritten from what the row
+ *  names. Only a row the user actually edits is sent as a pin, so a selection
+ *  with nothing changed imports exactly as it would have. An album left blank
+ *  is imported the way it always was (matched by name): the dialog is a chance
+ *  to be sure, never a wall. */
 export default function ImportIdentifyDialog({
   albums,
-  identified,
   onClose,
   onStart,
 }: {
   albums: IdentifyAlbum[];
-  /** How many of the selection already name a release (not asked about). */
-  identified: number;
   onClose: () => void;
   onStart: (pins: Record<string, string>) => void | Promise<void>;
 }) {
@@ -97,7 +101,12 @@ export default function ImportIdentifyDialog({
     const pinsOut: Record<string, string> = {};
     for (const [path, value] of Object.entries(pins)) {
       const v = (value || "").trim();
-      if (v) pinsOut[path] = v;
+      // A row left on the release it already names sends NO pin: an unchanged
+      // album re-imports the way it always did, and a pin — which the pipeline
+      // stamps over an existing id — is reserved for the row the user actually
+      // re-pointed.
+      const current = (albums.find((a) => a.path === path)?.current || "").trim();
+      if (v && v.toLowerCase() !== current.toLowerCase()) pinsOut[path] = v;
     }
     setBusy({ start: "start" });
     try {
@@ -107,37 +116,46 @@ export default function ImportIdentifyDialog({
     }
   };
 
-  const pinned = albums.filter((a) => (pins[a.path] || "").trim()).length;
+  // "pinned" is what the press will SEND: a row still holding the release it
+  // already names is not a pin (see `start`), so the count the subtitle and
+  // the button print is the rows the user actually re-pointed.
+  const pinned = albums.filter((a) => {
+    const v = (pins[a.path] || "").trim();
+    return !!v && v.toLowerCase() !== (a.current || "").trim().toLowerCase();
+  }).length;
+  // How many rows open on a release of their own: the wording below turns on
+  // it, because "keeps the release it names" says nothing to a user whose
+  // rows are all blank (nothing named yet).
+  const named = albums.filter((a) => (a.current || "").trim()).length;
+  const keptNote = named
+    ? "A row left alone keeps the release it already names."
+    : "An album left blank is imported the way it always was — matched by name.";
   const pending = Object.keys(busy).length > 0;
 
   return (
     <Modal
       icon={Disc3}
-      title="Which release is this?"
+      title={albums.length === 1 ? "Which release is this?" : `Releases — ${albums.length} albums`}
       subtitle={
-        identified
-          ? `${identified} of the selected album${identified === 1 ? "" : "s"} already name their release in the files — the ${albums.length} below ${albums.length === 1 ? "does" : "do"} not`
-          : `${albums.length} album${albums.length === 1 ? "" : "s"} to identify`
+        `${named
+          ? `${named} of these already name their release in the files, and each row opens on it — change a link and that album is re-pointed at the release you name (its release id, metadata and tracklist are rewritten from it). `
+          : ""}${keptNote}`
+        + (pinned ? ` · ${pinned} re-pointed` : "")
       }
       onClose={onClose}
       width="max-w-3xl"
       bodyClass="px-5 py-4 space-y-3"
       footer={
         <div className="flex flex-wrap items-center gap-2">
-          <span className="text-[11px] text-zinc-500">
-            An album left blank is imported the way it always was — matched by name.
-          </span>
+          <span className="text-[11px] text-zinc-500">{keptNote}</span>
           <span className="ml-auto inline-flex items-center gap-2">
             <button className="btn-ghost !py-1.5 text-xs tap" onClick={onClose} disabled={pending}>
               Cancel
             </button>
-            <button className="btn-ghost !py-1.5 text-xs tap" onClick={() => void onStart({})} disabled={pending}>
-              Import without a link
-            </button>
             <button className="btn-primary !py-1.5 text-xs tap" onClick={() => void start()} disabled={pending}>
               {busy.start ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
               Import {albums.length} album{albums.length === 1 ? "" : "s"}
-              {pinned ? ` — ${pinned} pinned` : ""}
+              {pinned ? ` — ${pinned} ${named ? "re-pointed" : "pinned"}` : ""}
             </button>
           </span>
         </div>
@@ -161,7 +179,7 @@ export default function ImportIdentifyDialog({
             <input
               className="input !py-1.5 text-xs font-mono"
               placeholder="MusicBrainz release or release-group URL, or the bare ID"
-              value={pins[al.path] ?? ""}
+              value={pins[al.path] ?? al.current ?? ""}
               onChange={(e) => setPin(al.path, e.target.value)}
             />
             <div className="flex flex-wrap items-center gap-2">

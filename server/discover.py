@@ -22,8 +22,7 @@ every external source that can speak about genres:
   so a row the library owns is KEPT and marked (`owned`, `path`) rather than
   dropped. A source whose entity feed answers a page of ANOTHER kind — Last.fm
   states similar ARTISTS and similar TRACKS, ListenBrainz only the artists one,
-  RateYourMusic's chart filter is seeded by an ARTIST and no other page, and
-  Discogs states no similarity at all — is NOT a failure
+  and Discogs states no similarity at all — is NOT a failure
   there: it is left out of the asking and named once, compactly, in
   `not_applicable` (see `entity_limit`), because a feed a provider does not
   publish is a fact about the provider, not about this request.
@@ -49,9 +48,8 @@ The endpoints are driven from it, so a source added there cannot be half-wired �
 and `sources_health` reads it so the Sources panel probes exactly the same set.
 
 Every call goes through `server.discovery`'s wrappers (which own the TTL cache
-and the per-host throttles), `server.integrations`' cached MusicBrainz access,
-or — for RateYourMusic, which has no API — that same module's RYM scrape, so
-this module never opens a request of its own.
+and the per-host throttles), or `server.integrations`' cached MusicBrainz
+access, so this module never opens a request of its own.
 
 Honesty rules, which every answer here follows:
 
@@ -223,61 +221,17 @@ SOURCES = (
             ("albums",), rec_kinds=("albums",),
             entity_kinds=("albums", "tracks"),
             needs=("spotify_client_id", "spotify_client_secret")),
-    # RateYourMusic answers with its OWN ranked songs — its charts, narrowed by
-    # the genre or the artist it is asked about — and nothing else: it publishes
-    # no genre list, no text search and no similar-entity feed, and its genre
-    # READING lives in the import chain (`server.integrations`). The SAME chart
-    # filter is what lets it answer a genre browse (`kinds=("tracks",)` — its
-    # genre chart) and an ARTIST's own ranked songs (`entity_kinds=("tracks",)`
-    # seeded by an artist page, see `_ENTITY_SEED`); it still has no album or
-    # artist chart this scraper reads, so it lists and shelves TRACKS only. It
-    # is last in this list on purpose — the registry order is the genre/rec
-    # merge order, and a RYM row carries no MusicBrainz id, so it must never win
-    # a row that a source holding an id also named (that id is what makes the
-    # row addable) — and first in `CHART_ORDER` below, where the user asked for
-    # it as the primary track source.
-    _source("rym", "RateYourMusic",
-            "Its own user-ranked song charts (all-time and per year), scraped "
-            "from the site and narrowed by GENRE or by ARTIST — the same chart "
-            "URL carries the filter, verified against the chart pages RYM has "
-            "served. That one filter is what it lists a genre browse with (its "
-            "top songs of the genre) and what it shelves an ARTIST page with "
-            "(that artist's own ranked songs). RYM has no API and refuses an "
-            "automated client without a rym_cookie, so an archived snapshot "
-            "answers behind the live route, and a chart the archive never "
-            "captured says so. Tracks only; no month or week chart exists.",
-            ("tracks",), rec_kinds=("tracks",), entity_kinds=("tracks",),
-            charts=("tracks",), chart_periods=("all", "year")),
-    # Album of the Year, registered for what it actually publishes: the
-    # genres and the user score of a NAMED artist/album/track, read by the
-    # genre and web-rating chains (`server.aoty`, `integrations._genre_source_answers`).
-    # It has no keyless list or chart feed this app reads, and its pages sit
-    # behind Cloudflare (a cleared `aoty_cookie`, or the solver), so it is a
-    # metadata source here — never a chart — and it says what it needs.
-    _source("aoty", "Album of the Year",
-            "States an artist's and an album's genres and its user score (and "
-            "each track's own score), which the genre and rating chains read. "
-            "No keyless list or chart feed is read from it, so it is a metadata "
-            "source, never a chart.",
-            needs=("aoty_cookie",)),
 )
 BY_ID = {spec["id"]: spec for spec in SOURCES}
 SOURCE_LABELS = {spec["id"]: spec["label"] for spec in SOURCES}
 _ORDER = {spec["id"]: i for i, spec in enumerate(SOURCES)}
 
 # The windows a chart can be asked for, and the order the CHART sources are
-# asked in — which is NOT the registry order, because the two list orders mean
-# different things. The registry's is the genre/rec merge preference; this one
-# is the user's own: RateYourMusic is the PRIMARY track-chart source, so its
-# rows lead the page for `kind=tracks` (and it is the only chart source for
-# tracks-only windows it publishes). The rest keep the registry's relative
-# order, so a source added there cannot fall out of the charts.
+# asked in: the registry's own relative order, so a source added there cannot
+# fall out of the charts.
 CHART_PERIODS = ("all", "year", "month", "week")
 CHART_KINDS = KINDS
-CHART_FIRST = "rym"
-CHART_ORDER = tuple([CHART_FIRST]
-                    + [spec["id"] for spec in SOURCES
-                       if spec["charts"] and spec["id"] != CHART_FIRST])
+CHART_ORDER = tuple(spec["id"] for spec in SOURCES if spec["charts"])
 _CHART_RANK = {sid: i for i, sid in enumerate(CHART_ORDER)}
 
 
@@ -848,30 +802,6 @@ def _browse(sid, kind, genre, limit, offset, cfg):
         return discovery.lastfm_tag_top(kind, genre, limit=limit, offset=offset, cfg=cfg)
     if sid == "spotify":
         return discovery.spotify_genre_albums(genre, limit=limit, offset=offset, cfg=cfg)
-    if sid == CHART_FIRST:
-        # RYM's genre answer IS its own chart narrowed to `/g:<genre>/` — the
-        # same ranked-song list the Charts page reads, one genre at a time. Its
-        # registry `kinds` is TRACKS only (it publishes no album/artist chart
-        # this scraper reads), and the chart's OWN name is checked before its
-        # rows are believed: RYM answers a genre it does not have by dropping
-        # the filter, and presenting its all-time chart as the genre's would be
-        # the same lie the recommendation arm refuses to tell.
-        if kind not in integrations.RYM_CHART_KINDS:
-            raise _Skip("RateYourMusic charts only: "
-                        + ", ".join(integrations.RYM_CHART_KINDS))
-        got = integrations.rym_charts(kind=kind, period="all",
-                                      limit=limit + offset, cfg=cfg, genre=genre)
-        if not integrations.rym_chart_states(got.get("chart"), genre):
-            raise _Skip('RateYourMusic has no genre called "%s" — its own '
-                        "chart filter matched no such chart" % genre)
-        rows = got["rows"]
-        if offset:
-            # A chart is ONE ranked page: there is no server-side cursor, so a
-            # deeper window is read off the same page (the cap we asked the
-            # scrape for is the offset plus this page) rather than pretending
-            # RYM paged for us. A page shorter than the offset is simply empty.
-            rows = rows[offset:]
-        return {"rows": rows, "total": None}
     raise _Skip("no %s list from this source" % kind)
 
 
@@ -934,7 +864,6 @@ def genre_payload(cfg=None, genre="", kind="albums", source="all", limit=25,
             row["_source"] = spec["id"]
             rows.append(row)
 
-    _rym_archive_note(cfg, asked)
     items = [finalize_row(row, index, "Genre: %s" % _genre_display(genre))
              for row in sort_rows(merge_rows(rows))]
     return {"genre": genre, "kind": kind, "source": source, "items": items,
@@ -951,9 +880,8 @@ def _recommend_rows(sid, kind, cfg, genres, artists, limit, seed):
 
     What the reason says is the source's own concept of a recommendation: a tag
     chart is "Genre: shoegaze (Last.fm tag)", a similar-artist feed is
-    "Sounds like Slowdive (ListenBrainz)", a discography is "More from Slowdive
-    (Deezer)", and RateYourMusic's own chart for a genre is "Genre: shoegaze
-    (RateYourMusic chart)". Raises `_Skip` when the source needs a seed this
+    "Sounds like Slowdive (ListenBrainz)", and a discography is "More from
+    Slowdive (Deezer)". Raises `_Skip` when the source needs a seed this
     request does not have (a genre it cannot filter by, an artist it cannot
     resolve)."""
     rows = []
@@ -1023,43 +951,18 @@ def _recommend_rows(sid, kind, cfg, genres, artists, limit, seed):
              "Most listened this month (ListenBrainz)")
         return rows
 
-    if sid == CHART_FIRST:
-        # RYM's recommendation IS its own ranking: the chart it publishes for
-        # the genre asked about (`/charts/top/song/all-time/g:<genre>/`), never
-        # a text search dressed up as one. The chart's own name is checked
-        # before its rows are believed — RYM answers a genre it does not have
-        # by dropping the filter, and presenting its ALL-TIME chart as the
-        # genre's would be a lie the row's reason line would repeat. Its
-        # refusal (no cookie, no capture) raises out of `rym_charts` and is
-        # reported in RYM's own words by the caller.
-        if kind not in integrations.RYM_CHART_KINDS:
-            raise _Skip("RateYourMusic charts only: "
-                        + ", ".join(integrations.RYM_CHART_KINDS))
-        if not genres:
-            raise _Skip("needs a genre seed and this request has none")
-        for genre in genres:
-            got = integrations.rym_charts(kind=kind, period="all", limit=limit,
-                                         cfg=cfg, genre=genre)
-            if not integrations.rym_chart_states(got.get("chart"), genre):
-                raise _Skip('RateYourMusic has no genre called "%s" — its own '
-                            "chart filter matched no such chart" % genre)
-            take(got["rows"], "Genre: %s (RateYourMusic chart)" % _genre_display(genre))
-        return rows
-
     raise _Skip("no recommendations from this source")
 
 
 # Which PAGE an entity feed is seeded by, where that is not the page it
 # produces rows about: a similar-TRACKS feed is asked about a track, never
-# about the album that contains it, and RateYourMusic's chart is narrowed by
-# an ARTIST, so the one page it answers is an artist's own ranked songs. A page
+# about the album that contains it. A page
 # of another kind cannot be answered by such a feed AT ALL — which is a fact
 # about the provider, not a failure of the request, and `entity_limit` below
 # reports it as information rather than as a `skipped:` note. A source with no
 # entry here is seeded by the page it answers about (every artist's-own-records
 # bridge is).
-_ENTITY_SEED = {"lastfm": {"artists": "artist", "tracks": "track"},
-                "rym": {"tracks": "artist"}}
+_ENTITY_SEED = {"lastfm": {"artists": "artist", "tracks": "track"}}
 
 # A page kind as the short marker says it — PAGE words, not row kinds: the
 # marker tells the reader which PAGE a source can be asked about.
@@ -1110,12 +1013,6 @@ def entity_limit(spec, seed_kind, kind):
         need = _ENTITY_SEED.get(sid, {}).get(kind)
         if not need or need == seed_kind:
             return "", ""
-        if sid == CHART_FIRST:
-            # Its chart filter IS its feed: a chart narrowed by an artist is
-            # not a similarity claim about whoever is being read.
-            return ("%s pages only" % _page_words((need,)),
-                    "RateYourMusic charts filter by GENRE and by ARTIST — it "
-                    "states no similar-%s feed" % kind)
         return ("%s pages only" % _page_words((need,)),
                 "%s's similar-%s feed is asked about %s %s page — this is %s %s "
                 "page" % (spec["label"], kind.upper(), _article(need), need,
@@ -1360,30 +1257,6 @@ def _entity_rows(sid, kind, cfg, seed, limit):
         take(found, "More from %s (Spotify)" % by)
         return rows
 
-    if sid == CHART_FIRST:
-        # RYM's chart filters are a genre and an ARTIST, so what it can say
-        # about ONE page is that artist's own ranked songs — the same chart
-        # narrowed to `/a:<artist>/`. There is no similar-track feed and no
-        # similar-album feed to ask about an album or a track page, and RYM's
-        # album charts are a different page shape this scraper does not read,
-        # so an artist page is the one entity it answers for — its
-        # `entity_kinds` is RYM_CHART_KINDS in full, and the gate has refused
-        # every page that is not that artist's own.
-        got = integrations.rym_charts(kind=kind, period="all", limit=limit,
-                                     cfg=cfg, artist=by)
-        # Rows are kept only when RYM's OWN artist field is the name asked for:
-        # a chart that came back withOUT the artist filter (how RYM answers a
-        # name it does not know) names other artists, and handing that over as
-        # "more from this page" is the one thing this must never do.
-        want = discovery.norm(by)
-        found = [row for row in got["rows"]
-                 if discovery.norm(row.get("artist")) == want]
-        if not found:
-            raise _Skip('RateYourMusic knows no artist called "%s" — its own '
-                        "chart filter matched no chart" % by)
-        take(found, "More from %s (RateYourMusic chart)" % by)
-        return rows
-
     # A source that declares an entity capability with no call wired above: a
     # bug in this module, reported rather than quietly dropped (every OTHER
     # reason a source is not asked is the capability gate's, and it says so in
@@ -1469,7 +1342,6 @@ def recommended_payload(cfg=None, seed="library", kind="albums", limit=20, lib=N
             for row in found:
                 row["_source"] = spec["id"]
                 rows.append(row)
-        _rym_archive_note(cfg, asked)
         items = _shelf_items(rows, index, limit,
                              "Similar to %s" % _entity_subject(entity),
                              drop_owned=False)
@@ -1514,7 +1386,6 @@ def recommended_payload(cfg=None, seed="library", kind="albums", limit=20, lib=N
             row["_source"] = spec["id"]
             rows.append(row)
 
-    _rym_archive_note(cfg, asked)
     items = _shelf_items(rows, index, limit, "Genre: %s" % _genre_display(seed), drop_owned=True)
     notes = asked.notes
     if not items:
@@ -1524,36 +1395,12 @@ def recommended_payload(cfg=None, seed="library", kind="albums", limit=20, lib=N
 
 
 # --------------------------------------------------------------------------- #
-# Asking a source at all — the gate, and RYM's second route
+# Asking a source at all — the gate
 # --------------------------------------------------------------------------- #
 def _source_skip(spec, cfg):
-    """WHY a source is not asked at all, or "" when it is asked.
-
-    The registry's own rule (`needs`) covers a source with an unset credential.
-    RateYourMusic's does not, because it has a second route: `integrations`'
-    `_genre_source_skip` states that rule once for the whole app (no cookie AND
-    no archive fallback is what actually skips it), so the chart and the
-    recommendation arms reuse it here instead of growing a second copy that
-    could disagree."""
-    if spec["id"] == CHART_FIRST:
-        return integrations._genre_source_skip("rateyourmusic", cfg or {}) or ""
+    """WHY a source is not asked at all, or "" when it is asked — the
+    registry's own rule (`needs`) for a source with an unset credential."""
     return skip_note(spec, cfg)
-
-
-def _rym_archive_note(cfg, asked):
-    """RYM's line when the shelf's RateYourMusic rows came from the archive.
-
-    The charts page says so per source (`_chart_rows`), and a recommendation
-    shelf owes the reader the same fact: the rows are real, but a snapshot can
-    predate them, and the reason line beside them says none of it. Read off
-    `integrations`' own route record — the module knows which route answered the
-    request it just made (see `_rym_note`), so this does not guess, and it says
-    nothing at all for a source that answered nothing or was never asked."""
-    if "rym" not in asked.ids or asked.notes.get("rym"):
-        return
-    note = integrations._rym_note(cfg, answered=True)
-    if note:
-        asked.note("rym", note)
 
 
 # --------------------------------------------------------------------------- #
@@ -1581,12 +1428,10 @@ def _unsupported_note(spec, period):
 
 
 def _chart_rows(sid, kind, period, limit, cfg):
-    """One source's chart for one window, through `server.discovery` (or, for
-    RYM, `server.integrations`' existing scrape — cookie, throttle, cache and
-    archive fallback included). Answers `(rows, note)`: the note is what the
-    SOURCE said about its own answer (an archived snapshot), "" otherwise.
-    Every provider that FAILED raises, so the caller reports its own words; a
-    provider with an empty chart returns []."""
+    """One source's chart for one window, through `server.discovery`. Answers
+    `(rows, note)`: the note is what the SOURCE said about its own answer, ""
+    otherwise. Every provider that FAILED raises, so the caller reports its own
+    words; a provider with an empty chart returns []."""
     if sid == "deezer":
         return discovery.deezer_chart(kind, limit=limit), ""
     if sid == "itunes":
@@ -1595,28 +1440,6 @@ def _chart_rows(sid, kind, period, limit, cfg):
         return discovery.lastfm_chart(kind, limit=limit, cfg=cfg), ""
     if sid == "listenbrainz":
         return discovery.listenbrainz_chart(kind, period, limit=limit), ""
-    if sid == CHART_FIRST:
-        got = integrations.rym_charts(kind=kind, period=period, limit=limit,
-                                      cfg=cfg)
-        name = str(got.get("chart") or "")
-        rows = got["rows"]
-        for row in rows:
-            # RYM's OWN ranking is the row's reason: it states no play count,
-            # so the chart position is the only score it has, and the chart's
-            # name (from the page's own title) says which window it is.
-            row["_reason"] = "Chart #%s%s" % (
-                row.get("rank") or "?",
-                (" · %s" % name) if name else " (RateYourMusic)")
-        note = ""
-        snapshot = got.get("archive") or {}
-        if snapshot:
-            # RYM answered from the Wayback Machine: the rows are real, but a
-            # snapshot can predate the window that was asked for, and that
-            # belongs on the chip rather than in a tooltip nobody opens.
-            when = integrations._rym_archive_when(snapshot.get("snapshot") or "")
-            note = ("answered from an archived snapshot%s on web.archive.org — "
-                    "the live site refused" % ((" captured %s" % when) if when else ""))
-        return rows, note
     raise _Skip("no charts from this source")
 
 
@@ -1625,9 +1448,9 @@ def charts_payload(cfg=None, period="all", kind="tracks", source="all",
     """What the online sources RANK for one window and one kind.
 
     The registry drives it: only the sources that declare this `kind` in
-    `charts` are asked, in `CHART_ORDER` (RateYourMusic first for tracks), and
-    only for the periods they declare in `chart_periods` — a different period is
-    `unsupported:` in `notes`, never their all-time chart.
+    `charts` are asked, in `CHART_ORDER`, and only for the periods they declare
+    in `chart_periods` — a different period is `unsupported:` in `notes`, never
+    their all-time chart.
 
     Rows are NOT merged across sources, deliberately: a chart's RANK is its
     data, and folding two providers' rankings into one row would have to drop

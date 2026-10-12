@@ -40,7 +40,7 @@ SCRIPTS = (
     (23, "Optimize tags",
      "delete excess tags: junk names, a valued COMMENT, unneeded aliases"),
     (24, "Web ratings",
-     "aggregated public album + track scores (MusicBrainz / RYM / Discogs)"),
+     "aggregated public album + track scores (MusicBrainz)"),
     # 25/26 walk the artist folders and fetch only what is missing — the same
     # fetch the import's metadata step makes, for a library that arrived
     # another way. Two scripts because artist_image_enabled and

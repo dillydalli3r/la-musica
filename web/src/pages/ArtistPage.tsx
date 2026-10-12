@@ -135,13 +135,9 @@ export default function ArtistPage() {
   // draws no track stars at all, so there is no average here to be confused
   // with — and no whole-library track map is fetched for one number.)
   const artistVerdict = ratingOf(artistRatingsData?.ratings, data.path);
-  // Identity links for this artist: MBID from any album's album-artist tag,
-  // RYM artist URL from any track that carries one.
+  // Identity link for this artist: the MBID from any album's album-artist tag.
   const artistTags = {
     MUSICBRAINZ_ARTISTID: artistMbid(data) ?? "",
-    RATEYOURMUSIC_ARTIST:
-      data.albums.flatMap((a) => a.tracks.map((t) => t.tags?.RATEYOURMUSIC_ARTIST ?? ""))
-        .find((v) => v) ?? "",
   };
 
   // Stored artwork (artist.jpg + description.txt, see mlo/artistdata) and the
@@ -416,7 +412,7 @@ export default function ArtistPage() {
                     {busy === "image-clear" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
                   </button>
                 )}
-                <LinkEditorButton mode="artist" paths={allTracks.map((t) => t.path)} current={artistTags} artist={data.name} />
+                <LinkEditorButton mode="artist" paths={allTracks.map((t) => t.path)} current={artistTags} />
                 <button className="btn-ghost" onClick={() => setStatsOpen(true)}>
                   <BarChart3 className="h-4 w-4" /> Stats
                 </button>

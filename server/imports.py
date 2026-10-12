@@ -783,7 +783,7 @@ def finish_album(album_dir, cfg=None, progress=None, force=None, release=None,
 
     The staged work is gated by its OWN keys, not by the chain switch:
     ``metadata_auto_fetch`` / ``cover_auto_fetch`` decide the artist image,
-    descriptions and cover art, ``rym_links_auto`` the links and
+    descriptions and cover art, and
     ``genre_autofill`` the genres (the family's only fetcher — see the step
     itself), so an import with the chain switched off still does those (the
     unattended import has fetched them since it existed, and turning the
@@ -1020,27 +1020,6 @@ def _finish_album(path, cfg, progress=None, force=None, release=None,
         album_mbid, album_rgid = _album_mbids(path)
     except Exception:
         album_mbid = album_rgid = ""
-
-    # RateYourMusic album + artist links: resolved and written once, only for
-    # the links the album does not carry yet. Deliberately BEFORE the chain
-    # check — an album imported with no scripts configured still gets its
-    # links. Gated by rym_links_auto; a lookup that finds nothing is one log
-    # line (the user pastes the URL in the links editor), never an error.
-    # Announced first: what the user pressed was "Run the import chain", and
-    # this is where the time before its first script goes. A family this import
-    # will NOT fetch is not announced at all: the text says what the album is
-    # having done to it, and a line about work that is switched off is a claim
-    # the run itself then contradicts (the owner's report: a step that is a
-    # no-op for this album must not be published). The cut is the SAME switch
-    # the step below reads, so the line and the work can never disagree.
-    if run_cfg.get("rym_links_auto", True):
-        _phase("Looking up links…")
-    try:
-        rym = stamp_rym_links(path, run_cfg)
-        if rym["note"].startswith("could not resolve"):
-            print(f"[mlo] rateyourmusic: {rym['note']} — {os.path.basename(path)}")
-    except Exception:
-        traceback.print_exc()
 
     # THE RELEASE'S OWN IDENTITY, at the moment it is known: MEDIA (the
     # medium the release is pressed on), RELEASECOUNTRY and the rest of what
@@ -1997,13 +1976,33 @@ def _import_extras(path, cfg, run_cfg, chain):
     step count never includes work nobody asked for. The callables are wrapped
     so an exception is that step's own failure (the chain carries on; the
     import never loses the rest of its pipeline).
+
+    Both run over the album the CHAIN is on when they run, not the folder the
+    import arrived with: a mover (script 14, beets) takes the audio out of the
+    staging folder and `run_chain` re-points the run at where it went
+    (`_follow_moved_targets`), so the step reads `config["targets"]` — the same
+    targets every script beside it works on, and the same album the manual
+    route (`POST /api/mb/advisory/fetch`) is asked about. *path* is only the
+    fallback for a caller that hands the chain no targets at all.
     """
     steps = []
 
     def _guarded(fn, key):
         def run(config):
+            # The album the chain is on NOW — `config["targets"]` — not the
+            # folder the import arrived with. A mover (script 14, beets) takes
+            # the audio out of the staging folder and re-points the run
+            # (`run_chain` → `_follow_moved_targets`), and every SCRIPT follows
+            # it; an extra step that kept reading *path* rated a folder with no
+            # audio left in it (nothing written at all) or only the tracks a
+            # mover failed to take (a partial rating) — while the manual route
+            # (`fetch_advisories` over the album where it is now) reached all
+            # of them. Same targets as every other step of the same run, and
+            # *path* stays the fallback for a caller that hands the chain no
+            # targets at all (a stub, or a chain run without a scope).
             try:
-                return fn([path], config)
+                targets = [str(t) for t in (config.get("targets") or [])]
+                return fn(targets or [path], config)
             except Exception as e:
                 traceback.print_exc()
                 return {"error": str(e), "step": key}
@@ -3211,78 +3210,31 @@ def _kept_placeholder(out, placeholder):
     return out
 
 
-def prefetch_links(album_dir, cfg=None):
-    """Resolve an album's / artist's RateYourMusic links onto its marker.
-
-    The tag half of the links step cannot run before the audio exists, but the
-    RESOLUTION can: the same resolver the stamp uses (`integrations.rym_links`,
-    MusicBrainz-relation first), the same switch (`rym_links_auto`), and a link
-    RYM itself confirmed is recorded in the framework marker so the album's
-    page shows it from the moment it is added. Nothing already recorded is ever
-    overwritten (a link the user pasted wins), and nothing is written when the
-    lookup resolves nothing. Returns ``{"album", "artist", "note", "saved"}``;
-    never raises.
-    """
-    cfg = cfg or load_config()
-    out = {"album": None, "artist": None, "note": "", "saved": False}
-    if not cfg.get("rym_links_auto", True):
-        out["note"] = "skipped: rym_links_auto is off"
-        return out
-    from mlo.paths import load_pending, save_pending
-    from server import integrations as intg
-
-    info = load_pending(album_dir) or {}
-    if not info:
-        out["note"] = "not a framework album — no marker to record a link in"
-        return out
-    have = dict(info.get("links") or {})
-    artist, album = album_identity(album_dir, cfg)
-    if not artist and not album:
-        out["note"] = "no artist/album to look a link up for"
-        return out
-    if not (have.get("album") and have.get("artist")):
-        links = {}
-        try:
-            links = intg.rym_links(
-                artist, album, cfg=cfg,
-                mbid=str(info.get("release_group_id")
-                         or info.get("release_id") or "")) or {}
-        except Exception:
-            traceback.print_exc()
-            out["note"] = "the link lookup failed"
-            return out
-        out["note"] = str(links.get("note") or "")
-        merged = {"album": have.get("album") or links.get("album"),
-                  "artist": have.get("artist") or links.get("artist")}
-        if any(merged.values()) and merged != have:
-            info["links"] = merged
-            out["saved"] = bool(save_pending(album_dir, info))
-            have = merged
-    out["album"], out["artist"] = have.get("album"), have.get("artist")
-    return out
-
-
 def prefetch_album(album_dir, cfg=None):
     """What a freshly added album can have BEFORE its audio exists.
 
     "Add to library" already creates the folder, its release manifest and a
     placeholder cover; this is the rest of what the album's page shows, fetched
     the moment the album is asked for rather than when the download lands: its
-    RateYourMusic links, its metadata (the ARTIST image, the artist and album
-    descriptions — `metadata_review` staging them instead when that is on) and
-    the ranked cover candidates with the policy's winner marked.
+    metadata (the ARTIST image, the artist and album descriptions —
+    `metadata_review` staging them instead when that is on) and the ranked
+    cover candidates with the policy's winner marked. The framework marker's
+    `prefetched.links` map is still carried through for a marker written by an
+    older build; since 2026-10-12 nothing RESOLVES those links any more (the
+    scraped sources are gone), so only a link the user pasted himself is in it.
 
     Every step is the import chain's own function and its own switch
-    (`rym_links_auto`, `metadata_auto_fetch`, `cover_auto_fetch`), so nothing
-    here is a second fetcher and nothing is fetched that the import would not
-    have fetched anyway. Never fatal: the folder is already a real library
-    album, and a provider that refuses must not fail the add. The album's
-    identity comes from the marker when there is no audio to read tags from
+    (`metadata_auto_fetch`, `cover_auto_fetch`), so nothing here is a second
+    fetcher and nothing is fetched that the import would not have fetched
+    anyway. Never fatal: the folder is already a real library album, and a
+    provider that refuses must not fail the add. The album's identity comes
+    from the marker when there is no audio to read tags from
     (`album_identity`).
     """
     cfg = cfg or load_config()
     out = {"links": None, "metadata": None, "cover": None}
     # The same effective config the import chain runs under, so a family the
+    # user kept for themselves is not decided here either.
     # user kept for themselves is not decided here either.
     try:
         from mlo import import_policy
@@ -3290,10 +3242,6 @@ def prefetch_album(album_dir, cfg=None):
     except Exception:
         traceback.print_exc()
         run_cfg = cfg
-    try:
-        out["links"] = prefetch_links(album_dir, run_cfg)
-    except Exception:
-        traceback.print_exc()
     try:
         out["metadata"] = run_metadata_step(album_dir, run_cfg)
     except Exception:
@@ -4694,11 +4642,11 @@ def _stamp_release(album_dir, release, cfg, force_ids=False):
                     names = album_genres
                 if names and not str(af.get_tag("GENRE") or "").strip():
                     # Canonical, and a LIST: `normalize_genres` resolves each
-                    # name to MusicBrainz's own spelling, derives the family
-                    # and puts it last, and set_tag writes one repeated GENRE
-                    # field per name — the grader counts every genre this step
-                    # wrote instead of reading one value literally named
-                    # "A; B".
+                    # name to MusicBrainz's own spelling and renders the
+                    # source's own rank order, and set_tag writes one
+                    # repeated GENRE field per name — the grader counts every
+                    # genre this step wrote instead of reading one value
+                    # literally named "A; B".
                     tags["GENRE"] = normalize_genres(names, cap)
                 for key, value in tags.items():
                     af.set_tag(key, value)
@@ -4734,166 +4682,6 @@ def _stamp_release(album_dir, release, cfg, force_ids=False):
         outcomes = list(ex.map(_stamp_one, files))
     return (sum(1 for o in outcomes if o == "written"),
             sum(1 for o in outcomes if o == "failed"))
-
-
-def _marker_links(album_dir, cfg=None):
-    """The RateYourMusic links the ADD already resolved for this album, or {}.
-
-    `imports.prefetch_links` runs the SAME resolver at add time (same switch,
-    same MB-relation first ladder) and records what RYM confirmed in the
-    framework marker, so an import that looks the links up again pays a second
-    time for an answer the app itself wrote down.
-
-    Read only while the marker still SPEAKS FOR this album, and only while the
-    user's switch is on: the marker must carry the resolved `links` (the
-    `prefetched` echo is accepted for a marker written before this existed) and
-    the release GROUP the album's own tags state — when they state one — must
-    be the group the marker was created with, so a marker left behind by a
-    different album that landed in the same folder hands nothing over. The
-    switch is checked here because `integrations.rym_links` is where it
-    normally short-circuits: off must keep writing NO auto-resolved link, and
-    that has to hold for the marker path too.
-    """
-    cfg = cfg if cfg is not None else load_config()
-    if not cfg.get("rym_links_auto", True):
-        return {}
-    try:
-        from mlo.paths import load_pending
-        info = load_pending(album_dir) or {}
-    except Exception:
-        return {}
-    if not info:
-        return {}
-    links = dict(info.get("links") or {})
-    echo = (info.get("prefetched") or {}).get("links") or {}
-    for key in ("album", "artist"):
-        links[key] = str(links.get(key) or echo.get(key) or "").strip()
-    if not (links["album"] or links["artist"]):
-        return {}
-    _album_id, rg = _album_mbids(album_dir)
-    marker_rg = str(info.get("release_group_id") or "").strip().lower()
-    if rg and marker_rg and rg != marker_rg:
-        return {}
-    return links
-
-
-def stamp_rym_links(album_dir, cfg=None):
-    """Resolve and write the album's / artist's RateYourMusic links.
-
-    One RATEYOURMUSIC_ALBUM and one RATEYOURMUSIC_ARTIST on every track — the
-    state the grader and the links editor read. A link already present on ANY
-    track of the album is left alone and NOT looked up: the user's own link
-    wins, and nothing here ever overwrites one. Only a link RYM itself
-    confirmed (``server.integrations.rym_links``) is written, so a failed
-    lookup writes nothing at all and reports "could not resolve" in its note
-    instead of failing the import.
-
-    Gated by `rym_links_auto` (config.py, default True). Returns
-    ``{"album", "artist", "note", "written"}``; never raises.
-    """
-    from mlo.audio import AudioFile
-    from server import integrations as intg
-
-    cfg = cfg or load_config()
-    out = {"album": None, "artist": None, "note": "", "written": 0}
-    files = []
-    for path in _audio_files(album_dir):
-        try:
-            af = AudioFile(path)
-        except Exception:
-            continue
-        if af.audio is not None:
-            files.append(af)
-    if not files:
-        return out
-
-    def _tag(af, name):
-        try:
-            return str(af.get_tag(name) or "").strip()
-        except Exception:
-            return ""
-
-    have_album = any(_tag(af, "RATEYOURMUSIC_ALBUM") for af in files)
-    have_artist = any(_tag(af, "RATEYOURMUSIC_ARTIST") for af in files)
-    if have_album and have_artist:
-        return out                      # nothing missing: no lookup at all
-
-    artist, album = _album_identity(album_dir)
-    # The ADD already resolved these links and recorded them in the framework
-    # marker (`prefetch_links` — the same resolver, the same switch, the same
-    # artist/album), and this step is where an import would ask for them a
-    # SECOND time: the lookup measured 2.7 s of the add's pre-fetch, re-paid at
-    # import for an answer the app itself wrote down. The TAGS are still
-    # written below; only the lookup is skipped, and only for a link the marker
-    # really carries for THIS album.
-    links = _marker_links(album_dir, cfg)
-    if links.get("album") and links.get("artist"):
-        out["note"] = "links already resolved when the album was added"
-    else:
-        # With the album's MusicBrainz id the lookup is a url-relation read on
-        # MusicBrainz — no RYM scrape, no cookie, no guess — so the id is offered
-        # first and the slug/search ladder is only the fallback.
-        found = intg.rym_links(
-            artist, album, cfg=cfg,
-            mbid=(_tag(files[0], "MUSICBRAINZ_RELEASEGROUPID")
-                  or _tag(files[0], "MUSICBRAINZ_ALBUMID")))
-        out["note"] = found.get("note") or ""
-        # A marker holding only ONE of the two is not a reason to throw that one
-        # away: the lookup fills the other, the marker keeps what it has.
-        links = {"album": found.get("album") or links.get("album"),
-                 "artist": found.get("artist") or links.get("artist")}
-    if not have_album:
-        out["album"] = links.get("album")
-    if not have_artist:
-        out["artist"] = links.get("artist")
-    if not out["album"] and not out["artist"]:
-        return out
-
-    def _write_links(af):
-        """Write whichever of the two links is missing, in ONE rewrite.
-
-        Both were a whole-file copy of their own before this (mlo.audio saves
-        by writing a temp beside the file and renaming it over — mlo.atomic.
-        rewrite_via), so two links cost two rewrites per track. The deferral
-        holds them for a single flush, and its verdict IS the answer: deferred,
-        a write that cannot land no longer raises out of set_tag, and a file
-        that did not reach disk must not be counted as written. The deferral is
-        turned off even when a write raised, so a half-written file is flushed
-        rather than left holding changes nobody saved."""
-        try:
-            tags = {}
-            if out["album"] and not _tag(af, "RATEYOURMUSIC_ALBUM"):
-                tags["RATEYOURMUSIC_ALBUM"] = out["album"]
-            if out["artist"] and not _tag(af, "RATEYOURMUSIC_ARTIST"):
-                tags["RATEYOURMUSIC_ARTIST"] = out["artist"]
-            if not tags:
-                return False
-            # A stand-in for AudioFile (a test double) cannot defer: it writes
-            # per tag, exactly as it did before.
-            defer = hasattr(af, "defer_save")
-            if defer:
-                af.defer_save(True)
-            written = False
-            try:
-                for key, value in tags.items():
-                    af.set_tag(key, value)
-                written = True
-            finally:
-                if defer and af.defer_save(False) is False:
-                    written = False
-            return written
-        except Exception:
-            return False
-
-    # Distinct FILES share nothing: every rewrite_via copies beside its OWN
-    # target and swaps it in with os.replace (mlo.atomic), so the album's
-    # tracks write side by side instead of one after another.
-    workers = worker_count(cfg, maximum=8, items=len(files))
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        out["written"] = sum(1 for ok in ex.map(_write_links, files) if ok)
-    if out["written"]:
-        _invalidate_caches(album_dir)
-    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -5070,13 +4858,17 @@ def _inside(path, folder):
         return False
 
 
-def _unique_dir(parent, name):
+def unique_dir(parent, name):
     """``<parent>/<name>``, deduplicated with " (2)", " (3)"…
 
     The name is user- or tag-supplied (an album name, an upload's own), so it
     goes through the app's one name rule (mlo.naming.sanitize_segment): the
     characters the OS refuses are replaced, the name is cut to what a
-    filesystem accepts, and the " (n)" suffix stays inside that limit."""
+    filesystem accepts, and the " (n)" suffix stays inside that limit.
+
+    Public because the upload route needs the SAME dedup the bulk queue uses:
+    two items that resolve to one album name must become two albums, never one
+    placement overwriting the other."""
     safe = sanitize_segment(str(name)) or "Import"
     dest = os.path.join(parent, safe)
     n = 2
@@ -5084,6 +4876,29 @@ def _unique_dir(parent, name):
         dest = os.path.join(parent, f"{safe} ({n})")
         n += 1
     return dest
+
+
+def _move_into_library(src, root):
+    """Move a staging album under the library, deduplicating its name.
+
+    Answers ``(dest, error)``, one of them empty. The name is deduplicated by
+    `unique_dir` — and the dedup is RETRIED when a SIBLING batch claims that
+    name between the check and the move. Two batches that resolve to ONE album
+    name are exactly the owner's case (several discs or editions named alike,
+    queued together), and the pool runs them at the same instant (`import_bulk_
+    concurrency` is 5 by default), so the loser would otherwise report "a file
+    inside is still in use" for a lock that does not exist — and a same-named
+    album would never import at all. A destination that exists although the
+    move did NOT lose the race is still the app's own sentence, unchanged.
+    """
+    for _attempt in range(8):
+        dest = unique_dir(root, os.path.basename(src.rstrip("\\/")))
+        if move_path(src, dest, log=lambda m: None):
+            return dest, ""
+        if not os.path.exists(dest):
+            break               # the move failed for a real reason, not a race
+    return "", ("could not move into the library — a file inside is still in "
+                "use (stop playback and retry)")
 
 
 def _bulk_one(item, cfg):
@@ -5205,10 +5020,9 @@ def _bulk_one(item, cfg):
         move = False
     album = src
     if move:
-        dest = _unique_dir(root, os.path.basename(src.rstrip("\\/")))
-        if not move_path(src, dest, log=lambda m: None):
-            row["error"] = ("could not move into the library — a file inside "
-                            "is still in use (stop playback and retry)")
+        dest, move_error = _move_into_library(src, root)
+        if move_error:
+            row["error"] = move_error
             return row
         album = dest
 

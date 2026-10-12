@@ -726,10 +726,16 @@ try:
               r.status_code == 200 and row.get("kind") == "credentials"
               and row.get("status") == "fail" and "401" in row.get("detail", ""),
               f"{r.status_code} {row}")
-        # RateYourMusic is a genre source AND a links source: the same id
-        # resolves per kind (Discogs is a credential/Discover id only now).
-        check("route: an id that is BOTH a genre and a links source resolves by kind",
+        # An id resolves per kind (Discogs is a credential/Discover id only).
+        # RateYourMusic used to be BOTH a genre source and a links source —
+        # the id, the links kind and both of its rows went with the scraped
+        # hosts (2026-10-12), so the same request is a plain 404 now and this
+        # pins exactly that: the app no longer knows the source at all.
+        check("route: a source the app no longer carries is a 404 under any kind",
               client.get("/api/sources/health/rateyourmusic?kind=genre&probe=0")
+              .status_code == 404)
+        check("route: the genre source that remains resolves as itself",
+              client.get("/api/sources/health/musicbrainz?kind=genre&probe=0")
               .json().get("kind") == "genre")
         check("route: an unknown kind is a 400 naming the kinds",
               client.get("/api/sources/health?kind=nope").status_code == 400)

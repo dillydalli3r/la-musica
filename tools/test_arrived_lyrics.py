@@ -143,7 +143,7 @@ def canonical(text):
 ANSWER = {"synced": "", "plain": ""}
 
 _real = {n: getattr(imports, n) for n in
-         ("stamp_rym_links", "fetch_advisories", "fetch_instrumentals",
+         ("fetch_advisories", "fetch_instrumentals",
           "run_metadata_step", "run_cover_step", "_stamp_release")}
 _real_chain = script_runners.run_chain
 _real_resolve = None
@@ -210,7 +210,6 @@ def stub_step(**payload):
 
 def install_stubs():
     global _real_resolve, _real_absent
-    imports.stamp_rym_links = stub_step(album=None, artist=None, note="")
     imports.fetch_advisories = stub_step(updated=0, values={}, sources={}, answers={})
     imports.fetch_instrumentals = stub_step(updated=0, values={}, evidence={})
     imports.run_metadata_step = stub_step(staged=False, applied={})
@@ -245,7 +244,7 @@ def cfg_for(**over):
         "import_autonomy": "automatic", "lyrics_format": "EMBEDDED",
         "lyrics_allow_plain": False, "import_keep_synced_lyrics": False,
         "advisory_auto_fetch": False, "metadata_auto_fetch": False,
-        "cover_auto_fetch": False, "rym_links_auto": False,
+        "cover_auto_fetch": False,
         "instrumental_auto_fetch": False, "genre_autofill": False,
         "grade_check_lyrics": True, "grade_check_lyrics_format": True,
         "grade_check_lyrics_spaces": True, "grade_check_lyrics_blank_lines": True,

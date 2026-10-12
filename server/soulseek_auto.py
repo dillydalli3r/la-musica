@@ -3175,20 +3175,52 @@ def _local_wanted_files(ddir, username, wanted):
     return out
 
 
-def _log_fail_reason(name, score, state, min_score, why=""):
-    """Why one rip log did not clear the bar, with Logchecker's own words.
+def _log_accuraterip(path):
+    """The AccurateRip verdict the log STATES about its own tracks, as
+    (state, detail) from `mlo.discs.parse_log_accuraterip` — 'fail' with the
+    offending line, 'ok', or None when the log says nothing about AccurateRip
+    (which is never a penalty). A read error is treated as "states nothing":
+    this gate must never manufacture a rejection out of a parse failure."""
+    from mlo.discs import parse_log_accuraterip, read_log_text
+    try:
+        return parse_log_accuraterip(read_log_text(path))
+    except Exception:
+        return None, ""
 
-    The bar is `grade_log_score_threshold` (Settings → Auto-import), 100 by
+
+def _log_format(path):
+    """The ripper a log names itself with, for the message an UNSCORED log
+    prints ("Logchecker could not score it (XLD)"). A log whose header no
+    dialect claims reads "unrecognised log format" — the honest answer, and
+    the one that says the toolchain, not the rip, is what could not read it."""
+    from mlo.discs import log_dialect, read_log_text
+    try:
+        d = log_dialect(read_log_text(path))
+    except Exception:
+        d = ""
+    return {"eac": "EAC", "xld": "XLD", "whipper": "whipper"}.get(d) \
+        or "unrecognised log format"
+
+
+def _log_fail_reason(name, score, state, min_score, why="",
+                     ar_state=None, ar_detail=""):
+    """Why one rip log did not clear the gate, with Logchecker's own words.
+
+    The bar is `soulseek_auto_log_min_score` (Settings → Auto-import), 100 by
     default, and Logchecker marks a log down for reasons of its own (-30 for an
     EAC older than 0.99, -10 for gap handling). A release whose copies are all
     the same scene rip therefore fails on every candidate — the owner's case,
     seventeen deep — and a bare "score 60 is below the required 100" said
     nothing about the deduction or what to do. `why` is Logchecker's own note
     about the log; the bar and the setting are named so the way out is one
-    screen away.
+    screen away. Only three things reject: a log checksum that does not verify,
+    an AccurateRip section that reports a failed track, or a score below the
+    bar — a log Logchecker could NOT score is not rejected here, so the reason
+    for that case is never printed as a rejection (it is logged as accepted).
     """
-    if score is None:
-        base = f"{name} — Logchecker could not score it"
+    if ar_state == "fail":
+        base = (f"{name} — the log's AccurateRip section reports a track it "
+                f"could not verify: {ar_detail}")
     elif state == "invalid":
         base = (f"{name} — log checksum does not verify (the file changed after "
                 f"EAC signed it)")
@@ -3414,11 +3446,22 @@ def _wait_for_files(slsk, ddir, username, wanted, timeout_s, cancel_check=None,
 # --------------------------------------------------------------------------- #
 # Verification helpers
 # --------------------------------------------------------------------------- #
-def _log_passes(score, state, min_score):
-    """Whether a log on its own is good enough to accept the album: scorable,
-    at or above the bar, and not a failed checksum (state 'invalid' means the
-    log's own SHA256 does not verify — real evidence, never junk)."""
-    return score is not None and score >= min_score and state != "invalid"
+def _log_passes(score, state, min_score, ar_state=None):
+    """Whether a log on its own is good enough to accept the album.
+
+    Three things, and only these: (1) a log that CARRIES a checksum has to
+    verify — state 'invalid' means the log's own SHA256/EAC checksum does not
+    match, real evidence the file changed after it was signed (an ABSENT
+    checksum is not required and costs nothing); (2) the log must not report a
+    failed AccurateRip track (ar_state 'fail'; no AccurateRip section is not a
+    penalty); (3) only when Logchecker COULD score it, the score must be at or
+    above the bar. A log Logchecker could not score (score None) is NOT a
+    rejection by itself: the bar is a quality opinion, and the per-track CRCs
+    (checked against the decoded audio after the album lands) are the hard
+    requirement — an unreadable-by-Logchecker log whose CRCs verify is a fine
+    rip and is accepted."""
+    return (state != "invalid" and ar_state != "fail"
+            and (score is None or score >= min_score))
 
 
 def _score_logs(local_logs, cfg):
@@ -4180,13 +4223,23 @@ def _try_batch(slsk, ddir, batch, release, cfg, is_cd, min_score):
         scores = _score_logs(list(got_logs.values()), cfg)
         good, bad = [], []
         for p, score, state, detail, why in scores:
+            ar_state, ar_detail = _log_accuraterip(p)
             _log(f"  {os.path.basename(p)}: score "
                  f"{score if score is not None else '?'}, checksum {state or '?'}"
+                 + (f", AccurateRip {ar_state}" if ar_state else "")
                  + (f" — {why}" if why else ""))
-            if _log_passes(score, state, min_score):
+            if _log_passes(score, state, min_score, ar_state):
                 good.append(os.path.basename(p))
+                if score is None:
+                    # The bar is an opinion Logchecker could not form; the log
+                    # is accepted on its per-track CRCs, and the outcome says
+                    # exactly which format the toolchain could not read.
+                    _log(f"  {os.path.basename(p)}: Logchecker could not score "
+                         f"it ({_log_format(p)}) — accepted; its per-track CRCs "
+                         f"are still checked against the log")
             else:
-                bad.append((os.path.basename(p), score, state, why))
+                bad.append((os.path.basename(p), score, state, why,
+                            ar_state, ar_detail))
         # A folder can hold a second, junk log for the same disc (and a
         # manual/browse pick can hold several): the album rides on the log that
         # grades well, the rest are reported and ignored. A checksum MISMATCH
@@ -4195,14 +4248,15 @@ def _try_batch(slsk, ddir, batch, release, cfg, is_cd, min_score):
         if not good:
             _reject(a["username"], a["dir"],
                     "log rejected: " + "; ".join(
-                        _log_fail_reason(n, s, st, min_score, why)
-                        for n, s, st, why in bad)
+                        _log_fail_reason(n, s, st, min_score, why,
+                                         ar_state=ar, ar_detail=ard)
+                        for n, s, st, why, ar, ard in bad)
                     + " (Settings → Auto-import); trying the next candidate")
             _drop_candidate(slsk, ddir, a["username"], a["wanted"])
             a["state"] = "dropped"
             continue
-        for n, s, st, why in bad:
-            _log(f"  ignoring {_log_fail_reason(n, s, st, min_score, why)}")
+        for n, s, st, why, ar, ard in bad:
+            _log(f"  ignoring {_log_fail_reason(n, s, st, min_score, why, ar_state=ar, ar_detail=ard)}")
         _log(f"{len(good)} log(s) pass — downloading the full album…")
         # The log cleared the bar, so the album has earned its bytes: it is
         # requested NOW, in a second call, and only its own files — the logs are

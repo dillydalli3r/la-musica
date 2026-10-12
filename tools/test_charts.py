@@ -4,8 +4,7 @@
 
 Offline by construction: every provider is stubbed at `server.discovery`'s ONE
 transport seam (`_json`, which Deezer, Apple, Last.fm and ListenBrainz all go
-through) and the RateYourMusic scrape is stubbed at `integrations.rym_charts`,
-so nothing here opens a socket. The play store is a temp database
+through), so nothing here opens a socket. The play store is a temp database
 (`plays.db_path` is monkeypatched) with an injected clock, the library payload
 is handed in, and the config is passed to the plain functions (`cfg=`) rather
 than read from disk.
@@ -16,9 +15,8 @@ What this pins:
     artist with distinct counts — most played first, each row carrying its
     `plays`, and an empty history answering with the note that explains it;
   * the charts registry: which sources chart which kinds, for which windows
-    (RateYourMusic tracks-only, all-time + year; ListenBrainz all four; Deezer,
-    iTunes and Last.fm all-time only), and that RateYourMusic is FIRST for
-    tracks;
+    (ListenBrainz all four; Deezer, iTunes and Last.fm all-time only), and the
+    order they are asked in;
   * a source that answers (Deezer's, Last.fm's, Apple's and ListenBrainz's real
     wrappers over the stubbed transport) — rows with their own rank and score;
   * a source that needs a key: `skipped: no lastfm_api_key`, with `needs`/
@@ -26,10 +24,6 @@ What this pins:
   * a source that refuses: `failed: <the provider's own words>`, verbatim;
   * a window a source does not publish: `unsupported: …`, never its all-time
     chart passed off as this week's;
-  * RateYourMusic first for tracks, its refusal surfaced verbatim while the
-    other sources still answer, its archived-snapshot answer saying so, and its
-    live-only rule reused from the genre chain (no cookie and no solver skips
-    it before any request, naming the key to set);
   * the library marking: a chart row the library owns carries its path, one it
     does not offers the add action;
   * the route's validation and the exact set of paths it serves.
@@ -48,7 +42,6 @@ sys.path.insert(0, ROOT)
 from fastapi import HTTPException  # noqa: E402
 
 from server import api_discover, api_plays, discover, discovery  # noqa: E402
-from server import integrations as intg  # noqa: E402
 from server import plays  # noqa: E402
 
 passed = 0
@@ -94,18 +87,6 @@ def fresh(answers):
     stub_json(route(answers))
 
 
-def stub_rym(rows=None, error=None):
-    """The RateYourMusic scrape seam — the chart source with no API."""
-    payload = rows if rows is not None else RYM_ROWS
-
-    def fake(kind="tracks", period="all", limit=50, cfg=None, now=None):
-        CALLS.append(("rym", kind, period))
-        if error:
-            raise error
-        return payload
-    intg.rym_charts = fake
-
-
 def supports_period(payload, sid):
     """The payload's own support matrix for one source."""
     return next(s for s in payload["sources"] if s["id"] == sid)["supports_period"]
@@ -141,11 +122,8 @@ LIB = {"folder": "C:/Music", "artists": [
 # as arguments.
 discover._library = lambda cfg, lib=None: lib if lib is not None else LIB
 
-FULL_CFG = {"discovery_enabled": True, "rym_archive_fallback": True,
-            "rym_cookie": "cf_clearance=test", "lastfm_api_key": "key"}
-NO_KEY_CFG = {"discovery_enabled": True, "rym_archive_fallback": True,
-              "rym_cookie": "cf_clearance=test"}
-NO_COOKIE_CFG = {"discovery_enabled": True}
+FULL_CFG = {"discovery_enabled": True, "lastfm_api_key": "key"}
+NO_KEY_CFG = {"discovery_enabled": True}
 
 # --------------------------------------------------------------------------- #
 # 1) /api/top — the library's own history, by kind
@@ -188,15 +166,12 @@ ok(empty["items"] == [] and empty["note"] == plays.EMPTY_NOTE
 # 2) The registry: who charts what, for which windows
 # --------------------------------------------------------------------------- #
 print("== the charts registry ==")
-ok(discover.CHART_ORDER[0] == "rym",
-   f"RateYourMusic leads the chart order ({discover.CHART_ORDER})")
+ok(discover.CHART_ORDER[0] == "deezer",
+   f"the registry order leads the chart order ({discover.CHART_ORDER})")
 ok(discover.CHART_PERIODS == ("all", "year", "month", "week"),
    "the four windows are the app's own")
 cat = discover.catalogue(cfg={})
 specs = {s["id"]: s for s in cat["sources"]}
-ok(specs["rym"]["charts"] == ["tracks"]
-   and specs["rym"]["chart_periods"] == ["all", "year"],
-   f"RYM charts tracks only, all-time and per year ({specs['rym']})")
 ok(specs["listenbrainz"]["chart_periods"] == ["all", "year", "month", "week"],
    "ListenBrainz answers every window (its stats take the range)")
 ok(specs["deezer"]["chart_periods"] == ["all"]
@@ -237,14 +212,6 @@ LB_TRACKS = {"payload": {"recordings": [
      "listen_count": 987654,
      "caa_release_mbid": "bbbbbbbb-0000-0000-0000-000000000001"},
 ]}}
-RYM_ROWS = {"chart": "Best songs of all time", "total": 40, "rows": [
-    {"kind": "track", "title": "Alison", "artist": "Slowdive",
-     "link": "https://rateyourmusic.com/song/slowdive/alison/", "rank": 1,
-     "popularity": None, "popularity_label": None, "source": "rym"},
-    {"kind": "track", "title": "Starless", "artist": "King Crimson",
-     "link": "https://rateyourmusic.com/song/king-crimson/starless/", "rank": 2,
-     "popularity": None, "popularity_label": None, "source": "rym"},
-]}
 
 ANSWERS = [
     ("api.deezer.com/chart/0/tracks", DEEZER_TRACKS),
@@ -255,20 +222,20 @@ ANSWERS = [
 
 # ── everything answers ──────────────────────────────────────────────────────
 fresh(ANSWERS)
-stub_rym()
 all_tracks = api_discover.charts_list(period="all", kind="tracks", cfg=FULL_CFG)
 by_source = {}
 for row in all_tracks["items"]:
     by_source.setdefault(row["source"], []).append(row)
-ok(all_tracks["sources_asked"][0] == "rym",
-   f"RateYourMusic is asked FIRST for tracks ({all_tracks['sources_asked']})")
-ok([r["source"] for r in all_tracks["items"][:2]] == ["rym", "rym"]
+ok(all_tracks["sources_asked"] == ["deezer", "itunes", "lastfm", "listenbrainz"],
+   f"every chart source that charts tracks is asked, in registry order "
+   f"({all_tracks['sources_asked']})")
+ok([r["source"] for r in all_tracks["items"][:2]] == ["deezer", "deezer"]
    and all_tracks["items"][0]["rank"] == 1,
-   "and its rows lead the page in RYM's own order")
-ok(all_tracks["items"][0]["reason"] == "Chart #1 · Best songs of all time",
-   f"a RYM row says which chart and where it sits "
+   "and the leading source's rows lead the page in its own order")
+ok(all_tracks["items"][0]["reason"] == "Chart #1 on Deezer",
+   f"a chart row says which chart and where it sits "
    f"({all_tracks['items'][0]['reason']})")
-ok(set(by_source) == {"rym", "deezer", "itunes", "lastfm", "listenbrainz"},
+ok(set(by_source) == {"deezer", "itunes", "lastfm", "listenbrainz"},
    f"every chart source that answered contributed ({sorted(by_source)})")
 ok([r["rank"] for r in by_source["deezer"]] == [1, 2],
    "Deezer rows keep Deezer's order as their rank")
@@ -293,16 +260,15 @@ ok(all_tracks["notes"] == {},
 ok(set(by_source["deezer"][0]) >= {"rank", "score", "score_label"},
    "every chart row carries its rank and score on top of the shared shape")
 matrix = {s["id"]: s for s in all_tracks["sources"]}
-ok(matrix["rym"]["supports_period"] is True
-   and matrix["rym"]["periods"] == ["all", "year"]
+ok(matrix["deezer"]["supports_period"] is True
+   and matrix["deezer"]["periods"] == ["all"]
    and matrix["lastfm"]["missing"] == []
    and matrix["lastfm"]["ready"] is True,
    f"the payload's source list is the support matrix for THIS request "
-   f"({matrix['rym']})")
+   f"({matrix['deezer']})")
 
 # ── a source that needs a key ───────────────────────────────────────────────
 fresh(ANSWERS)
-stub_rym()
 keyless = api_discover.charts_list(period="all", kind="tracks", cfg=NO_KEY_CFG)
 ok(keyless["notes"]["lastfm"] == "skipped: no lastfm_api_key",
    f"an unconfigured source is skipped by name ({keyless['notes']})")
@@ -311,8 +277,8 @@ ok(not any(r["source"] == "lastfm" for r in keyless["items"]),
 ok({s["id"]: s for s in keyless["sources"]}["lastfm"]["missing"]
    == ["lastfm_api_key"],
    "while the source list still names what it needs")
-ok("rym" not in keyless["notes"],
-   "RYM IS asked — its own rym_cookie is set, so the live gate lets it through")
+ok(set(keyless["notes"]) == {"lastfm"},
+   f"the keyless sources are all asked and note nothing ({keyless['notes']})")
 
 # ── a source that refuses: the provider's own words, verbatim ───────────────
 def refuse_apple(url, params):
@@ -323,28 +289,22 @@ def refuse_apple(url, params):
 
 fresh([("rss.applemarketingtools.com", refuse_apple)]
       + [(f, a) for f, a in ANSWERS if "rss.applemarketingtools.com" not in f])
-stub_rym()
 refused = api_discover.charts_list(period="all", kind="tracks", cfg=FULL_CFG)
 ok(refused["notes"]["itunes"].startswith(
     "failed: HTTP 403: Forbidden: this storefront is not available"),
    f"a refusal is reported in the provider's own words ({refused['notes']['itunes']})")
 ok(refused["items"] and {r["source"] for r in refused["items"]}
-   == {"rym", "deezer", "lastfm", "listenbrainz"},
+   == {"deezer", "lastfm", "listenbrainz"},
    "…and the other sources still answer")
 ok(not any(r["source"] == "itunes" for r in refused["items"]),
    "a refused source contributes no rows, never a placeholder")
 
 # ── a window a source does not publish ──────────────────────────────────────
 fresh(ANSWERS)
-stub_rym()
 weekly = api_discover.charts_list(period="week", kind="tracks", cfg=FULL_CFG)
 ok(weekly["notes"]["lastfm"] == "unsupported: Last.fm publishes no weekly chart "
                                "— it charts all-time",
    f"a provider with no such window says so ({weekly['notes']['lastfm']})")
-ok(weekly["notes"]["rym"].startswith("unsupported: RateYourMusic publishes no "
-                                     "weekly chart"),
-   f"…RYM too, rather than an all-time list passed off as this week's "
-   f"({weekly['notes']['rym']})")
 ok(weekly["notes"]["deezer"].startswith("unsupported: Deezer")
    and weekly["notes"]["itunes"].startswith("unsupported: iTunes"),
    "…and each of them lists the windows it DOES publish "
@@ -356,58 +316,16 @@ ok(weekly["period"] == "week" and weekly["kind"] == "tracks"
    and weekly["limit"] == 50,
    "the payload echoes the window it answered")
 ok(supports_period(weekly, "listenbrainz") is True
-   and supports_period(weekly, "rym") is False,
+   and supports_period(weekly, "deezer") is False,
    "the support matrix says which source can answer THIS window")
-ok([c for c in CALLS if c[0] == "rym"] == [],
+ok(not [c for c in CALLS if c[0] == "json" and "api.deezer.com" in c[1]],
    "and no unsupported source was even asked")
-
-# ── RYM refusing: its own words, and the rest of the page survives ──────────
-fresh([("api.deezer.com/chart/0/tracks", DEEZER_TRACKS),
-       ("api.listenbrainz.org", LB_TRACKS)])
-stub_rym(error=RuntimeError(
-    "RateYourMusic refused: HTTP 403; Cloudflare challenge instead of a page; "
-    "the rym_cookie has expired or is not for this network "
-    "(https://rateyourmusic.com/charts/top/song/all-time)"))
-rym_refused = api_discover.charts_list(period="all", kind="tracks", cfg=FULL_CFG)
-ok(rym_refused["notes"]["rym"].startswith("failed: RateYourMusic refused: "
-                                          "HTTP 403; Cloudflare challenge"),
-   f"RYM's refusal is surfaced verbatim ({rym_refused['notes']['rym']})")
-ok("rym_cookie" in rym_refused["notes"]["rym"],
-   "including what the user can do about it")
-ok({r["source"] for r in rym_refused["items"]} == {"deezer", "listenbrainz"},
-   "and the other sources still answer — one blocked source is not the page")
-
-# ── RYM answering from the archive ──────────────────────────────────────────
-fresh([("api.deezer.com/chart/0/tracks", DEEZER_TRACKS)])
-stub_rym(rows={"chart": "Best songs of 2025", "total": None,
-               "rows": RYM_ROWS["rows"],
-               "archive": {"snapshot": "2021-03-25",
-                           "url": "https://web.archive.org/x"}})
-archived = api_discover.charts_list(period="year", kind="tracks", cfg=FULL_CFG)
-ok(archived["notes"]["rym"].startswith("answered from an archived snapshot"),
-   f"an archived answer says so rather than looking like a live one "
-   f"({archived['notes']['rym']})")
-ok([r["source"] for r in archived["items"]][:2] == ["rym", "rym"],
-   "…and its rows still lead the tracks page")
-
-# ── RYM with neither a cookie nor a solver ──────────────────────────────────
-fresh([("api.deezer.com/chart/0/tracks", DEEZER_TRACKS)])
-stub_rym()
-no_cookie = api_discover.charts_list(period="all", kind="tracks", cfg=NO_COOKIE_CFG)
-ok(no_cookie["notes"]["rym"].startswith("skipped: no rym_cookie"),
-   f"without a cookie or a solver, RYM is skipped by name "
-   f"({no_cookie['notes']['rym']})")
-ok([c for c in CALLS if c[0] == "rym"] == [],
-   "…without spending a request on it")
 
 # ── a kind a source cannot chart, an unknown source, and nothing at all ─────
 fresh([("api.deezer.com/chart/0/albums", {"data": []})])
-stub_rym()
-one = api_discover.charts_list(kind="albums", source="rym", cfg=FULL_CFG)
-ok(one["items"] == [] and one["notes"]["rym"].startswith("cannot chart albums:"),
+one = api_discover.charts_list(kind="albums", source="itunes", cfg=FULL_CFG)
+ok(one["items"] == [] and one["notes"]["itunes"].startswith("cannot chart albums:"),
    f"a source asked for a kind it does not chart says so ({one['notes']})")
-ok("Tracks only" in one["notes"]["rym"],
-   "with the registry's own note about what it does chart")
 missing = api_discover.charts_list(kind="tracks", source="nope", cfg=FULL_CFG)
 ok(missing["items"] == [] and missing["notes"] == {"nope": "unknown source"}
    and missing["sources_asked"] == [],
@@ -417,7 +335,6 @@ fresh([("api.deezer.com/chart/0/tracks", {"data": []}),
        ("rss.applemarketingtools.com", {"feed": {"results": []}}),
        ("ws.audioscrobbler.com", {"tracks": {"track": []}}),
        ("api.listenbrainz.org", {"payload": {"recordings": []}})])
-stub_rym(rows={"chart": "Best songs of all time", "total": None, "rows": []})
 nothing = api_discover.charts_list(period="all", kind="tracks", cfg=FULL_CFG)
 ok(nothing["items"] == []
    and nothing["notes"]["charts"].startswith("no chart source had anything"),

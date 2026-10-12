@@ -87,12 +87,68 @@ export function MediaChip({ media }: { media: string | null | undefined }) {
 }
 
 /** Compact media label for album cards/icons: the first word of the media
- *  value in its OWN capitalization ("CD", "Digital", "SACD", "Vinyl"…). */
+ *  value in its OWN capitalization ("CD", "Digital", "SACD", "Vinyl"…). The
+ *  fallback for a medium OUTSIDE the CD family — every CD family value wears
+ *  the one short word "CD" instead (see mediaCardLabel). */
 export function mediaShort(media: string | null | undefined): string | null {
   const m = (media ?? "").trim();
   if (!m) return null;
   const first = (m.split(/[\s/;,]+/)[0] ?? "").slice(0, 10);
   return first || null;
+}
+
+/** The CD family, the app's own vocabulary: every MEDIA value the writers and
+ *  the grader (mlo/tagtext.py `CD_MEDIA_VALUES`, the table mlo.grader's
+ *  KNOWN_MEDIA folds from and mlo.tagtext.is_cd_media answers for) call a
+ *  CD-DA disc — plain "CD" and its pressings and variants: CD-R, CD+G,
+ *  8cm CD, 8cm CD+G, Blu-spec CD, Blu-spec CD2, Copy Control CD, Data CD,
+ *  DTS CD, Enhanced CD, HDCD, HQCD, Minimax CD, Mixed Mode CD, SHM-CD, UHQCD
+ *  and XRCD. Deliberately NOT here, exactly as mlo/tagtext.py splits it: SACD
+ *  (a DSD disc with its own evidence rules) and the video discs whose names
+ *  merely end in "CD" (VCD/SVCD). Mirrored here so the shelf and the grader
+ *  can never disagree about what a CD is. */
+const CD_MEDIA_VALUES = [
+  "CD", "CD-R", "CD+G", "8cm CD", "8cm CD+G", "Blu-spec CD", "Blu-spec CD2",
+  "Copy Control CD", "Data CD", "DTS CD", "Enhanced CD", "HDCD", "HQCD",
+  "Minimax CD", "Mixed Mode CD", "SHM-CD", "UHQCD", "XRCD",
+];
+/* The family as two membership tables — its folded spelling, and its spelling
+ * with every separator removed — so one medium never needs two entries. */
+const CD_MEDIA_FOLDED: Record<string, true> = Object.fromEntries(
+  CD_MEDIA_VALUES.map((v) => [v.toLowerCase(), true]));
+const CD_MEDIA_FOLDED_ALNUM: Record<string, true> = Object.fromEntries(
+  CD_MEDIA_VALUES.map((v) => [v.toLowerCase().replace(/[^a-z0-9]+/g, ""), true]));
+
+/** Whether a stored MEDIA value names a CD-DA disc — "CD" or any CD variant.
+ *  The front-end twin of mlo.tagtext.is_cd_media (the ONE rule every CD check
+ *  in the app asks): case-insensitive, and separator-folded so a tagger's
+ *  "SHMCD" is MusicBrainz's "SHM-CD". */
+export function isCdMedia(media: string | null | undefined): boolean {
+  const text = (media ?? "").trim().toLowerCase();
+  if (!text) return false;
+  if (CD_MEDIA_FOLDED[text]) return true;
+  return !!CD_MEDIA_FOLDED_ALNUM[text.replace(/[^a-z0-9]+/g, "")];
+}
+
+/** The label an album CARD/icon wears for a stored MEDIA value: any CD family
+ *  value (see isCdMedia) reads the one short family word "CD" — the owner's
+ *  ask, since the card has no room for, and no need of, the pressing detail —
+ *  while every other value keeps the label mediaShort prints today
+ *  ("Digital", "SACD", "Vinyl", "Blu-ray"…). The tag's FULL value stays in the
+ *  badge's own tooltip and on the album page (mediaFullLabel). */
+export function mediaCardLabel(media: string | null | undefined): string | null {
+  if (isCdMedia(media)) return "CD";
+  return mediaShort(media);
+}
+
+/** The stored MEDIA value exactly as the tag carries it — the label the ALBUM
+ *  PAGE's own chip row names the pressing with ("SHM-CD", "Enhanced CD",
+ *  "Digital Media"), where a card's icon wears the short family word instead
+ *  (mediaCardLabel). The two spellings are the surfaces' choice, not a second
+ *  vocabulary: both read the one stored value. */
+export function mediaFullLabel(media: string | null | undefined): string | null {
+  const m = (media ?? "").trim();
+  return m || null;
 }
 
 /** Every country a release was released in, in the order the tag lists them.
@@ -112,7 +168,7 @@ export function releaseCountries(value: string | null | undefined): string[] {
 }
 
 /** The medium plus, for a DIGITAL MEDIA release, where its files CAME FROM —
- *  "Digital · Bandcamp", "CD" for a rip, exactly as before.
+ *  "Digital · Bandcamp", "CD" for a rip.
  *
  *  A download has no pressing, so the fact that takes the pressing's place is
  *  its provenance: `source_summary` (mlo.grader reads the tracks' SOURCE tags)
@@ -125,37 +181,45 @@ export function releaseCountries(value: string | null | undefined): string[] {
  *  state, not a source, so it stays with the album page's own Source readout
  *  instead of reading as a shop called INCONSISTENT.
  *
- *  The medium is digital when the word `mediaShort` prints IS "Digital" — the
- *  label both a "Digital Media" value and a hand-written "Digital" one wear,
- *  and the format this app grades a release with no disc as
- *  (mlo.grader._is_digital). */
+ *  `mediumLabel` decides which spelling of the medium is named — the card's
+ *  short one (`mediaCardLabel`, the default: every CD family value reads "CD")
+ *  or the album page's full tag value (`mediaFullLabel`). The medium is
+ *  digital when the word `mediaShort` prints IS "Digital" — the label both a
+ *  "Digital Media" value and a hand-written "Digital" one wear, and the format
+ *  this app grades a release with no disc as (mlo.grader._is_digital) — which
+ *  is why the digital test and the "source repeats the medium" test read the
+ *  SHORT form whatever `mediumLabel` prints. */
 export function mediaSourceLabel(
   media: string | null | undefined,
-  source: string | null | undefined
+  source: string | null | undefined,
+  mediumLabel: (m: string | null | undefined) => string | null = mediaCardLabel
 ): string | null {
-  const medium = mediaShort(media);
+  const medium = mediumLabel(media);
+  const short = mediaShort(media);
   const origin = (source ?? "").trim();
-  const stated = (medium ?? "").toLowerCase() === "digital"
+  const stated = (short ?? "").toLowerCase() === "digital"
     && origin !== ""
-    && origin.toLowerCase() !== (medium ?? "").toLowerCase()
+    && origin.toLowerCase() !== (short ?? "").toLowerCase()
     && origin.toUpperCase() !== "INCONSISTENT";
   const parts = [medium, stated ? origin : ""].filter(Boolean);
   return parts.length ? parts.join(" · ") : null;
 }
 
-/** The one media label every album/release badge wears: the medium and its
- *  source for a download (see mediaSourceLabel), then the release countries —
- *  "CD · US, CA", "Digital · Bandcamp · DE". A card and the page header it
- *  opens name the same release the same way, an album released in several
- *  countries says so instead of showing a single code it picked, and the
- *  ORDER is fixed (medium, source, countries) so two surfaces cannot list the
- *  same facts in two orders. */
+/** The ALBUM PAGE's chip-row label: the medium and, for a download, its source
+ *  (see mediaSourceLabel), then the release countries — "CD · US, CA",
+ *  "Digital Media · Bandcamp · DE". The ORDER is fixed (medium, source,
+ *  countries) so two surfaces cannot list the same facts in two orders.
+ *
+ *  It names the medium with the TAG's full value by default (`mediaFullLabel`:
+ *  "SHM-CD", "Enhanced CD", "Digital Media"); a card wears the short family
+ *  word instead and calls mediaSourceLabel directly. */
 export function mediaCountryLabel(
   media: string | null | undefined,
   country: string | null | undefined,
-  source?: string | null
+  source?: string | null,
+  mediumLabel: (m: string | null | undefined) => string | null = mediaFullLabel
 ): string | null {
-  const parts = [mediaSourceLabel(media, source), releaseCountries(country).join(", ")].filter(Boolean);
+  const parts = [mediaSourceLabel(media, source, mediumLabel), releaseCountries(country).join(", ")].filter(Boolean);
   return parts.length ? parts.join(" · ") : null;
 }
 

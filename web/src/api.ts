@@ -327,9 +327,6 @@ const NEVER_CACHE_EXACT: Record<string, true> = {
   // pasting a file in: an offline copy would say "4 cookies saved" over a jar
   // that was just deleted.
   "/api/youtube/cookies": true,
-  // Same reason for the RYM jar: names of a cookie that was just
-  // replaced or cleared must never come from an offline copy.
-  "/api/rym/cookies": true,
 };
 const NEVER_CACHE_PREFIX = ["/api/auth/"];
 
@@ -464,39 +461,6 @@ export interface YoutubeCookiesSaveReply extends YoutubeCookies {
   filtered: number;
 }
 
-/** The RateYourMusic credential (`server/api_rym.py`): what the stored
- *  `rym_cookie` holds. NAMES only — a `session` cookie is a live credential,
- *  so no route returns a value — plus the server's own sentences about it (a
- *  saved cookie with no `session` pair means RYM answers as a guest). */
-export interface RymCookies {
-  present: boolean;
-  /** cookie pairs in the stored `Cookie` header. */
-  lines: number;
-  /** the one host these cookies are ever sent to. */
-  sites: string[];
-  names: string[];
-  max_bytes: number;
-  warnings: string[];
-}
-
-/** What an import answers with: the same state, plus how many pairs the last
- *  import actually stored (`0` when the file held no rateyourmusic.com cookie —
- *  nothing was replaced), how many cookie lines in the file were for other
- *  sites, and whether the stored credential now carries RYM's `session`
- *  cookie. */
-export interface RymCookiesSaveReply extends RymCookies {
-  stored: number;
-  session: boolean;
-  filtered: number;
-}
-
-/** The Album of the Year credential (`server/api_aoty.py`) is the same surface
- *  as RYM's — one cookie header in a config value — so it answers the same
- *  shape. `session` means the `cf_clearance` pair is present, which is what
- *  answers Cloudflare here (AOTY has no signed-in cookie). */
-export type AotyCookies = RymCookies;
-export type AotyCookiesSaveReply = RymCookiesSaveReply;
-
 /** One cookie of a credential, as `GET /api/cookies/{source}` states it
  *  (`server/api_cookies.py`) — the row a user reads and writes against. There
  *  is NO value: a session cookie is a live credential. `expires_at` and
@@ -527,30 +491,6 @@ export interface CookieList {
   hosts: string[];
   present: boolean;
   cookies: CookieEntry[];
-}
-
-/** One browser the app can read a session out of (`/api/cookies/browsers`).
- *  `profiles` is how many cookie-bearing profiles were found for it, and
- *  `user_agent` is the exact UA that browser sends — stored beside the cookie,
- *  because a `cf_clearance` counts only alongside the UA that earned it. */
-export interface CookieBrowser {
-  id: string;
-  label: string;
-  profiles: number;
-  user_agent: string;
-}
-
-export interface CookieBrowsers {
-  browsers: CookieBrowser[];
-  installed: boolean;
-}
-
-/** What a browser read answered: the stored list plus what it managed to keep. */
-export interface CookieFromBrowserReply extends CookieList {
-  browser: string;
-  user_agent: string;
-  stored: number;
-  warnings: string[];
 }
 
 /** One credit row of `/api/credits`: who did what on a track or an album.
@@ -1251,16 +1191,10 @@ export interface DiscoverRecommended {
   not_applicable?: DiscoverNotApplicable[];
 }
 
-/** The four closed windows every chart can be asked for — the same vocabulary
- *  on both sides of the line: the library's own history (`/api/top`) and the
- *  providers' charts (`/api/discover/charts`). */
+/** The four closed windows a chart can be asked for — the vocabulary of the
+ *  library's own play history (`/api/top`). */
 export type ChartPeriod = "all" | "year" | "month" | "week";
 
-/** One provider's chart, as ONE row of `GET /api/discover/charts`: the shared
- *  Discover row (so it renders and adds exactly like a genre row) plus the
- *  provider's own rank and score. `rank` is its position in that provider's
- *  chart and `score_label` its own words ("1.2M listens") — null for a
- *  provider that states no number, never a made-up one. */
 export interface DiscoverChartItem extends DiscoverItem {
   rank: number;
   score: number | null;
@@ -1285,7 +1219,7 @@ export interface DiscoverChartSource {
 /** `GET /api/discover/charts` — what the online providers rank for one window
  *  and one kind. Rows keep each provider's own order (they are never merged
  *  across providers), `sources_asked` is who was asked in the order they were
- *  asked — RateYourMusic first for tracks — and `notes` carries every outcome
+ *  asked, and `notes` carries every outcome
  *  that was not an answer: `skipped:` (no key), `unsupported:` (no such window)
  *  or `failed:` (the provider's own words). The one non-source key, `charts`,
  *  is the verdict when nobody had anything to rank. */
@@ -2271,35 +2205,6 @@ export interface WatchCandidates {
   notes: { policy: string; types: string[]; include: number; exclude: number };
 }
 
-
-/** The Cloudflare solver's state (server/solver.py), as the card renders it. */
-export type SolverStatus = {
-  installed: boolean;
-  executable: string;
-  version?: string | null;
-  /** How FlareSolverr installs on THIS host (mlo.fetchdeps.install_kind). */
-  install_kind?: "deps" | "system" | "unsupported";
-  /** Why it cannot be installed here, when it cannot — the sentence shown. */
-  install_note?: string | null;
-  /** Anything answering on the resolved URL right now. */
-  running: boolean;
-  /** True when the process is one THIS app started (Stop can end it). */
-  managed: boolean;
-  pid?: number | null;
-  /** The endpoint the scraped sources will use, or "" when there is none. */
-  url: string;
-  /** Where that URL came from: the config, the environment, our child process,
-   *  or something already listening on the default port. */
-  source: "" | "config" | "env" | "managed" | "local";
-  /** Hosts the solver was tried on and could not pass (its own words). */
-  blocked: { host: string; label: string; message: string }[];
-  /** Whether the app may bring its own solver up at boot. */
-  autostart: boolean;
-  default_url: string;
-  timeout_ms: number;
-  log?: string;
-};
-
 export const api = {
   health: () => json<{ status: string; version: string }>(`${API}/health`),
   /** The running server's version, checked against the latest GitHub release
@@ -2755,16 +2660,6 @@ export const api = {
       body: JSON.stringify(body),
     }, 300000).then(noteContainerSwap),
 
-  rymValidate: (url: string) => json<{ valid: boolean }>(`${API}/rym/validate?url=${encodeURIComponent(url)}`),
-
-  /** Verified RateYourMusic links for the link editor's auto-find. Each one is
-   *  null when RYM itself did not confirm that page and `note` says why — a
-   *  miss is a normal 200, never an error. */
-  rymResolve: (artist: string, album = "") =>
-    json<{ album: string | null; artist: string | null; note: string }>(
-      `${API}/rym/resolve?artist=${encodeURIComponent(artist)}&album=${encodeURIComponent(album)}`,
-    ),
-
   /** The cover URL. `token` (the `CoverWriteResult.token` of the write that
    *  just happened) rides along as `&v=`: a cover is replaced IN PLACE, so
    *  without it a replaced cover.jpg is the same URL — and neither the
@@ -2859,13 +2754,26 @@ export const api = {
    *  server already holds — the files `importUnpack` unpacked out of a user's
    *  archive — are moved into the album instead of being uploaded a second
    *  time. A group may carry both (a drop of a folder AND an archive), and the
-   *  album that comes out is the same one either way. */
-  importUpload: (targetDir: string, files: { file: File; relPath: string }[], staged?: string[]) => {
+   *  album that comes out is the same one either way.
+   *
+   *  A name already taken by a DIFFERENT album never costs a batch its bytes:
+   *  the server lands this one in a folder of its own (`collided`, with
+   *  `album_name` naming it), while an album the library already holds keeps
+   *  its own copy of a same-named file instead of replacing it (`kept` names
+   *  those). The wizard says both out loud — the batch worklist imports several
+   *  batches in a row, and two of them can resolve to one album name.
+   *
+   *  `album` names the album the files belong to — the Match step's "Add
+   *  tracks…" for an album the wizard was opened on. Its path is used as-is
+   *  (fill-only): no name is guessed and no `(2)` folder is opened, and `kept`
+   *  names a file the album already had. */
+  importUpload: (targetDir: string, files: { file: File; relPath: string }[], staged?: string[], album?: string) => {
     const fd = new FormData();
     for (const { file, relPath } of files) fd.append("files", file, relPath);
     if (staged?.length) fd.append("staged", JSON.stringify(staged));
-    return json<{ ok: boolean; saved: string[]; album_path: string; album_name?: string; merged?: boolean }>(
-      `${API}/import/upload?target_dir=${encodeURIComponent(targetDir)}`,
+    return json<{ ok: boolean; saved: string[]; album_path: string; album_name?: string; merged?: boolean; collided?: boolean; kept?: string[] }>(
+      `${API}/import/upload?target_dir=${encodeURIComponent(targetDir)}` +
+        (album ? `&album=${encodeURIComponent(album)}` : ""),
       { method: "POST", body: fd },
       1800000
     );
@@ -2922,15 +2830,13 @@ export const api = {
       `${API}/import/ingest?source=${encodeURIComponent(source)}&target=${encodeURIComponent(target)}`,
       { method: "POST" }
     ),
-  /** Store the album's MB/RYM links. `rymArtistLink` is the artist page the
-   *  wizard already confirmed as an artist (server-side kind check) — it is
-   *  stamped per track as RATEYOURMUSIC_ARTIST in the same container write as
-   *  the album tags, so the Links step costs one pass over the album. */
-  importCommit: (targetDir: string, mbLink?: string, rymLink?: string, staged = false, rymArtistLink?: string) =>
+  /** Store the album's MusicBrainz link — the Links step's one pass over the
+   *  album. */
+  importCommit: (targetDir: string, mbLink?: string, staged = false) =>
     json<{ ok: boolean; changed: number }>(`${API}/import/commit`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ target_dir: targetDir, mb_link: mbLink || null, rym_link: rymLink || null, rym_artist_link: rymArtistLink || null, staged }),
+      body: JSON.stringify({ target_dir: targetDir, mb_link: mbLink || null, staged }),
     }),
   /** Record the release's full tracklist on the album, so a PARTIAL import
    *  can grey out the tracks that never came in. Empty tracks clears it. */
@@ -3053,34 +2959,6 @@ export const api = {
         body: JSON.stringify({ keys: keys ?? null }),
       },
       900000
-    ),
-
-  // ── Cloudflare solver (server/solver.py) ──────────────────────────────
-  /** Installed? running? which URL, and where did it come from? */
-  solver: () => json<{ status: SolverStatus }>(`${API}/solver`),
-  /** Start the managed solver (or report that one already answers). Waits for
-   *  `/health`, so the budget covers a cold boot's browser launch. */
-  solverStart: () =>
-    json<{ ok: boolean; message: string; status: SolverStatus }>(
-      `${API}/solver/start`, { method: "POST" }, 180000
-    ),
-  /** Stop the solver THIS app started; a sidecar or a hand-run one stays. */
-  solverStop: () =>
-    json<{ ok: boolean; message: string; status: SolverStatus }>(
-      `${API}/solver/stop`, { method: "POST" }, 60000
-    ),
-  /** Write the card's own settings: the autostart switch, and/or the URL
-   *  override for a solver this machine does not run. Omitted fields are left
-   *  alone, so the switch never blanks an override and vice versa. */
-  solverConfig: (body: { enabled?: boolean; url?: string }) =>
-    json<{ ok: boolean; message: string; status: SolverStatus }>(
-      `${API}/solver/config`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      },
-      30000
     ),
 
   /** Upload a cover. No track/tracks → the album cover; `track` → that file's
@@ -3739,7 +3617,7 @@ export const api = {
   /** Import genres for a set of album/track paths.
 
    *  `sources` picks which providers to ask — the wizard's two per-source
-   *  buttons pass one each (MusicBrainz, RateYourMusic); omitted asks every
+   *  buttons pass one each (MusicBrainz, the configured AI tier); omitted asks every
    *  configured source in order. `per_source`/`notes` report what each source
    *  contributed and why one stayed silent. */
   genresImport: (paths: string[], limit?: number, sources?: string[], staged = false) =>
@@ -3826,17 +3704,13 @@ export const api = {
     if (p.seedArtist) q.set("seed_artist", p.seedArtist);
     return json<DiscoverRecommended>(`${API}/discover/recommended?${q}`, undefined, 60000);
   },
-  /** What the online providers RANK for one window and one kind. Rows are not
-   *  merged across providers (a chart's rank is its data), so each row names
-   *  its provider, its rank and its own score — and `sources` says which
-   *  providers can answer THIS window at all. 90 s: a chart walks every source
-   *  (RateYourMusic's scrape included) and the answer is TTL-cached. */
   discoverCharts: (p: { period: ChartPeriod; kind: DiscoverKind; source?: string; limit?: number }) => {
     const q = new URLSearchParams({ period: p.period, kind: p.kind });
     if (p.source) q.set("source", p.source);
     if (p.limit != null) q.set("limit", String(p.limit));
     return json<DiscoverCharts>(`${API}/discover/charts?${q}`, undefined, 90000);
   },
+
 
   /** The LIBRARY's own most-played rows for one window (`GET /api/top`) —
    *  this user's play history, counted server-side, never a provider's chart.
@@ -3939,62 +3813,17 @@ export const api = {
   /** Remove the jar (the mode setting is untouched). */
   youtubeCookiesDelete: () =>
     json<YoutubeCookies>(`${API}/youtube/cookies`, { method: "DELETE" }),
-  /** The stored RateYourMusic credential: the cookie names it holds, in the
-   *  order they are sent, no values. */
-  rymCookies: () => json<RymCookies>(`${API}/rym/cookies`),
-  /** Save the rateyourmusic.com cookies of a pasted or dropped cookies.txt
-   *  into `rym_cookie` (the credential the RYM scraper already reads). The
-   *  server validates it IS a Netscape cookie file first, so junk comes back
-   *  as a 400 instead of replacing a credential that worked — and a
-   *  well-formed export holding no RYM cookie stores nothing at all
-   *  (`stored: 0`) rather than clearing it. */
-  rymCookiesSave: (text: string) =>
-    json<RymCookiesSaveReply>(`${API}/rym/cookies`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text }),
-    }, 60000),
-  /** The stored Album of the Year credential: the cookie names it holds, in
-   *  the order they are sent, no values. */
-  aotyCookies: () => json<AotyCookies>(`${API}/aoty/cookies`),
-  /** Save the albumoftheyear.org cookies of a pasted or dropped cookies.txt
-   *  into `aoty_cookie`, mirroring `rymCookiesSave` — the `cf_clearance` pair
-   *  is what lets the site answer instead of challenging. */
-  aotyCookiesSave: (text: string) =>
-    json<AotyCookiesSaveReply>(`${API}/aoty/cookies`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text }),
-    }, 60000),
-  /** The browsers this machine has a signed-in profile for, with the
-   *  User-Agent each one sends — `GET /api/cookies/browsers`. The panel offers
-   *  these as "read it from <browser>" instead of asking for an export. */
-  cookieBrowsers: () =>
-    json<CookieBrowsers>(`${API}/cookies/browsers`),
-  /** Read one source's credential out of a browser the user is already signed
-   *  in to — `POST /api/cookies/{source}/from-browser`. The server asks the
-   *  yt-dlp it ships for that browser's cookies, keeps only the ones this
-   *  source is sent, stores them AND that browser's User-Agent (Cloudflare
-   *  binds a `cf_clearance` to the UA that earned it, so the two travel
-   *  together). Answers with the stored list, like `cookieList`. */
-  cookiesFromBrowser: (source: "rym" | "aoty", browser: string) =>
-    json<CookieFromBrowserReply>(`${API}/cookies/${source}/from-browser`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ browser }),
-    }, 240000),
-  /** The cookies ONE cookie login stores, with each cookie's own comment —
-   *  `GET /api/cookies/{source}` (server/api_cookies.py). The same shape for
-   *  the yt-dlp jar (`youtube`) and the RYM (`rym`) and AOTY (`aoty`)
-   *  credentials, so one panel draws all three. Never carries a cookie value. */
-  cookieList: (source: "youtube" | "rym" | "aoty") =>
+  /** The cookies the yt-dlp jar stores, with each cookie's own comment —
+   *  `GET /api/cookies/{source}` (server/api_cookies.py). Never carries a
+   *  cookie value. */
+  cookieList: (source: "youtube") =>
     json<CookieList>(`${API}/cookies/${source}`),
   /** Write (or, with an empty `comment`, clear) one cookie's comment. The
    *  cookie is named by its IDENTITY — domain, path, name — so the note follows
    *  the cookie across a re-import instead of the line it sat on. Answers with
    *  the fresh list. */
   cookieComment: (
-    source: "youtube" | "rym" | "aoty",
+    source: "youtube",
     body: { domain: string; path: string; name: string; comment: string }
   ) =>
     json<CookieList>(`${API}/cookies/${source}/comments`, {
@@ -4220,7 +4049,7 @@ export const api = {
       body: JSON.stringify({ accept }),
     }, 30000),
   soulseekTestLog: (username: string, files: { filename: string; size: number }[]) =>
-    json<{ ok: boolean; threshold: number; logs: { file: string; score: number | null; checksum: string | null; detail: string | null }[] }>(`${API}/soulseek/test-log`, {
+    json<{ ok: boolean; threshold: number; logs: { file: string; score: number | null; checksum: string | null; accuraterip: string | null; detail: string | null }[] }>(`${API}/soulseek/test-log`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ username, files }),

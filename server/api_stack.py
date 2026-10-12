@@ -171,7 +171,7 @@ _GROUP_KEYS = {
     "auditing": ("grade_check_audit", "grade_check_flac_md5",
                  "grade_check_log_checksum",
                  "grade_check_accuraterip", "grade_check_log_grade"),
-    "links": ("grade_check_mb_links", "grade_check_rym_links"),
+    "links": ("grade_check_mb_links",),
     "covers": ("grade_check_cover", "grade_check_cover_crop",
                "grade_check_sidecar_cover"),
     # The formatting family is named by what it compares, not by what it
@@ -239,7 +239,7 @@ RELAXED_OFF = frozenset((
     "grade_check_lyrics_blank_lines", "grade_check_cue_blank_lines",
     "grade_check_filename_case", "grade_check_ext_case",
     "grade_check_excess_tags", "grade_check_alias_excess",
-    "grade_check_mb_links", "grade_check_rym_links",
+    "grade_check_mb_links",
     "grade_check_replaygain", "grade_check_album_description",
     "grade_check_artist_image", "grade_check_artist_description",
 ))

@@ -39,6 +39,7 @@ through `/api/stream?download=1`.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import queue
@@ -47,11 +48,17 @@ import subprocess
 import tempfile
 import threading
 import time
+from email.utils import formatdate
 from typing import Callable, Iterator, Sequence
+from urllib.parse import quote
 
+import anyio
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import (FileResponse, PlainTextResponse, Response,
+                               StreamingResponse)
 from pydantic import BaseModel
+from starlette.background import BackgroundTask
+from starlette.datastructures import Headers
 
 from mlo import load_config
 
@@ -353,22 +360,178 @@ def iter_bulk_body(
             reader.close()
 
 
-def full_body_response(path: str, media_type: str) -> FileResponse:
+def _content_disposition(filename: str) -> str:
+    """``Content-Disposition: attachment`` for *filename*, RFC 6266-style: a
+    plain name stays readable, anything else is percent-encoded."""
+    quoted = quote(filename)
+    if quoted != filename:
+        return f"attachment; filename*=utf-8''{quoted}"
+    return f'attachment; filename="{filename}"'
+
+
+def _parse_single_range(value, size):
+    """The ``(start, end)`` a single ``bytes=`` range names.
+
+    ``None`` means "serve the whole body" (an absent, malformed or multi-part
+    range — a player asks for one at a time, and the whole file is a legal
+    answer to any Range). ``"unsatisfiable"`` is a range that starts past the
+    end, which owes a 416.
+    """
+    text = str(value).strip()
+    if not text.lower().startswith("bytes="):
+        return None
+    first = text[len("bytes="):].strip().split(",")[0].strip()
+    if "-" not in first:
+        return None
+    a, _, b = first.partition("-")
+    a, b = a.strip(), b.strip()
+    try:
+        if not a:
+            if not b:
+                return None
+            length = int(b)
+            if length <= 0:
+                return "unsatisfiable"
+            return (max(size - length, 0), size - 1)
+        start = int(a)
+        end = int(b) if b else size - 1
+    except ValueError:
+        return None
+    if start > end or start >= size:
+        return "unsatisfiable"
+    return (start, min(end, size - 1))
+
+
+class SharedFileResponse(Response):
+    """``FileResponse``'s job, over a handle that SHARES DELETE.
+
+    The installed starlette's ``FileResponse`` opens the path itself (it runs
+    ``os.stat`` and ``anyio.open_file`` on ``path``, so it refuses a file
+    object), which is exactly what the long-lived media routes must NOT do: a
+    plain ``open`` denies ``os.replace`` for the whole playback, and the owner
+    hit it rating a track mid-play (see ``mlo.atomic.open_shared_read``). So
+    the route opens the handle itself — with delete sharing — and hands it
+    here.
+
+    Same observable behaviour as ``FileResponse``: the stat headers, a single
+    ``Range`` answered with 206, ``Accept-Ranges`` where the route advertises
+    it, and the handle held for the whole body (the point of it). ``close()``
+    releases the handle; it is also the response's own ``BackgroundTask``, so a
+    cancelled stream closes it too.
+    """
+
+    chunk_size = 64 * 1024
+
+    def __init__(self, fh, stat_result, *, media_type=None, headers=None,
+                 filename=None, allow_range=True):
+        self.fh = fh
+        self.stat_result = stat_result
+        self.allow_range = bool(allow_range)
+        base = f"{stat_result.st_mtime}-{stat_result.st_size}"
+        self.etag = f'"{hashlib.md5(base.encode(), usedforsecurity=False).hexdigest()}"'
+        static = {str(k): str(v) for k, v in (headers or {}).items()}
+        static.setdefault("last-modified", formatdate(stat_result.st_mtime, usegmt=True))
+        static.setdefault("etag", self.etag)
+        if filename is not None:
+            static.setdefault("content-disposition", _content_disposition(filename))
+        # The wire headers are rebuilt in __call__ (content-length and
+        # content-range depend on the request's Range), but the static ones
+        # also live on ``self.headers`` so the response reads like FileResponse.
+        self._declared = [(k.encode("latin-1"), v.encode("latin-1"))
+                          for k, v in static.items()]
+        super().__init__(content=b"", media_type=media_type, headers=static)
+        self.background = BackgroundTask(self.close)
+
+    def close(self):
+        try:
+            self.fh.close()
+        except OSError:
+            pass
+
+    def _if_range_ok(self, value) -> bool:
+        value = str(value).strip()
+        return (value == self.etag
+                or value == formatdate(self.stat_result.st_mtime, usegmt=True))
+
+    async def __call__(self, scope, receive, send):
+        size = int(self.stat_result.st_size)
+        start, end, status = 0, size - 1, 200
+        request_headers = Headers(scope=scope)
+        rng = request_headers.get("range") if self.allow_range else None
+        if_range = request_headers.get("if-range") if self.allow_range else None
+        if rng and if_range is not None and not self._if_range_ok(if_range):
+            rng = None
+        if rng:
+            parsed = _parse_single_range(rng, size)
+            if parsed == "unsatisfiable":
+                await PlainTextResponse(
+                    "Range Not Satisfiable", status_code=416,
+                    headers={"content-range": f"bytes */{size}"})(scope, receive, send)
+                return
+            if parsed:
+                start, end = parsed
+                status = 206
+        headers = list(self._declared)
+        headers.append((b"content-length", str(end - start + 1).encode("latin-1")))
+        if status == 206:
+            headers.append((b"content-range",
+                            f"bytes {start}-{end}/{size}".encode("latin-1")))
+        if self.media_type and b"content-type" not in {k for k, _ in headers}:
+            headers.append((b"content-type", self.media_type.encode("latin-1")))
+        await send({"type": "http.response.start", "status": status, "headers": headers})
+        if scope.get("method", "").upper() == "HEAD":
+            await send({"type": "http.response.body", "body": b"", "more_body": False})
+            return
+        await anyio.to_thread.run_sync(self.fh.seek, start)
+        remaining = end - start + 1
+        while remaining > 0:
+            data = await anyio.to_thread.run_sync(
+                self.fh.read, min(self.chunk_size, remaining))
+            if not data:
+                break
+            remaining -= len(data)
+            await send({"type": "http.response.body", "body": data,
+                        "more_body": remaining > 0})
+
+
+def shared_file_response(path: str, media_type: str, *, headers=None,
+                         filename=None, allow_range=True) -> SharedFileResponse:
+    """Serve *path* from a handle that SHARES DELETE, so a tag rename onto it
+    lands while the response streams.
+
+    This is what the LONG-LIVED media routes use — the player's stream, the
+    video stream, and the download variants — because their handle lives for
+    the whole playback/download and a non-sharing one would deny every tag
+    write to the file for that whole time (mlo.atomic.open_shared_read has the
+    owner's exact error). A short-lived response (a cover, a thumbnail) keeps
+    the plain ``FileResponse``: it opens and closes inside one request, so
+    there is no window to fix.
+    """
+    from mlo.atomic import open_shared_read
+    fh = open_shared_read(path)
+    try:
+        stat_result = os.fstat(fh.fileno())
+    except OSError:
+        fh.close()
+        raise
+    return SharedFileResponse(fh, stat_result, media_type=media_type,
+                              headers=headers, filename=filename,
+                              allow_range=allow_range)
+
+
+def full_body_response(path: str, media_type: str) -> SharedFileResponse:
     """`path` as ONE 200 body, whatever the request asked for.
 
     Starlette's FileResponse honours a Range header because a player wants
     206s; Cache Storage refuses them, so the Range header is dropped from the
     request the body is built from and the response says `Accept-Ranges: none`
     — no client is told a range is available when answering with one would
-    break the cache that asked.
+    break the cache that asked. The body is read from a SHARED handle for the
+    same reason the stream route uses one (a download is long-lived too).
     """
-
-    class _FullBody(FileResponse):
-        async def __call__(self, scope, receive, send):
-            await super().__call__(without_range(scope), receive, send)
-
-    return _FullBody(path, media_type=media_type,
-                     headers={"Accept-Ranges": "none", **_NO_TRANSFORM})
+    return shared_file_response(path, media_type,
+                                headers={"Accept-Ranges": "none", **_NO_TRANSFORM},
+                                allow_range=False)
 
 
 def encoded_response(src: str, args: Sequence[str], ext: str, media_type: str,
@@ -386,8 +549,6 @@ def encoded_response(src: str, args: Sequence[str], ext: str, media_type: str,
     (`/api/track/export`) and the download rendition below differ only in
     which codec table and which media type they pass.
     """
-    from starlette.background import BackgroundTask
-
     from mlo.subproc import run_tool
     from mlo.tools import detect_all_tools
 

@@ -65,10 +65,16 @@ except OSError:
 
 from mlo import atomic                      # noqa: E402
 from mlo.audio import AudioFile             # noqa: E402
+from mlo import pending as pending_tags     # noqa: E402
 from mlo.paths import (app_data_dir, library_root,  # noqa: E402
                        load_pending, save_pending)
 from server import interrupt_recovery, job_locks, script_runners  # noqa: E402
 import mlo.paths as _paths                                           # noqa: E402
+
+# This test drives the pending-write drain itself (section 1e): the automatic
+# fire-and-forget attempt an enqueue starts would otherwise race these checks
+# from a background thread. Nothing else in the suite depends on it.
+pending_tags._attempt_soon = lambda: None
 
 # This test's library IS in the OS temp dir, which the app warns about on
 # every resolution (a one-off stderr line per call): the warning is about a
@@ -558,13 +564,195 @@ else:
             proc.kill()
             proc.wait(timeout=30)
         if os.name == "nt":
-            check("a holder that will not let go fails the write with the honest message",
+            check("a holder that will not let go fails the write, and the change is QUEUED",
                   af.error is not None and "has it open" in af.error
-                  and "nothing was written" in af.error, str(af.error))
-            check("...and the track keeps its original bytes",
+                  and "QUEUED" in af.error, str(af.error))
+            check("the queued change is recorded for a later drain",
+                  any(e["path"] == os.path.normpath(held_path)
+                      for e in pending_tags.pending_entries()),
+                  str(pending_tags.pending_entries()))
+            check("...and the track keeps its original bytes for now",
                   read(held_path) == original)
         check("...and no temp file is left behind",
               leftover_temps(retry_album) == [], str(leftover_temps(retry_album)))
+
+# ---------------------------------------------------------------------------
+# 1e. playback never blocks a tag write; a write that cannot land is queued
+# ---------------------------------------------------------------------------
+section("1e. a tag write lands while the app streams the file, or is queued")
+
+# The owner's report: rating a track WHILE IT PLAYS failed the tag write. The
+# media routes used to serve through a plain open (share read+write, NOT
+# delete), so os.replace onto the file was denied for the whole playback. They
+# now open with FILE_SHARE_DELETE (mlo.atomic.open_shared_read) and the writer
+# has mlo.atomic.replace_over_open_handle — together those let the write land
+# while the stream keeps reading its own (old) bytes. A holder that does NOT
+# share delete is handled by mlo.pending: the op is queued and drained later.
+from mlo.atomic import open_shared_read, replace_locked        # noqa: E402
+from server import api_media                                   # noqa: E402
+
+# 1e starts from a clean queue (1d left its own held write owed).
+try:
+    os.remove(pending_tags.queue_path())
+except OSError:
+    pass
+
+stream_album = os.path.join(music, "Artists", "Streaming Artist", "Streaming Album")
+os.makedirs(stream_album, exist_ok=True)
+STREAM_TRACK = os.path.join(stream_album, "01 - Playing.flac")
+stream_built = (make_track(STREAM_TRACK, 3) if FFMPEG else False)
+if not stream_built:
+    check("a fixture for the mid-playback write was built", False, "needs ffmpeg")
+else:
+    original = read(STREAM_TRACK)
+
+    # ---- the mechanism: a delete-sharing handle lets the write land ---------
+    handle = open_shared_read(STREAM_TRACK)
+    af = AudioFile(STREAM_TRACK)
+    wrote = af.set_tag("ALBUM", "Rated while playing")
+    check("a tag write LANDS while a shared-read handle holds the file",
+          wrote and AudioFile(STREAM_TRACK).get_tag("ALBUM") == "Rated while playing",
+          str(af.error))
+    check("the READER keeps the old bytes until it closes (the stream is whole)",
+          handle.read(len(original)) == original)
+    handle.close()
+
+    # ---- a PLAIN open is what the fix is about: it denies the rename --------
+    # MEASURED 2026-10-12 (Windows 11 26200): MoveFileEx refuses a replace onto
+    # ANY open destination, so a bare os.replace is denied even for the shared
+    # handle — which is why the writer moves the old file out of the name first
+    # (replace_over_open_handle), an operation the shared handle permits.
+    scratch = os.path.join(stream_album, "02 - Scratch.flac")
+    made_scratch = make_track(scratch, 2)
+
+    def _staged(blob):
+        t = atomic.new_temp(scratch)
+        with open(t, "wb") as fh:
+            fh.write(blob)
+        return t
+
+    if made_scratch:
+        t = _staged(b"new bytes")
+        plain = open(scratch, "rb")
+        deny = None
+        try:
+            os.replace(t, scratch)
+        except OSError as e:
+            deny = getattr(e, "winerror", None)
+        finally:
+            plain.close()
+            if os.path.exists(t):
+                os.remove(t)
+        if os.name == "nt":
+            check("a PLAIN open denies a bare os.replace onto the file (WinError 5)",
+                  deny == 5, f"winerror={deny}")
+        else:
+            check("(POSIX: a rename over an open file is allowed)", deny is None)
+
+        # A holder that shares NOTHING still makes the app's rename rule give
+        # up honestly — that is the write mlo.pending must queue, not lose.
+        original_scratch = read(scratch)
+        t = _staged(b"a queued write must not land over a plain holder")
+        plain = open(scratch, "rb")
+        gave_up = False
+        try:
+            replace_locked(t, scratch, attempts=1, delay=0)
+        except PermissionError:
+            gave_up = True
+        finally:
+            plain.close()
+            atomic._discard(t)
+        if os.name == "nt":
+            check("a PLAIN holder makes the rename rule give up (no data touched)",
+                  gave_up and read(scratch) == original_scratch)
+        else:
+            check("(POSIX: the plain holder does not block; the write lands)",
+                  not gave_up and read(scratch) != original_scratch)
+
+        # ... while the SAME rule lands over the shared handle.
+        t = _staged(b"landed while streaming")
+        handle = open_shared_read(scratch)
+        landed = False
+        try:
+            replace_locked(t, scratch, attempts=1, delay=0)
+            landed = True
+        finally:
+            handle.close()
+        check("the rename rule LANDS while the shared-read handle streams",
+              landed and read(scratch) == b"landed while streaming")
+
+    # ---- the route itself serves from that handle --------------------------
+    from server import main as server_main                     # noqa: E402
+    resp = server_main.stream(path=STREAM_TRACK)
+    check("GET /api/stream serves from a delete-sharing handler, not FileResponse",
+          isinstance(resp, api_media.SharedFileResponse), type(resp).__name__)
+    t = _staged(b"replaced mid-response")
+    landed_mid = False
+    try:
+        replace_locked(t, STREAM_TRACK, attempts=1, delay=0)
+        landed_mid = True
+    finally:
+        resp.close()
+    check("a write LANDs against the route's own open handle",
+          landed_mid and read(STREAM_TRACK) == b"replaced mid-response")
+
+    # ---- a write that still cannot land is QUEUED, then drained -------------
+    # Windows only: a plain (non-delete-sharing) holder is what DENIES the
+    # rename there — on POSIX a rename over an open file is allowed, so there
+    # is nothing to queue.
+    held_track = os.path.join(stream_album, "03 - Held.flac")
+    if os.name != "nt":
+        check("(POSIX: an open file never denies the rename, so nothing queues)",
+              make_track(held_track, 2) and
+              AudioFile(held_track).set_tag("ALBUM", "no holder can stop this"))
+    elif make_track(held_track, 2):
+        holder_py = os.path.join(music, "hold_noshare.py")
+        with open(holder_py, "w", encoding="utf-8") as fh:
+            fh.write("import sys, time\n"
+                     "fh = open(sys.argv[1], 'rb')\n"
+                     "print('HELD', flush=True)\n"
+                     "time.sleep(float(sys.argv[2]))\n"
+                     "fh.close()\n")
+        proc = subprocess.Popen([sys.executable, holder_py, held_track, "20"],
+                                stdout=subprocess.PIPE, text=True)
+        proc.stdout.readline()
+        af = AudioFile(held_track)
+        ok = af.set_tag("ALBUM", "Queued while held")
+        check("a write a NON-sharing holder denies reports QUEUED, not lost",
+              not ok and af.error is not None and "QUEUED" in af.error,
+              str(af.error))
+        key = os.path.normpath(held_track)
+        check("...and the change is recorded in the persistent queue",
+              any(e["path"] == key and e["ops"] for e in pending_tags.pending_entries()),
+              str(pending_tags.pending_entries()))
+        check("the file is untouched while it is held",
+              AudioFile(held_track).get_tag("ALBUM") in (None, ""))
+        proc.kill()
+        proc.wait(timeout=30)
+        summary = pending_tags.drain(now=time.time() + pending_tags.INTERVAL_S + 1)
+        check("a drain writes the queued change once the holder lets go",
+              summary["written"] >= 1
+              and AudioFile(held_track).get_tag("ALBUM") == "Queued while held",
+              str(summary))
+        check("...and the owed change is cleared",
+              not any(e["path"] == key for e in pending_tags.pending_entries()),
+              str(pending_tags.pending_entries()))
+
+    # ---- an op whose file has vanished is dropped, not retried forever -----
+    gone = os.path.join(stream_album, "99 - Gone.flac")
+    pending_tags.enqueue(gone, [{"op": "set_tag", "name": "ALBUM", "value": "x"}])
+    check("an op for a file that no longer exists is queued",
+          any(e["path"] == os.path.normpath(gone)
+              for e in pending_tags.pending_entries()))
+    summary = pending_tags.drain(now=time.time() + 1)
+    check("a drain DROPS the op for the vanished file (stale, not failed)",
+          summary["dropped"] >= 1
+          and not any(e["path"] == os.path.normpath(gone)
+                      for e in pending_tags.pending_entries()),
+          str(summary))
+
+    check("the mid-playback work left no temp file behind",
+          leftover_temps(stream_album) == [], str(leftover_temps(stream_album)))
 
 # ---------------------------------------------------------------------------
 # 2. An interrupted run is recoverable, and says so

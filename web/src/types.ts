@@ -27,7 +27,6 @@ export interface AlbumMeta {
   MUSICBRAINZ_ALBUMID?: string | null;
   MUSICBRAINZ_ALBUMARTISTID?: string | null;
   MUSICBRAINZ_RELEASEGROUPID?: string | null;
-  RATEYOURMUSIC_ALBUM?: string | null;
   MEDIA?: string | null;
   /** Every country the release was released in. One code on most files, a
    *  list ("US; CA") on the ones tagged from a release group's events — the
@@ -81,9 +80,6 @@ export interface TrackTags {
   MUSICBRAINZ_ARTISTID?: string | null;
   MUSICBRAINZ_TRACKID?: string | null;
   MUSICBRAINZ_RELEASEGROUPID?: string | null;
-  RATEYOURMUSIC_ALBUM?: string | null;
-  RATEYOURMUSIC_TRACK?: string | null;
-  RATEYOURMUSIC_ARTIST?: string | null;
   CATALOGNUMBER?: string | null;
   LABEL?: string | null;
   RELEASETYPE?: string | null;
@@ -1912,9 +1908,9 @@ export interface SourceHealth {
   provides?: string;
   needs: string[];
   /** The subset of `needs` whose absence does NOT stop this source: it has a
-   *  second route (RateYourMusic's archived snapshot, MusicBrainz's own links).
-   *  A row with these still prompts for the key — they upgrade the read — but
-   *  is `ok` rather than `skipped` while they are unset. */
+   *  second route (MusicBrainz's own links). A row with these still prompts
+   *  for the key — they upgrade the read — but is `ok` rather than `skipped`
+   *  while they are unset. */
   optional_needs?: string[];
   configured: boolean;
   status: "ok" | "skipped" | "fail";

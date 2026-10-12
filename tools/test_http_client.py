@@ -127,7 +127,7 @@ def main():
     # ---- the shared client keeps no cookie jar --------------------------
     # The per-call client `httpx.get` built dropped response cookies with
     # itself, so a shared client must not accumulate a session (a cookie one
-    # user's RYM session obtained would ride along on another user's request).
+    # caller obtained would ride along on another caller's request).
     seen = []
 
     def cookie_handler(request):
@@ -150,7 +150,7 @@ def main():
        f"cookies ({seen[0].get('cookie')!r})")
     ok(seen[1].get("cookie") == "mine=1",
        f"httpx: a caller's OWN per-request cookie is still sent "
-       f"({seen[1].get('cookie')!r}) — RYM's pasted jar is untouched")
+       f"({seen[1].get('cookie')!r}) — a caller's own jar is untouched")
 
     if skipped:
         print(f"\n{passed} check(s) passed, {len(skipped)} skipped")

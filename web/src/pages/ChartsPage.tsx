@@ -78,7 +78,7 @@ export default function ChartsPage() {
     staleTime: 60_000,
     retry: false,
   });
-  // The providers: slow (a source chain, RateYourMusic's scrape included),
+  // The providers: slow (a source chain, each provider its own client),
   // TTL-cached server-side, so a page being read does not re-walk it.
   const onQ = useQuery({
     queryKey: ["discoverCharts", period, kind],

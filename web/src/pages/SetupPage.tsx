@@ -131,16 +131,16 @@ export default function SetupPage() {
   // follows the bind address), and that is the desktop app's built-in backend:
   // it listens on 127.0.0.1 for its own window, so demanding a password there
   // would be asking the user to lock a door that opens onto nothing. A server
-  // bound to a network address keeps the requirement — the email/rym/hash
-  // rules below are unchanged — because there the password is the only thing
+  // bound to a network address keeps the requirement — the email/hash rules
+  // below are unchanged — because there the password is the only thing
   // deciding who can read the library.
   const localOnly = auth?.gate === false;
   const accountMissing = !!auth && !auth.has_password && !localOnly;
 
   // Seeded — and RE-seeded — from the saved config: the Sources panel on the
-  // step before this one writes keys of its own (the RYM cookie, the provider
-  // orders) through its own endpoint, and a draft seeded once would send those
-  // stale values back as changes on the next save.
+  // step before this one writes keys of its own (the provider orders, the
+  // cookie jars) through its own endpoint, and a draft seeded once would send
+  // those stale values back as changes on the next save.
   //
   // The re-seed is per key: a control the user has since typed in keeps what
   // was typed, and one still showing the value that just changed underneath it
@@ -666,11 +666,10 @@ export default function SetupPage() {
           )}
 
           {step.panel === "sources" && (
-            // The rows that ASK for a key, and nothing else: the credentials
-            // list plus the links row the RYM cookie hangs off (the same
-            // endpoint files it under `links`, not `credentials`). The
-            // providers themselves are triaged in Settings → Sources, which
-            // draws this same panel unfolded.
+            // The rows that ASK for a key, and nothing else: the credential
+            // rows the Sources endpoint files under `credentials` and `links`.
+            // The providers themselves are triaged in Settings → Sources,
+            // which draws this same panel unfolded.
             <SourcesPanel only={["credentials", "links"]} askKeys />
           )}
 

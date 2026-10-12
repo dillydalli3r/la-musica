@@ -12,7 +12,27 @@
  *
  *  A phone or tablet shell keeps the document path too: `IN_MOBILE_SHELL` is a
  *  device whose window already IS the screen, and `core:window`'s fullscreen
- *  commands are desktop-shaped. */
+ *  commands are desktop-shaped.
+ *
+ *  A MAXIMIZED window is the trap, and it is the owner's own report
+ *  (2026-10-12: "the fullscreen button doesn't fullscreen the window … black
+ *  space at the bottom … and the top bar is still visible"). Asking tao for
+ *  borderless fullscreen while the window is maximized moves and sizes the
+ *  WINDOW to the monitor, but Windows keeps the MAXIMIZED state: the CLIENT
+ *  area stays the work area (measured on the host shell at 1920×1040 of a
+ *  1080p screen — the bottom 40 px of the window then paint as nothing, the
+ *  black band in their screenshot) and NO resize fires, which is why the
+ *  in-page title bar never hides (`TitleBar` only re-reads the state on a
+ *  resize). The same call from a restored window measured innerHeight 1080 and
+ *  `--mlo-titlebar-h` 0, i.e. the real thing. So entering fullscreen RESTORES
+ *  the window first (`unmaximize`), and leaving puts the maximized state BACK —
+ *  tao's exit restores the placement it captured when fullscreen began, which
+ *  is the restored one by then, so without that the reader's maximized window
+ *  would come back as a small window. Both commands are granted to this page
+ *  in `desktop/src-tauri/capabilities/default.json` (`allow-unmaximize` /
+ *  `allow-maximize`); without them the page's answer is a refusal, which is
+ *  exactly what a missing permission looked like here.
+ */
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { IN_MOBILE_SHELL, IN_TAURI } from "../api";
 
@@ -21,14 +41,39 @@ import { IN_MOBILE_SHELL, IN_TAURI } from "../api";
  *  as their source of truth. */
 export const WINDOW_FULLSCREEN = IN_TAURI && !IN_MOBILE_SHELL;
 
+/** Entering fullscreen from a MAXIMIZED window unmaximizes it (see the module
+ *  doc), and this remembers that so LEAVING can restore the maximized state:
+ *  tao's exit re-applies the placement it saved when fullscreen began, which
+ *  is the restored placement. Set on every ENTER (false when the window was
+ *  not maximized — a stale `true` must not maximize a window nobody
+ *  maximized), cleared on every leave. */
+let wasMaximized = false;
+
+async function goFullscreen(on: boolean): Promise<void> {
+  const win = getCurrentWindow();
+  if (on) {
+    wasMaximized = await win.isMaximized().catch(() => false);
+    if (wasMaximized) await win.unmaximize().catch(() => { /* gone */ });
+    await win.setFullscreen(true).catch(() => { /* gone */ });
+    return;
+  }
+  await win.setFullscreen(false).catch(() => { /* gone */ });
+  if (wasMaximized) {
+    wasMaximized = false;
+    await win.maximize().catch(() => { /* gone */ });
+  }
+}
+
 /** Flip the window fullscreen and give back the state it landed in. Reading it
  *  afterwards rather than assuming the toggle took is what keeps the button
- *  honest on a platform that clamps a request. */
+ *  honest on a platform that clamps a request — and when even the READ is
+ *  refused (a shell without the permission), the honest answer is the state it
+ *  started from, never an optimistic flip. */
 export async function toggleWindowFullscreen(): Promise<boolean> {
   const win = getCurrentWindow();
   const on = await win.isFullscreen().catch(() => false);
-  await win.setFullscreen(!on).catch(() => {});
-  return win.isFullscreen().catch(() => !on);
+  await goFullscreen(!on);
+  return win.isFullscreen().catch(() => on);
 }
 
 /** Leave window fullscreen if it is on — the viewer's own close path, which
@@ -36,7 +81,7 @@ export async function toggleWindowFullscreen(): Promise<boolean> {
 export function leaveWindowFullscreen(): void {
   const win = getCurrentWindow();
   win.isFullscreen()
-    .then((fs) => { if (fs) return win.setFullscreen(false); })
+    .then((fs) => { if (fs) return goFullscreen(false); })
     .catch(() => { /* gone */ });
 }
 

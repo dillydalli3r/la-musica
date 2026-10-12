@@ -2,7 +2,7 @@
 
 The app has two cookie-bearing credentials, and they are the same file:
 yt-dlp's jar on disk (``server/api_youtube.py``, ``<music>/.mlo/data/
-cookies.txt``) and RateYourMusic's `Cookie` header (``server/api_rym.py``,
+cookies.txt``) and YouTube's exported jar (``server/api_youtube.py``,
 a header string in the ``rym_cookie`` config key). Both accept a browser
 extension's ``cookies.txt`` export, so the file reading, the strictness, the
 sentences a refusal uses and the per-cookie notes all live HERE, once — a
@@ -96,7 +96,7 @@ MAX_COMMENT_CHARS = 300
 
 # The empty-file sentence is the one thing this module says that a caller may
 # want to replace: the RYM import answers an empty paste with its own version
-# (see server/api_rym.py). It names neither credential, because it is the
+# (see server/api_youtube.py). It names no credential, because it is the
 # shared one.
 EMPTY_FILE = ("the file is empty — export cookies.txt from the browser you "
               "are signed in with, and paste it here")
@@ -233,7 +233,7 @@ def parse_cookie_file(text: str, with_values: bool = False):
     ``cookies`` is ``[(domain, name)]`` — or ``[(domain, name, value)]`` when
     *with_values* is set, for the caller that re-serves the file's cookies as a
     `Cookie` header rather than as a jar of their own (the RateYourMusic
-    credential, server/api_rym.py) — one entry per accepted line. The value is
+    credential, server/api_youtube.py) — one entry per accepted line. The value is
     only ever returned when asked for: it is a live credential, and the yt-dlp
     jar's own state is names, counts and domains.
     """

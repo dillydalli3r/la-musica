@@ -497,6 +497,36 @@ eq(row3["partial_reason"], "2 of 4 tracks of the album's tracklist are in this f
    "and it says so with the new count")
 eq(hashlib.sha256(open(log_path, "rb").read()).hexdigest(), log_before,
    "the album's own .log was NOT replaced by the arriving copy (writers fill)")
+# The refusal is REPORTED, not silent: the reply carries what the album kept,
+# so a surface can say what happened instead of implying the whole upload
+# landed. Before this, the caller got the same "saved" list either way.
+check([os.path.basename(p) for p in body3.get("kept") or []] == ["CD-1.log"],
+      "the reply names the file the album already had (kept, not replaced)",
+      str(body3.get("kept")))
+check(body3.get("collided") is False,
+      "a file landing IN its album is not a collision", str(body3.get("collided")))
+
+print("== a same-named file with DIFFERENT bytes is kept, not replaced ==")
+# The album's own copy wins even when the arriving file is NOT these bytes (a
+# re-rip's log, a sheet somebody edited). The fill-never-overwrite rule is the
+# album's, so the collision comes back as a fact the reply carries — and the
+# upload succeeds: an album that keeps its own bytes is not a failed import.
+original_log = open(os.path.join(RIP, "CD-1.log"), "rb").read()
+with open(os.path.join(RIP, "CD-1.log"), "wb") as fh:
+    fh.write(original_log + b"\r\nEdited by whoever sent this second copy\r\n")
+try:
+    res6 = upload(NAMES[0], [NAMES[0]], extra=["CD-1.log"])
+finally:
+    with open(os.path.join(RIP, "CD-1.log"), "wb") as fh:
+        fh.write(original_log)
+check(res6.status_code == 200, "the upload still succeeds", res6.text[:200])
+eq(hashlib.sha256(open(log_path, "rb").read()).hexdigest(), log_before,
+   "the album's own .log was NOT replaced by the DIFFERENT arriving copy")
+eq(sorted(os.path.basename(p) for p in res6.json().get("kept") or []),
+   sorted([NAMES[0], "CD-1.log"]),
+   "…and the reply names every collision it kept")
+check(os.path.isfile(os.path.join(album_dir, NAMES[0])),
+      "…the track the album already held is still there too")
 
 # --------------------------------------------------------------------------- #
 # 4. script 9 does not regenerate a partial disc's .accurip into a lie

@@ -6,38 +6,36 @@ What this pins:
   * `mlo.genres.normalize_genres` is THE list policy: every name resolved to
     MusicBrainz's own spelling when MusicBrainz publishes it (and kept verbatim
     when it does not — dropping what a source said would be worse), duplicates
-    collapsed on the casefolded name, every name another member of the SAME
-    list sits under dropped (the old app-written family slot, wherever it sits),
-    and the result capped at the configured count — nothing is ever added;
+    collapsed on the casefolded name, the result capped at the configured count
+    (the FIRST N names, the source's own rank) and kept in the source's own
+    order — nothing is ever added and nothing is dropped for being a parent;
   * `format_genres` / `split_stored` round-trip: the rendered
     "rock / shoegaze" string reads back as exactly the names inside it, which
     is what lets the display spelling (and the one another tagger stores) be
     read back;
-  * `issues` reports the structural problems — too many, a duplicate, a parent
-    name stored beside its own child anywhere in the list, spacing, a name
-    MusicBrainz does not publish — and nothing else;
-  * `server.genre_ai.infer_genres` asks for at most `count - 1` SPECIFIC
-    genres (the family is the app's to put in front of them), names the
-    release and the fetched candidates in its prompt, states the family rule,
-    honours `ai_genre_research` (own knowledge vs re-rank only) and
+  * `issues` reports the structural problems — too many, a duplicate, spacing
+    and a name MusicBrainz does not publish — and nothing else; neither the
+    order nor a parent stored beside its own child is a defect any more;
+  * `server.genre_ai.infer_genres` asks for at most `count` genres (every slot
+    is a genre now), names the release and the fetched candidates in its
+    prompt, honours `ai_genre_research` (own knowledge vs re-rank only) and
     `ai_genre_effort` (passed to the shared client as `ai_effort`), parses a
     JSON object, a fenced block, a bare array and a plain newline list, and
     returns None — never raising — for an unconfigured client, a failing call,
-    a refusal, a single-family answer, a name it invented, and `count == 1`
-    (no specific slot exists then);
+    a refusal, an answer with no usable name, and a name it invented;
   * the same question is answered from the disk cache on the second call, so
     an import that re-runs costs no second request;
   * `mlo.autotag.trim_genres` routes through `normalize_genres`: a
-    case-insensitive duplicate and a non-canonical spelling are fixed as well
-    as the overflow, an ancestor stored beside its own child is dropped, its
-    return value is still "how many values were removed", and a list that is
-    already canonical is never rewritten;
+    case-insensitive duplicate and a non-display spelling are fixed as well as
+    the overflow, the surviving names KEEP the file's own order (the source's
+    rank), its return value is still "how many values were removed", and a list
+    that is already in shape is never rewritten;
   * `server.integrations.genre_chain` asks the AI only as a LAST RESORT: when
     the sources already fill every slot the writer would write, no model call
     is spent (a mere disagreement between them is not a reason to call it);
     only when they cannot fill the slots does the call happen, and a usable
-    answer REPLACES the merged source list — canonicalized into the full
-    specific/family list — names "ai" among the path's contributing sources,
+    answer REPLACES the merged source list — canonicalized but in the model's
+    own order — names "ai" among the path's contributing sources,
     and leaves every field alone when the setting is off or the ranker raises.
 
 Run:  python tools/test_genre_format.py   (exit 0 = pass, 1 = failure)
@@ -62,52 +60,63 @@ from server import integrations as intg
 # --------------------------------------------------------------------------- #
 # The names a source STATED, resolved to MusicBrainz's own genre names and
 # CAPITALIZED for display (mlo.genres.display_name): the vocabulary keeps them
-# lowercase, a tag is read by a person. Nothing is ever ADDED — the level above
-# a name is derived at read time (G.path_of), never written into the list.
-assert G.normalize_genres(["shoegaze", "rock"]) == ["Shoegaze"]
+# lowercase, a tag is read by a person. Nothing is ever ADDED and nothing is
+# dropped for being a parent (the owner's call, 2026-10-12) — the ORDER is the
+# source's own (MusicBrainz publishes an entity's genres by vote count,
+# most-voted first), and the cap keeps the FIRST N names (count defaults to 2:
+# the top two genres the track's own entity lists).
+assert G.normalize_genres(["shoegaze", "rock"]) == ["Shoegaze", "Rock"]
 assert G.normalize_genres(["idm", "shoegaze"]) == ["IDM", "Shoegaze"]
 assert G.normalize_genres(["shoegaze", "dream pop", "idm"], 3) == [
     "Shoegaze", "Dream Pop", "IDM"]
 # Spelling is resolved to the vocabulary's own first: any casing of "Shoegaze"
 # resolves (the vocabulary lookup folds case) and the alias table runs too.
-assert G.normalize_genres(["Shoegaze", "Rock"]) == ["Shoegaze"]
-# …and a parent name is dropped whatever slot the source put it in: the rule is
-# about the pair, never about position.
-assert G.normalize_genres(["Rock", "Shoegaze"]) == ["Shoegaze"]
+assert G.normalize_genres(["Shoegaze", "Rock"]) == ["Shoegaze", "Rock"]
+# A parent name the source stated is kept exactly where the source put it: the
+# rule about parents is GONE and no name is derived above another.
+assert G.normalize_genres(["Rock", "Shoegaze"]) == ["Rock", "Shoegaze"]
 # Duplicates collapse on the casefolded name, the FIRST spelling surviving.
 assert G.normalize_genres(["Shoegaze", "shoegaze", "SHOEGAZE", "IDM"], 3) == [
     "Shoegaze", "IDM"]
 assert G.normalize_genres(["shoegaze", "  ", "idm"], 3) == ["Shoegaze", "IDM"]
-# The cap decides how many SPECIFIC names fit, and only they are counted.
+# The cap keeps the FIRST N names and only reorders nothing: they ARE the
+# source's rank, so the tail goes and the head stays in place.
 assert G.normalize_genres(["shoegaze", "dream pop"], 3) == [
     "Shoegaze", "Dream Pop"]
 assert G.normalize_genres(["shoegaze", "dream pop"], 2) == ["Shoegaze", "Dream Pop"]
 assert G.normalize_genres(["shoegaze", "dream pop"], 1) == ["Shoegaze"]
+# A 3-name list with count=2 keeps the first two, in the source's order.
+assert G.normalize_genres(["shoegaze", "dream pop", "idm"], 2) == [
+    "Shoegaze", "Dream Pop"]
 # A genre with no known parent sits at the top of its own chain…
 assert G.normalize_genres(["Nonsense"]) == ["Nonsense"]
 # …and an unrecognised name is kept VERBATIM rather than dropped: the grade
 # check flags it (mlo.grader.grade_check_genre_vocab), which is honest.
 assert G.normalize_genres(["shoegaze", "Nonsense"], 3) == [
     "Shoegaze", "Nonsense"]
-# The OLD family slot — what this app wrote before the parent became a view —
-# loses exactly the name it invented, WHEREVER the source put it. Order stops
-# mattering, and a head no member of the list sits under survives.
-assert G.normalize_genres(["rock", "shoegaze"]) == ["Shoegaze"]
-assert G.normalize_genres(["shoegaze", "rock"]) == ["Shoegaze"]      # either order
-assert G.normalize_genres(["pop", "art pop"]) == ["Art Pop"]
-assert G.normalize_genres(["art pop", "pop"]) == ["Art Pop"]
+# A parent+child pair a source really stated is kept VERBATIM, in the source's
+# own order — the old app-written family slot is no longer a thing, and neither
+# name is invented or removed.
+assert G.normalize_genres(["rock", "shoegaze"]) == ["Rock", "Shoegaze"]
+assert G.normalize_genres(["shoegaze", "rock"]) == ["Shoegaze", "Rock"]
+assert G.normalize_genres(["pop", "art pop"]) == ["Pop", "Art Pop"]
+assert G.normalize_genres(["art pop", "pop"]) == ["Art Pop", "Pop"]
 assert G.normalize_genres(["pop", "art pop", "synth-pop"], 3) == [
-    "Art Pop", "Synth-Pop"]
+    "Pop", "Art Pop", "Synth-Pop"]
 assert G.normalize_genres(["pop", "art pop", "house"], 3) == [
-    "Art Pop", "House"]                                             # three names
+    "Pop", "Art Pop", "House"]                                      # three names
+# Two orders of the same pair are two lists now: there is no canonical order,
+# so the source's own survives whichever way it arrived.
 assert G.normalize_genres(["trip hop", "alternative rock"], 3) == [
-    "Trip Hop", "Alternative Rock"]                                 # no ancestor edge
+    "Trip Hop", "Alternative Rock"]
+assert G.normalize_genres(["alternative rock", "trip hop"], 3) == [
+    "Alternative Rock", "Trip Hop"]                           # either arrival order
 assert G.normalize_genres(["rock", "jazz"]) == ["Rock", "Jazz"]
 assert G.normalize_genres(["rock"]) == ["Rock"]
 # An unrecognised name is neither resolved nor dropped: it is kept verbatim and
-# never treated as an ancestor of anything.
+# never treated as an ancestor of anything (it lands after the known names).
 assert G.normalize_genres(["Nonsense", "Pop", "Electropop"], 3) == [
-    "Electropop", "Nonsense"]
+    "Pop", "Electropop", "Nonsense"]
 # A single stored value another tagger joined is read as the names inside it.
 assert G.split_stored("Rock; Shoegaze") == ["Rock", "Shoegaze"]
 assert G.split_stored("shoegaze / rock") == ["shoegaze", "rock"]
@@ -131,29 +140,33 @@ assert G.normalize_genres([G.format_genres(["shoegaze", "dream pop"])]) == [
 # --------------------------------------------------------------------------- #
 # 3) issues(): the structural problems, and nothing else
 # --------------------------------------------------------------------------- #
-assert G.issues(["shoegaze", "idm"]) == []
-assert G.issues(["shoegaze", "dream pop", "idm"], 3) == []
+assert G.issues(["idm", "shoegaze"]) == []
+assert G.issues(["dream pop", "idm", "shoegaze"], 3) == []
 assert G.issues([]) == ["missing"]
-assert G.issues(["shoegaze", "dream pop", "idm"], 2) == ["too many (3 > 2)"]
+assert G.issues(["dream pop", "idm", "shoegaze"], 2) == ["too many (3 > 2)"]
 assert G.issues(["shoegaze", "shoegaze"]) == ["duplicate"]
-# There is no ORDER rule beyond this: a GENRE tag holds specific names and the
-# level above them is derived, so position means nothing — EXCEPT that a parent
-# name stored beside its own child is the old app-written family SLOT, a
-# derived value standing in for a fact, and it is reported WHEREVER it sits.
-assert G.issues(["shoegaze", "idm"]) == []
-assert G.issues(["rock", "shoegaze"]) == ["derived parent genre stored"]
-assert G.issues(["shoegaze", "rock"]) == ["derived parent genre stored"]
-assert G.issues(["Pop", "Art Pop"]) == ["derived parent genre stored"]
-assert G.issues(["art pop", "pop"]) == ["derived parent genre stored"]
-assert G.issues(["pop", "art pop", "house"], 3) == ["derived parent genre stored"]
-assert G.issues(["rock", "jazz"]) == []          # a head nobody sits under
-assert G.issues(["trip hop", "alternative rock"]) == []   # no ancestor edge
+# ORDER carries no defect any more: the list IS the source's rank, so no grader
+# can say what another order should have been; a PARENT sitting beside its own
+# child is just another name too (the owner's call, 2026-10-12). What is left
+# is a repeat, an unknown spelling, spacing and too many names.
+assert G.issues(["Alternative Rock", "Trip Hop"]) == []
+assert G.issues(["Trip Hop", "Alternative Rock"]) == []          # either order
+assert G.issues(["rock", "shoegaze"]) == []
+assert G.issues(["shoegaze", "rock"]) == []                      # …and reversed
+assert G.issues(["Pop", "Art Pop"]) == []
+assert G.issues(["art pop", "pop"]) == []
+assert G.issues(["pop", "art pop", "house"], 3) == []
+assert G.issues(["jazz", "rock"]) == []
+assert G.issues(["alternative rock", "trip hop"]) == []
 assert G.issues(["rock"]) == []
+# …and only a REPEAT fails, wherever it sits and whatever its casing.
+assert G.issues(["rock", "rock"]) == ["duplicate"]
+assert G.issues(["Shoegaze", "shoegaze"]) == ["duplicate"]
 # A name the vocabulary does not publish is its own line (the writer kept it,
 # the grader reports it). Surrounding and internal whitespace is not a problem
 # this reports: the names arrive already cleaned by split_stored/_clean.
 assert G.issues(["Nonsense"]) == ["not a known genre: Nonsense"]
-assert G.issues(["shoegaze", "  idm  "]) == []
+assert G.issues(["idm", "  shoegaze  "]) == []
 assert G.issues("  shoegaze  ") == []
 
 # --------------------------------------------------------------------------- #
@@ -210,8 +223,8 @@ try:
     genre_ai._config = lambda: dict(CFG)
     got = genre_ai.infer_genres(**FIXED)
     prompt = chat.calls[0][2]
-    # count=3 means two SPECIFIC slots: the model's own order is the ranking,
-    # each name is resolved to MusicBrainz's spelling, and no family comes back.
+    # count=3 asks the model for up to three names: the model's own order is
+    # the ranking and each name is resolved to MusicBrainz's spelling.
     assert got == ["post-britpop", "shoegaze"], got
     # The prompt names the release, the candidates and the shape asked for.
     assert "Radiohead" in prompt and "OK Computer" in prompt, prompt
@@ -258,12 +271,14 @@ try:
     got, _ = ask(FakeChat('{"genres": ["Shoegaze", "shoegaze", "", "IDM"]}'))
     assert got == ["shoegaze", "idm"], got
 
-    # A FAMILY is not a specific genre, so a family answer is dropped — the app
-    # appends the family itself. With count=2 there is one specific slot.
+    # A broad name the model answers with is a PUBLISHED genre like any other
+    # now: nothing above a name is derived or dropped (2026-10-12), so it is
+    # kept, in the model's own order, and simply capped. The prompt still asks
+    # for specifics, but the answer is not policed for breadth.
     got, _ = ask(FakeChat('{"genres": ["Rock", "Shoegaze"]}'), count=2)
-    assert got == ["shoegaze"], got
+    assert got == ["rock", "shoegaze"], got
     got, _ = ask(FakeChat('{"genres": ["Rock"]}'), count=2)
-    assert got is None, got
+    assert got == ["rock"], got
 
     # A name that is neither a MusicBrainz genre nor a fetched candidate is an
     # invention, not an answer…
@@ -304,7 +319,7 @@ finally:
     shutil.rmtree(TMP, ignore_errors=True)
 
 # --------------------------------------------------------------------------- #
-# 5) trim_genres: the duplicate and the spelling go, the derived slot too
+# 5) trim_genres: the duplicate and the spelling go, the source's ORDER stays
 # --------------------------------------------------------------------------- #
 _MISSING = object()
 
@@ -334,51 +349,59 @@ class FakeAudioFile:
         return True
 
 
-# A case-insensitive duplicate goes as well as the overflow; nothing is added.
+# A case-insensitive duplicate goes; the surviving names keep the order they
+# were stored in — never re-sorted — and the overflow is trimmed too.
 af = FakeAudioFile(["shoegaze", "shoegaze", "dream pop"])
 removed = autotag.trim_genres(af, 2)
 assert removed == 1, removed
 assert af.values == ["Shoegaze", "Dream Pop"], af.values
 assert af.written == ["Shoegaze", "Dream Pop"], af.written
 
-# In shape but lowercase: nothing is REMOVED, and the capitalization the tag is
-# read with (mlo.genres.display_name) is what this pass writes — the same
-# "canonical form" job scripts 8 and 10 have always done for spacing and
-# duplicates. A container write happens once per file, never per run.
+# In shape but lowercase: nothing is REMOVED, and what this pass writes is the
+# display spelling (mlo.genres.display_name) in the file's own order — the
+# order is the source's rank now (2026-10-12) and is never casefold-sorted. A
+# container write happens once per file, never per run.
 af = FakeAudioFile(["shoegaze", "idm"])
 assert autotag.trim_genres(af, 2) == 0
 assert af.written == ["Shoegaze", "IDM"], af.written
 
-# Already canonical (capitalized, no derived slot): nothing is removed and the
+# Already in shape (display spelling, no repeat): nothing is removed and the
 # container is never rewritten.
+af = FakeAudioFile(["IDM", "Shoegaze"])
+assert autotag.trim_genres(af, 2) == 0
+assert af.written is _MISSING, af.written
+
+# …and the SAME names in another order are just as in shape: there is no
+# canonical order any more, so the file is left alone rather than re-sorted.
 af = FakeAudioFile(["Shoegaze", "IDM"])
 assert autotag.trim_genres(af, 2) == 0
 assert af.written is _MISSING, af.written
 
 # Over the cap with no duplicates: the overflow goes (three names in, two
-# stored, one value removed).
+# stored, one value removed) and the FIRST N survive untouched.
 af = FakeAudioFile(["shoegaze", "dream pop", "post-britpop"])
 assert autotag.trim_genres(af, 2) == 1
 assert af.values == ["Shoegaze", "Dream Pop"], af.values
 
-# The old family slot goes too, and is counted like any other value: the lead
-# is a named head the rest of the list already sits under.
+# A parent stated beside its own child is left alone and counted like any other
+# value now: nothing above a name is derived or dropped, so three in-shape
+# names are only re-rendered, never trimmed.
 af = FakeAudioFile(["rock", "shoegaze", "dream pop"])
-assert autotag.trim_genres(af, 3) == 1
-assert af.values == ["Shoegaze", "Dream Pop"], af.values
-# …while a head a source really stated, with nothing under it, stays put.
+assert autotag.trim_genres(af, 3) == 0
+assert af.values == ["Rock", "Shoegaze", "Dream Pop"], af.values
+# …and a head a source really stated, in the source's order, is not rewritten.
 af = FakeAudioFile(["Rock", "Jazz"])
 assert autotag.trim_genres(af, 3) == 0
 assert af.written is _MISSING, af.written
 
-# One stored value holding a joined list is split and canonicalized — the file
-# another tagger wrote comes out as the names it holds, one field each.
+# One stored value holding a joined list is split — the file another tagger
+# wrote comes out as the names it holds, one field each, in its own order.
 af = FakeAudioFile(["Shoegaze; IDM"])
 assert autotag.trim_genres(af, 2) == 0     # two names in, two names out
 assert af.values == ["Shoegaze", "IDM"], af.values
 # Under the cap, one joined value is split into the names it holds and the
-# canonical casing is written back: the count is unchanged (nothing removed),
-# the stored form is now the app's own.
+# display form is written back: the count is unchanged (nothing removed), the
+# stored form is now the app's own.
 af = FakeAudioFile(["shoegaze; idm"])
 assert autotag.trim_genres(af, 5) == 0
 assert af.written == ["Shoegaze", "IDM"], af.written
@@ -431,9 +454,9 @@ try:
     def fake_infer(*, artist, album, title="", track_path="", candidates=None,
                    count=3, extra=None):
         seen.append((artist, album, title, list(candidates or []), count, extra))
-        # Specifics only, in the model's own casing and order (and with a blank
-        # and a repeat on purpose): the chain canonicalizes them into the full
-        # list, capitalized for the tag. Nothing is appended.
+        # In the model's own casing and order (and with a blank and a repeat
+        # on purpose): the chain canonicalizes them, keeping that order and
+        # capitalizing for the tag. Nothing is appended.
         return ["Post-Britpop", "shoegaze", "", "shoegaze"]
 
     genre_ai.infer_genres = fake_infer
@@ -469,29 +492,6 @@ try:
     assert settled["per_track"][(1, 1)] == ["shoegaze", "dream pop",
                                             "post-britpop"], settled["per_track"]
     assert settled["per_track_sources"][(1, 1)] == ["musicbrainz"], settled["per_track_sources"]
-
-    # (c) Two sources whose top genres DISAGREE, but whose merged list fills
-    # the cap: a filled list is SETTLED, so the model is not asked to
-    # second-guess it — the merge keeps the ask order, top-tier provider first.
-    seen.clear()
-
-    def two_sources(source, *a, **k):
-        rows = {"musicbrainz": ["shoegaze", "dream pop"],
-                "albumoftheyear": ["post-britpop"]}
-        names = rows.get(source)
-        return {intg._ALL_TRACKS: {"level": "album", "genres": names}} if names else {}
-
-    intg._genre_source_answers = two_sources
-    tie = intg.genre_chain(artist="Test Artist", album="Test Album",
-                           release=RELEASE, files=[],
-                           cfg=dict(ON, genre_sources=["musicbrainz",
-                                                       "albumoftheyear"],
-                                    aoty_cookie="cf_clearance=a"))
-    assert seen == [], "a filled list is settled — the sources' answer stands"
-    assert tie["per_track"][(1, 1)] == ["shoegaze", "dream pop",
-                                        "post-britpop"], tie["per_track"]
-    assert tie["per_track_sources"][(1, 1)] == ["musicbrainz", "albumoftheyear"], \
-        tie["per_track_sources"]
 
     # The setting off: the ranker is not reached at all, and every field is
     # what the sources alone produced (the merge keeps their spelling — the
