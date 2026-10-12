@@ -229,13 +229,22 @@ AOTY_CRITICS_ONLY = (
 
 print("== scale conversion ==")
 # The one conversion, on every scale a source publishes. 4.18/5 = 83.6 -> 84;
-# 4.75/5 = 95; 2.5/5 = 50; 4.125/5 = 82.5 -> 83 (halves UP, never to even).
+# The conversion TRUNCATES to the app's grid (0.05 on the 0-5 scale): the tag
+# never holds a number ABOVE what the source published, because the number a
+# reader sees is that grid value printed to one decimal and a rounding UP would
+# carry it past the tenth's boundary the source itself rounded to. The grid
+# points ARE those boundaries, so truncating makes the displayed one decimal
+# equal the source's own (R358/R358e): 4.54 -> 90 -> "4.5" (not 91 -> "4.6"),
+# 4.45 -> 89 -> "4.5", 4.35 -> 87 -> "4.4" — the last one is exactly ON the
+# grid, and the tolerance in `scale_to_100` is what keeps binary noise from
+# truncating it to 86 ("4.3", a wrong number).
 eq(wr.scale_to_100(5), 100, "5/5 is 100")
 eq(wr.scale_to_100(0), 0, "0/5 is 0")
-eq(wr.scale_to_100(4.35), 87, "4.35/5 is 87")
-eq(wr.scale_to_100(4.18), 84, "4.18/5 is 84")
+eq(wr.scale_to_100(4.35), 87, "4.35/5 is 87 (on the grid, not 86 from float noise)")
+eq(wr.scale_to_100(4.18), 83, "4.18/5 is 83 (the grid value at or below it)")
 eq(wr.scale_to_100(2.5), 50, "2.5/5 is 50")
-eq(wr.scale_to_100(4.125), 83, "a half rounds UP (82.5 -> 83, never 82)")
+eq(wr.scale_to_100(4.125), 82, "82.5 truncates to 82 — a source's 4.125 reads "
+                              "\"4.1\" at one decimal, and 83 would read \"4.2\"")
 eq(wr.scale_to_100(5.5), 100, "above the scale clamps to 100, it is not dropped")
 eq(wr.scale_to_100(None), None, "no value is no conversion")
 eq(wr.scale_to_100("nonsense"), None, "a non-number is no conversion")
@@ -261,10 +270,10 @@ eq(wr.rym_rating_from_html(RYM_HTML_AVG_ONLY), {"value": 3.77, "count": 0},
    "…and the visual avg_rating is the fallback, with no count stated")
 eq(wr.rym_rating_from_html("<html><body>nothing</body></html>"), None,
    "a page that states no rating parses to None")
-eq(wr.parse_rateyourmusic(RYM_HTML), (84, 49366, "RateYourMusic"),
-   "the RYM page HTML -> 84, weighted by its 49 366 votes")
+eq(wr.parse_rateyourmusic(RYM_HTML), (83, 49366, "RateYourMusic"),
+   "the RYM page HTML -> 83 (its own 4.18 truncated to the grid)")
 eq(wr.parse_rateyourmusic({"rating": {"value": 4.18, "count": 49366}}),
-   (84, 49366, "RateYourMusic"),
+   (83, 49366, "RateYourMusic"),
    "…and the parsed answer the genre ladder hands over gives the same number")
 eq(wr.parse_rateyourmusic({"genres": ["art rock"]}), None,
    "an answer with no rating sub-dict is a miss")
@@ -297,8 +306,10 @@ eq(list(wr.ALBUM_SOURCES), ["rateyourmusic", "albumoftheyear", "musicbrainz"],
 eq(list(wr.TRACK_SOURCES), ["rateyourmusic", "albumoftheyear", "musicbrainz"],
    "…and all three answer for a track (an album answer may stand in)")
 
-eq(wr.parse_aoty(AOTY_HTML), (77, 152, "Album of the Year"),
-   "AOTY: the user score box, 0-100 as published, weighted by its ratings")
+eq(wr.parse_aoty(AOTY_HTML), (76, 152, "Album of the Year"),
+   "AOTY: the user score box read at AOTY's own precision (the anchor's exact "
+   "76.7), truncated to the app's grid — 77 would display \"3.9\" where the "
+   "site's own 76.7 is 3.8")
 eq(wr.parse_aoty(AOTY_CRITICS_ONLY), None,
    "…and the CRITIC score is never read as the user score")
 eq(wr.parse_aoty(""), None, "an empty page is a miss")
@@ -308,8 +319,8 @@ eq(wr.parse_aoty(""), None, "an empty page is a miss")
 eq(wr.parse_aoty({"genres": ["Alt-Country"],
                   "rating": {"value": 76.7, "count": 152},
                   "tracks": []}),
-   (77, 152, "Album of the Year"),
-   "the parsed AOTY album dict -> the same 77 the page states")
+   (76, 152, "Album of the Year"),
+   "the parsed AOTY album dict -> the same 76 (76.7 truncated)")
 eq(wr.parse_aoty({"genres": ["Alt-Country"], "rating": None, "tracks": []}),
    None, "an AOTY answer with no user score is a miss")
 eq(wr.parse_aoty_track({"title": "This Tornado Loves You",
@@ -327,7 +338,7 @@ eq(wr.parse_source("musicbrainz", MB_ALBUM, "album"), (95, 105, "MusicBrainz"),
 eq(wr.parse_source("musicbrainz", MB_TRACK_OWN, "track"), (84, 18, "MusicBrainz"),
    "…and is level-aware for a track")
 eq(wr.parse_source("albumoftheyear", AOTY_HTML, "album"),
-   (77, 152, "Album of the Year"),
+   (76, 152, "Album of the Year"),
    "…and reads an AOTY page through the same dispatch")
 eq(wr.parse_source("albumoftheyear", "2024-06: not an album page", "album"), None,
    "a payload with no user score contributes nothing")
@@ -500,7 +511,9 @@ clint = wr.track_rating("Gorillaz", "Clint Eastwood", "rec-mbid", {},
                         _clint_fetch,
                         album={"artist": "Gorillaz", "album": "Gorillaz",
                                "mbid": "rg-mbid"})
-eq(clint["value"], 91, "RYM's own 4.54 -> 91 (half-up once), not the mean's 92")
+eq(clint["value"], 90, "RYM's own 4.54 -> 90 (truncated to the grid), which "
+                        "prints \"4.5\" — the site's own one-decimal reading "
+                        "(91 would print 4.6, the double rounding the owner saw)")
 eq(clint["sources"], ["RateYourMusic"],
    "…and only the source whose number the file carries is named")
 eq(clint["asked"], ["rateyourmusic"],

@@ -6021,11 +6021,14 @@ def genres_import(req: GenreChainImportRequest):
 
 
 def _genre_path(name):
-    """The display form of a genre's derived hierarchy: "Pop › Synth-Pop".
+    """The display form of a genre's hierarchy chain: "Pop › Synth-Pop".
 
-    One name when nothing is known above it (a head, or a name outside the
-    vocabulary) — the view never invents a level. `mlo.genre_vocab.path_of`
-    is the single place the walk lives.
+    The NAME ITSELF is the last element (`mlo.genre_vocab.path_of` answers
+    "this name, and what is above it", head first), so a surface that prints
+    this beside the name must drop the tail — the wizard does, through
+    `genreParents` in `web/src/lib/genres.ts`. One name when nothing is known
+    above it (a head, or a name outside the vocabulary) — the view never
+    invents a level.
     """
     try:
         from mlo.genre_vocab import path_of
@@ -6047,10 +6050,12 @@ def genres_facets():
     MusicBrainz's own spelling (`mlo.genres.canonical`) and a stored value
     another tagger joined ("Rock / Shoegaze") counts as the two genres it
     names, exactly as the writers and the grader read it. Every row also
-    carries `path`: the DERIVED hierarchy above the name, head first
-    ("Electronic › House › Deep House") — the tag stores names, and this is
-    where each one sits, computed by `mlo.genre_vocab.path_of` rather than
-    read out of any file."""
+    carries `path`: the name WITH its chain above it, head first
+    ("Electronic › House › Deep House" is `deep house`'s row) — the tag stores
+    names, and this is where each one sits, computed by `mlo.genre_vocab
+    .path_of` rather than read out of any file. A reader that shows it BESIDE
+    the name drops the tail (`genreParents`), because printing the name twice
+    beside itself is what made the arrow read as a mystery."""
     from mlo.genres import canonical, split_stored
     from server import library as lib_mod
 

@@ -48,6 +48,9 @@ __all__ = [
     "CANONICAL_CASE",
     "CANONICAL_VALUES",
     "CD_MEDIA_VALUES",
+    "RATING_TAGS",
+    "RATING_SCALE_MAX",
+    "canonical_rating",
     "canonical_text",
     "canonical_value",
     "collapse_spacing",
@@ -55,6 +58,7 @@ __all__ = [
     "is_cd_media",
     "is_multiline",
     "join_list",
+    "rating_problem",
     "spacing_problem",
     "split_list",
 ]
@@ -248,6 +252,77 @@ def _title_code(part: str) -> str:
 
 # tag -> how its value is capitalised. Tags absent from this table have no
 # canonical form (and are what the free-text rule protects).
+# The rating tags, all on the app's own 0-100 scale (Picard's, one half-star =
+# 10): the listener's own RATING, script 24's WEBRATING and its album twin
+# (mlo/web_ratings.LEVEL_TAGS). Every one of them holds a WHOLE number — no
+# writer in this app emits anything else — so a value carrying a decimal point
+# is a SOURCE's score pasted in on the source's own scale (RateYourMusic's
+# "4.54" on a 0-5 scale, which every other tagger reads as 4.54/100), and a
+# formatter must not "fix" that by guessing which scale was meant.
+RATING_TAGS: Tuple[str, ...] = ("RATING", "WEBRATING", "ALBUMWEBRATING")
+RATING_SCALE_MAX = 100
+
+# A whole number with an optional sign and an optional ".0"-style tail: the
+# spellings that all mean the SAME rating ("91", "91.0", "+91"), which is what
+# makes the canonical rewrite safe. Anything else — a real fraction, a unit, a
+# thousands separator — is not a rating this app writes.
+_RATING_NUMBER_RE = re.compile(r"^[+-]?(?P<whole>\d{1,3})(?:\.0+)?$")
+
+
+def rating_problem(tag, value) -> str:
+    """Why *value* is not a rating this app writes for *tag*, or "" when it is.
+
+    The shape rule the grader and the writers share (spec R358e): a rating is a
+    WHOLE number 0-*RATING_SCALE_MAX* in its canonical spelling ("91" — no
+    decimal point, no sign). It says WHY, so a grade names what it found
+    instead of only that something is wrong, and it reports a merely
+    NON-CANONICAL spelling ("91.0", "+91") as well as a value that is not a
+    rating at all ("4.54" is another scale's score). Whitespace is not this
+    rule's business: `spacing_problem` owns it for every tag.
+    """
+    if _bare_tag(tag) not in RATING_TAGS:
+        return ""
+    text = "" if value is None else str(value).strip()
+    if not text:
+        return ""
+    canonical = canonical_rating(text)
+    if canonical is None:
+        if _RATING_NUMBER_RE.match(text):
+            return f"is outside 0-{RATING_SCALE_MAX}"
+        return "is not a whole number on the 0-100 scale"
+    if canonical != text:
+        return f"carries a decimal point or sign (expected {canonical})"
+    return ""
+
+
+def canonical_rating(value) -> Optional[str]:
+    """*value* as this app writes a rating, or None when it is not one.
+
+    "91", "91.0" and "+91" are one rating spelled three ways, and all of them
+    canonicalize to "91" — a pure spelling change, which is why a formatter may
+    make it (script 10 does, through `CANONICAL_CASE`). A value that is not a
+    whole number on the scale has NO canonical form: "4.54" is a different
+    scale's score and "910" is outside the scale, and script 24 (a re-fetch) is
+    what fixes those, never a guess. Idempotent, like every rule here.
+    """
+    text = "" if value is None else str(value).strip()
+    match = _RATING_NUMBER_RE.match(text)
+    if not match:
+        return None
+    whole = int(match.group("whole"))
+    if not 0 <= whole <= RATING_SCALE_MAX:
+        return None
+    return str(whole)
+
+
+def _rating_value(text: str) -> str:
+    """`canonical_rating` in the CANONICAL_CASE table's shape: the value
+    unchanged when it is not a rating at all (so an unknown value is never
+    coerced into a wrong one)."""
+    canonical = canonical_rating(text)
+    return text if canonical is None else canonical
+
+
 CANONICAL_CASE: Dict[str, Callable[[str], str]] = {
     # CLOSED vocabularies: matched case-insensitively, an unknown part kept.
     "MEDIA": _closed(MEDIA_VALUES),
@@ -259,6 +334,12 @@ CANONICAL_CASE: Dict[str, Callable[[str], str]] = {
     # CODE-SHAPED values, whose canonical form is the code's own casing.
     "RELEASECOUNTRY": _upper_code,
     "SCRIPT": _title_code,
+    # RATINGS: a whole number on the 0-100 scale, and the one spelling of it
+    # ("91.0" → "91"). A value that is not a rating is left alone (see
+    # `_rating_value`), which is what keeps the rewrite safe.
+    "RATING": _rating_value,
+    "WEBRATING": _rating_value,
+    "ALBUMWEBRATING": _rating_value,
 }
 
 # MLO's own spelling of a multi-value field (mlo.audio joins repeated fields
@@ -275,7 +356,6 @@ _SPACE_RUN = re.compile(r" {2,}")
 # (indentation, a blank line between verses) and no spacing or case rule may
 # reach inside them. Any value carrying a newline is treated the same way.
 _MULTILINE_TAGS = frozenset({"LYRICS", "UNSYNCEDLYRICS", "SYNCLYRICS"})
-
 
 def _bare_tag(tag) -> str:
     """The tag a stored key names, upper-cased.

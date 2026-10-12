@@ -499,7 +499,7 @@ group still renders (section *Other checks*).
 | `grade_check_genre_count` | Genre count per track | ON | at most `mb_genre_count` genres (default 2, max 3) — a ceiling, never a quota (`GENRE_COUNT`) |
 | `grade_check_genre_structure` | Genre structure | ON | no repeated name and no derived parent slot in `GENRE` (`GENRE_STRUCTURE`) — the tag holds what a source stated, and the level above a name is derived, never stored |
 | `grade_check_genre_vocab` | Genre vocabulary | ON | every name is one MusicBrainz publishes (`GENRE_VOCAB`); grading never rewrites the tag |
-| `grade_check_web_rating` | Web rating present | ON | `WEBRATING` (0-100) exists on every audio track (`WEBRATING_MISSING`) — the public verdict script 24 gathers, required per track like the genre beside it. The check **stands down** with `web_ratings_enabled` off (nothing gathers a rating, so nothing is failed for its absence) and never applies to a music-video container, which carries no `WEBRATING` tag |
+| `grade_check_web_rating` | Web rating present + in shape | ON | `WEBRATING` exists on every audio track (`WEBRATING_MISSING`) **and is a whole number 0-100** in its one spelling (`WEBRATING_FORMAT`; `ALBUMWEBRATING_FORMAT` when a file carries the album twin, judged only while it is there) — the public verdict script 24 gathers, required per track like the genre beside it. A source's own scale pasted in raw ("4.54") fails and names script 24; a stray decimal point ("91.0") is the same rating spelled differently and script 10/23 rewrite it (R358e). The check **stands down** with `web_ratings_enabled` off (nothing gathers a rating, so nothing is failed for its absence) and never applies to a music-video container, which carries no `WEBRATING` tag |
 | `grade_check_replaygain` | ReplayGain tags present | ON | opt-in per file: any `REPLAYGAIN_*` tag means all four must exist |
 | `grade_check_acoustid` | AcoustID tags required | ON | every audio track carries the `ACOUSTID_ID` + `ACOUSTID_FINGERPRINT` pair — neither half stored fails naming both, a half pair fails naming the missing one (`ACOUSTID_ID` / `ACOUSTID_FINGERPRINT`). `acoustid_api_key` is NOT needed (script 21 takes the fingerprint locally with fpcalc and reads the recording id off the file); the check stands down while `acoustid_enabled` is off, since then script 21 does nothing |
 | `grade_check_alias_needed` | Locale alias for names the locale cannot read | ON | a `TITLE` / `ARTIST` / `ALBUM` written in a script the configured `locale` does not read needs its alias tag — `TITLEALIAS` / `ARTISTALIAS` / `ALBUMALIAS`, in a spelling the app writes (`mlo.audio.alias_spelling_ok`: the bare tag, or the configured locale's own suffix). The rule is `server.integrations.alias_required` (the SAME answer the writers, the import's stamp and script 8's prescan ask), built on `mlo.lyrics_xlit`'s script reading (`non_latin_ratio` ≥ `_LATIN_THRESHOLD` and `dominant_script` ≠ latin) plus the locale's own script, so a Latin name — and a name in the locale's own script — is never graded or counted |
@@ -983,9 +983,12 @@ rating.
   table name is a real MusicBrainz genre and every chain ends on a head
   (`tools/test_genre_vocab.py`), a head has NO parent, and no parent is
   preferred to a wrong one. Read by: `/api/genres/facets` (each row carries
-  `path`, "Pop › Synth-Pop"), the browse buckets (`genre_category` files by
-  HEAD), the genre page's chips, the import wizard's per-track line, and the
-  recommendation shelves
+  `path` — the NAME with its chain above it, "Pop › Synth-Pop"), the browse
+  buckets (`genre_category` files by HEAD), the genre page's chips, the import
+  wizard's per-track row (which shows the PARENTS only, "under Hip Hop", since
+  a path printed beside the name repeats it: `genreParents` in
+  `web/src/lib/genres.ts` drops the tail, and each chip carries its own place
+  as its tooltip), and the recommendation shelves
 - **R39** — every name must exist in MusicBrainz's 2 202-name list
   (`mlo/_genre_names.py`, canonicalized through `mlo/genre_vocab.py`); an alias
   table folds the spellings sources emit (`rnb` → `r&b`, `synthpop` →
@@ -6932,7 +6935,15 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   number on the file is a score a reader can open the site and check. Every
   source is normalised to 0–100 by the ONE conversion (`scale_to_100`:
   MusicBrainz is 0–5 and ×20, RateYourMusic 0.5–5, Album of the Year already
-  0–100), rounded half-up exactly once, and the walk STOPS at the answer that
+  0–100), which TRUNCATES to the app's grid — the tag never holds a number
+  ABOVE what the source published. That is what makes the one-decimal display
+  equal to the source's own reading: the grid points (0.05) are exactly the
+  boundaries a one-decimal rounding can land on, so a value that sat just
+  under one can never be carried over it. RateYourMusic's 4.54 is stored as 90
+  and prints "4.5" (91 → "4.6" was the double rounding the owner reported);
+  the IEEE tolerance in `scale_to_100` (1e-9) keeps a score that IS on the grid
+  — 4.35/5 is exactly 87 — from truncating to one step low on binary noise.
+  The walk STOPS at the answer that
   settles the value: a source below the one that answered is not asked at all.
   Nothing is invented and a miss writes nothing: absence is not a zero.
   **NOT a mean.** The vote-count-weighted mean this replaced was unreproducible
@@ -6950,11 +6961,33 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   `server/tags_registry.py`, `server/library.py`), and the whole family is
   gated by `web_ratings_enabled` (`SCRIPT_GATES[24]` and the write-gate family
   switch both read it, so an install with it off neither asks nor writes).
-  On the WEB the tag is drawn at its own resolution: `web/src/lib/ratings.ts`
-  `webText` prints the 0-100 integer as 0-5 with ONE decimal when it lands on
-  a tenth (92 → "4.6") and TWO when it does not (91 → "4.55"), because `half`,
-  the star grid's writer, would put a SECOND rounding on a number that was
-  already rounded once.
+  On the WEB the tag is drawn at ONE decimal, rounded half-up (`web/src/lib/
+  ratings.ts` `webText`, applied to the rounded tenths of a unit — never to the
+  raw float, whose binary representation can print "4.5" for one value and
+  "4.6" for its neighbour): 89 → "4.5 Web", 92 → "4.6 Web", 78 → "3.9 Web".
+
+- **R358e — a rating on a file is a WHOLE number 0-100, and that SHAPE is
+  graded and canonicalised.** One rule, `mlo.tagtext.rating_problem` /
+  `canonical_rating`, covers `RATING`, `WEBRATING` and `ALBUMWEBRATING`
+  (`RATING_TAGS`): the grader asks `rating_problem` and the writers ask
+  `canonical_rating` through `CANONICAL_CASE`, so a value can never be wrong to
+  one of them and fine to the other.
+  * **A source's own scale is not this scale.** RateYourMusic's "4.54" is a
+    perfectly good 0-5 average and a meaningless 0-100 rating, and no formatter
+    may GUESS which scale it meant — `canonical_rating("4.54")` is None,
+    `canonical_text` leaves it exactly as it came, and grading fails it with
+    `WEBRATING_FORMAT` (or `ALBUMWEBRATING_FORMAT` on the album carrier, judged
+    only while a file carries one) naming the value found and script 24 as the
+    fixer. A value past the top of the scale ("910") fails the same way and says
+    so.
+  * **A stray decimal point IS the same rating.** "91.0" and "+91" canonicalize
+    to "91" (a pure spelling change), so script 10's canonical pass rewrites
+    them and the grade agrees — a formatted file passes, and a file that has not
+    been through the pass is flagged once.
+  On the web the readout is one decimal (R358), so the tag is the thing that
+  carries the extra precision and the grade is the thing that keeps it honest.
+  Pinned by `tools/test_grading_paths.py` (the rule, the two codes, the counted
+  check) and `tools/test_web_ratings.py` (the conversion's truncation).
 - **R358a — RateYourMusic leads the shipped sources, and all three are read
   LIVE.** `web_ratings_sources` ships
   `["rateyourmusic", "albumoftheyear", "musicbrainz"]` (`normalize_config`

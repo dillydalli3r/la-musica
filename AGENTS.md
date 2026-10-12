@@ -213,9 +213,17 @@ When they do ask for one:
   configured chain that answered — the order IS the hierarchy (RYM → AOTY →
   MusicBrainz), a TRACK-level answer beats an album-level one whoever stated
   it, and the walk STOPS there (`mlo.web_ratings.choose`), so the number is a
-  score a reader can open the site and check. All three answer per track
-  (AOTY's own album rows are its per-track scores); `*_SOURCE` names the one
-  source whose number the file carries. See spec R358/R358a/R358b.
+  score a reader can open the site and check. The tag holds a WHOLE number, and
+  the conversion TRUNCATES to the app's 0.05 grid (`scale_to_100`) so the
+  one-decimal readout equals the source's own reading (RYM's 4.54 → 90 →
+  "4.5"; rounding to 91 would show 4.6 — the double rounding the owner
+  reported). The SHAPE is graded and canonicalised through ONE rule
+  (`mlo.tagtext.rating_problem` / `canonical_rating`, spec R358e): a source's
+  own 0-5 score pasted in raw ("4.54") fails as `WEBRATING_FORMAT` and is
+  never "fixed" by a guess, while "91.0" is the same rating spelled
+  differently and script 10 rewrites it. All three answer per track (AOTY's
+  own album rows are its per-track scores); `*_SOURCE` names the one source
+  whose number the file carries. See spec R358/R358a/R358b.
 - **The chain is a graph: one album-lane step at a time, the free lane beside
   it.** `mlo.scripts.SCRIPT_DEPS`/`SCRIPT_LANES` + `run_chain(..., extra=...)`
   (spec R388). Every script that reads or writes the album's own files is

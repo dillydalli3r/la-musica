@@ -140,19 +140,21 @@ export function webRatingOf(raw: unknown): number | undefined {
   return Math.min(100, n) / 20;
 }
 
-/** A web rating WRITTEN OUT, at the resolution its tag really has.
+/** A web rating WRITTEN OUT for a reader: ONE decimal, rounded half-up.
  *
- *  `WEBRATING` is a 0-100 integer, so on this control's 0-5 scale its steps are
- *  0.05s: 91 is 4.55, 92 is 4.6, 83 is 4.15. `half` — the grid's own writer —
- *  would put 4.55 through a SECOND rounding (toFixed(1): "4.5" or "4.6"
- *  depending on the float) on a number that was already rounded once, when the
- *  source's score became that integer. So a value that lands on a tenth keeps
- *  one decimal and one that does not keeps two: the printed number is exactly
- *  the tag, which is exactly one source's own score (`mlo.web_ratings.choose`
- *  takes the first source in the chain that answered, never a blend). */
+ *  `WEBRATING` is a 0-100 integer, i.e. a 0-5 value in 0.05 steps, and the
+ *  number beside the stars is the number the source's own page rounds to: the
+ *  app stores the source's score TRUNCATED to its grid (`mlo.web_ratings
+ *  .scale_to_100`), so a value that sat just under a tenth's boundary can
+ *  never be carried over it by a second rounding — RYM's 4.54 is stored as 90
+ *  and prints "4.5", not "4.6" (MEASURED on the owner's own library,
+ *  2026-10-11). `toFixed` is applied to the ROUNDED hundredth of a unit, never
+ *  to the raw float, because `(4.55).toFixed(1)` depends on the binary
+ *  representation and can print "4.5" for one value and "4.6" for its
+ *  neighbour. */
 export function webText(value: number): string {
-  const hundredths = Math.round(value * 100);
-  return hundredths % 10 === 0 ? half(hundredths / 100) : (hundredths / 100).toFixed(2);
+  const tenths = Math.round(value * 10);
+  return (tenths / 10).toFixed(1);
 }
 
 /** The `*_SOURCE` tag as a tooltip wants it: the trimmed names, or undefined

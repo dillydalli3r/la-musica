@@ -34,6 +34,25 @@ export const GENRE_COUNT_MAX = 3;
 export const splitGenres = (value: unknown): string[] =>
   String(value ?? "").split(/[/;]/).map((g) => g.trim()).filter(Boolean);
 
+/** The chain ABOVE a genre name — its parents, and never the name itself.
+ *
+ *  `/api/genres/facets` publishes each name's whole path, top first and ENDING
+ *  ON THE NAME ("Hip Hop › Experimental Hip Hop"), because that is what
+ *  `mlo.genre_vocab.path_of` answers. A surface that prints the path right
+ *  beside the name therefore says the name TWICE and leaves the reader asking
+ *  what the arrow is for (the owner's own question, 2026-10-12) — so every
+ *  reader that shows "where this sits" next to the name itself takes the
+ *  parents from here: `under Hip Hop`, `under Electronic › House`, and nothing
+ *  at all for a name with no known parent (a family head, or a name outside
+ *  the vocabulary). */
+export function genreParents(path: unknown): string {
+  const parts = String(path ?? "")
+    .split("›")
+    .map((part) => part.trim())
+    .filter(Boolean);
+  return parts.slice(0, -1).join(" › ");
+}
+
 /** MusicBrainz's own spelling, as far as the browser can reproduce it.
  *
  *  The server is the authority (`mlo.genres.canonical` folds case, resolves

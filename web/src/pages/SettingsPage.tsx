@@ -1420,7 +1420,8 @@ export default function SettingsPage() {
     { k: "grade_check_mood", label: "Mood tag present", type: "bool" },
     { k: "grade_check_energy", label: "Energy tag present (0-100, with MOOD)", type: "bool" },
     { k: "grade_check_genre", label: "Genre tag present", type: "bool" },
-    { k: "grade_check_web_rating", label: "Web rating present (WEBRATING, per track)", type: "bool" },
+    { k: "grade_check_web_rating", label: "Web rating present + in shape (WEBRATING, per track)", type: "bool",
+      help: "Every audio track needs the public verdict script 24 gathers, on the app's 0-100 scale — and the VALUE must be a whole number in its one spelling (WEBRATING_FORMAT / ALBUMWEBRATING_FORMAT when a file carries it): a source's own score pasted in raw (RateYourMusic's 4.54 on a 0-5 scale) fails and names script 24 as the fixer, while a stray decimal point is the same rating spelled differently and the format pass rewrites it." },
     { k: "grade_check_sidecar_format", label: "Sidecar text files canonically formatted (.mb_expected, descriptions)", type: "bool" },
     {
       k: "grade_check_genre_count", label: "Genre count per track (at most mb_genre_count)", type: "bool",

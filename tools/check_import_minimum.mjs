@@ -570,6 +570,90 @@ try {
   await app2.close();
 }
 
+// --------------------------------------------------------------------------- #
+// The Genres step's per-track row, driven on the REAL page: the derived
+// PARENTS, never the name twice
+// --------------------------------------------------------------------------- #
+// The row used to print the facets `path`, which ENDS ON THE NAME ("Hip Hop ›
+// Experimental Hip Hop") right beside the chip that already says it — the
+// owner's question was "I don't understand the > purpose" (2026-10-12). The
+// line is the parents only now, prefixed to read as a relation ("under Hip
+// Hop"), and each chip carries its own place as a tooltip. `genreParents`
+// (web/src/lib/genres.ts) is what drops the tail.
+//
+// This is a BROWSER drive, not server rendering: the wizard fills its genre
+// state in an effect (React effects do not run under renderToString), so only
+// the live page shows the chips at all.
+const GENRE_LIBRARY = { artists: [{ name: "Daft Punk", albums: [{ path: ALBUM, tracks: [
+  { ...TRACKS[0], tags: { ...TRACKS[0].tags, GENRE: "Experimental Hip Hop" } },
+  { ...TRACKS[1], tags: { ...TRACKS[1].tags, GENRE: "Electropop" } },
+] }] }] };
+const FACETS = { genres: [
+  { name: "Experimental Hip Hop", count: 1, path: "Hip Hop › Experimental Hip Hop" },
+  { name: "Electropop", count: 1, path: "Pop › Electropop" },
+] };
+const app3 = await createServer({
+  configFile: path.join(webDir, "vite.config.ts"), root: webDir, logLevel: "error",
+  server: { host: "127.0.0.1", port: 8011, strictPort: false },
+});
+await app3.listen();
+const port3 = app3.httpServer.address().port;
+const browser3 = await chromium.launch();
+try {
+  const page = await (await browser3.newContext({ serviceWorkers: "block" })).newPage();
+  await page.route("**/sw.js", (route) => route.abort());
+  await page.route("**/api/**", (route) => {
+    const url = route.request().url();
+    const send = (body) => route.fulfill({
+      status: 200, contentType: "application/json", body: JSON.stringify(body) });
+    if (url.includes("/api/auth/status")) return send({ required: false, authenticated: true });
+    if (url.includes("/api/config"))
+      return send({ ...CONFIG, first_run_done: true, metadata_review: false });
+    if (url.includes("/api/library")) return send(GENRE_LIBRARY);
+    if (url.includes("/api/genres/facets")) return send(FACETS);
+    // The SHELL's own queries (the wizard mounts inside the app): a stub that
+    // answers `{}` for a list crashes the render (`sessionData.sessions is not
+    // iterable`), so the three list-shaped payloads are named.
+    if (url.includes("/api/import/sessions")) return send({ sessions: [] });
+    if (url.includes("/api/import/prompts")) return send({ prompts: [] });
+    if (url.includes("/api/auth/users"))
+      return send({ users: ["owner"], current: "owner", required: false });
+    return send({});          // every other payload this step reads: empty is fine
+  });
+  await page.goto(`http://127.0.0.1:${port3}/import?album=${encodeURIComponent(ALBUM)}&step=Genres`);
+  // Wait for the TITLE, not only for the chip: the parents come from the
+  // facets query, and a chip that exists a moment before that payload lands
+  // has no tooltip yet (the first run of this check read exactly that race).
+  await page.waitForFunction(
+    () => [...document.querySelectorAll("span.chip")].some((el) => /sits under Hip Hop/.test(el.title)),
+    { timeout: 20000 }).catch(() => {});
+  const row = await page.evaluate(() => ({
+    chips: [...document.querySelectorAll("span.chip")]
+      .filter((el) => /Experimental Hip Hop|Electropop/.test(el.textContent))
+      .map((c) => ({ text: c.textContent.trim(), title: c.title })),
+    // What a READER sees: innerText carries no attributes, so the tooltip's
+    // path cannot satisfy the "printed once" check below by accident.
+    text: document.body.innerText,
+  }));
+  check("the Genres step renders the track row with its chips", row.chips.length >= 2,
+        JSON.stringify(row.chips));
+  check("…and the row shows the derived PARENTS, prefixed as a relation "
+        + "(\"under Hip Hop\")", /under Hip Hop/.test(row.text),
+        row.text.replace(/\n+/g, " | ").slice(-260));
+  check("…never the whole path beside the name (the name is printed once)",
+        !/Hip Hop › Experimental Hip Hop/.test(row.text),
+        row.text.replace(/\n+/g, " | ").slice(-260));
+  check("…while each chip carries its own place as its tooltip",
+        row.chips.some((c) => c.text.startsWith("Experimental Hip Hop")
+                        && c.title.includes("sits under Hip Hop"))
+        && row.chips.some((c) => c.text.startsWith("Electropop")
+                          && c.title.includes("sits under Pop")),
+        JSON.stringify(row.chips));
+} finally {
+  await browser3.close();
+  await app3.close();
+}
+
 if (failures.length) {
   console.error(`[minimum] FAILED (${failures.length} of ${checks}):`);
   for (const f of failures) console.error("  - " + f);
@@ -579,6 +663,8 @@ console.log(`ok  the wizard's minimum entry mode shows the missing family's cont
   `collapses the rest behind one affordance that reveals it, leaves the ordinary ` +
   `wizard untouched, and runs the import chain — not the Run All order — from ` +
   `its Finish step; Done under a held claim completes on the album page with ` +
-  `an "already being finished" status (a 500 still shows an error); and a newly ` +
+  `an "already being finished" status (a 500 still shows an error); a newly ` +
   `staged album opens the Links step on an EMPTY release-id field, never the ` +
-  `previous album's, while its own tags still fill it (${checks} checks)`);
+  `previous album's, while its own tags still fill it; and the Genres step's ` +
+  `per-track row shows a genre's derived PARENTS ("under Hip Hop"), never the ` +
+  `whole path beside the name that already is the chip (${checks} checks)`);

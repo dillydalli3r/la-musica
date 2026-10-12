@@ -32,7 +32,7 @@ import type {
 import { DEFAULT_RUN_ALL, SCRIPT_LABEL } from "../lib/scripts";
 import { forceDict } from "../lib/force";
 import { fmtCounts, fmtSteps } from "../lib/fmt";
-import { GENRE_COUNT_MAX, GENRE_FAMILIES, canonicalGenre, splitGenres } from "../lib/genres";
+import { GENRE_COUNT_MAX, GENRE_FAMILIES, canonicalGenre, genreParents, splitGenres } from "../lib/genres";
 import { dismiss as dismissNotification, importSessionNotificationId } from "../lib/notifications";
 
 const STEPS = ["Select & separate", "Links", "Match", "Covers", "Genres", "Lyrics", "Advisory", "Finish"];
@@ -2535,6 +2535,15 @@ export default function ImportWizard() {
     return byName;
   }, [genreFacets]);
 
+  // The facets rows as ONE lookup: the genre rows ask for each chip's parents,
+  // and a linear scan per chip would be O(names) per row for a payload that
+  // already arrived as a list.
+  const genrePathByName = useMemo(
+    () => new Map((genreFacets?.genres ?? []).map(
+      (g) => [g.name.toLowerCase(), g.path] as const)),
+    [genreFacets],
+  );
+
   // When the Genres step opens, prefill untouched tracks with their existing
   // GENRE tags so they are visible and editable right away.
   useEffect(() => {
@@ -4800,8 +4809,9 @@ const finish = async (closeByNavigation: boolean) => {
               Genres are not fetched automatically — set the per-track limit, then Import genres asks every source
               ticked in the tray beside it, top to bottom, and stops as soon as a track's list is full (a source
               that needs a login is skipped and says so until you set it).
-              The app derives the family (rock, electronic…) from the specific genres and writes it in the first slot,
-              the specific genres after it: at most {genreCap} genre value{genreCap === 1 ? "" : "s"} per track (Settings → Import).
+              Only the specific names a source states are WRITTEN: the level above each one (its parent genre, up to
+              the family head) is derived by the app and shown as “under …”, never stored — at most {genreCap} genre
+              value{genreCap === 1 ? "" : "s"} per track (Settings → Import).
             </span>
           </MinBlock>
           <MinBlock min={minMode} here={missingHere} mine="genres">
@@ -4876,13 +4886,15 @@ const finish = async (closeByNavigation: boolean) => {
               >
                 {g.rows.map((t) => {
                   const list = genreList(t.path);
-                  // The DERIVED hierarchy of the first name ("Pop › Synth-Pop"),
-                  // straight from the facets payload: shown, never written.
-                  const derived = list.length
-                    ? genreFacets?.genres.find(
-                        (row) => row.name.toLowerCase() === list[0].toLowerCase()
-                      )?.path ?? null
-                    : null;
+                  // WHERE A NAME SITS, in the app's genre tree — the PARENTS
+                  // only ("Hip Hop"), straight from the facets payload, which is
+                  // why the arrow is not a mystery: the name itself is the chip
+                  // beside the line (or the chip being hovered), never repeated
+                  // here. Derived, never written (`genreParents`, spec
+                  // R38/R38a).
+                  const parents = list.length
+                    ? genreParents(genrePathByName.get(list[0].toLowerCase()))
+                    : "";
                   const typed = genreAddValues[t.path] ?? "";
                   const unknown = !!typed.trim() && !genreSuggestions.has(typed.trim().toLowerCase());
                   return (
@@ -4890,26 +4902,35 @@ const finish = async (closeByNavigation: boolean) => {
                       <TrackNoBadge disc={discNoOf(t.path)} track={trackNoOf(t.path)} />
                       <span className="flex-1 truncate text-sm">{displayTitle(t.path)}</span>
                       <div className="flex items-center gap-1.5 flex-wrap justify-end">
-                        {derived && (
+                        {parents && (
                           <span
                             className="text-[10px] text-zinc-500 truncate max-w-[16rem]"
-                            title={`Where ${list[0]} sits — derived from the genre tree (mlo.genre_vocab.path_of), never stored on the file`}
+                            title={`${list[0]} sits under ${parents} in the app's genre tree — the level above a name is derived (mlo.genre_vocab.path_of), never written to the file. The tag holds ${list.map((n) => `“${n}”`).join(", ")}.`}
                           >
-                            {derived}
+                            under {parents}
                           </span>
                         )}
-                        {list.map((gen) => (
-                          <span key={gen} className="chip bg-accent/10 text-accent-soft border border-accent/25">
-                            {gen}
-                            <button
-                              className="hover:text-white transition-colors"
-                              onClick={() => removeGenre(t.path, gen)}
-                              title={`Remove ${gen}`}
+                        {list.map((gen) => {
+                          const above = genreParents(genrePathByName.get(gen.toLowerCase()));
+                          return (
+                            <span
+                              key={gen}
+                              className="chip bg-accent/10 text-accent-soft border border-accent/25"
+                              title={above
+                                ? `${gen} sits under ${above} — a level the app derives, never written to the file`
+                                : undefined}
                             >
-                              <X className="h-3 w-3" />
-                            </button>
-                          </span>
-                        ))}
+                              {gen}
+                              <button
+                                className="hover:text-white transition-colors"
+                                onClick={() => removeGenre(t.path, gen)}
+                                title={`Remove ${gen}`}
+                              >
+                                <X className="h-3 w-3" />
+                              </button>
+                            </span>
+                          );
+                        })}
                         <input
                           className={`input !w-36 !py-1 text-xs tap${unknown ? " !border-amber-700" : ""}`}
                           list="wizard-genres"

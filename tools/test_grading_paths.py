@@ -592,6 +592,82 @@ ok("WEBRATING_MISSING" not in res["tracks"][0]["issues"]
 set_tags(flac, dict(NO_MOOD, MOOD="melancholic"))
 
 # ----------------------------------------------------------------------
+# Rating FORMAT (spec R358e) — a whole number on the 0-100 scale, and the one
+# spelling of it. The value a source publishes on ITS scale (RYM's 4.54) is
+# not a rating this app can hold, and no formatter may guess which scale it
+# meant; a stray decimal point on the app's own scale ("91.0") is the SAME
+# rating spelled differently, which script 10 rewrites and this check agrees
+# with (mlo.tagtext's one rule, asked by the writer and the grader alike).
+# ----------------------------------------------------------------------
+print("== rating format ==")
+from mlo.tagtext import canonical_rating, canonical_text, rating_problem   # noqa: E402
+
+ok(rating_problem("WEBRATING", "91") == "",
+   "a whole number on the scale is in shape")
+ok(rating_problem("WEBRATING", "4.54").startswith("is not a whole number"),
+   "a source's own 0-5 score is not a rating on the 0-100 scale")
+ok(rating_problem("WEBRATING", "91.0").startswith("carries a decimal point"),
+   "…while '91.0' is the same rating spelled with a decimal point")
+ok(rating_problem("WEBRATING", "910") == "is outside 0-100",
+   "a value past the top of the scale says so")
+ok(rating_problem("ALBUMWEBRATING", "abc").startswith("is not a whole number"),
+   "the album twin is judged by the same rule")
+ok(rating_problem("TITLE", "4.54") == "",
+   "…and no other tag is judged by it at all")
+ok(canonical_rating("4.54") is None and canonical_rating("91.0") == "91",
+   "only a whole number on the scale HAS a canonical form")
+ok(canonical_text("WEBRATING", " 91.0 ") == "91",
+   "the writer's canonical text trims and drops the stray point")
+ok(canonical_text("WEBRATING", "4.54") == "4.54",
+   "…and leaves a value it cannot fix exactly as it came (the grade names it)")
+
+set_tags(flac, dict(NO_MOOD, MOOD="melancholic", WEBRATING="4.54"))
+res = _grade_album(album, "EMBEDDED", web_cfg)
+ok(res["tracks"][0]["issues"] == ["WEBRATING_FORMAT"],
+   f"a raw 0-5 score on WEBRATING fails with its own code "
+   f"(got {res['tracks'][0]['issues']})")
+ok(any("is not a whole number on the 0-100 scale" in msg for msg in res["issues"])
+   and any("script 24" in msg for msg in res["issues"]),
+   f"…and the issue says what is wrong and which script re-fetches it "
+   f"(got {res['issues']})")
+
+set_tags(flac, dict(NO_MOOD, MOOD="melancholic", WEBRATING="91.0"))
+res = _grade_album(album, "EMBEDDED", web_cfg)
+ok(res["tracks"][0]["issues"] == ["WEBRATING_FORMAT"]
+   and any("expected 91" in msg for msg in res["issues"]),
+   f"a stray decimal point on the app's own scale is flagged too "
+   f"(got {res['tracks'][0]['issues']} / {res['issues']})")
+
+set_tags(flac, dict(NO_MOOD, MOOD="melancholic", WEBRATING="91",
+                    ALBUMWEBRATING="4.05"))
+res = _grade_album(album, "EMBEDDED", web_cfg)
+ok(res["tracks"][0]["issues"] == ["ALBUMWEBRATING_FORMAT"],
+   f"the album-level carrier is judged by the same rule when present "
+   f"(got {res['tracks'][0]['issues']})")
+
+del_tags(flac, ["ALBUMWEBRATING"])
+set_tags(flac, dict(NO_MOOD, MOOD="melancholic", WEBRATING="91"))
+res = _grade_album(album, "EMBEDDED", web_cfg)
+ok(res["pass_count"] == res["total_checks"]
+   and res["total_checks"] == with_rating["total_checks"],
+   f"a clean rating passes, and the shape is the SAME counted check as the "
+   f"presence ({res['pass_count']}/{res['total_checks']})")
+
+set_tags(flac, dict(NO_MOOD, MOOD="melancholic", WEBRATING="91",
+                    ALBUMWEBRATING="78"))
+res = _grade_album(album, "EMBEDDED", web_cfg)
+# The album carrier is graded too: its own shape rule (counted while the tag is
+# PRESENT — a library without it is never moved by it) plus the generic
+# tag-hygiene sweep every tag outside the two lists gets (spaces and blank
+# lines), so the totals rise by three and every one of them passes.
+ok(res["pass_count"] == res["total_checks"]
+   and res["total_checks"] == with_rating["total_checks"] + 3,
+   f"a valid ALBUMWEBRATING passes its own check and the hygiene sweep "
+   f"({res['pass_count']}/{res['total_checks']})")
+
+set_tags(flac, dict(NO_MOOD, MOOD="melancholic"))
+
+# ----------------------------------------------------------------------
 # Genre count (grade_check_genre_count) — AT MOST mb_genre_count values
 # ----------------------------------------------------------------------
 print("== genre count ==")

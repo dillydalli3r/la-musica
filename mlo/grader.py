@@ -41,7 +41,8 @@ from .genres import display_name as genre_display_name
 # ever fail what those writers would have fixed — and the case check is the
 # SAME function, not a second opinion about what canonical means.
 from .tagtext import (
-    MEDIA_VALUES as _MEDIA_VALUES, canonical_value, is_cd_media, spacing_problem,
+    MEDIA_VALUES as _MEDIA_VALUES, canonical_value, is_cd_media,
+    rating_problem, spacing_problem,
 )
 from .lyrics_xlit import (
     XLIT_SIDECAR, dominant_script, primary_translation_lang, xlit_needs,
@@ -2166,6 +2167,23 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                         failed_checks += 1
                         add_issue(f"ITUNESADVISORY must be 0/1/2 without spaces (found {raw!r})", basename)
                         track["issues"].append(t)
+            elif t == "WEBRATING":
+                # The value as well as its presence: the check's own wording is
+                # "(0-100)", so a malformed number is the SAME check failing —
+                # never a second denominator for one graded fact (spec R358e).
+                # A source's score pasted in on ITS scale ("4.54") is not a
+                # rating this app can hold and has no canonical form; "91.0" is
+                # the same rating spelled with a decimal point, which script 10
+                # rewrites, so a formatted file passes here (mlo.tagtext).
+                _why = rating_problem(t, val)
+                if _why and presence_graded:
+                    failed_checks += 1
+                    add_issue(
+                        f"{t} {_why} (found {str(val)!r}) — expected a whole "
+                        "number 0-100; script 24 (Web ratings) re-fetches it, "
+                        "and the format pass rewrites a stray decimal point",
+                        basename)
+                    track["issues"].append("WEBRATING_FORMAT")
             elif t == "GENRE":
                 raw = str(val)
                 if cfg.get("grade_check_tag_spaces", True):
@@ -2297,6 +2315,39 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                 for name in unknown:
                     add_issue(f"Not a MusicBrainz genre: {name}", basename)
                 track["issues"].append("GENRE_VOCAB")
+
+        # Rating FORMAT (grade_check_web_rating's own shape half, spec R358e):
+        # a rating is a WHOLE number on the app's 0-100 scale, and the app
+        # writes nothing else. The presence check above says a track must CARRY
+        # the public verdict; this one says the number it carries must be that
+        # verdict and not another scale's score pasted in raw — RateYourMusic's
+        # "4.54" is a perfectly good 0-5 average and a meaningless 0-100 rating,
+        # and no formatter may "fix" it (mlo.tagtext.canonical_rating has no
+        # canonical form for it), so the grade names it and points at the
+        # re-fetch (script 24). "91.0" is the SAME rating spelled with a
+        # decimal point: script 10 rewrites it to "91" (mlo.tagtext's rating
+        # rule, applied by every writer through set_tag), so a file that has
+        # been through a format pass is clean and this check agrees with what
+        # the writer would have stored.
+        if cfg.get("grade_check_web_rating", True) \
+                and should_write_audio_tag(cfg, "ALBUMWEBRATING", filepath=ap):
+            _raw = af.get_tag("ALBUMWEBRATING")
+            if _raw is not None and str(_raw).strip():
+                # The ALBUM carrier is not in PER_TRACK_TAGS (R358: it is
+                # carried, never required), but a value a file DOES carry must
+                # still be a rating: one check, counted only while the tag is
+                # there, so a library without it is never moved by it.
+                total_checks += 1
+                _why = rating_problem("ALBUMWEBRATING", _raw)
+                if _why:
+                    failed_checks += 1
+                    add_issue(
+                        f"ALBUMWEBRATING {_why} (found {str(_raw)!r}) — expected "
+                        "a whole number 0-100; script 24 (Web ratings) "
+                        "re-fetches it, and the format pass rewrites a stray "
+                        "decimal point",
+                        basename)
+                    track["issues"].append("ALBUMWEBRATING_FORMAT")
 
         # Key & BPM (script 12 output) — required when the check is on.
         # Excess tags: anything NEITHER this pipeline's scripts NOR beets

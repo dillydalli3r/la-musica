@@ -64,6 +64,7 @@ pinned to a real payload rather than guessed.
 """
 from __future__ import annotations
 
+import math
 import os
 import re
 
@@ -171,42 +172,53 @@ def _to_int(value):
     return got
 
 
-def _round_half_up(number):
-    """Nearest integer, halves rounded UP — the one rounding rule here.
-
-    Python's own ``round`` rounds halves to the nearest EVEN number, so
-    ``round(82.5)`` is 82 and ``round(83.5)`` is 84 — a scale conversion whose
-    answer depends on the parity of the digit above it is not a rule a person
-    can predict from a page that shows 4.125/5. Every conversion and the
-    aggregation itself go through this, so 82.5 always reads 83.
-    """
-    return int(number + 0.5) if number >= 0 else -int(-number + 0.5)
-
-
 def scale_to_100(value, scale_max=SOURCE_SCALE_MAX):
-    """*value* on a 0-*scale_max* scale as the app's integer 0-100.
+    """*value* on a 0-*scale_max* scale as the app's integer 0-100 — TRUNCATED
+    to the grid, never rounded above the source's own score.
 
     The ONE conversion every parser calls, so two sources that publish the
     same score on the same scale can never land on two different numbers.
     A value outside the scale is CLAMPED rather than dropped: 4.9/5 is a real
-    answer that rounds to 98, and a source that publishes 5.5 on a 0-5 scale
-    is stating "as high as it goes", not nothing.
+    answer, and a source that publishes 5.5 on a 0-5 scale is stating "as high
+    as it goes", not nothing.
+
+    WHY NOT THE NEAREST INTEGER. The app's grid is 0.05 (one 0-100 step), and
+    the number a reader sees is that grid value printed to ONE decimal
+    (`web/src/lib/ratings.ts` `webText`). Rounding the source UP to the
+    nearest grid point puts values that sit just under a tenth's boundary ON
+    the boundary, and the second rounding then carries them the rest of the
+    way: MEASURED 2026-10-11 on the owner's "Clint Eastwood", RateYourMusic's
+    4.54 became 91 = 4.55 and the tag read 4.6, while 4.54 at one decimal is
+    4.5 — the rounding the site itself shows. Truncating keeps the display
+    equal to the source's own one-decimal reading for EVERY value: the grid
+    points are exactly the boundaries a one-decimal rounding can land on, so
+    the tag never crosses one the source did not cross. The stored value is
+    the source's score rounded DOWN to the app's resolution — 4.54 → 90 →
+    "4.5", 4.45 → 89 → "4.5", 4.55 → 91 → "4.6" — never a number above what
+    the source published.
     """
     number = _to_int(value)
     if number is None or scale_max <= 0:
         return None
     if number < 0:
         return 0
-    return max(0, min(RATING_MAX, _round_half_up(number / float(scale_max)
-                                                 * RATING_MAX)))
+    scaled = number / float(scale_max) * RATING_MAX
+    # The tolerance is for BINARY NOISE, not for the rule: a score that IS on
+    # the grid (4.35/5 is exactly 87) computes as 86.99999999999999 in IEEE
+    # doubles, and truncating that would land one step low — the same
+    # double-rounding defect from the other side (4.35 must read "4.4" on a
+    # one-decimal display, and 86 → 4.30 → "4.3" is a wrong number). 1e-9 of a
+    # 0-100 point is far below any precision a source publishes.
+    return max(0, min(RATING_MAX, math.floor(scaled + 1e-9)))
 
 
 def _weight(count):
-    """The aggregation weight a source's own vote count earns.
+    """A source's own vote count, as parsed from its payload.
 
-    The source's own count when it states one — a score 49 366 people voted
-    on outranks one with a single vote — and 1 when it states none, so a
-    source that answers without a count still counts exactly once.
+    The count the source stated, or 1 when it states none — carried beside the
+    value as part of that source's answer (a 3 458-vote average and a single
+    vote are different reads of the same payload), never a weight in the
+    app's own arithmetic: the CHOICE is by configured order (`choose`).
     """
     number = _to_int(count)
     if number is None or number <= 0:
