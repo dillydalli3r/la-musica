@@ -129,6 +129,33 @@ def _challenge(text: str) -> bool:
     return bool(text and _CHALLENGE_RE.search(text[:4000]))
 
 
+# Chrome's OWN network-error document, which is not a page from any site.
+# MEASURED 2026-10-10: RYM answers an anonymous client `503` on every
+# `/release/` URL, and that document — `<body class="neterror">`,
+# `id="main-frame-error"`, the Chromium Authors stylesheet — was read as "the
+# answer": 185 KB with no markup from the site at all, so it parsed to no
+# genres and no track list. One got into a library's 30-day `rym_cache` and
+# every later lookup was served it from disk, which reads exactly like a
+# scraper that no longer works.
+_ERROR_PAGE_RE = None
+
+
+def is_error_page(html) -> bool:
+    """Whether *html* is the browser's error document rather than a site page.
+
+    Callers cache whole pages for 30 days, so this is what keeps a navigation
+    failure out of that cache — and what lets a page already cached from
+    before this check be recognised, dropped, and fetched again.
+    """
+    global _ERROR_PAGE_RE
+    if _ERROR_PAGE_RE is None:
+        import re
+        _ERROR_PAGE_RE = re.compile(
+            r'<body[^>]+class="[^"]*neterror|id="main-frame-error"|'
+            r"--error-code-color", re.I)
+    return bool(html) and bool(_ERROR_PAGE_RE.search(str(html)[:8000]))
+
+
 def browser_exe():
     """The Chromium browser this host can drive, or "".
 
@@ -684,13 +711,13 @@ def fetch(url, cfg=None, timeout=CLEAR_TIMEOUT, settle=0.4):
                 if str(session.value("location.href") or "").startswith("chrome-error"):
                     return None
                 html = session.value("document.documentElement.outerHTML") or ""
-                if (html and not _challenge(html)
+                if (html and not _challenge(html) and not is_error_page(html)
                         and session.value("document.readyState") == "complete"):
                     _publish_clearance(session, url)
                     return {"html": html, "status": 200, "via": "browser"}
             # Never cleared. A cleared-but-empty read is still worth returning
             # only when it is not the challenge — the caller decides.
-            if html and not _challenge(html):
+            if html and not _challenge(html) and not is_error_page(html):
                 _publish_clearance(session, url)
                 return {"html": html, "status": 200, "via": "browser"}
             return None

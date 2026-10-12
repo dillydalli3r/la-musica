@@ -49,6 +49,18 @@ def ok(cond, label):
 CHALLENGE = ("<!DOCTYPE html><html><head><title>Just a moment...</title>"
              "</head><body>checking your browser</body></html>")
 PAGE = "<html><head><title>Search - Rate Your Music</title></head><body>real</body></html>"
+# Chrome's own network-error document, byte-for-byte from the copy a library's
+# `rym_cache` was found holding (see `browserfetch.is_error_page`): a 185 KB
+# "page" with the site's markup nowhere in it.
+ERROR_PAGE = ('<html dir="ltr" lang="en"><head>'
+              "<style>/* Copyright 2017 The Chromium Authors\n"
+              " * Use of this source code is governed by a BSD-style license"
+              " that can be found in the LICENSE file. */\n"
+              "body { --error-code-color: var(--google-gray-700); }</style>"
+              '<title>rateyourmusic.com</title></head>'
+              '<body class="neterror" style="font-family: \'Segoe UI\'">'
+              '<div id="content"><div id="main-frame-error" '
+              'class="interstitial-wrapper"></div></div></body></html>')
 
 
 # --------------------------------------------------------------------------- #
@@ -93,8 +105,12 @@ def _handler(ws):
             else:
                 STATE["reads"] += 1
                 # "never" keeps serving the interstitial — the challenge this
-                # module must NOT mistake for a page. Anything else answers.
-                value = CHALLENGE if "never" in STATE["url"] else PAGE
+                # module must NOT mistake for a page. "dead" serves Chrome's
+                # OWN error document, which is not a page either. Anything
+                # else answers.
+                url = STATE["url"]
+                value = (CHALLENGE if "never" in url
+                         else ERROR_PAGE if "dead" in url else PAGE)
             result = {"result": {"type": "string", "value": value}}
         ws.send(json.dumps({"id": mid, "result": result}))
 
@@ -259,6 +275,17 @@ try:
     never = browserfetch.fetch("https://rateyourmusic.com/never", ON, timeout=1.6)
     ok(never is None,
        "a page that stays on the interstitial is a FAILURE, never a page")
+
+    # Chrome's own error document is not a page either — MEASURED 2026-10-10,
+    # RYM's 503 to an anonymous client renders exactly this, and one that got
+    # cached read as "the album page with no genres" for 30 days.
+    dead = browserfetch.fetch("https://rateyourmusic.com/dead", ON, timeout=1.6)
+    ok(dead is None, "the browser's OWN error page is a FAILURE, never a page")
+    ok(browserfetch.is_error_page(ERROR_PAGE)
+       and not browserfetch.is_error_page(PAGE)
+       and not browserfetch.is_error_page(CHALLENGE)
+       and not browserfetch.is_error_page(""),
+       "and the predicate that says so is exact")
 
     # A browser that cannot be driven at all is None, not an exception.
     _target = browserfetch._target

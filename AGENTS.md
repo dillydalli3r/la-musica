@@ -296,8 +296,14 @@ When they do ask for one:
   `200` and 654 KB. The Settings cookie import (`POST /api/cookies/{source}/from-browser`)
   remains the explicit way to STORE that session. When `rym_cookie` is blank
   and browser fetching is on, `server/browserfetch._browser_session` lazily
-  reads only rateyourmusic.com cookies from local browser profiles via yt-dlp,
-  filters to that host, caches the cookie string in memory for 45 minutes, and
+  reads only rateyourmusic.com cookies from local browser profiles through
+  yt-dlp's own reader — `yt_dlp.cookies`, imported IN PROCESS
+  (`mlo.tools.python_pkg_path("yt-dlp")`), because the install the app itself
+  makes is a pip folder whose entry point is `bin/yt-dlp` with no `.exe` beside
+  it: an executable-only lookup finds nothing and reads an EMPTY jar, which is
+  what "per-track genres never arrive" looked like (MEASURED 2026-10-11; a PATH
+  or `.dependencies` executable is still the fallback) — filters to that host,
+  caches the cookie string in memory for 45 minutes, and
   never writes it to config or sends it elsewhere. Each page fetch injects the
   borrowed pairs as host-scoped session cookies and deletes them in `finally`;
   Chrome keeps its own clearance/site-set cookies in the managed profile. The

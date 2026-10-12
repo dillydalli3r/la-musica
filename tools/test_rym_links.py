@@ -997,4 +997,90 @@ assert got and got["tracks"], got
 assert got["tracks"][0]["genres"] == [], got["tracks"][0]
 assert got["genres"] == ["Art Pop"], got["genres"]
 
+# The per-track tier's clock is its OWN, not the release lookup's wall.
+# MEASURED 2026-10-11, on the owner's own library: the release page is answered
+# by the BROWSER route (the only route that answers that network), which costs
+# 30-50 s cold — so a tier that inherited `RYM_MAX_WALL` stopped before its
+# FIRST track page and the release's genres silently became every track's
+# answer ("per-track genres don't work"). Here the wall is already spent.
+fake = run({
+    "/release/album/rihanna/loud/": ok(_release_with_tracks([("S&M", "rihanna/sm")])),
+    "/song/rihanna/sm": ok(_song_page("Dance Pop")),
+})
+intg._rym_cookie = lambda cfg=None: "cf_clearance=x"
+_real_wall = intg.RYM_MAX_WALL
+intg.RYM_MAX_WALL = 0.0                 # "the lookup's wall ran out long ago"
+try:
+    rows = intg._rym_tracks_from(_release_with_tracks([("S&M", "rihanna/sm")]))
+    assert rows and rows[0].get("path"), rows
+    intg._rym_track_genres(rows, cfg=CFG)
+finally:
+    intg.RYM_MAX_WALL = _real_wall
+assert rows[0]["genres"] == ["Dance Pop"], rows[0]
+assert rows[0]["level"] == "track", rows[0]
+assert any(u.endswith("/song/rihanna/sm") for u in fake.calls), fake.calls
+
+# ----------------------------------------------------------------------- #
+# A browser ERROR DOCUMENT is not a page, and is not served from the cache
+# ----------------------------------------------------------------------- #
+# MEASURED 2026-10-11, on the owner's own library: the release page's cache
+# slot for `gorillaz/plastic_beach` held Chrome's own `net::ERR_*` document
+# (RYM answers an anonymous client `503` on every `/release/` URL). 185 KB of
+# Chrome stylesheet with no site markup in it answers `[]` for genres and no
+# tracks at all — so the per-track tier had nothing to be per-track about, and
+# every lookup for that album was served that file from disk for 30 days.
+# It reads exactly like a scraper that has stopped working.
+from urllib.parse import urlencode                      # noqa: E402
+import hashlib                                         # noqa: E402
+
+ERR = ('<html dir="ltr" lang="en"><head>'
+       "<style>/* Copyright 2017 The Chromium Authors"
+       " * Use of this source code is governed by a BSD-style license. */"
+       "body { --error-code-color: var(--google-gray-700); }</style>"
+       "<title>rateyourmusic.com</title></head>"
+       '<body class="neterror"><div id="main-frame-error"></div></body></html>')
+
+
+def _release_key(path, params=None):
+    return hashlib.sha1((path + "?" + urlencode(sorted((params or {}).items())))
+                        .encode("utf-8")).hexdigest()
+
+
+_gorillaz = ('<html><body><h1 class="album_title">Plastic Beach</h1>'
+             '<a href="/artist/gorillaz">Gorillaz</a>'
+             '<a href="/genre/electropop">Electropop</a>'
+             '<div class="tracklist_line"><span class="tracklist_num">1</span>'
+             '<span class="tracklist_title">'
+             '<a href="/song/gorillaz/orchestral-intro">Orchestral Intro</a>'
+             "</span>lyrics 1:09</div></body></html>")
+
+_path = "/release/album/gorillaz/plastic_beach/"
+_cache = tempfile.mkdtemp(prefix="mlo_rym_error_")
+intg._rym_cache_dir = lambda: _cache
+_fp = os.path.join(_cache, _release_key(_path) + ".html")
+intg._rym_cache_write(_release_key(_path), ERR)
+assert not os.path.exists(_fp), \
+    "a browser error document is never WRITTEN to the page cache"
+# …and one already there (cached before that guard existed) is dropped, not
+# answered: the lookup below pays the real request instead of reading it.
+with open(_fp, "w", encoding="utf-8", newline="\n") as _fh:
+    _fh.write(ERR)
+fake = run({
+    _path: ok(_gorillaz),
+    "/song/gorillaz/orchestral-intro": ok(_song_page("Cinematic Classical")),
+}, cache=_cache)
+intg._rym_cookie = lambda cfg=None: "cf_clearance=x"
+got = intg.rym_genres("Gorillaz", "Plastic Beach")
+assert got and got["tracks"], got
+assert got["tracks"][0]["genres"] == ["Cinematic Classical"], got["tracks"][0]
+assert got["tracks"][0]["level"] == "track", got["tracks"][0]
+assert got["genres"] == ["Electropop"], got["genres"]
+assert any(c.endswith(_path) for c in fake.calls), \
+    f"the poisoned slot did not answer: RYM was asked for the page — {fake.calls}"
+_cached = intg._rym_cache_read(_release_key(_path), 10 ** 9)
+assert _cached and "neterror" not in _cached and "Orchestral Intro" in _cached, \
+    "the slot holds the PAGE now, not the error document"
+assert intg._rym_cache_read(_release_key("/release/album/gorillaz/nope/"),
+                           10 ** 9) is None, "an uncached path still reads None"
+
 print("test_rym_links: OK")

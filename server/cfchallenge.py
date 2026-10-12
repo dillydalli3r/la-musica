@@ -584,6 +584,13 @@ def solve(url, cfg=None, timeout=None):
             record_failure(target, str(body.get("message") or "")
                            or "the solver ended on the challenge page")
             return None
+        if browserfetch.is_error_page(html):
+            # The solver drove a browser too, so it can hand back the
+            # browser's OWN error document (a dead host, a refused
+            # connection) — a page with no site markup in it. Same answer as
+            # a challenge: this route did not get the page.
+            record_failure(target, "the solver ended on a browser error page")
+            return None
         cookies = {}
         for cookie in solution.get("cookies") or []:
             name = str((cookie or {}).get("name") or "").strip()

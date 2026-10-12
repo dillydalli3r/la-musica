@@ -1007,6 +1007,26 @@ rating.
   MusicBrainz is the keyless, challenge-free floor under both. A source
   marked per-track that cannot answer per track answers nothing rather than
   passing an album's list off as a track's.
+  **The per-track tier has its OWN clock.** RateYourMusic's release page and
+  each track's own `/song/…` page are separate budgets (`RYM_MAX_WALL` for the
+  release lookup, `RYM_TRACK_BUDGET` + `RYM_TRACK_PAGE_MAX` for the track
+  pages, every page cached 30 days): MEASURED 2026-10-11, the release page is
+  answered by the BROWSER route on a network where the plain client is refused,
+  and paying that route's challenge costs 30-50 s cold — a tier that inherited
+  the release lookup's 20 s wall stopped before its FIRST track page, and the
+  release's own genres silently became every track's answer. **And a DOCUMENT
+  path goes to the browser FIRST when no `rym_cookie` is stored**: `/release/`
+  and `/song/` answer `503` to an anonymous plain client (while `/artist/` and
+  `/search` answer `200`), so `_rym_document_refused_by_plain` skips a retry
+  chain that is already known to end in a refusal — with the borrowed session
+  in the browser those pages are `200`, and a `5xx` still falls back to the
+  browser once before it is allowed to count as "RYM unreachable". MEASURED
+  end to end on the owner's own album, no cookie stored: 15 of 16 tracks
+  answered at `level: track` (`Orchestral Intro` → `Cinematic Classical`,
+  `White Flag` → `Experimental Hip Hop`, `Glitter Freeze` → `Electroclash`),
+  and the files written with `Classical; Cinematic Classical`, `Hip Hop;
+  Experimental Hip Hop`, … (canonicalized family first, capped at
+  `mb_genre_count`).
 
 ### 7.3 ReplayGain and dynamic range
 
@@ -6853,7 +6873,12 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   gone), and Chrome's own UA is what the clearance it earns is bound to.
   **The user's session travels IN.** A stored `rym_cookie`/`aoty_cookie` paste
   wins. If it is blank, `_browser_session` reads the user's local browser jar
-  through yt-dlp, filters to the requested host, caches only that host's cookie
+  through yt-dlp — its Python reader (`yt_dlp.cookies`) IN PROCESS, because the
+  app's own install is a pip folder (`bin/yt-dlp`, no `.exe`) that an
+  executable-only lookup misses entirely; the executable is the fallback
+  (MEASURED 2026-10-11: with the empty read, every RYM page was anonymous and
+  `/release/` was refused, which is what per-track genres look like when they
+  "stop working") — filters to the requested host, caches only that host's cookie
   string in memory for 45 minutes, and never writes it to config. It is sent
   only to its own site as a host-scoped session cookie for that navigation, then
   removed in `browserfetch.fetch`'s `finally`; Chrome's own clearance and site-set

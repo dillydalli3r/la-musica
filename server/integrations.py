@@ -2693,7 +2693,7 @@ def _rym_song_path(row):
     return match.group(1) if match else ""
 
 
-def _rym_track_genres(rows, cfg, started):
+def _rym_track_genres(rows, cfg):
     """Fill each track row's OWN genres from its `/song/...` page, in place.
 
     WHY — MEASURED, 2026-10-10: a RYM RELEASE page states the RELEASE's genres,
@@ -2703,6 +2703,16 @@ def _rym_track_genres(rows, cfg, started):
     release page links all of them. So the per-track tier is one request per
     track — paced at RYM's 1 req/s and disk-cached 30 days by `_rym_get`, so it
     is a first-run cost per album, not a per-run one.
+
+    Its clock is its OWN (`RYM_TRACK_BUDGET`), never the release lookup's
+    `RYM_MAX_WALL`: MEASURED 2026-10-11, on the owner's own library, the
+    release page here is answered by the BROWSER route — the only route that
+    answers this network — and paying that route's challenge costs 30-50 s
+    cold, so a tier that inherited the 20 s wall stopped before its FIRST
+    track page. The release's own genres then became every track's answer and
+    per-track genres were silently absent, which is exactly what "per-track
+    genres don't work" looks like from the outside. The tier is bounded by the
+    budget below and by `RYM_TRACK_PAGE_MAX`; both already live here.
 
     A row whose page cannot be read keeps the release-level answer the caller
     already has (`genre_chain` marks that `level: album`), and the loop stops
@@ -2718,7 +2728,7 @@ def _rym_track_genres(rows, cfg, started):
             continue            # a row that states its own, or links none
         if fetched >= RYM_TRACK_PAGE_MAX:
             break               # a box set: the release list answers the rest
-        if time.time() > end or _rym_blocked(cfg) or _rym_expired(started):
+        if time.time() > end or _rym_blocked(cfg):
             break
         fetched += 1
         page = _rym_get(row["path"], cfg=cfg, expect="/song/")
@@ -3222,7 +3232,20 @@ def _rym_cache_read(key, ttl):
     try:
         if os.path.isfile(fp) and time.time() - os.path.getmtime(fp) < ttl:
             with open(fp, "r", encoding="utf-8", errors="replace") as fh:
-                return fh.read()
+                text = fh.read()
+            # A BROWSER ERROR DOCUMENT is not an answer, and an install that
+            # cached one before `browserfetch.is_error_page` existed would
+            # otherwise be served it for its full 30 days — which reads as a
+            # source that has stopped working, forever. Drop it here so the
+            # caller pays one real request instead, and delete the file so the
+            # next lookup starts clean.
+            if browserfetch.is_error_page(text):
+                try:
+                    os.remove(fp)
+                except OSError:
+                    pass
+                return None
+            return text
     except OSError:
         return None
     return None
@@ -3230,7 +3253,11 @@ def _rym_cache_read(key, ttl):
 
 def _rym_cache_write(key, text):
     d = _rym_cache_dir()
-    if not d:
+    # The same document must never ENTER the cache: this is the write half of
+    # the guard in `_rym_cache_read` (see there), and the one that matters for
+    # every route that hands a page over — the plain client, the browser and
+    # the solver each return a body, and only a page is worth 30 days.
+    if not d or browserfetch.is_error_page(text):
         return
     try:
         os.makedirs(d, exist_ok=True)
@@ -3565,6 +3592,18 @@ def _rym_get(path, params=None, cfg=None, expect=None):
         return None
     url = f"{RYM_BASE}{path}"
     _rym_warm(cfg)
+    # A DOCUMENT path under an anonymous plain client is refused with a 5xx
+    # (MEASURED 2026-10-11: `/release/` and `/song/` answer `503`), which the
+    # retry chain below spends three requests discovering — and then the
+    # browser, which is where the borrowed session lives, is reached at last.
+    # Sixteen song pages were blowing `RYM_TRACK_BUDGET` on those retries alone.
+    # So when no `rym_cookie` is stored to make the plain request work, the
+    # browser is asked FIRST for those paths — the same route, taken without
+    # paying for refusals that are already known.
+    if _rym_document_refused_by_plain(path, cfg):
+        page = _rym_browser_page(url, cfg, key)
+        if page:
+            return page
     jar, headers = _rym_cookiejar(cfg), _rym_headers(cfg)
     reason = ""
     for attempt in range(RYM_RETRIES + 1):
@@ -3579,49 +3618,23 @@ def _rym_get(path, params=None, cfg=None, expect=None):
     if r is None:
         _rym_unreachable(reason, cfg, url=url)
         return None
-    # A challenge is not an answer. With a solver configured (`cf_solver_url`),
-    # ask it once for THIS url: the page it returns is RYM's live page — the
-    # same slugs, the same scrapers — and the clearance cookies it won are
-    # reused by later plain requests, so one solve buys many fast pages.
+    # A challenge is not an answer. The BROWSER is asked for THIS url (it is
+    # the route that WORKS — see `server/browserfetch.py`); the solver is the
+    # fallback for a host whose challenge a browser cannot reach either.
     if cfchallenge.is_challenge(r.text or "", r.status_code):
-        # The real browser comes first (it is the route that WORKS — see
-        # `server/browserfetch.py`); the solver is the fallback for a host whose
-        # challenge a browser cannot reach either. The page either returns is
-        # RYM's live page — the same slugs, the same scrapers — and the
-        # clearance the browser won stays in its own profile, so the next page
-        # is fetched without meeting the challenge again.
-        try:
-            live = browserfetch.fetch(str(getattr(r, "url", "") or url), cfg)
-        except Exception:
-            live = None
-        if (live and live.get("html")
-                and not cfchallenge.is_challenge(live["html"])):
-            # The browser published the clearance it earned to `cfchallenge`
-            # (see `browserfetch._publish_clearance`), so merge it into RYM's
-            # own jar too: RYM builds its requests by hand and would otherwise
-            # pay for the clearance again on the next page.
-            _adopt_solved_clearance(cfg)
-            _rym_record(200, url)
-            _rym_route.update({"route": "live", "cached": False, "url": url,
-                               "snapshot": "", "solved": True})
-            _rym_cache_write(key, live["html"])
-            return live["html"]
-        solved = cfchallenge.solve(str(getattr(r, "url", "") or url), cfg)
-        if (solved and solved.get("html")
-                and not cfchallenge.is_challenge(solved["html"])):
-            # The clearance the browser won is what makes the NEXT request a
-            # plain GET instead of another ~60 s solve. RYM builds its own
-            # headers and jar (it does not go through
-            # `cfchallenge.fetch_page`), so the cookies have to be merged here;
-            # `_rym_headers` then sends them with the solver's own User-Agent,
-            # which is what the clearance is bound to.
-            _adopt_solved_clearance(cfg)
-            _rym_record(200, url)
-            _rym_route.update({"route": "live", "cached": False, "url": url,
-                               "snapshot": "", "solved": True})
-            _rym_cache_write(key, solved["html"])
-            return solved["html"]
+        page = _rym_browser_page(str(getattr(r, "url", "") or url), cfg, key)
+        if page:
+            return page
     if r.status_code != 200:
+        # 5xx is also where a refusal can hide (a document path, a client
+        # without the session): one browser navigation says which it is, and
+        # keeps a refusal that the browser CAN answer from latching RYM
+        # "unreachable" for the rest of the run — with the session in the
+        # browser, `/song/` pages answer `200` after the plain client's `503`.
+        if r.status_code >= 500:
+            page = _rym_browser_page(str(getattr(r, "url", "") or url), cfg, key)
+            if page:
+                return page
         # 404 is a slug that does not exist, not a blocked source: the caller
         # tries its next candidate instead of declaring RYM unreachable. The
         # negative is CACHED — "no such page" is an answer that does not get
@@ -3669,6 +3682,79 @@ def _rym_get(path, params=None, cfg=None, expect=None):
                        "snapshot": ""})
     _rym_cache_write(key, r.text)
     return r.text
+
+
+def _rym_document_refused_by_plain(path, cfg):
+    """Whether *path* must go to the BROWSER before any plain request.
+
+    MEASURED 2026-10-11, on the owner's own library: with no `rym_cookie`
+    stored, `/release/` AND `/song/` answer `503` to the plain client (RYM
+    serves its documents to a session) while `/artist/` and `/search` answer
+    `200`. The browser route is where the borrowed session lives, and each
+    plain attempt first costs its retry chain — 16 song pages were spending
+    `RYM_TRACK_BUDGET` on refusals that are already known, so the per-track
+    tier ran out of clock before half the tracks were read. When a stored
+    `rym_cookie` exists the plain request is the cheap route and is tried
+    first, exactly as before.
+    """
+    if _rym_cookie(cfg):
+        return False
+    if not (path.startswith("/release/") or path.startswith("/song/")):
+        return False
+    try:
+        return bool(browserfetch.available(cfg))
+    except Exception:
+        return False
+
+
+def _rym_browser_page(url, cfg, key):
+    """One live page for *url* from the BROWSER (then the solver), or None.
+
+    The one route that answers a document path for an install with no
+    `rym_cookie`: the managed browser carries the session borrowed from the
+    user's own profile (`browserfetch._session_cookie`) and the clearance it
+    earned stays in its profile, so the NEXT page is fetched without meeting
+    the challenge again. The page is recorded as the route that answered, the
+    last response, and cached 30 days — the same three things the plain path
+    does with an answer, so callers and the report cannot tell them apart
+    except by `_rym_route`'s own "live" entry.
+    """
+    try:
+        live = browserfetch.fetch(url, cfg)
+    except Exception:
+        live = None
+    if (live and live.get("html")
+            and not cfchallenge.is_challenge(live["html"])
+            and not browserfetch.is_error_page(live["html"])):
+        # The browser published the clearance it earned to `cfchallenge`
+        # (see `browserfetch._publish_clearance`), so merge it into RYM's own
+        # jar too: RYM builds its requests by hand and would otherwise pay for
+        # the clearance again on the next page.
+        _adopt_solved_clearance(cfg)
+        _rym_record(200, url)
+        _rym_route.update({"route": "live", "cached": False, "url": url,
+                           "snapshot": "", "solved": True})
+        _rym_cache_write(key, live["html"])
+        return live["html"]
+    try:
+        solved = cfchallenge.solve(url, cfg)
+    except Exception:
+        solved = None
+    if (solved and solved.get("html")
+            and not cfchallenge.is_challenge(solved["html"])
+            and not browserfetch.is_error_page(solved["html"])):
+        # The clearance the browser won is what makes the NEXT request a plain
+        # GET instead of another ~60 s solve. RYM builds its own headers and
+        # jar (it does not go through `cfchallenge.fetch_page`), so the cookies
+        # have to be merged here; `_rym_headers` then sends them with the
+        # solver's own User-Agent, which is what the clearance is bound to.
+        _adopt_solved_clearance(cfg)
+        _rym_record(200, url)
+        _rym_route.update({"route": "live", "cached": False, "url": url,
+                           "snapshot": "", "solved": True})
+        _rym_cache_write(key, solved["html"])
+        return solved["html"]
+    return None
 
 
 def _rym_slug(value):
@@ -3875,7 +3961,7 @@ def _rym_live_album_answer(artist, album, cfg, album_url=""):
         if html:
             got = _rym_album_answer(html, path)
             if got:
-                _rym_track_genres(got.get("tracks") or [], cfg, started)
+                _rym_track_genres(got.get("tracks") or [], cfg)
                 return got
     # 2) RYM's own release slugs (see `_rym_release_paths` for the order).
     if not _rym_expired(started) and not _rym_blocked(cfg):
@@ -3884,7 +3970,7 @@ def _rym_live_album_answer(artist, album, cfg, album_url=""):
             if html:
                 got = _rym_album_answer(html, url)
                 if got:
-                    _rym_track_genres(got.get("tracks") or [], cfg, started)
+                    _rym_track_genres(got.get("tracks") or [], cfg)
                     return got
             if _rym_expired(started) or _rym_blocked(cfg):
                 return None
@@ -3906,7 +3992,7 @@ def _rym_live_album_answer(artist, album, cfg, album_url=""):
             continue
         got = _rym_album_answer(page, rel_url)
         if got:
-            _rym_track_genres(got.get("tracks") or [], cfg, started)
+            _rym_track_genres(got.get("tracks") or [], cfg)
         if not got:
             continue
         got["artist_page"] = f"{RYM_BASE}{m.group(1)}" if m else ""

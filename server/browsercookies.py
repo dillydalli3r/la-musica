@@ -29,6 +29,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import sys
 import tempfile
 
 # The browsers yt-dlp understands, in the order the UI offers them: the ones a
@@ -152,18 +153,144 @@ def _ytdlp():
     return ""
 
 
+_module_state = {"module": None, "tried": False}
+
+
+def _ytdlp_module():
+    """The ``yt_dlp`` module — site-packages, else the vendored pip folder.
+
+    Read the way `server/youtube.py` reads it, and for the same measured
+    reason: the pip layout the app installs keeps its entry point at
+    ``bin/yt-dlp`` with no ``.exe`` beside it, and Windows cannot spawn an
+    extension-less script. MEASURED 2026-10-11 on the owner's own install —
+    `<music>/.mlo/tools/yt-dlp v2026.8.19/bin/yt-dlp` — where the tool scan
+    answered ``ytdlp_exe: None`` and an exe-only lookup therefore returned ""
+    for EVERY browser, so the borrowed RYM session (the signed-in half a
+    `/release/` page needs) was silently empty and per-track genres had
+    nothing to read. The module route extracts the same cookies in-process,
+    with no subprocess and no interpreter to guess at.
+    """
+    if _module_state["tried"]:
+        return _module_state["module"]
+    _module_state["tried"] = True
+    module = None
+    try:
+        import yt_dlp  # noqa: A004
+        module = yt_dlp
+    except ImportError:
+        try:
+            from mlo.tools import python_pkg_path
+            folder = python_pkg_path("yt-dlp")
+        except Exception:
+            folder = None
+        if folder:
+            sys.path.insert(0, folder)
+            try:
+                import yt_dlp  # noqa: A004
+                module = yt_dlp
+            except ImportError:
+                module = None
+    _module_state["module"] = module
+    return module
+
+
+class _Quiet:
+    """The logger yt-dlp insists on — its chatter is not the app's log."""
+
+    def debug(self, msg):
+        pass
+
+    def info(self, msg):
+        pass
+
+    def warning(self, msg):
+        pass
+
+    def error(self, msg):
+        pass
+
+
+def _jar_body(text):
+    """*text* when it carries a cookie line, else "".
+
+    A jar with only yt-dlp's header comment is "nothing was read", not an
+    empty credential to store over a working one.
+    """
+    body = [ln for ln in str(text or "").splitlines()
+            if ln.strip() and not ln.lstrip().startswith("#")]
+    return text if body else ""
+
+
+def _jar_from_module(browser):
+    """That browser's cookies, extracted IN PROCESS, as Netscape jar text.
+
+    yt-dlp's own reader (`yt_dlp.cookies`), so the file is byte-for-byte the
+    shape its `--cookies` flag writes — and the shape every reader here
+    (`server/cookies.py`, `browserfetch._browser_session`) parses. Empty when
+    the module is absent, the browser's store is unreadable (a locked or
+    DPAPI-encrypted profile), or it holds no cookies at all.
+    """
+    module = _ytdlp_module()
+    if module is None:
+        return ""
+    yt_cookies = getattr(module, "cookies", None)
+    if yt_cookies is None:
+        return ""
+    try:
+        jar = yt_cookies.extract_cookies_from_browser(str(browser),
+                                                      logger=_Quiet())
+    except Exception:
+        return ""
+    if not len(jar):
+        return ""
+    folder = tempfile.mkdtemp(prefix="mlo-cookies-")
+    path = os.path.join(folder, "cookies.txt")
+    try:
+        try:
+            # `ignore_discard` keeps the SESSION cookies (RYM's own `ulv` and
+            # `is_logged_in` are two) — without it the jar would lose exactly
+            # the half a signed-in release page needs.
+            jar.save(path, ignore_discard=True, ignore_expires=True)
+        except Exception:
+            import http.cookiejar
+            plain = http.cookiejar.MozillaCookieJar(path)
+            for cookie in jar:
+                plain.set_cookie(cookie)
+            plain.save(ignore_discard=True, ignore_expires=True)
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            return _jar_body(fh.read())
+    except OSError:
+        return ""
+    finally:
+        try:
+            import shutil
+            shutil.rmtree(folder, ignore_errors=True)
+        except OSError:
+            pass
+
+
 def jar(browser, timeout=120):
     """That browser's cookies as a Netscape jar, or "".
 
-    yt-dlp writes the jar as it exits, and it exits non-zero on a URL that is
-    not a video — which is EVERY url this is used for — so the return code is
-    ignored and the FILE is what is read. A missing yt-dlp, an unknown browser,
-    or a locked/corrupt profile all answer "" rather than raising: the caller
+    Two routes, in the order that works: the `yt_dlp` MODULE in process (see
+    `_ytdlp_module` — the app's own install is a pip folder with no spawnable
+    binary), then the `yt-dlp` EXECUTABLE (a distro/PATH build, which is what
+    the module route has to make room for on Linux).
+
+    The exe route runs yt-dlp against a URL that is not a video — which is
+    EVERY url this is used for — so its return code is ignored and the FILE it
+    writes is what is read. A missing yt-dlp, an unknown browser, or a
+    locked/corrupt profile all answer "" rather than raising: the caller
     reports "could not read that browser", never a crash.
     """
-    exe = _ytdlp()
     name = str(browser or "").strip().lower()
-    if not exe or name not in BROWSERS:
+    if name not in BROWSERS:
+        return ""
+    text = _jar_from_module(name)
+    if text:
+        return text
+    exe = _ytdlp()
+    if not exe:
         return ""
     # The jar path must NOT exist when yt-dlp starts: `--cookies <path>` is
     # READ first (an empty file is "not a Netscape cookies file" and it aborts
@@ -184,14 +311,9 @@ def jar(browser, timeout=120):
             return ""
         try:
             with open(path, encoding="utf-8", errors="replace") as fh:
-                text = fh.read()
+                return _jar_body(fh.read())
         except OSError:
             return ""
-        # A jar with only yt-dlp's header comment is "nothing was read", not an
-        # empty credential to store over a working one.
-        body = [ln for ln in text.splitlines()
-                if ln.strip() and not ln.lstrip().startswith("#")]
-        return text if body else ""
     finally:
         try:
             import shutil
