@@ -102,7 +102,7 @@ library-wide pass is never a side effect of an album action.
 ### 3.2 Naming template (default, overridable)
 
 ```
-%albumartist% [%musicbrainz_albumartistid%]/$if(%releasetype%,[%releasetype%] ,)$if(%originaldate%,%originaldate% - ,)$if(%date%,%date% - ,)%album% {$if(%releasecountry%,%releasecountry%)$if(%media%,$if(%releasecountry%, - ,)%media%)$if(%catalognumber%,$if(%media%, - ,$if(%releasecountry%, - ,))%catalognumber%)}$if(%label%, [%label%])$if(%musicbrainz_albumid%, [%musicbrainz_albumid%])$if(%musicbrainz_releasegroupid%, [%musicbrainz_releasegroupid%])/%discnumber%-$num(%tracknumber%,2) %title%$if(%musicbrainz_trackid%, [%musicbrainz_trackid%])$if(%musicbrainz_releasegroupid%, [%musicbrainz_releasegroupid%])
+%albumartist% [%musicbrainz_albumartistid%]/$if(%releasetype%,[%releasetype%] ,)$if(%originaldate%,%originaldate% - ,)$if(%date%,%date% - ,)%album% {$if(%releasecountry%,%releasecountry%)$if(%media%,$if(%releasecountry%, - ,)%media%)$if(%label%,$if(%media%, - ,$if(%releasecountry%, - ,))%label%)$if(%catalognumber%,$if(%label%, - ,$if(%media%, - ,$if(%releasecountry%, - ,)))%catalognumber%)}$if(%musicbrainz_albumid%, [%musicbrainz_albumid%])$if(%musicbrainz_releasegroupid%, [%musicbrainz_releasegroupid%])/%discnumber%-$num(%tracknumber%,2) %title%$if(%musicbrainz_trackid%, [%musicbrainz_trackid%])$if(%musicbrainz_releasegroupid%, [%musicbrainz_releasegroupid%])
 ```
 
 Rules that must hold:

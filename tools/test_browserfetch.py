@@ -29,6 +29,8 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from server import browserfetch, cfchallenge  # noqa: E402
+from server import browsercookies  # noqa: E402
+REAL_BROWSER_SESSION = browserfetch._browser_session
 from websockets.sync.server import serve  # noqa: E402
 
 PASS = 0
@@ -53,6 +55,10 @@ PAGE = "<html><head><title>Search - Rate Your Music</title></head><body>real</bo
 # A stub DevTools endpoint: real framing, no browser
 # --------------------------------------------------------------------------- #
 STATE = {"url": "", "reads": 0, "connections": 0, "evaluates": 0}
+# What the app SET on the browser (`Network.setCookie`), in order — the session
+# it hands the browser before navigating.
+SET_COOKIES = []
+DELETED_COOKIES = []
 
 
 def _handler(ws):
@@ -69,6 +75,16 @@ def _handler(ws):
         if method == "Page.navigate":
             STATE["url"] = params.get("url") or ""
             STATE["reads"] = 0
+        elif method == "Network.setCookie":
+            SET_COOKIES.append(params)
+        elif method == "Network.deleteCookies":
+            DELETED_COOKIES.append(params)
+        elif method == "Network.getCookies":
+            # What a real browser holds after it fetched a page: the clearance
+            # it earned plus the session the site set. `fetch` is expected to
+            # hand these to `cfchallenge` (see `_publish_clearance`).
+            result = {"cookies": [{"name": "cf_clearance", "value": "won"},
+                                  {"name": "ulv", "value": "session-1"}]}
         elif method == "Runtime.evaluate":
             STATE["evaluates"] += 1
             expr = params.get("expression") or ""
@@ -93,6 +109,11 @@ def _install_stub():
     browserfetch.ensure = lambda timeout=40.0: "http://127.0.0.1:1"
     browserfetch._version = lambda timeout=1.5: {"Browser": "stub"}
     browserfetch._target = lambda: f"ws://127.0.0.1:{ws_port}/"
+    # The session fallback reads THIS machine's own browsers through yt-dlp
+    # (see `browserfetch._browser_session`); a suite must never do that — the
+    # case below patches it again to exercise the fallback itself.
+    browserfetch._browser_session = lambda host: ""
+    browserfetch._BROWSER_SESSION.clear()
 
 
 try:
@@ -134,6 +155,106 @@ try:
     ok(got is not None and got["html"] == PAGE and got["via"] == "browser",
        f"a cleared page comes back as the page: {got}")
     ok(STATE["evaluates"] > 0, "…by asking the browser for the document")
+    # The clearance the browser won is published for the plain fast path.
+    ok(cfchallenge.solved_cookies("rateyourmusic.com").get("cf_clearance") == "won",
+       "a fetched page hands the browser's cookies to cfchallenge")
+
+    # The session the user STORED goes into the browser before it navigates —
+    # and Cloudflare's OWN cookies are dropped on the way in (a clearance is
+    # bound to the browser+UA that earned it, so it can never validate here).
+    # The site's own signed-in tokens travel, RYM's `sec_*` rotation included:
+    # MEASURED 2026-10-11, dropping those fails the release page.
+    SET_COOKIES.clear()
+    DELETED_COOKIES.clear()
+    cfchallenge.clear()
+    browserfetch.fetch("https://rateyourmusic.com/search?x=1",
+                       dict(ON, rym_cookie="ulv=s1; cf_clearance=stale; __cf_bm=x; sec_id=jar1"),
+                       timeout=2.0)
+    ok([c["name"] for c in SET_COOKIES] == ["ulv", "sec_id"],
+       f"Cloudflare's cookies are dropped, the site's own session travels: {SET_COOKIES}")
+    ok([c["name"] for c in DELETED_COOKIES] == ["ulv", "sec_id"],
+       f"the borrowed session is removed from Chrome after the fetch: {DELETED_COOKIES}")
+
+    ok(browserfetch._session_cookie({"rym_cookie": "a=1"},
+                                    "https://rateyourmusic.com/x") == "a=1",
+       "the stored RYM paste is what a RYM URL is given")
+    ok(browserfetch._session_cookie({"aoty_cookie": "b=2"},
+                                    "https://www.albumoftheyear.org/x") == "b=2",
+       "…and the AOTY paste for an AOTY URL")
+    ok(browserfetch._session_cookie({"rym_cookie": "a=1"},
+                                    "https://example.com/x") == "",
+       "a host this app keeps no session for is given none")
+
+    # Exercise the actual browser-profile reader without reading THIS machine's
+    # browser: yt-dlp's result and the installed-profile list are deterministic
+    # fakes, but host filtering, pair conversion and the 45-minute cache are the
+    # production helper (`_browser_session`) itself.
+    _installed, _jar = browsercookies.installed, browsercookies.jar
+    _jar_reads = []
+    _netscape = (
+        "# Netscape HTTP Cookie File\n"
+        ".rateyourmusic.com\tTRUE\t/\tTRUE\t0\tusername\talice\n"
+        "rateyourmusic.com\tFALSE\t/\tTRUE\t0\tis_logged_in\t1\n"
+        ".albumoftheyear.org\tTRUE\t/\tTRUE\t0\trememberMe\tseen\n")
+    browsercookies.installed = lambda: {"firefox": 1}
+    browsercookies.jar = lambda browser: (_jar_reads.append(browser) or _netscape)
+    browserfetch._BROWSER_SESSION.clear()
+    try:
+        _rym = REAL_BROWSER_SESSION("rateyourmusic.com")
+        ok(_rym == "username=alice; is_logged_in=1",
+           f"the borrowed RYM session contains only RYM cookies: {_rym!r}")
+        ok(REAL_BROWSER_SESSION("rateyourmusic.com") == _rym and len(_jar_reads) == 1,
+           "the filtered browser jar is reused within its 45-minute cache")
+        _aoty = REAL_BROWSER_SESSION("albumoftheyear.org")
+        ok(_aoty == "rememberMe=seen" and "username" not in _aoty,
+           f"the borrowed AOTY session cannot contain RYM cookies: {_aoty!r}")
+    finally:
+        browsercookies.installed, browsercookies.jar = _installed, _jar
+        browserfetch._BROWSER_SESSION.clear()
+
+    # The real helper takes a browser-export-shaped jar, filters to the
+    # requested host, caches only the filtered cookie string, and never reads
+    # the machine's actual profile in a suite (the functions are patched here).
+    _real_installed, _real_jar = browsercookies.installed, browsercookies.jar
+    _calls = []
+    _fake_jar = (
+        "# Netscape HTTP Cookie File\n"
+        ".rateyourmusic.com\tTRUE\t/\tTRUE\t0\tusername\talice\n"
+        "rateyourmusic.com\tFALSE\t/\tTRUE\t0\tis_logged_in\t1\n"
+        ".albumoftheyear.org\tTRUE\t/\tTRUE\t0\trememberMe\tseen\n")
+    browsercookies.installed = lambda: {"firefox": 1}
+    browsercookies.jar = lambda browser: (_calls.append(browser) or _fake_jar)
+    browserfetch._BROWSER_SESSION.clear()
+    try:
+        _rym = REAL_BROWSER_SESSION("rateyourmusic.com")
+        ok(_rym == "username=alice; is_logged_in=1",
+           f"borrowed RYM cookies are filtered to that host: {_rym!r}")
+        ok(REAL_BROWSER_SESSION("rateyourmusic.com") == _rym and len(_calls) == 1,
+           "the browser jar is cached, not read again for the same host")
+        _aoty = REAL_BROWSER_SESSION("albumoftheyear.org")
+        ok(_aoty == "rememberMe=seen" and "username" not in _aoty,
+           f"the AOTY fallback cannot receive RYM cookies: {_aoty!r}")
+    finally:
+        browsercookies.installed, browsercookies.jar = _real_installed, _real_jar
+        browserfetch._BROWSER_SESSION.clear()
+
+    # Nothing stored: the session the user's own browser is signed in with is
+    # used (patched here — a suite must never read the cookies of the machine
+    # running it), and it is remembered so the read happens once.
+    _real_session = browserfetch._browser_session
+    _reads = []
+    browserfetch._BROWSER_SESSION.clear()
+    browserfetch._browser_session = lambda host: (_reads.append(host) or "ulv=frombrowser")
+    try:
+        ok(browserfetch._session_cookie({}, "https://rateyourmusic.com/x")
+           == "ulv=frombrowser",
+           "with nothing stored, the browser's own session is borrowed")
+        ok(browserfetch._session_cookie({"rym_cookie": "stored=1"},
+                                        "https://rateyourmusic.com/x") == "stored=1",
+           "…while a stored paste still wins")
+    finally:
+        browserfetch._browser_session = _real_session
+        browserfetch._BROWSER_SESSION.clear()
 
     never = browserfetch.fetch("https://rateyourmusic.com/never", ON, timeout=1.6)
     ok(never is None,
@@ -200,6 +321,22 @@ try:
     finally:
         cfchallenge.solve, cfchallenge.solver_url = _saved
         browserfetch.fetch = _fetch
+
+    # ----------------------------------------------------------------------- #
+    # The invisible desktop (Windows): created once, reused, given back on stop
+    # ----------------------------------------------------------------------- #
+    _name, _handle = browserfetch._hidden_desktop()
+    if os.name == "nt":
+        ok(bool(_name) and bool(_handle), f"a hidden desktop is created ({_name!r})")
+        ok(browserfetch._hidden_desktop() == (_name, _handle),
+           "…the same one is reused, never a second")
+        browserfetch._close_desktop()
+        ok(browserfetch._hidden_desktop()[0] == _name,
+           "…and it is made again after a stop")
+        browserfetch._close_desktop()
+    else:
+        ok((_name, _handle) == ("", 0),
+           "off Windows there is no desktop to hide on (headless is the fallback)")
 
     # ----------------------------------------------------------------------- #
     # Lifecycle: stopping a browser we never started is a no-op, not an error

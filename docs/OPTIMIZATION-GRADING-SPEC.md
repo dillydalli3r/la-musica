@@ -883,8 +883,10 @@ rating.
   `naming_script`; the shipped script puts the artist MBID in the artist folder,
   the release id *and* release-group id in the album folder and the recording id
   in the file name, with `[Release type]`, both dates in full and a
-  `{country - media - catalog}` brace group in which each segment appears only
-  when the previous one is present.
+  `{country - media - label - catalog}` brace group in which each segment
+  appears only when the previous one is present — the label rides WITH the
+  catalog number it belongs to (`{US - CD - Virgin - 509996 27547 2 9}`) rather
+  than in a bracket of its own, so the pressing's identity reads in one place.
 - **R32** — `short_folder_names` truncates the UUIDs to 8 characters; grading
   accepts **both** spellings, so switching the flag does not fail a library by
   itself.
@@ -6761,7 +6763,8 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   gone.** RateYourMusic and Album of the Year — their genres and their ratings
   alike — are fetched from the live pages; no Internet Archive snapshot stands
   behind a refusal any more (the removed `aoty_archive_fallback` switch is
-  dropped from a saved config). A Cloudflare challenge therefore needs a
+  dropped from a saved config). A Cloudflare challenge therefore needs the
+  browser route (`cf_browser_fetch`, R385 — the one that clears both), a
   cleared cookie (`rym_cookie`/`aoty_cookie`) or the configured
   `cf_solver_url`; without one the source reports its refusal honestly and
   contributes nothing rather than filling the value from a stale capture.
@@ -6831,6 +6834,74 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   jar and `_rym_user_agent` sends the solver's UA with them, which is what a
   clearance is bound to. The card reports which hosts the solver could not pass
   (`solver.blocked_hosts`) — "running" alone must not imply "working".
+- **R385 — the browser the two scraped hosts are fetched with is never seen, and
+  what it wins is reused.** `server/browserfetch.py` is the route that clears
+  both challenges (R358c/R384 name why a cookie alone cannot do it for RYM and
+  why the solver cannot do it for either); R385 is how it stays out of the way.
+  **It is HEADED on a desktop the user never sees** — `CreateDesktopW` +
+  `CreateProcessW` with `lpDesktop` — because MEASURED, 2026-10-11, true
+  `--headless=new` is detected by BOTH hosts in every spelling tried: real
+  Chrome UA, a matching `userAgentData` override, the anti-automation JS
+  patches (webdriver, `window.chrome`, plugins, WebGL) and a profile that
+  already HOLDS a valid `cf_clearance`. Headless is a fingerprint the WAF reads;
+  where the browser is DRAWN is not. Nothing appears on any display, in the
+  taskbar, or on the alt-tab list. **Off-screen positioning is NOT this** — a
+  multi-monitor layout can put `-3200,-3200` back on a real display, which is
+  the browser window the owner reported. **A UA override breaks the route on its
+  own**: a `--user-agent` that disagrees with Chrome's own `userAgentData` build
+  never clears the challenge (measured; neither host answered until the flag was
+  gone), and Chrome's own UA is what the clearance it earns is bound to.
+  **The user's session travels IN.** A stored `rym_cookie`/`aoty_cookie` paste
+  wins. If it is blank, `_browser_session` reads the user's local browser jar
+  through yt-dlp, filters to the requested host, caches only that host's cookie
+  string in memory for 45 minutes, and never writes it to config. It is sent
+  only to its own site as a host-scoped session cookie for that navigation, then
+  removed in `browserfetch.fetch`'s `finally`; Chrome's own clearance and site-set
+  cookies remain in the app-owned profile. Cloudflare's OWN cookies from the
+  user's paste (`cf_clearance`, `__cf_bm`, `__cfruid`, `__cfuvid`) are dropped
+  before Chrome receives them — a clearance is bound to the browser+UA that
+  earned it and can never validate here — while the site's own signed-in
+  tokens, RYM's `sec_*` rotation included, travel with the session (MEASURED
+  2026-10-11: dropping them fails the release page).
+  This is what reads a RYM *release* page: MEASURED, an anonymous browser clears
+  the challenge and is still refused `/release/` (a `503`, i.e. a `chrome-error`
+  page) while `/artist/` and `/search` answer `200`; with the signed-in session
+  the same page is `200` with its genres and its rating on it.
+  **The clearance travels BACK OUT:** after every fetched page the browser's
+  cookies and its own UA are published to `cfchallenge`
+  (`remember_clearance`), so `fetch_page`'s plain fast path and RYM's own jar
+  (`_adopt_solved_clearance`, which no longer requires a solver URL) reuse
+  them — the pages after the first are plain GETs wherever the WAF allows one,
+  not another navigation. **The exits stay failures**: `Page.navigate`'s
+  `errorText` and a `chrome-error:` location are a failed fetch, never "a page
+  with no genres". **The challenge is taken at BOOT, not by the user's first
+  import** (`cfchallenge.warm_browser`, fired beside the solver's own warm-up):
+  MEASURED, 2026-10-11 — the first navigation to a host after the profile goes
+  cold spends the whole challenge (~27 s Album of the Year, ~49 s
+  RateYourMusic), which read as "no data" for a host that answers in a second
+  once the clearance is in the profile. One successful background navigation per
+  host (retrying once only if the first returns no page), skipped if the managed
+  profile already has its own clearance or the browser route is off. The
+  per-page wait is 75 s so a cold fetch that is still clearing is not lost by
+  seconds (45 s lost the RYM page on the first try). The browser is a child of
+  the app — one per app (adopted by
+  `MANAGED_PORT`, never two), stopped by `main.py`'s lifespan — and its profile
+  is the app's own under `<music>/.mlo/data/browser`, which is where the
+  clearance lives so later runs pay no challenge.
+- **R386 — OS fullscreen hides the app title bar, and the player keeps the exit.**
+  The fullscreen-player button in Tauri desktop calls the window's
+  `setFullscreen`, not `documentElement.requestFullscreen` (which WebView2 does
+  not use to fullscreen its OS window). While `isFullscreen` is true,
+  `web/src/components/TitleBar.tsx` removes the app-drawn title bar and sets
+  `--mlo-titlebar-h` to 0; when the window is restored, the title bar and its
+  inset return. The viewer's own `Leave fullscreen` control and Esc still exit
+  the window fullscreen, so hiding window chrome does not strand the user.
+  Browser and mobile shells keep the document Fullscreen API.
+  HOST-PROVED, 2026-10-11: the screen was `1920×1080` (`availHeight` 1040,
+  i.e. the 40 px taskbar); the window went from `1440×900`,
+  `isFullscreen=false` to `1920×1080`, `isFullscreen=true`, with no titlebar
+  node or controls at the top. The second press returned to `1440×900`,
+  `isFullscreen=false` and restored the titlebar.
 - **R358d — a missing per-track web rating FAILS the grade, by default.** The
   public verdict is part of what a finished album carries, so `WEBRATING` joins
   `GENRE`/`MOOD`/`ENERGY` in `mlo.grader.TAG_PRESENCE_CHECKS`:

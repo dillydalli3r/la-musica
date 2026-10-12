@@ -4,6 +4,7 @@ import { Link } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Disc3, Info, ListMusic, ListPlus, Maximize2, Mic2, Play, Pause, SkipBack, SkipForward, Shuffle, Repeat, Timer, Volume2, X } from "lucide-react";
 import { api, isOffline } from "../api";
+import { WINDOW_FULLSCREEN, leaveWindowFullscreen } from "../lib/windowFullscreen";
 import { notePlayerPosition, startPlayerPersistence, toast, useStore, type QueueTrack } from "../store";
 import { fetchQueueRecommend, queueTrackOf, QUEUE_RUNWAY } from "../lib/recommend";
 import { fmtDuration } from "../lib/fmt";
@@ -262,6 +263,10 @@ export default function PlayerBar() {
   const closeFullscreen = () => {
     setFullscreen(false);
     if (document.fullscreenElement) document.exitFullscreen().catch(() => { /* gone */ });
+    // The desktop shell's fullscreen belongs to the WINDOW and outlives the
+    // document's: leaving the viewer must hand the window back too, or the pane
+    // closes onto a screen the user has no button left to leave.
+    if (WINDOW_FULLSCREEN) leaveWindowFullscreen();
   };
   const [plOpen, setPlOpen] = useState(false);
   const [queueOpen, setQueueOpen] = useState(false);

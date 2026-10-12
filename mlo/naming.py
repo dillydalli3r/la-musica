@@ -22,7 +22,7 @@ Example (the default): the ARTIST folder ends with the artist id, the ALBUM
 folder ends with the release id and the release group id, and the FILE name
 ends with the track's recording id and the release group id — every level is
 identifiable without reading tags:
-  Slowdive [a16371b9-…]/$if(%releasetype%,[%releasetype%] ,)$if(%date%,%date% - ,)%album% {…}[%label%] [%musicbrainz_albumid%] [%musicbrainz_releasegroupid%]/1-01 Title [trackid] [releasegroupid].flac
+  Slowdive [a16371b9-…]/$if(%releasetype%,[%releasetype%] ,)$if(%date%,%date% - ,)%album% {country - media - label - catalog} [%musicbrainz_albumid%] [%musicbrainz_releasegroupid%]/1-01 Title [trackid] [releasegroupid].flac
 """
 import os
 import re
@@ -43,15 +43,17 @@ DEFAULT_NAMING_SCRIPT = (
     # spelled in full when the tags carry more than a year.
     "$if(%originaldate%,%originaldate% - ,)"
     "$if(%date%,%date% - ,)"
-    # country - media - catalog number, each joined only when the one before
-    # it is present, so a missing tag never leaves a dangling " - "
+    # country - media - label - catalog number, each joined only when the one
+    # before it is present, so a missing tag never leaves a dangling " - ".
+    # The label shares the brace group with the catalog number — the two
+    # describe the same pressing — instead of its own bracket after it.
     "%album% {$if(%releasecountry%,%releasecountry%)"
     "$if(%media%,$if(%releasecountry%, - ,)%media%)"
-    "$if(%catalognumber%,$if(%media%, - ,$if(%releasecountry%, - ,))%catalognumber%)}"
-    # label, the RELEASE id and the RELEASE GROUP id, each its own optional
-    # bracket group. The release group is the album's own identity across its
+    "$if(%label%,$if(%media%, - ,$if(%releasecountry%, - ,))%label%)"
+    "$if(%catalognumber%,$if(%label%, - ,$if(%media%, - ,$if(%releasecountry%, - ,)))%catalognumber%)}"
+    # the RELEASE id and the RELEASE GROUP id, each its own optional bracket
+    # group. The release group is the album's own identity across its
     # pressings; the release id names this pressing.
-    "$if(%label%, [%label%])"
     "$if(%musicbrainz_albumid%, [%musicbrainz_albumid%])"
     "$if(%musicbrainz_releasegroupid%, [%musicbrainz_releasegroupid%])/"
     # The file name carries the track's own ids: %musicbrainz_trackid% is the

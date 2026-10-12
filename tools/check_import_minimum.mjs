@@ -346,6 +346,88 @@ try {
   await server.close();
 }
 
+// --------------------------------------------------------------------------- #
+// 6. Done while the album is held by another job: the press completes
+// --------------------------------------------------------------------------- #
+// The behaviour here is client-only — the wizard's own `finish` — so it is
+// pinned the way the repo pins a page's behaviour: the REAL app (vite, the
+// module graph, the router) on a scratch port with the API answered from
+// canned payloads, and the ONE Done press driven for real.
+//
+// The refusal sentence is the server's own (`server/job_locks.refusal`): the
+// album an Organize job is finishing, which `/api/run` and `/api/organize`
+// answer 409 with. The press must read it as "already being finished" — not as
+// a failure — and must still CLOSE (the Link to the album page is what closes
+// the wizard; clearing the params afterwards would carry the wizard's route
+// back over it). A genuine 500 is the second half: it must still be an error.
+const REFUSAL = "Homework is in use by Organize (job-2) — wait for it to finish, then retry";
+
+const app = await createServer({
+  configFile: path.join(webDir, "vite.config.ts"),
+  root: webDir,
+  logLevel: "error",
+  server: { host: "127.0.0.1", port: 8011, strictPort: false },
+});
+await app.listen();
+const appPort = app.httpServer.address().port;
+
+const appBrowser = await chromium.launch();
+try {
+  const context = await appBrowser.newContext({ serviceWorkers: "block" });
+  const page = await context.newPage();
+  await page.route("**/sw.js", (route) => route.abort());
+  /** The one reply the second half changes: /api/run answers the claim's 409
+   *  refusal, then a genuine 500. */
+  let runReply = { status: 409, body: { detail: REFUSAL } };
+  await page.route("**/api/**", (route) => {
+    const url = route.request().url();
+    const send = (status, body) => route.fulfill({
+      status, contentType: "application/json", body: JSON.stringify(body) });
+    if (url.includes("/api/auth/status")) return send(200, { required: false, authenticated: true });
+    if (url.includes("/api/config")) return send(200, { ...CONFIG, first_run_done: true });
+    if (url.includes("/api/library")) return send(200, LIBRARY);
+    if (url.includes("/api/import/scripts/preview")) return send(200, PREVIEW);
+    if (url.includes("/api/import/settle")) return send(200, {});
+    if (url.includes("/api/organize")) return send(200, { results: [{ path: ALBUM }] });
+    if (url.includes("/api/run")) return send(runReply.status, runReply.body);
+    if (url.includes("/api/album?")) return send(200, { ...LIBRARY.artists[0].albums[0], artist: "Daft Punk" });
+    if (url.includes("/api/artist/artwork")) return send(200, {});
+    return undefined;                 // anything else: left unanswered (pending)
+  });
+
+  /** The Finish step's own Done press, through the real component. */
+  const pressDone = async () => {
+    await page.goto(`http://127.0.0.1:${appPort}/import?album=${encodeURIComponent(ALBUM)}&step=Finish`);
+    await page.waitForSelector("text=Ticked by default", { timeout: 20000 });
+    await page.locator("a", { hasText: "Done" }).first().click();
+    // The press is done once the router has left for the album page; a beat
+    // more so the closing status (a toast) is on screen to read.
+    await page.waitForFunction(() => location.pathname.startsWith("/album/"),
+                               null, { timeout: 20000 }).catch(() => {});
+    await page.waitForTimeout(600);
+  };
+  const pageText = () => page.evaluate(
+    "document.body.innerText.replace(/\\s+/g, ' ').trim()");
+
+  await pressDone();
+  check("Done under a held claim lands on the album, not back on the wizard",
+        page.url().includes("/album/"), page.url());
+  const held = await pageText();
+  check("…and the album is reported as already being finished",
+        held.includes("already being finished"), held.slice(0, 400));
+  check("…without the refusal toasted as an error",
+        !/Error:.*in use by/.test(held), held.slice(0, 400));
+
+  // A genuine failure is not swallowed by the same handling.
+  runReply = { status: 500, body: { detail: "the runner exploded" } };
+  await pressDone();
+  check("a real failure still surfaces as an error",
+        (await pageText()).includes("the runner exploded"), (await pageText()).slice(0, 400));
+} finally {
+  await appBrowser.close();
+  await app.close();
+}
+
 if (failures.length) {
   console.error(`[minimum] FAILED (${failures.length} of ${checks}):`);
   for (const f of failures) console.error("  - " + f);
@@ -354,4 +436,5 @@ if (failures.length) {
 console.log(`ok  the wizard's minimum entry mode shows the missing family's controls, ` +
   `collapses the rest behind one affordance that reveals it, leaves the ordinary ` +
   `wizard untouched, and runs the import chain — not the Run All order — from ` +
-  `its Finish step (${checks} checks)`);
+  `its Finish step; and Done under a held claim completes on the album page with ` +
+  `an "already being finished" status (a 500 still shows an error) (${checks} checks)`);

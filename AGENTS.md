@@ -234,11 +234,14 @@ When they do ask for one:
   `ffmpeg_cmd()`): the helper is spawned windowed, so an unflagged ffmpeg under it
   would allocate a console of its own.
 - **The desktop shell is undecorated, and the web app draws its window.**
-  `web/src/components/TitleBar.tsx` is the only title bar, and every screen owes
-  it room. Links that leave the app go through the shell
-  (`web/src/lib/externalLinks.ts` → `open_external`): a webview drops
-  `window.open` and `target="_blank"` alike. And no window the app did not open
-  may appear.
+  `web/src/components/TitleBar.tsx` is the only title bar in WINDOWED desktop
+  mode: every screen owes it room and it owns dragging/minimize/maximize/close.
+  When Tauri's window is fullscreen, the bar and its controls disappear and
+  `--mlo-titlebar-h` becomes 0; the fullscreen player's own `Leave fullscreen`
+  control remains the way out, and leaving restores the bar/inset. Links that
+  leave the app go through the shell (`web/src/lib/externalLinks.ts` →
+  `open_external`): a webview drops `window.open` and `target="_blank"` alike.
+  And no window the app did not open may appear.
 - **A scratch run isolates its app data — `MLO_MUSIC_FOLDER` alone is not
   isolation.** The app data dir stays the install's
   (`%LOCALAPPDATA%\la musica`) unless `MLO_APP_DATA_DIR` names another, and
@@ -268,7 +271,9 @@ When they do ask for one:
   fresh, unexpired, sent with that browser's exact User-Agent — still gets
   `403 Just a moment…` from RateYourMusic over `httpx` AND over `curl_cffi`
   impersonating Firefox 135/144/157 (AOTY accepts it, RYM does not); and
-  HEADLESS is detected by both Chrome and Firefox. `server/browserfetch.py`
+  HEADLESS is detected by both Chrome and Firefox — re-measured 2026-10-11 and
+  still true, so the route below runs a headed browser on a desktop no one can
+  see instead (see the release-page rule). `server/browserfetch.py`
   drives this machine's own Chrome/Edge over DevTools, is preferred to the
   solver inside `cfchallenge.fetch_page`, and keeps the clearance in a profile
   under the app's state dir (`<music>/.mlo/data/browser`, ~280 MB) so later
@@ -276,25 +281,49 @@ When they do ask for one:
   gate reads "no cfg, or no key ⇒ OFF" — so a suite's own cfg can never launch
   a browser on the machine running it, and a suite that DOES exercise the route
   patches the module (see `tools/test_browserfetch.py`). A smoke run with the
-  live config will open one window, placed off to the side: expect it, and make
-  sure whatever started it stops it (`main.py`'s lifespan does).
-- **A session cookie beats a browser, and is the ONLY thing that reads a RYM
-  release page.** MEASURED, 2026-10-10: `/release/album/...` answers `503` —
-  Chrome renders an error page for it — to every client with no session, while
-  `/artist/` and `/search` answer `200`; with the owner's own cookie set the
-  release page is `200` and 654 KB. The UA travels WITH the cookie (same jar:
-  Firefox's UA → `200`, the built-in Chrome UA → `403`), which is why
-  `server/browsercookies.py` stores both, and why
-  `POST /api/cookies/{source}/from-browser` reads them out of a browser the
-  user is already signed in to. HEADLESS is not an option — Chrome is
-  challenged even on a warmed profile that HOLDS a valid persisted
-  `cf_clearance`, with `--dump-dom`, with `--virtual-time-budget`, and with
-  `--disable-blink-features=AutomationControlled` — so a browser route must
-  place its window OFF the desktop (`browserfetch.WINDOW_POSITION`) rather
-  than hide it. RYM also THROTTLES this client (a burst of requests turns into
-  `403 Just a moment…` for a while, credentials or not) and rotates its own
-  `sec_*` tokens in `Set-Cookie`, so a jar read before the burst is not a jar
-  that works during it. And `Page.navigate`'s `errorText` (and a
-  `chrome-error:` location) must be treated as a FAILED fetch: Chrome's error
-  page carries no challenge marker, so it was being returned as "a page with
-  no genres" and reported as "no data".
+  live config opens NO window and needs none: the browser is launched onto a
+  hidden Windows desktop (`browserfetch`'s `CreateDesktopW` route), so nothing
+  appears on any display — and whatever started it must still stop it
+  (`main.py`'s lifespan does). The challenge itself is taken at BOOT
+  (`cfchallenge.warm_browser`, fired by the lifespan): the first navigation to
+  a host after the profile goes cold spends it all (~27 s AOTY, ~49 s RYM
+  measured 2026-10-11), which read as "no data" when the user's first import
+  was what paid it.
+- **A signed-in session is the ONLY thing that reads a RYM release page.**
+  MEASURED, 2026-10-10: `/release/album/...` answers `503` — Chrome renders an
+  error page for it — to every client with no session, while `/artist/` and
+  `/search` answer `200`; with the owner's own cookie set the release page is
+  `200` and 654 KB. The Settings cookie import (`POST /api/cookies/{source}/from-browser`)
+  remains the explicit way to STORE that session. When `rym_cookie` is blank
+  and browser fetching is on, `server/browserfetch._browser_session` lazily
+  reads only rateyourmusic.com cookies from local browser profiles via yt-dlp,
+  filters to that host, caches the cookie string in memory for 45 minutes, and
+  never writes it to config or sends it elsewhere. Each page fetch injects the
+  borrowed pairs as host-scoped session cookies and deletes them in `finally`;
+  Chrome keeps its own clearance/site-set cookies in the managed profile. The
+  user-supplied UA still travels with a stored cookie for plain HTTP; managed
+  Chrome keeps its own UA and drops only Cloudflare's own cookies
+  (`cf_clearance`, `__cf_bm`, `__cfruid`, `__cfuvid` — bound to the browser+UA
+  that earned them), while the site's signed-in tokens, `sec_*` included,
+  travel with the session.
+  **HEADLESS is not an option, and no longer
+  attempted.** RE-MEASURED 2026-10-11: `--headless=new` ends on the
+  interstitial for BOTH hosts even with a real Chrome UA, a matching
+  `userAgentData` override, the anti-automation JS patches and a profile that
+  HOLDS a valid persisted `cf_clearance`. What does work, invisibly, is a
+  HEADED Chrome on a desktop this process creates and never shows
+  (`server/browserfetch.py`: `CreateDesktopW` + `CreateProcessW` with
+  `lpDesktop`): the same launch clears both hosts and returns real pages with
+  no window on any display. Positioning a real window off-screen is NOT that —
+  a multi-monitor layout can put `-3200,-3200` back on a real display, which is
+  the window the owner saw; the hidden desktop is invisible on every layout.
+  A `--user-agent` flag (or any UA override) breaks it on its own: a UA that
+  disagrees with Chrome's own `userAgentData` build stops the challenge
+  clearing, which is how the first version of this route failed. RYM also
+  THROTTLES this client (a burst of requests turns into `403 Just a moment…`
+  for a while, credentials or not) and rotates its own `sec_*` tokens in
+  `Set-Cookie`, so a jar read before the burst is not a jar that works during
+  it. And `Page.navigate`'s `errorText` (and a `chrome-error:` location) must
+  be treated as a FAILED fetch: Chrome's error page carries no challenge
+  marker, so it was being returned as "a page with no genres" and reported as
+  "no data".

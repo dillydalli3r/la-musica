@@ -6,6 +6,7 @@ import {
   Repeat, Settings2, Shuffle, SkipBack, SkipForward, Volume1, Volume2, VolumeX, X,
 } from "lucide-react";
 import { api } from "../api";
+import { WINDOW_FULLSCREEN, toggleWindowFullscreen, watchWindowFullscreen } from "../lib/windowFullscreen";
 import VolumePct from "./VolumePct";
 import FavHeart from "./FavHeart";
 import { likeToasts } from "../lib/favs";
@@ -1369,10 +1370,27 @@ export default function NowPlayingView(p: Props) {
   // fullscreenchange listener below reads it through a ref to stay correct.
   const closeRef = useRef(p.onClose);
   closeRef.current = p.onClose;
-  // Native (browser-window) fullscreen: off unless the top-bar button asks for
-  // it, and `fsOwn` marks the transitions this pane caused itself.
+  // Native fullscreen: off unless the top-bar button asks for it, and `fsOwn`
+  // marks the DOCUMENT transitions this pane caused itself. In the desktop
+  // shell it is the WINDOW's fullscreen rather than the document's — see
+  // lib/windowFullscreen for why the document API read as dead there.
   const [nativeFs, setNativeFs] = useState(() => !!document.fullscreenElement);
   const fsOwn = useRef(false);
+
+  // The desktop shell's fullscreen is the WINDOW's, and the page's own
+  // `fullscreenchange` never fires for it: read the real state on mount and on
+  // every resize, which is what a fullscreen change is. An F11 or the OS taking
+  // the window fullscreen therefore moves this button instead of leaving it
+  // lying about what the screen is doing.
+  useEffect(() => {
+    if (!WINDOW_FULLSCREEN) return;
+    let alive = true;
+    let off: (() => void) | undefined;
+    watchWindowFullscreen((fs) => { if (alive) setNativeFs(fs); })
+      .then((unlisten) => { if (alive) off = unlisten; else unlisten(); })
+      .catch(() => { /* gone */ });
+    return () => { alive = false; off?.(); };
+  }, []);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -1412,6 +1430,14 @@ export default function NowPlayingView(p: Props) {
   }, []);
 
   const toggleNativeFs = () => {
+    // The desktop shell drives the OS WINDOW: the document API cannot take a
+    // WebView2 window fullscreen, which is why the button read as dead there.
+    // A browser and a phone keep the document path — nothing to grant, and a
+    // phone's window already is the screen.
+    if (WINDOW_FULLSCREEN) {
+      void toggleWindowFullscreen().then(setNativeFs);
+      return;
+    }
     fsOwn.current = true;
     if (document.fullscreenElement) {
       document.exitFullscreen().catch(() => { /* gone */ });
@@ -2319,8 +2345,10 @@ export default function NowPlayingView(p: Props) {
               <button
                 className={`p-2 rounded-lg transition-colors ${nativeFs ? barOn : barOff}`}
                 onClick={toggleNativeFs}
-                title={nativeFs ? "Leave browser fullscreen (Esc)" : "Browser fullscreen — hide the browser's own chrome"}
-                aria-label={nativeFs ? "Leave browser fullscreen" : "Enter browser fullscreen"}
+                title={nativeFs
+                  ? (WINDOW_FULLSCREEN ? "Leave fullscreen" : "Leave browser fullscreen (Esc)")
+                  : (WINDOW_FULLSCREEN ? "Fullscreen — fill the screen" : "Browser fullscreen — hide the browser's own chrome")}
+                aria-label={nativeFs ? "Leave fullscreen" : "Enter fullscreen"}
                 aria-pressed={nativeFs}
               >
                 {nativeFs ? <Minimize2 className="h-5 w-5" /> : <Maximize2 className="h-5 w-5" />}

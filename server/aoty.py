@@ -3,13 +3,21 @@
 Album of the Year has no API, and every page sits behind Cloudflare's
 "Just a moment…" interstitial. MEASURED, 2026-10-10, from this machine: a plain
 HTTP client, `curl_cffi` impersonating Chrome, headless Chromium, and a real
-headed Chrome all received the 403 challenge. So a page is fetched through
-`server.cfchallenge.fetch_page`, which uses a CLEARED SESSION (`aoty_cookie`,
-the Cookie header of a browser that already passed the challenge, sent with
-the matching `aoty_user_agent`) and falls back to a FlareSolverr-compatible
-solver (`cf_solver_url`) when one is configured. Nothing here touches the
-Internet Archive: the owner asked for live info from each site, and the Wayback
-route this module replaced is gone.
+headed Chrome all received the 403 challenge without a cleared session. The
+page route is `cfchallenge.fetch_page`: a stored `aoty_cookie` + matching
+`aoty_user_agent` permits the fast plain request; without that paste it uses
+the hidden managed browser first (and the solver only if that cannot answer).
+Nothing here touches the Internet Archive: the owner asked for live info from
+each site, and the Wayback route this module replaced is gone.
+
+MEASURED AGAIN, 2026-10-11: a plain client is not merely CHALLENGED — when it
+is answered at all it is answered a DEGRADED page, with the search results
+missing (the page is 12 KB of chrome and no `/album/` links: its results are
+rendered by script) and an album page arriving without its genres. The pages
+are the real ones only from a real browser, or from a request carrying the
+user's OWN cleared session. So `fetch` takes the plain path exactly when
+`aoty_cookie` is stored and the browser route otherwise (`plain=bool(pairs)`);
+a page that parses to nothing used to read as "AOTY has no such album".
 
 What each page answers (all VERIFIED against real page markup):
 
@@ -185,23 +193,39 @@ def _cached(key, producer):
 def fetch(path, cfg=None):
     """One LIVE AOTY path → its HTML, or None.
 
-    Goes through `cfchallenge.fetch_page` (cleared cookie, then solver), paced
-    to one request a second. Returns None for a challenge or a miss; the caller
-    reports which (the chain's own note does) — `last_response` is where it
-    reads the two apart — and never an archived page. The 30-day memory of an
-    answer belongs to the caller (`integrations._genre_cached`), which is why a
-    transient refusal is NOT one of them: only a page AOTY really served, or a
-    real "no such page", is worth remembering.
+    Goes through `cfchallenge.fetch_page`: with the user's own `aoty_cookie`
+    stored, the plain cleared GET; without it, the browser the app drives
+    (`server/browserfetch.py`), because a plain request is served a page with
+    its content missing — see the measurement in the body — and only then the
+    solver. Returns None for a challenge or a miss; the caller reports which
+    (the chain's own note does) — `last_response` is where it reads the two
+    apart — and never an archived page. The 30-day memory of an answer belongs
+    to the caller (`integrations._genre_cached`), which is why a transient
+    refusal is NOT one of them: only a page AOTY really served, or a real "no
+    such page", is worth remembering.
     """
     global _LAST_INFO
     if not path:
         return None
     url = path if path.startswith("http") else f"{AOTY_BASE}{path}"
+    # MEASURED, 2026-10-11: AOTY answers a plain client a DEGRADED page — its
+    # search page comes back with the results MISSING (they are rendered by
+    # script: 12 KB of chrome, zero `/album/` links) and pages arrive without
+    # genres — unless the request carries the user's OWN cleared session
+    # (`aoty_cookie` plus the User-Agent that earned it), which is measured to
+    # return the real pages (24 KB of results; a 164 KB album page with its
+    # score and genres). So the plain fast path is taken exactly when that
+    # credential is stored, and the browser — the route that always returns the
+    # real page — is asked first otherwise. A page that parses to nothing is
+    # worse than a slower one: it reads as "no such album" and the source
+    # silently contributes nothing.
+    pairs = dict(cookie_pairs(cfg))
     # Pacing is `cfchallenge.fetch_page`'s alone now: it keys the 1 req/s per
     # host, so a gate here too would only make every request pay twice.
     got = cfchallenge.fetch_page(url, cfg, headers=headers(cfg),
-                                 cookies=dict(cookie_pairs(cfg)), timeout=25.0,
-                                 host="albumoftheyear.org")
+                                 cookies=pairs, timeout=25.0,
+                                 host="albumoftheyear.org",
+                                 plain=bool(pairs))
     ok = bool(got.get("ok")) and bool(got.get("html"))
     if ok and "albumoftheyear.org" not in str(url) and \
             "albumoftheyear.org" not in got["html"]:
@@ -354,7 +378,17 @@ def genres_from_html(html):
 
 def _genre_row(html):
     text = html or ""
+    # The Details row whose own label says "Genre". AOTY has served the label
+    # in two shapes and the app must read both: `Genre</span>` (the capture the
+    # parser tests pinned) and `/&nbsp;Genre <span id="showGenre">…`, which is
+    # what the pages carry today — MEASURED, 2026-10-11, on the live album page
+    # every route returns (the row's anchors come BEFORE its label, so the
+    # window is what precedes the marker either way). A third shape that keeps
+    # the label word but not `showGenre` would read as "no genres" rather than
+    # as a wrong answer, and reads here as [].
     marker = text.find("Genre</span>")
+    if marker < 0:
+        marker = text.find('id="showGenre"')
     if marker < 0:
         return []
     window = text[max(0, marker - 2000):marker]

@@ -15,17 +15,41 @@ WHY THIS EXISTS — MEASURED, 2026-10-10, on the owner's machine:
   * A REAL browser passes both, with no human in the loop: a plain Chrome, a
     plain Firefox, launched at the URL, clear the challenge themselves in
     seconds and keep the `cf_clearance` that did it.
-  * HEADLESS is detected: `--headless=new` Chrome and `--headless` Firefox both
-    end on the interstitial. A real window is load-bearing, so this module
-    opens one — positioned off to the side (`WINDOW_POSITION`), never hidden,
-    because a hidden window is exactly what the challenge refuses.
+  * HEADLESS is detected by BOTH hosts, in every spelling tried — re-MEASURED,
+    2026-10-11: `--headless=new` ends on the interstitial even with the real
+    Chrome User-Agent, a matching `userAgentData` override, the anti-automation
+    JS patches (webdriver, `window.chrome`, plugins, WebGL) and a profile that
+    already holds a valid `cf_clearance`. Headless is a fingerprint the WAF can
+    read, so there is nothing to gain from a headless process.
+  * But a VISIBLE window is not what the challenge wants either. The same
+    Chrome, launched headed onto a WINDOWS DESKTOP THE USER NEVER SEES
+    (`CreateDesktopW` + `CreateProcessW` with `lpDesktop`), clears both hosts
+    and returns real pages — nothing appears on any display, in the taskbar or
+    on the alt-tab list, because the desktop it draws on is not one the logon
+    session shows. Off-screen POSITIONING is what does not work: a multi-monitor
+    desktop can put `-3200,-3200` back on a real display, which is the window
+    the owner saw. A hidden desktop is invisible on every layout.
 
 So this is the third route for a scraped host: after the plain HTTP GET with
 whatever clearance is in hand, and INSTEAD of the solver (which cannot pass),
 the page is fetched by driving a browser the user already trusts, over its
-DevTools protocol. The profile is the module's own, under the app's state dir,
-so the clearance it earns survives to the next run — the second import of a
-session pays no challenge at all.
+DevTools protocol. On Windows it runs on a hidden desktop and no window is
+ever shown; elsewhere it falls back to `--headless=new`, which the two hosts
+refuse but costs nothing on a host that does not challenge. The profile is the
+module's own, under the app's state dir: its clearance survives later runs, and
+every page hands cookies back to `cfchallenge`: AOTY's plain path is fast when
+an explicit `aoty_cookie` is stored; without it, AOTY uses this browser route
+because a plain `200` can omit its search results and genres.
+
+When no `rym_cookie`/`aoty_cookie` paste is stored, the browser fetch lazily
+reads that host's session from this machine's browser profiles via yt-dlp,
+filters the jar to the requested host, and keeps only that cookie string in
+memory for 45 minutes. A stored paste always wins; a borrowed session is never
+written to config or sent to another host. It is injected as session cookies
+for that page — Cloudflare's own pairs from the paste are dropped, the site's
+signed-in tokens travel — and deleted in `finally`; Chrome's own clearance
+remains in its managed profile. That is the signed-in half RYM requires for
+`/release/` pages.
 
 Nothing here changes what the scrapers do with a page: it is the same HTML the
 plain path would have received, handed back in `fetch_page`'s own shape.
@@ -56,17 +80,25 @@ _CANDIDATES = (
 # developer is already using.
 MANAGED_PORT = 9333
 
-# Where the window goes. A REAL window is load-bearing — MEASURED, 2026-10-10:
-# headless is challenged even when the profile holds a valid persisted
-# `cf_clearance` — so it is placed FAR off the desktop instead of hidden. The
-# user never sees it, and Cloudflare still sees a browser that is not headless.
-WINDOW_POSITION = "-3200,-3200"
-WINDOW_SIZE = "900,600"
+# The desktop the browser is drawn on, on Windows: one this process creates for
+# itself (`CreateDesktopW`) and never shows, so the window exists for the WAF
+# and for nobody else — it is not on any display, in the taskbar, or on the
+# alt-tab list. The name carries the pid: two runs of the app (the install and a
+# dev bed, say) must not fight over one desktop. The handle is kept for as long
+# as the browser lives, because destroying the desktop takes the browser with
+# it. See the module docstring: off-screen POSITIONING is what fails (a
+# multi-monitor layout can put the window back on a real display), a hidden
+# desktop does not.
+HIDDEN_DESKTOP_PREFIX = "mlo-browser-fetch"
 
-# How long to let a challenge clear before giving up on that page. A real
-# browser clears these in a few seconds; the ceiling is for a slow first visit,
-# which also has to unpack the profile.
-CLEAR_TIMEOUT = 45.0
+# How long to let a challenge clear before giving up on that page. MEASURED,
+# 2026-10-11, from a COLD profile on this machine: Album of the Year clears in
+# ~27 s and RateYourMusic in ~49 s — the first version of this route used 45 s
+# and lost the RYM page by four seconds, which read as "no data" for a host
+# that answers perfectly a moment later. The ceiling is for a challenge that
+# will not clear at all; a profile that already holds a clearance pays none of
+# it. `cfchallenge.warm_browser` takes this cost at boot instead (see there).
+CLEAR_TIMEOUT = 75.0
 # How long a navigation has to reach "complete" before the page is read anyway.
 NAV_TIMEOUT = 60.0
 
@@ -74,8 +106,17 @@ NAV_TIMEOUT = 60.0
 # import it (it is imported BY it — a cycle here would be a real one).
 _CHALLENGE_RE = None
 
-_lock = threading.Lock()
+# One lock for the managed browser AND its desktop, and it is REENTRANT: the
+# desktop is created from inside `ensure`'s own critical section (see
+# `_spawn` → `_hidden_desktop`), and a plain `Lock` deadlocked the first
+# version of that route — `ensure()` never returned, so every page the browser
+# was supposed to fetch hung instead. Any nested acquire must be safe here.
+_lock = threading.RLock()
 _proc = {"popen": None, "started_at": 0.0}
+# The desktop the browser draws on, on Windows. Created once per process and
+# never shown; the handle is held for the browser's whole life (see
+# `HIDDEN_DESKTOP_PREFIX`).
+_desktop = {"handle": None, "name": ""}
 
 
 def _challenge(text: str) -> bool:
@@ -187,6 +228,118 @@ def stop():
         _proc["popen"] = None
         _proc["started_at"] = 0.0
     _kill_tree(proc)
+    _close_desktop()
+
+
+def _close_desktop():
+    """Destroy the hidden desktop once nothing is drawn on it (Windows)."""
+    with _lock:
+        handle = _desktop.get("handle")
+        _desktop["handle"], _desktop["name"] = None, ""
+    if handle and os.name == "nt":
+        try:
+            import ctypes
+            ctypes.windll.user32.CloseDesktop(ctypes.c_void_p(handle))
+        except Exception:
+            pass
+
+
+def _hidden_desktop():
+    """``(name, handle)`` of a desktop only this process can see, or ``("", 0)``.
+
+    MEASURED, 2026-10-11: a headed Chrome on a desktop created this way clears
+    both scraped hosts' challenge and returns real pages, while no window is
+    shown on any display — see the module docstring for why headless cannot be
+    made to do this. Windows only; every other platform has no desktop to hide
+    on and gets `--headless=new` instead.
+    """
+    if os.name != "nt":
+        return "", 0
+    with _lock:
+        if _desktop["handle"]:
+            return _desktop["name"], _desktop["handle"]
+        import ctypes
+        # DESKTOP_ALL_ACCESS: the browser creates its windows on this desktop.
+        # The restype has to be a pointer — the default `int` truncates a
+        # 64-bit HANDLE and CreateDesktop fails with an access error.
+        create = ctypes.windll.user32.CreateDesktopW
+        create.restype = ctypes.c_void_p
+        name = f"{HIDDEN_DESKTOP_PREFIX}-{os.getpid()}"
+        handle = create(name, None, None, 0, 0x01FF, None, None)
+        if not handle:
+            return "", 0
+        _desktop["name"], _desktop["handle"] = name, handle
+        return name, handle
+
+
+class _HiddenProc:
+    """A `subprocess.Popen`-shaped handle on a process started with
+    `CreateProcessW`.
+
+    `Popen` is what this module wants — `_kill_tree` and `ensure` read its
+    `pid`, `poll()` and return value — but it cannot name a desktop:
+    `STARTUPINFO.lpDesktop` is not exposed by Python's `subprocess`. So the one
+    Windows-only spawn goes through ctypes and comes back in this shape.
+    """
+
+    def __init__(self, pid, handle):
+        self.pid = pid
+        self._handle = handle
+
+    def poll(self):
+        """None while the process runs, its exit code once it has exited."""
+        import ctypes
+        code = ctypes.c_ulong()
+        if not ctypes.windll.kernel32.GetExitCodeProcess(
+                ctypes.c_void_p(self._handle), ctypes.byref(code)):
+            return 0
+        return None if code.value == 259 else int(code.value)   # STILL_ACTIVE
+
+
+def _spawn_on_hidden_desktop(exe, flags):
+    """Chrome on the invisible desktop, or None (Windows, ctypes)."""
+    import ctypes
+    import ctypes.wintypes as wt
+    name, _handle = _hidden_desktop()
+    if not name:
+        return None
+
+    class STARTUPINFO(ctypes.Structure):
+        _fields_ = [
+            ("cb", wt.DWORD), ("lpReserved", wt.LPWSTR), ("lpDesktop", wt.LPWSTR),
+            ("lpTitle", wt.LPWSTR), ("dwX", wt.DWORD), ("dwY", wt.DWORD),
+            ("dwXSize", wt.DWORD), ("dwYSize", wt.DWORD),
+            ("dwXCountChars", wt.DWORD), ("dwYCountChars", wt.DWORD),
+            ("dwFillAttribute", wt.DWORD), ("dwFlags", wt.DWORD),
+            ("wShowWindow", wt.WORD), ("cbReserved2", wt.WORD),
+            ("lpReserved2", ctypes.POINTER(ctypes.c_byte)),
+            ("hStdInput", wt.HANDLE), ("hStdOutput", wt.HANDLE),
+            ("hStdError", wt.HANDLE),
+        ]
+
+    class PROCESS_INFORMATION(ctypes.Structure):
+        _fields_ = [("hProcess", wt.HANDLE), ("hThread", wt.HANDLE),
+                    ("dwProcessId", wt.DWORD), ("dwThreadId", wt.DWORD)]
+
+    si = STARTUPINFO()
+    si.cb = ctypes.sizeof(si)
+    si.lpDesktop = name
+    si.dwFlags = 0x00000001            # STARTF_USESHOWWINDOW
+    si.wShowWindow = 0                 # SW_HIDE — belt and braces; the desktop
+                                       # it names is one nothing shows anyway
+    pi = PROCESS_INFORMATION()
+    kernel32 = ctypes.windll.kernel32
+    ok = kernel32.CreateProcessW(
+        exe, ctypes.create_unicode_buffer(subprocess.list2cmdline([exe] + flags)),
+        None, None, False, 0x08000000,   # CREATE_NO_WINDOW
+        None, None, ctypes.byref(si), ctypes.byref(pi))
+    if not ok:
+        return None
+    try:
+        kernel32.CloseHandle(pi.hThread)
+    except Exception:
+        pass
+    return _HiddenProc(int(pi.dwProcessId), pi.hProcess)
 
 
 def _spawn():
@@ -208,14 +361,18 @@ def _spawn():
         # keep it a profile and not a cache: the disk cache is the part that
         # grows without bound, and this route reads a handful of pages.
         "--disk-cache-size=52428800",
-        f"--window-position={WINDOW_POSITION}", f"--window-size={WINDOW_SIZE}",
         "about:blank",
     ]
-    kwargs = {}
+    # NO `--user-agent` and no UA override of any kind: MEASURED, 2026-10-11 —
+    # a UA that disagrees with Chrome's own `userAgentData` build is exactly
+    # what stops the challenge clearing. Neither host answered until that flag
+    # was gone. Chrome's own UA is also what the `cf_clearance` it earns is
+    # bound to, so overriding it defeats the clearance rather than hiding us.
     if os.name == "nt":
-        kwargs["creationflags"] = 0x08000000        # CREATE_NO_WINDOW
+        return _spawn_on_hidden_desktop(exe, flags)
+    kwargs = {}
     try:
-        return subprocess.Popen([exe] + flags, **kwargs)
+        return subprocess.Popen([exe, "--headless=new"] + flags, **kwargs)
     except OSError:
         return None
 
@@ -301,6 +458,180 @@ class _Session:
             pass
 
 
+# The cookies that belong to the browser+UA that earned them, and to nothing
+# else: Cloudflare's clearance pair and its per-client ids. A paste read out of
+# the user's own Firefox carries these for THAT browser, and handing them to
+# this Chrome is worse than sending none — the WAF sees a clearance that can
+# never validate and refuses the request instead of letting the browser solve
+# it. Everything a session needs (`is_logged_in`, `username`, `ulv`,
+# `rememberMe`, and RYM's own `sec_*` tokens, which travel WITH that signed-in
+# jar) is not Cloudflare's to bind and does travel.
+#
+# MEASURED, 2026-10-11: dropping RYM's `sec_*` alongside the clearance made the
+# release page fail on a fresh profile — the signed-in jar is one credential,
+# its `sec_*` rotation included — so only Cloudflare's own pairs are filtered.
+_CF_OWNED_COOKIES = frozenset({"cf_clearance", "__cf_bm", "__cfruid", "__cfuvid"})
+
+
+def _is_foreign_browser_cookie(name):
+    """Whether *name* is Cloudflare's own, and so must not come from a paste."""
+    return name.lower() in _CF_OWNED_COOKIES
+
+
+def _session_cookie(cfg, url):
+    """The session to hand the browser for *url*'s host, or "".
+
+    The stored paste wins (`rym_cookie` / `aoty_cookie` — the same two the plain
+    scrapers send). When nothing is stored, the session the user's OWN browser is
+    signed in with is used instead (`_browser_session`), because that is the
+    difference between an album's genres being readable and RYM answering `503`
+    to every anonymous client — see `_set_session_cookies`.
+    """
+    try:
+        from . import cfchallenge
+        host = cfchallenge.host_of(url)
+    except Exception:
+        return ""
+    key = {"rateyourmusic.com": "rym_cookie",
+           "albumoftheyear.org": "aoty_cookie"}.get(host, "")
+    if not key:
+        return ""
+    stored = str((cfg or {}).get(key) or "").strip()
+    if stored:
+        return stored
+    return _browser_session(host)
+
+
+# The session read out of the user's own browser, per host:
+# {"cookie": str, "at": ts}. Cached for the same 45 minutes
+# `server/browsercookies.ttl_seconds` gives a browser-read jar, and an EMPTY
+# answer is cached too — it is an answer ("that browser is not signed in"), and
+# re-shelling out to yt-dlp for every page would be the cost this cache exists
+# to avoid.
+_BROWSER_SESSION: dict = {}
+BROWSER_SESSION_TTL = 45 * 60.0
+
+
+def _browser_session(host):
+    """The `host` session out of a browser this machine is signed in to, or "".
+
+    WHY: RateYourMusic serves `/release/` — an album's genres and its rating —
+    ONLY to a signed-in client; an anonymous browser is refused `503` while
+    `/artist/` and `/search` answer (MEASURED, see the module docstring and
+    `AGENTS.md`). An install that never pasted `rym_cookie` therefore could not
+    read a single album's RYM data even though the owner's own browser is signed
+    in. The panel's "read from a browser" import is this same read made by
+    hand (`POST /api/cookies/{source}/from-browser`); this is done once, lazily,
+    only when nothing is stored. The Python cache keeps the filtered cookie
+    string in memory for 45 minutes; `fetch` injects it as host-scoped session
+    cookies for the requested page, then deletes those names in `finally`.
+    Nothing is written to config or sent to another host; Chrome's clearance
+    and site-set cookies remain in its app-owned profile as the fast path.
+
+    Never raises: no yt-dlp, no browser, no profile, or a signed-out profile all
+    answer "" and the caller reports RYM's refusal as it did before.
+    """
+    now = time.time()
+    entry = _BROWSER_SESSION.get(host)
+    if entry and now - entry.get("at", 0) < BROWSER_SESSION_TTL:
+        return str(entry.get("cookie") or "")
+    cookie = ""
+    try:
+        from server import browsercookies
+        from server import cookies as cookies_mod
+        have = browsercookies.installed() or {}
+        for browser in ("firefox", "chrome", "edge", "brave", "chromium"):
+            if browser not in have:
+                continue
+            jar = browsercookies.jar(browser)
+            if not jar:
+                continue
+            _filtered, kept, _dropped = cookies_mod.filter_jar(jar, [host])
+            pairs = [f"{row.name}={row.value}" for row in kept if row.name]
+            if pairs:
+                cookie = "; ".join(pairs)
+                break
+    except Exception:
+        cookie = ""
+    _BROWSER_SESSION[host] = {"cookie": cookie, "at": now}
+    return cookie
+
+
+def _set_session_cookies(session, url, cookie_header):
+    """Set the user's session on the browser, returning names to delete later.
+
+    The managed browser's own profile is an ANONYMOUS visit: it clears the
+    challenge, and on RateYourMusic an anonymous visit is served `/artist/` and
+    `/search` but has `/release/` answered `503` (MEASURED 2026-10-10 and again
+    2026-10-11 — a `chrome-error` page, not a challenge). A stored paste OR the
+    filtered session read from the user's own browser (`_browser_session`) is a
+    signed-in session; a signed-in release page is `200`. Cloudflare's own
+    pairs are dropped on the way in (`_CF_OWNED_COOKIES`); the site's signed-in
+    tokens, `sec_*` included, are set as session cookies and the returned names
+    are what `fetch` removes from the managed profile in `finally`. They are
+    never written to config or left in the profile after a fetch. The clearance
+    Chrome earns is separate and remains in its profile.
+    """
+    text = str(cookie_header or "").strip()
+    if not text:
+        return []
+    from urllib.parse import urlsplit
+    try:
+        host = (urlsplit(str(url)).hostname or "").lower()
+    except ValueError:
+        return []
+    if not host:
+        return []
+    domain = "." + host[4:] if host.startswith("www.") else host
+    set_names = []
+    for pair in text.split(";"):
+        name, _sep, value = pair.strip().partition("=")
+        name = name.strip()
+        if not name or _is_foreign_browser_cookie(name):
+            continue
+        try:
+            reply = session.call("Network.setCookie", {
+                "name": name, "value": value, "domain": domain,
+                "path": "/", "secure": True,
+            }, timeout=10)
+            if not reply.get("error") and (reply.get("result") or {}).get("success") is not False:
+                set_names.append(name)
+        except Exception:
+            continue
+    return list(dict.fromkeys(set_names))
+
+
+def _publish_clearance(session, url):
+    """Hand the browser's cookies for *url* to `cfchallenge`.
+
+    MEASURED, 2026-10-11: the cookies a real browser holds — `cf_clearance`
+    plus whatever else the visit set — are exactly what `cfchallenge.
+    fetch_page`'s fast path reads (`solved_cookies`), so publishing them here
+    makes a cleared fast path available where the source can trust plain HTTP.
+    RYM's own module still prefers the browser (the WAF refuses its plain client
+    whatever it carries); AOTY's plain path uses it only with an explicit
+    `aoty_cookie`, because an anonymous 200 may omit the search results/genres.
+    Never raises — a fetch that worked must not fail over a cache update.
+    """
+    try:
+        from . import cfchallenge
+        host = cfchallenge.host_of(url)
+        if not host:
+            return
+        user_agent = str(session.value("navigator.userAgent") or "")
+        session.call("Network.enable", timeout=10)
+        got = session.call("Network.getCookies", {"urls": [str(url)]}, timeout=10)
+        cookies = {}
+        for cookie in ((got.get("result") or {}).get("cookies") or []):
+            name = str((cookie or {}).get("name") or "").strip()
+            if name:
+                cookies[name] = str((cookie or {}).get("value") or "")
+        if cookies:
+            cfchallenge.remember_clearance(host, cookies, user_agent)
+    except Exception:
+        pass
+
+
 def fetch(url, cfg=None, timeout=CLEAR_TIMEOUT, settle=0.4):
     """*url* read by the managed browser: ``{"html", "status"}`` or None.
 
@@ -314,15 +645,27 @@ def fetch(url, cfg=None, timeout=CLEAR_TIMEOUT, settle=0.4):
         return None
     if not ensure():
         return None
+    # This navigation is a real GET too. Use the shared per-host gate even on
+    # the browser-only path and on a challenge fallback, so rapid AOTY/RYM page
+    # sequences keep the same 1 req/s politeness as the plain path.
+    from . import cfchallenge
+    cfchallenge._pace(cfchallenge.host_of(url))
     with _lock:                     # one browser, so one page at a time
         ws_url = _target()
         if not ws_url:
             return None
         session = None
+        session_cookies = []
         try:
             session = _Session(ws_url)
             session.call("Page.enable", timeout=20)
             session.call("Runtime.enable", timeout=20)
+            session.call("Network.enable", timeout=20)
+            # Stored or borrowed session for this host; Cloudflare-owned
+            # cookies are dropped and these session cookies are removed after
+            # the page is read (`finally`).
+            session_cookies = _set_session_cookies(session, url,
+                                                   _session_cookie(cfg, url))
             nav = session.call("Page.navigate", {"url": str(url)}, timeout=30)
             # A navigation that never reached a document is NOT a page. Chrome
             # answers `net::ERR_*` and then renders its own error document,
@@ -343,14 +686,22 @@ def fetch(url, cfg=None, timeout=CLEAR_TIMEOUT, settle=0.4):
                 html = session.value("document.documentElement.outerHTML") or ""
                 if (html and not _challenge(html)
                         and session.value("document.readyState") == "complete"):
+                    _publish_clearance(session, url)
                     return {"html": html, "status": 200, "via": "browser"}
             # Never cleared. A cleared-but-empty read is still worth returning
             # only when it is not the challenge — the caller decides.
             if html and not _challenge(html):
+                _publish_clearance(session, url)
                 return {"html": html, "status": 200, "via": "browser"}
             return None
         except Exception:
             return None
         finally:
             if session is not None:
+                for name in session_cookies:
+                    try:
+                        session.call("Network.deleteCookies",
+                                     {"name": name, "url": str(url)}, timeout=10)
+                    except Exception:
+                        pass
                 session.close()

@@ -100,9 +100,9 @@ _FAILED = {}
 _STARTED_FOR = {"at": 0.0, "ok": False}
 _START_TTL = 60.0
 
-# Outbound pacing for the live scrapers. `fetch_page` is the ONE gate: it keeps
-# consecutive GETs to the same host at least this far apart, so a caller that
-# paced as well (aoty.fetch used to) would only make every request pay twice.
+# One shared per-host gate for every live HTTP GET and browser navigation.
+# `fetch_page` uses it for plain GETs; `browserfetch.fetch` uses it for CDP
+# navigations. Source callsites add no second gate (or the wait doubles).
 # Both scraped sources ask for one request a second.
 FETCH_MIN_INTERVAL = 1.0
 # A 429 or a 5xx that is NOT the interstitial is the site being busy, not an
@@ -281,8 +281,9 @@ def clear_failures(host=None):
     _STARTED_FOR["at"] = 0.0
 
 
-# What the background warm-up probes, and the cookie that makes a probe
-# pointless for that host.
+# Host, saved cookie key (for the solver warm-up), and URL. `warm_solver` skips
+# a host with a stored cookie; `warm_browser` still visits it because a
+# clearance bound to the user's other browser is dropped before Chrome sees it.
 WARM_URLS = (
     ("rateyourmusic.com", "rym_cookie", "https://rateyourmusic.com/"),
     ("albumoftheyear.org", "aoty_cookie", "https://www.albumoftheyear.org/"),
@@ -324,6 +325,51 @@ def warm_solver(cfg=None):
                 continue
 
     threading.Thread(target=_run, daemon=True, name="solver-warm").start()
+
+
+def warm_browser(cfg=None):
+    """Clear both hosts' challenge at boot, in the background, with the browser.
+
+    The OTHER warm-up (`warm_solver`) asks what the solver can pass; this one
+    starts from the route that actually works. WHY at boot: MEASURED,
+    2026-10-11 — the FIRST navigation to a host after the profile goes cold
+    spends the whole challenge (Album of the Year ~27 s, RateYourMusic ~49 s),
+    which is most of what a page fetch is willing to wait for and more than a
+    genre lookup's own budget. A cold start therefore reported "no data" for a
+    host that answers in a second once its clearance is in the profile, and the
+    user's first import of the session was the thing that paid it. One
+    successful navigation per host, off the request path, and every fetch
+    afterwards is the cleared fast path (`solved_cookies` is filled by the
+    browser itself — see `browserfetch._publish_clearance`).
+
+    Skipped per host when the MANAGED browser profile already holds its own
+    fresh clearance, when no browser can be driven, or when the caller did not
+    carry `cf_browser_fetch` (the same gate `browserfetch.enabled` applies: a
+    suite's own cfg must never launch a browser on the machine running it). The
+    user's pasted clearance belongs to a different UA and is discarded before
+    it reaches Chrome; a saved login session does not clear Chrome's challenge.
+
+    A host that answers nothing on the first navigation is asked ONCE more:
+    MEASURED, 2026-10-11, Album of the Year's front page is heavy enough that a
+    cold clearance can outlast even the raised ceiling, while the same URL
+    answers in ~3 s the moment that first navigation is done — so a second
+    attempt is what turns "the warm-up did nothing" into a cleared profile.
+    """
+    def _run():
+        for host, _cookie_key, url in WARM_URLS:
+            try:
+                if solved_cookies(host):
+                    continue
+                for _attempt in range(2):
+                    got = browserfetch.fetch(url, cfg)
+                    if got and got.get("html"):
+                        break
+            except Exception:
+                continue
+
+    if not browserfetch.available(cfg):
+        return
+    threading.Thread(target=_run, daemon=True, name="browser-warm").start()
 
 
 def is_challenge(text, status=None):
@@ -395,6 +441,19 @@ def solved_user_agent(host):
     if not entry or time.time() - entry.get("at", 0) > COOKIE_TTL:
         return ""
     return str(entry.get("user_agent") or "")
+
+
+def remember_clearance(host, cookies, user_agent=""):
+    """Cache a cleared session for *host* — the fast plain path's credential.
+
+    `solve` calls this with what the solver won; `server/browserfetch.py` calls
+    it with what a real browser holds after it fetched a page. Both are the same
+    thing to this module (the cookies a cleared client sends and the UA they are
+    bound to), and caching a clearance a browser WON is what makes the pages
+    after the first plain fast GETs instead of more browser navigations.
+    """
+    if host:
+        _remember(host, cookies, user_agent)
 
 
 def clear():
@@ -540,15 +599,21 @@ def solve(url, cfg=None, timeout=None):
 
 
 def fetch_page(url, cfg=None, *, headers=None, cookies=None, params=None,
-               timeout=20.0, host=None, solve_on_challenge=True):
+               timeout=20.0, host=None, solve_on_challenge=True, plain=True):
     """A LIVE page: ``{"ok", "html", "status", "challenge", "via"}``.
 
     The fast path is a plain GET through the shared client, wearing whatever
     cleared-session cookies the caller holds (its own paste, plus anything the
     solver last won for this host). Only if that answer IS the interstitial —
     or the request failed outright — is the solver asked, and only when one is
-    configured. `via` names which route produced `html` ("http" or "solver"),
-    so a caller can report where a page came from.
+    configured. `via` names which route produced `html` ("http", "browser" or
+    "solver"), so a caller can report where a page came from.
+
+    `plain=False` skips that GET entirely and asks the browser first: a host
+    that answers a plain client with a DEGRADED page (not a challenge — a real
+    `200` carrying less than the real one, which is what Album of the Year does
+    without the user's own session — see `server/aoty.py::fetch`) must not have
+    that page mistaken for an answer.
 
     Never raises: a network error is ``ok: False`` with `challenge: False`, and
     a cleared page that Cloudflare still refused is ``ok: False`` with
@@ -564,7 +629,7 @@ def fetch_page(url, cfg=None, *, headers=None, cookies=None, params=None,
     status = None
     text = ""
     r = None
-    for attempt in range(FETCH_RETRIES + 1):
+    for attempt in range(FETCH_RETRIES + 1 if plain else 0):
         _pace(host)                 # the ONE per-host gate — see FETCH_MIN_INTERVAL
         try:
             from server import httpclient  # noqa: F401
@@ -587,7 +652,7 @@ def fetch_page(url, cfg=None, *, headers=None, cookies=None, params=None,
         if wait > 0:
             time.sleep(wait)
 
-    if not text.startswith("__error__") and not is_challenge(text, status):
+    if plain and not text.startswith("__error__") and not is_challenge(text, status):
         if r is not None and (status == 429 or (status or 0) >= 500):
             # The retries above were not enough: an exhausted refusal is no
             # page — the caller must report a failure, not "no data".

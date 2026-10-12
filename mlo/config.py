@@ -51,6 +51,18 @@ LEGACY_DEFAULT_NAMING_SCRIPTS = (
     "$if(%catalognumber%,$if(%media%, - ,$if(%releasecountry%, - ,))%catalognumber%)}"
     "$if(%label%, [%label%])$if(%musicbrainz_albumid%, [%musicbrainz_albumid%])/"
     "%discnumber%-$num(%tracknumber%,2) %title%$if(%musicbrainz_trackid%, [%musicbrainz_trackid%])",
+    #   [4] the label's own bracket, retired when the label moved INTO the
+    #       album folder's brace group ("{US - CD - Virgin - 509996 27547 2 9}")
+    #       so the pressing's label and catalog number read in one place
+    "%albumartist% [%musicbrainz_albumartistid%]/$if(%releasetype%,[%releasetype%] ,)"
+    "$if(%originaldate%,%originaldate% - ,)$if(%date%,%date% - ,)"
+    "%album% {$if(%releasecountry%,%releasecountry%)"
+    "$if(%media%,$if(%releasecountry%, - ,)%media%)"
+    "$if(%catalognumber%,$if(%media%, - ,$if(%releasecountry%, - ,))%catalognumber%)}"
+    "$if(%label%, [%label%])$if(%musicbrainz_albumid%, [%musicbrainz_albumid%])"
+    "$if(%musicbrainz_releasegroupid%, [%musicbrainz_releasegroupid%])/"
+    "%discnumber%-$num(%tracknumber%,2) %title%$if(%musicbrainz_trackid%, [%musicbrainz_trackid%])"
+    "$if(%musicbrainz_releasegroupid%, [%musicbrainz_releasegroupid%])",
 )
 
 # The genre chains previous releases shipped (Settings writes the whole list
@@ -1629,24 +1641,22 @@ DEFAULT_CONFIG = {
     "genre_sources": [
         "rateyourmusic", "albumoftheyear", "musicbrainz",
     ],
-    # Optional keys for the genre sources that need one. Left empty the source
-    # is skipped instead of guessed (Discogs' search endpoint requires a
-    # token; Last.fm requires an API key). RYM answers only a real browser
-    # session: paste the Cookie header of a logged-in rateyourmusic.com tab
-    # (it carries Cloudflare's cf_clearance). Empty, RYM's live pages are not
-    # asked at all while the archived-snapshot fallback below is on — a
-    # refused request would latch the source off for a few minutes anyway
-    # (`integrations._rym_blocked`) — so the genre chain either reads a
-    # snapshot or falls through to the next source. Deezer/iTunes/TheAudioDB/
-    # MusicBrainz are keyless.
+    # Optional credentials. A stored `rym_cookie` is the persistent, explicit
+    # signed-in session for RateYourMusic; release pages refuse anonymous
+    # clients. If it is empty and `cf_browser_fetch` is on, the browser route
+    # lazily reads only rateyourmusic.com cookies from the browser profiles on
+    # this machine, keeps the filtered session in memory for 45 minutes, and
+    # never saves it to config. With the browser route off and no paste/solver,
+    # RYM is reported as unavailable; the app never guesses data. Discogs and
+    # Last.fm still need their own tokens.
     "discogs_token": "",
     "lastfm_api_key": "",
     "rym_cookie": "",
-    # The User-Agent RYM's requests are sent with. Cloudflare binds the
-    # `cf_clearance` cookie it hands out to the EXACT User-Agent (and network)
-    # that earned it, so a paste exported from any browser that is not the
-    # built-in Chrome UA cannot validate without this set to that browser's
-    # own UA string. Empty = the built-in Chrome UA (`integrations.RYM_HEADERS`).
+    # The User-Agent for the stored RYM cookie's plain HTTP requests. Cloudflare
+    # binds `cf_clearance` to the exact UA (and network) that earned it, so a
+    # paste from another browser needs that browser's UA here. The managed
+    # browser route uses Chrome's own UA instead and drops only Cloudflare's own
+    # cookies (`cf_*`); the site's signed-in tokens travel with the paste.
     "rym_user_agent": "",
     # The per-cookie notes for the cookie logins (server/api_cookies.py): one
     # JSON object per source, one entry per cookie identity
@@ -1663,21 +1673,15 @@ DEFAULT_CONFIG = {
     # no longer affects what genre or rating an import writes, and RYM's link
     # resolution comes from MusicBrainz rather than the archive.
     "rym_archive_fallback": True,
-    # A FlareSolverr-compatible solver. Both scraped sources (RateYourMusic
-    # and Album of the Year) sit behind Cloudflare's challenge, which refuses
-    # every automated client this project can run (measured: plain HTTP,
-    # curl_cffi, headless Chromium and a headed Chrome all got the 403
-    # interstitial). A solver keeps a real browser warm and solves the
-    # challenge once per host; the cookies it wins are reused for the plain
-    # fast path until they expire, so one solve buys many fast requests.
-    #
-    # Empty is the NORMAL case now: FlareSolverr is installed from
-    # Dependencies and run by this app (server/solver.py), so the URL resolves
-    # on its own — a set value is the explicit override that wins over it (and
-    # over the MLO_SOLVER_URL/FLARESOLVERR_URL environment the shipped Docker
-    # compose uses). With neither, the live page is reachable only with a
-    # cleared session cookie (rym_cookie / aoty_cookie), and a refused page is
-    # reported as a challenge, never filled from somewhere else.
+    # An optional FlareSolverr-compatible solver endpoint. Its challenge result
+    # is cached for plain requests; on this network the managed browser route
+    # is preferred because FlareSolverr cannot pass either host's challenge.
+    # Empty is the NORMAL case: Dependencies installs/runs the app-managed
+    # FlareSolverr (`server/solver.py`), and an explicit URL overrides it (and
+    # `MLO_SOLVER_URL` / `FLARESOLVERR_URL`). If neither answers, the default
+    # browser route can still fetch live pages and can borrow a host-filtered,
+    # in-memory session from a local browser profile; a refused page is never
+    # filled from an archive or an invented value.
     "cf_solver_url": "",
     # Whether the app may bring its own FlareSolverr up by itself. Ships ON: it
     # removes the cookie work entirely, and it does nothing at all when
@@ -1688,16 +1692,18 @@ DEFAULT_CONFIG = {
     # How long the solver may spend on one page, in milliseconds (FlareSolverr's
     # own budget). A hard challenge can take most of a minute.
     "cf_solver_timeout": 60000,
-    # Whether this machine's own Chrome/Edge may be driven — over its DevTools
-    # protocol — to fetch a page the two scraped hosts refuse every plain
-    # client. Ships ON, because MEASURED 2026-10-10 it is the ONLY route that
-    # clears them: FlareSolverr cannot pass either challenge (a 60 s timeout,
-    # every attempt, on a clean process), and RateYourMusic refuses a cleared
-    # cookie from every non-browser client tried, including curl_cffi
-    # impersonating Firefox. With it OFF, those two sources answer only from a
-    # cache or a cleared cookie. It opens ONE window (placed off to the side,
-    # `server/browserfetch.py`) and keeps it for the session; the clearance it
-    # wins lives in the profile the app owns, so later fetches are fast.
+    # Whether this machine's Chrome/Edge may be driven through DevTools to fetch
+    # live pages. Ships ON: MEASURED, 2026-10-11, this route clears both hosts;
+    # FlareSolverr and true `--headless` Chromium do not. On Windows Chrome is
+    # headed on a hidden desktop — no visible window, taskbar button, or focus
+    # change — and its profile keeps the clearance. When no `rym_cookie` /
+    # `aoty_cookie` is stored, a host-filtered session is read from local browser
+    # profiles on demand and cached in Python memory for 45 minutes. The pairs
+    # are injected as session cookies only for that page and deleted in
+    # `finally`; nothing is written to config or sent to another host. Chrome's
+    # own clearance/site-set cookies remain in its profile. Off, the app does
+    # not run a browser or read local browser sessions; cache, configured
+    # cookies, or a solver are the remaining routes.
     "cf_browser_fetch": True,
     # Auto-resolve RateYourMusic album + artist links during import; off =
     # links are only ever set by hand in the link editor.
@@ -1719,11 +1725,11 @@ DEFAULT_CONFIG = {
     # meets Cloudflare. An empty list, or one naming nothing real, falls back
     # to mlo.web_ratings.SOURCES (the same ids).
     "web_ratings_sources": ["rateyourmusic", "albumoftheyear", "musicbrainz"],
-    # Album of the Year's own cleared session, exactly like `rym_cookie`: paste
-    # the Cookie header of a browser tab that has passed the challenge (it
-    # carries the `cf_clearance` pair bound to that browser's User-Agent and
-    # network). Empty = AOTY is asked through the solver (`cf_solver_url`) when
-    # one is set, and otherwise reports the challenge rather than an answer.
+    # Optional persistent AOTY session, exactly like `rym_cookie`. A stored
+    # paste plus its matching `aoty_user_agent` enables the fast plain path; if
+    # blank, the browser route reads a host-filtered session from this machine's
+    # browser profiles on demand, caches it in memory for 45 minutes, and never
+    # saves it to config. With browser fetch off and no solver, AOTY is refused.
     "aoty_cookie": "",
     # The User-Agent AOTY's requests are sent with — Cloudflare binds
     # `cf_clearance` to the exact UA that earned it, so a cookie pasted from

@@ -160,6 +160,21 @@ async def _lifespan(app: FastAPI):
             except Exception as e:
                 print(f"[mlo] solver autostart failed: {e}")
         threading.Thread(target=_autostart_solver, daemon=True).start()
+    # …and the browser route's OWN warm-up, when it is allowed: the first
+    # navigation to either scraped host is what clears its challenge (MEASURED,
+    # 2026-10-11: ~27 s for Album of the Year, ~49 s for RateYourMusic), so it
+    # happens here — off the request path — instead of inside the user's first
+    # import, where it read as "no data" for a host that answers in a second
+    # once the clearance is in the profile. See `cfchallenge.warm_browser`; the
+    # browser draws on a hidden desktop, so no window is shown.
+    if load_config().get("cf_browser_fetch", True):
+        def _autostart_browser():
+            try:
+                from server import cfchallenge
+                cfchallenge.warm_browser(load_config())
+            except Exception as e:
+                print(f"[mlo] browser warm-up skipped: {e}")
+        threading.Thread(target=_autostart_browser, daemon=True).start()
     # Wishlist worker: periodically re-searches Soulseek for saved releases.
     try:
         from server import wishes_worker

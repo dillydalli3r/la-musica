@@ -81,49 +81,44 @@ export const TITLEBAR_H = "2rem";
  *  them dragging the window (`data-tauri-drag-region="deep"` is Tauri's own
  *  injected handler — the same one that maximizes on a double click).
  *
- *  Rendered on EVERY screen of the desktop shell, the setup wizard and the
- *  address/claim screens included: an undecorated window with no bar there
- *  would have no way left to be moved or closed. `null` everywhere else — a
- *  browser and a phone shell get their window chrome from their host.
+ *  Rendered on EVERY non-fullscreen screen of the desktop shell, the setup
+ *  wizard and address/claim screens included: an undecorated window with no
+ *  bar there would have no way left to be moved or closed. When the OS window
+ *  is fullscreen, this whole strip — title and window controls — is hidden;
+ *  the fullscreen player's own exit control remains available in its overlay.
+ *  `null` everywhere else — a browser and a phone shell get their window
+ *  chrome from their host.
  *
  *  It sits at `z-[70]`, above the fullscreen player (`z-50`) and the dialogs
- *  (`z-[60]`): the window controls are the one thing that must never be
- *  painted over, so a modal dims the app and leaves the chrome alone.
+ *  (`z-[60]`) while visible: the window controls must never be painted over.
  *
  *  macOS draws its controls on the LEFT, in its own order — the whole point of
  *  a custom bar is that it looks native, and a Mac with Windows' three buttons
  *  in the corner is the tell that it is not. */
 export default function TitleBar() {
   const [maximized, setMaximized] = useState(false);
+  const [fullscreen, setFullscreen] = useState(false);
 
-  // Publish the bar's height as that inset. The bar sits in the app's flow, so
-  // everything INSIDE the shell is below it already; a `fixed inset-0` overlay
-  // anchors to the window, and the fullscreen player's top row (the exit button
-  // and the queue readout) came out underneath the window controls on Windows
-  // (owner report). Set on <html> rather than the app box because the player is
-  // portalled to <body>. Retired with the bar, so a browser and a phone — where
-  // the host draws the chrome and this component renders nothing — keep 0. */
+  // Publish the bar's height as that inset. Fullscreen hides the entire bar,
+  // so the window-anchored overlays no longer reserve its 2rem strip.
   useEffect(() => {
     if (!IN_TAURI || IN_MOBILE_SHELL) return;
     const root = document.documentElement;
-    root.style.setProperty("--mlo-titlebar-h", TITLEBAR_H);
-    return () => {
-      root.style.removeProperty("--mlo-titlebar-h");
-    };
-  }, []);
+    root.style.setProperty("--mlo-titlebar-h", fullscreen ? "0px" : TITLEBAR_H);
+    return () => { root.style.removeProperty("--mlo-titlebar-h"); };
+  }, [fullscreen]);
 
   useEffect(() => {
     if (!IN_TAURI || IN_MOBILE_SHELL) return;
     const win = getCurrentWindow();
     let alive = true;
     const read = () => {
-      win.isMaximized().then((v) => {
-        if (alive) setMaximized(v);
-      }).catch(() => {});
+      win.isMaximized().then((v) => { if (alive) setMaximized(v); }).catch(() => {});
+      // Fullscreen is a resize too; reading the native state here hides the
+      // titlebar even when F11 or the OS, rather than the player button, did it.
+      win.isFullscreen().then((v) => { if (alive) setFullscreen(v); }).catch(() => {});
     };
     read();
-    // The state is only ever read to pick the icon — the toggle itself is the
-    // window's business, so this one listener is the whole of the bookkeeping.
     const stop = win.onResized(read);
     return () => {
       alive = false;
@@ -131,7 +126,7 @@ export default function TitleBar() {
     };
   }, []);
 
-  if (!IN_TAURI || IN_MOBILE_SHELL) return null;
+  if (!IN_TAURI || IN_MOBILE_SHELL || fullscreen) return null;
   const win = getCurrentWindow();
   // Desktop macOS, as opposed to an iPad in desktop mode (`maxTouchPoints`,
   // the same test `IN_MOBILE_SHELL` makes).

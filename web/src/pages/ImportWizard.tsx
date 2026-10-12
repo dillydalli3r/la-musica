@@ -3201,10 +3201,29 @@ const runTickedHere = async () => {
 };
 
 
-const finish = async () => {
+/** Finish the album the wizard is on: settle the release, name it with the
+ *  naming script, then run the ticked chain — and close.
+ *
+ *  `closeByNavigation` says the press was the Done control that is a LINK to
+ *  the album page: that navigation is what closes the wizard, and clearing the
+ *  params afterwards would carry the wizard's own route back OVER the album
+ *  page it just opened — the reported "Done loads the album, then cuts back to
+ *  the importing tab". Only the plain button (an import with no album to open)
+ *  closes by clearing the params here.
+ *
+ *  A claim refusal is NOT a failure: another job (an import, a bulk run, the
+ *  organizer) is already finishing this album, so there is nothing for this
+ *  press to run and the album is in the library either way. It is remembered
+ *  and reported in the step's own words ("already being finished — <the
+ *  refusal>") instead of being toasted as a failure; a real failure (a 500, a
+ *  bad path) still is one. */
+const finish = async (closeByNavigation: boolean) => {
   // Whether this Finish's ticked run went out forced — the completion toast
   // says so, the same "(forced)" the Optimization page uses.
   let forced = false;
+  // The claim's own refusal, when another job already holds the album: not an
+  // error (see above), so it only rewords the closing status.
+  let alreadyFinishing: string | null = null;
   try {
     // The digital release's OWN three answers first — SOURCE, the untimed
     // lyrics this install refuses, and the album description — through the
@@ -3262,13 +3281,31 @@ const finish = async () => {
           if (uploaded.length <= 1) setAlbumPath(roots[0]);
         }
       } catch (e) {
-        setFinishMsg(`Organize failed — ${e}`);
+        // A busy album is not an organize failure: another job is already
+        // finishing it, which is what this press would have done. The claim's
+        // own sentence, without `String(e)`'s "Error: " prefix, is the status.
+        const text = e instanceof Error ? e.message : String(e);
+        if (alreadyRunning(text)) {
+          alreadyFinishing ??= text;
+          setFinishMsg(startProblem("Organize", text));
+        } else {
+          setFinishMsg(`Organize failed — ${e}`);
+        }
       }
     }
     const force = forceRun ? forceDict(forceSel) : undefined;
     if (runAfterImportIds.length && targets.length) {
       forced = !!force;
-      await api.run(runAfterImportIds, targets, force);
+      try {
+        await api.run(runAfterImportIds, targets, force);
+      } catch (e) {
+        // The album is held by another job finishing it: nothing ran here, and
+        // nothing is broken — do not answer a success press with an error.
+        const text = e instanceof Error ? e.message : String(e);
+        if (!alreadyRunning(text)) throw e;
+        alreadyFinishing ??= text;
+        setFinishMsg(startProblem("Scripts", text));
+      }
     }
   } catch (e) {
     toast.error(String(e));
@@ -3286,10 +3323,15 @@ const finish = async () => {
   }
   lastSession.current = "";
   qc.invalidateQueries({ queryKey: ["importSessions"] });
-  setParams({});
+  // Closing: the Link's own navigation already left this route, so clearing the
+  // params here would travel BACK to /import over the album page the press just
+  // opened. The plain button has no such navigation and closes by clearing them.
+  if (!closeByNavigation) setParams({});
   toast(
-    (uploaded.length > 1 ? `Imported ${uploaded.length} albums — enrich each from its album page` : "Import complete — album graded") +
-      (forced ? " (scripts forced)" : "")
+    alreadyFinishing
+      ? `Album is already being finished by another job — ${alreadyFinishing}`
+      : (uploaded.length > 1 ? `Imported ${uploaded.length} albums — enrich each from its album page` : "Import complete — album graded") +
+        (forced ? " (scripts forced)" : "")
   );
 };
 
@@ -5426,12 +5468,12 @@ const finish = async () => {
               <Link
                 to={releaseId ? `/album/mb:${encodeURIComponent(releaseId)}` : `/album/${encodeURIComponent(albumPath)}`}
                 className="btn-primary tap"
-                onClick={finish}
+                onClick={() => finish(true)}
               >
                 Done
               </Link>
             ) : (
-              <button className="btn-primary tap" onClick={finish}>Done</button>
+              <button className="btn-primary tap" onClick={() => finish(false)}>Done</button>
             )}
           </div>
         </div>

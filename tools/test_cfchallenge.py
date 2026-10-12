@@ -452,6 +452,63 @@ try:
        == "cleared-token",
        "a warm-up solve that WORKED caches its clearance for the chain")
     cfchallenge.clear()
+
+    # The BROWSER's own warm-up: once per host, in the background, and only for
+    # a host nothing has cleared yet. The one thing it must never do is launch
+    # anything when the route is off (a suite's cfg has to be inert).
+    _real_fetch, _real_available = (cfchallenge.browserfetch.fetch,
+                                    cfchallenge.browserfetch.available)
+    _warmed = []
+    cfchallenge.browserfetch.fetch = lambda url, cfg=None, **kw: (
+        _warmed.append(url) or {"html": "<html>cleared</html>", "status": 200})
+    try:
+        cfchallenge.browserfetch.available = lambda cfg=None: False
+        cfchallenge.warm_browser({"cf_browser_fetch": True})
+        time.sleep(0.1)
+        ok(_warmed == [], "a warm-up with no browser available fetches nothing")
+
+        cfchallenge.browserfetch.available = lambda cfg=None: True
+        # A stored user session does NOT warm Chrome's profile: its clearance
+        # belongs to another browser's UA and `_set_session_cookies` drops it.
+        cfchallenge.warm_browser({"cf_browser_fetch": True,
+                                  "rym_cookie": "is_logged_in=1; cf_clearance=other-UA",
+                                  "aoty_cookie": "cf_clearance=other-UA"})
+        end = time.time() + 3
+        while time.time() < end and len(_warmed) < 2:
+            time.sleep(0.02)
+        ok(sorted(_warmed) == sorted(u for _h, _k, u in cfchallenge.WARM_URLS),
+           f"the browser warms both hosts even with user-session cookies ({_warmed})")
+
+        # A host whose first navigation answered nothing is asked again — the
+        # cold AOTY front page outlasts the per-page ceiling (measured).
+        _warmed.clear()
+        _answers = {"n": 0}
+
+        def _flaky(url, cfg=None, **kw):
+            _warmed.append(url)
+            _answers["n"] += 1
+            return None if _answers["n"] == 1 else {"html": "<html>x</html>"}
+
+        cfchallenge.browserfetch.fetch = _flaky
+        cfchallenge.browserfetch.available = lambda cfg=None: True
+        cfchallenge.warm_browser({"cf_browser_fetch": True})
+        end = time.time() + 3
+        while time.time() < end and len(_warmed) < 3:
+            time.sleep(0.02)
+        ok(len(_warmed) == 3 and _warmed[0] == _warmed[1],
+           f"a host that answered nothing is asked once more ({_warmed})")
+
+        # A host whose clearance is already in hand is not visited again.
+        _warmed.clear()
+        cfchallenge.remember_clearance("rateyourmusic.com", {"cf_clearance": "x"})
+        cfchallenge.remember_clearance("albumoftheyear.org", {"cf_clearance": "y"})
+        cfchallenge.warm_browser({"cf_browser_fetch": True})
+        time.sleep(0.3)
+        ok(_warmed == [], "a host that is already cleared is not warmed again")
+    finally:
+        cfchallenge.browserfetch.fetch = _real_fetch
+        cfchallenge.browserfetch.available = _real_available
+    cfchallenge.clear()
 finally:
     server.shutdown()
     cfchallenge.clear()

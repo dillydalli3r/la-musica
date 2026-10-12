@@ -2746,8 +2746,10 @@ def _rym_cookie(cfg=None):
     """The user's `rym_cookie` — a browser session cookie, or "".
 
     Read from the live config on every request so pasting one into Settings
-    takes effect without a restart. An empty cookie is not an error: it is
-    the documented "RYM is skipped" state.
+    takes effect without a restart. An empty paste means the browser route may
+    lazily borrow a host-filtered session from this machine's browser profiles
+    (`server.browserfetch._browser_session`); only when neither it, a solver,
+    nor a stored cookie can answer is RYM reported unavailable.
 
     The paste is normalised: people copy the value from wherever their
     browser shows it, so a leading "Cookie:" (the devtools row label), a
@@ -2883,18 +2885,18 @@ def _rym_apply_ua(headers, ua):
 
 
 def _adopt_solved_clearance(cfg=None):
-    """Merge a solved clearance into RYM's own jar — one solve, not one per page.
+    """Merge a cleared session into RYM's own jar — one clearance, not one per page.
 
     RYM builds its requests by hand (its own header set and jar), so it does not
-    go through `cfchallenge.fetch_page`'s fast path and would otherwise solve the
-    challenge again for EVERY page — a browser navigation per request. The
-    cookies the solver won are exactly the ones Cloudflare expects, so they join
-    the same jar the user's paste seeds; `_rym_user_agent` then sends them with
-    the solver's User-Agent, which is what the clearance is bound to.
+    go through `cfchallenge.fetch_page`'s fast path and would otherwise pay for
+    the clearance again for EVERY page. The cookies a cleared client holds —
+    won by the solver, or by the real browser `server/browserfetch.py` drives,
+    which is the route that works — are exactly the ones Cloudflare expects, so
+    they join the same jar the user's paste seeds; `_rym_user_agent` then sends
+    them with the User-Agent that earned them, which is what the clearance is
+    bound to.
     """
     try:
-        if not cfchallenge.solver_url(cfg):
-            return
         solved = cfchallenge.solved_cookies("rateyourmusic.com")
         if not solved:
             return
@@ -3594,6 +3596,11 @@ def _rym_get(path, params=None, cfg=None, expect=None):
             live = None
         if (live and live.get("html")
                 and not cfchallenge.is_challenge(live["html"])):
+            # The browser published the clearance it earned to `cfchallenge`
+            # (see `browserfetch._publish_clearance`), so merge it into RYM's
+            # own jar too: RYM builds its requests by hand and would otherwise
+            # pay for the clearance again on the next page.
+            _adopt_solved_clearance(cfg)
             _rym_record(200, url)
             _rym_route.update({"route": "live", "cached": False, "url": url,
                                "snapshot": "", "solved": True})

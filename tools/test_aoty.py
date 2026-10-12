@@ -98,6 +98,20 @@ ok(artist["genres"] == ["Alternative Rock"], f"artist genres: {artist['genres']}
 ok(aoty.genres_from_html(ALBUM) == album["genres"],
    "genres_from_html agrees with the album parse")
 
+# The label shape AOTY serves NOW (MEASURED, 2026-10-11, on the live page every
+# route returns): the row ends `/&nbsp;Genre <span id="showGenre">…` and there
+# is no `Genre</span>` anywhere on the page. A parser that knew only the
+# capture above read every real album page as "no genres" — the value is in
+# the anchors BEFORE the label, which is why the marker alone decides.
+LIVE_ALBUM = ALBUM.replace(
+    '<span>/&nbsp;Genre</span>',
+    '<span>/&nbsp;Genre <span id="showGenre"><span class="actionBlank '
+    'showGenreSuggest" data-album-id="1298"><i class="far fa-plus-square">'
+    '</i></span></span></span>')
+_live = aoty.parse_album(LIVE_ALBUM)
+ok(_live["genres"] == ["Alternative Rock", "Post-Britpop", "Art Rock"],
+   f"the label shape the live site serves is read too: {_live['genres']}")
+
 
 # --------------------------------------------------------------------------- #
 # Resolution through the site's own search (fetch stubbed)
