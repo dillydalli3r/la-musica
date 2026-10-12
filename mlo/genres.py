@@ -10,9 +10,10 @@ why a track whose only genre was `Pop` looked like a parent with no child.
 
 What replaced it:
 
-  * `normalize_genres` caps, resolves and dedupes the names, and drops a
-    LEADING head the rest of the list sits under — the slot old files still
-    carry (`_drop_derived_head`). Nothing is ever added.
+  * `normalize_genres` caps, resolves and dedupes the names, and drops every
+    name another member of the SAME list sits under — the parent slot old
+    files still carry, wherever the source put it (`_drop_derived_parents`).
+    Nothing is ever added.
   * the hierarchy is a VIEW: `genre_vocab.path_of`/`parent_of` answer what sits
     above a name (`Electronic › House › Deep House`), so the levels a file
     shows can be corrected without rewriting the file, and a name that is a
@@ -135,25 +136,31 @@ def split_stored(value) -> List[str]:
     return [p for p in (_clean(p) for p in _SPLIT_RE.split(text)) if p]
 
 
-def _drop_derived_head(names):
-    """*names* without a leading head the rest of the list already sits under.
+def _drop_derived_parents(names):
+    """*names* without any name another member of the list sits under.
 
-    The shape this removes is the one THIS APP used to write: the family
-    first, then the specific genres, so `Pop; Art Pop` is really `Art Pop` —
-    the `Pop` was derived, never stated. The rule is narrow on purpose: the
-    head has to be FIRST (that is where the writer put it) and another member
-    has to sit under it, so a head a source really stated — alone, or beside a
-    genre it does not contain (`Rock` + `Jazz`) — is left exactly as it came.
+    The shape this removes is the one THIS APP used to write: a family stored
+    beside its own child, so `Pop; Art Pop` is really `Art Pop` — the `Pop`
+    was derived, never stated, and a track whose only genre was `Pop` looked
+    like a parent with no child. The rule is position-independent on purpose:
+    a name is dropped whenever it is a STRICT ANCESTOR of another name in the
+    SAME list, wherever the source put it, so `Pop; Electropop` and
+    `Electropop; Pop` both answer `Electropop` and no head survives beside its
+    own child by source order. A name no other member sits under keeps its
+    place exactly as it came, so an unrelated pair (`Rock` + `Jazz`) and a
+    lone head are untouched.
     """
+    names = list(names)
     if len(names) < 2:
-        return list(names)
-    head = canonical(names[0])
-    if not head or not is_parent(head):
-        return list(names)
-    for name in names[1:]:
-        if head in path_of(name)[:-1]:
-            return list(names[1:])
-    return list(names)
+        return names
+    keys = [canonical(n) or _clean(n) for n in names]
+    kept = []
+    for index, key in enumerate(keys):
+        others = keys[:index] + keys[index + 1:]
+        if key and any(key in path_of(other)[:-1] for other in others):
+            continue
+        kept.append(names[index])
+    return kept
 
 
 def family_of(names: Iterable) -> str:
@@ -178,9 +185,9 @@ def normalize_genres(names: Iterable, count: int = DEFAULT_GENRE_COUNT,
     * every name is resolved to MusicBrainz's spelling when it is a genre
       (`Nonsense` is kept as written, because dropping evidence is worse),
     * duplicates are removed case-insensitively,
-    * a leading head the rest of the list sits under is dropped — the family
-      slot this app wrote before the parent became a derived view
-      (`_drop_derived_head`),
+    * a name another member of the SAME list sits under is dropped — the
+      parent slot this app wrote before the parent became a derived view,
+      wherever the source put it (`_drop_derived_parents`),
     * the result is capped at *count*,
     * each name is capitalized for display (`display_name`) unless *caps* is
       off — the stored value is what a person reads, and MusicBrainz's own
@@ -215,7 +222,7 @@ def normalize_genres(names: Iterable, count: int = DEFAULT_GENRE_COUNT,
             continue
         seen.add(key)
         known.append(name)
-    out = _drop_derived_head(known)[:count]
+    out = _drop_derived_parents(known)[:count]
     return [display_name(n) for n in out] if caps else out
 
 
@@ -254,6 +261,9 @@ def issues(values: Iterable, count: int = DEFAULT_GENRE_COUNT) -> List[str]:
     of them, single-spaced. There is no ORDER rule any more — a GENRE tag
     holds specific names, and the level above them is derived, not stored
     (`mlo.genres` and `mlo.genre_vocab.path_of`), so position means nothing.
+    What is still a defect is a PARENT name stored beside its own child,
+    anywhere in the list: the family slot this app used to write, which the
+    canonical pass removes.
     """
     names = iter_names(values)
     out: List[str] = []
@@ -270,9 +280,10 @@ def issues(values: Iterable, count: int = DEFAULT_GENRE_COUNT) -> List[str]:
         if name != _clean(name):
             out.append("spacing")
             break
-    if len(_drop_derived_head([canonical(n) or _clean(n) for n in names])) < len(names):
-        # The file still carries the family slot this app used to write: it is
-        # a derived value standing in for a fact, and Format All's canonical
+    if len(_drop_derived_parents([canonical(n) or _clean(n) for n in names])) < len(names):
+        # The file still carries a parent name beside its own child (anywhere
+        # in the list) — the family slot this app used to write. It is a
+        # derived value standing in for a fact, and Format All's canonical
         # pass removes it (the same predicate, so the writer and the check
         # cannot disagree).
         out.append("derived parent genre stored")

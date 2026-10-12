@@ -1241,31 +1241,19 @@ def _finish_album(path, cfg, progress=None, force=None, release=None,
     _files_pool = ThreadPoolExecutor(max_workers=1)
     _files = _files_pool.submit(_files_step)
 
-    # Advisory BEFORE the chain: script 8 derives ALBUMITUNESADVISORY from the
-    # per-track values, so writing ITUNESADVISORY afterwards would leave the
-    # album tag stale. Gated by advisory_auto_fetch; never fatal. Only fetched
-    # when a chain is configured to read them — they exist to feed script 8 and
-    # the lyrics step, and a chain that is switched off must not leave those
-    # tags behind as a side effect. The frame rides INSIDE that same condition:
+    # The per-track advisory fetch and the instrumental check are CHAIN STEPS,
+    # not stages before it — see `_import_extras`. Both write tags on the
+    # album's own files, so they run on the album lane; the advisory step sits
+    # AFTER the lyrics script (a dependency, not a comment: its decision reads
+    # the track's own words — mlo/advisory.py `_lyrics_text`), and script 8,
+    # which derives ALBUMITUNESADVISORY from the per-track values, waits for
+    # it (`mlo.scripts.SCRIPT_DEPS[8]`). The frame rides INSIDE the switch:
     # an import that fetches no advisories (no chain, or the switch off) does
     # not say it is fetching them.
-    if chain and run_cfg.get("advisory_auto_fetch", True):
-        _phase("Fetching advisories…")
-        try:
-            out["advisory"] = fetch_advisories([path], run_cfg)
-        except Exception:
-            traceback.print_exc()
-
-    # Instrumental detection sits next to it for the same reason (the chain's
-    # lyrics step reads INSTRUMENTAL), and is independent of the advisory: a
-    # track can be instrumental and explicit-rated. Gated by
-    # instrumental_auto_fetch; never fatal. Same rule for its frame.
-    if chain and cfg.get("instrumental_auto_fetch", True):
-        _phase("Checking instrumentals…")
-        try:
-            out["instrumental"] = fetch_instrumentals([path], cfg)
-        except Exception:
-            traceback.print_exc()
+    # (The advisory and instrumental frames are gone from here: those two
+    # fetches are chain steps now, so the CHAIN announces them — "#n/N ·
+    # Fetching advisories" when the step starts, like every other step of a
+    # run. A frame published here would name work that has not started yet.)
 
     # Artist image / descriptions: fetched here (the metadata step) so an
     # import leaves the album graded-ready. metadata_review on stages the
@@ -1340,7 +1328,16 @@ def _finish_album(path, cfg, progress=None, force=None, release=None,
         try:
             out["scripts"] = script_runners.run_chain(
                 run_cfg, chain, targets=[path], force=force, progress=progress,
-                wait=wait, final=final)
+                wait=wait, final=final, extra=_import_extras(path, cfg, run_cfg, chain))
+            for entry in out["scripts"] or []:
+                # The two extra steps' own answers, back where every caller
+                # reads them (`out["advisory"]` / `out["instrumental"]`): they
+                # are the same fetch this function used to run before the
+                # chain, now sequenced inside it (see `_import_extras`).
+                if entry.get("id") == "advisories" and "stats" in entry:
+                    out["advisory"] = entry["stats"]
+                elif entry.get("id") == "instrumentals" and "stats" in entry:
+                    out["instrumental"] = entry["stats"]
         finally:
             run_cfg.pop("_grade_sink", None)
     except script_runners.RunBusy as e:
@@ -1975,6 +1972,59 @@ STATUS_WRITTEN = "written"       # the tag now holds what this run wrote
 STATUS_UNCHANGED = "unchanged"   # decided, and the tag already read that
 STATUS_EXISTING = "existing"     # echoed, nobody was asked this run
 STATUS_GATED = "gated"           # the write gate refused the file
+
+
+def _import_extras(path, cfg, run_cfg, chain):
+    """The import's own steps, as nodes of the CHAIN it is about to run.
+
+    Two fetches that used to run before the chain now run INSIDE it, so their
+    place is a declared edge rather than the order of two calls:
+
+    * ``instrumentals`` (``fetch_instrumentals``) FIRST — the lyrics script
+      reads the INSTRUMENTAL tag it writes (an instrumental track is skipped
+      by the fetch and gets no lyrics to translate), so it has no dependency
+      and is spliced in at the front of the run;
+    * ``advisories`` (``fetch_advisories``) AFTER the lyrics script (13),
+      because the advisory decision reads the track's own words
+      (``mlo/advisory.py`` `_lyrics_text`): the owner's rule is that an
+      advisory must never be decided before the lyrics it would want. Script
+      8, which derives ALBUMITUNESADVISORY from the per-track values, waits
+      for it in turn (``mlo.scripts.SCRIPT_DEPS[8]``).
+
+    Both write tags on the album's own files, so both are "album" lane steps —
+    one at a time, like every script beside them. Either is skipped by its own
+    switch, and a step whose switch is off is not added at all, so the run's
+    step count never includes work nobody asked for. The callables are wrapped
+    so an exception is that step's own failure (the chain carries on; the
+    import never loses the rest of its pipeline).
+    """
+    steps = []
+
+    def _guarded(fn, key):
+        def run(config):
+            try:
+                return fn([path], config)
+            except Exception as e:
+                traceback.print_exc()
+                return {"error": str(e), "step": key}
+        return run
+
+    if cfg.get("instrumental_auto_fetch", True):
+        steps.append({"key": "instrumentals", "label": "Checking instrumentals",
+                      "run": _guarded(fetch_instrumentals, "instrumentals"),
+                      "lane": "album", "after": None})
+    if run_cfg.get("advisory_auto_fetch", True):
+        # Anchored after the lyrics script and dependent on it — but only when
+        # this chain really runs one: a chain configured without 13 fetches no
+        # lyrics at all, so there is nothing to wait for and the advisory step
+        # keeps its old place at the front (it was a pre-chain stage before
+        # this graph, and it is still fetched for every chain that wants it).
+        after_lyrics = 13 in set(chain or ())
+        steps.append({"key": "advisories", "label": "Fetching advisories",
+                      "run": _guarded(fetch_advisories, "advisories"),
+                      "deps": (13,) if after_lyrics else (),
+                      "lane": "album", "after": 13 if after_lyrics else None})
+    return steps
 
 
 def fetch_advisories(paths, cfg=None, force=False):

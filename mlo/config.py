@@ -748,12 +748,12 @@ DEFAULT_CONFIG = {
     # Genre STRUCTURE: no repeated name and no derived parent left in the tag
     # (issue codes GENRE_STRUCTURE per track). A GENRE tag holds the specific
     # names a source stated and the level above them is derived, never stored
-    # (mlo.genres) — so a LEADING head another member of the list sits under is
-    # the family slot this app used to write, and a repeat is a repeat. Both
-    # survive in files written before the model changed and in downloads
-    # another tagger touched, and script 10 / the Optimize strip pass remove
-    # them through the same predicate (mlo.genres._drop_derived_head), so the
-    # check and the writers cannot disagree.
+    # (mlo.genres) — so a parent name stored beside its own child (anywhere in
+    # the list) is the family slot this app used to write, and a repeat is a
+    # repeat. Both survive in files written before the model changed and in
+    # downloads another tagger touched, and script 10 / the Optimize strip pass
+    # remove them through the same predicate (mlo.genres._drop_derived_parents),
+    # so the check and the writers cannot disagree.
     "grade_check_genre_structure": True,
     # Genre VOCABULARY: every stored name must be a MusicBrainz genre
     # (mlo.genres.canonical). The app's own writers only ever store names

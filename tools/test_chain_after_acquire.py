@@ -243,10 +243,14 @@ CHAIN_RAISE = None      # exception instance — emulates a chain that cannot st
 
 
 def stub_run_chain(cfg, ids, targets=None, force=None, progress=None,
-                   wait=False, timeout=None, final=None):
+                   wait=False, timeout=None, final=None, extra=None):
     folder = norm((targets or [""])[0])
+    # `extra` is the import's non-script steps (the instrumental check and the
+    # advisory fetch, see `imports._import_extras`): this suite's config switches
+    # BOTH off, so it is always empty here — but the keyword is part of the seam
+    # and is recorded so a check could read it.
     entry = {"ids": list(ids), "target": folder, "wait": bool(wait),
-             "force": force, "chain": None}
+             "force": force, "chain": None, "extra": list(extra or ())}
     CHAIN_CALLS.append(entry)
     if CHAIN_RAISE is not None:
         raise CHAIN_RAISE
@@ -1317,7 +1321,7 @@ def check_cover_before_chain():
         return {"note": "", "staged": False, "fetched": 1, "source": "smoke"}
 
     def chain(cfg, ids, targets=None, force=None, progress=None, wait=False,
-              timeout=None, final=None):
+              timeout=None, final=None, extra=None):
         order.append("chain")
         seen_at_chain["cover"] = os.path.isfile(cover)
         if final is not None:

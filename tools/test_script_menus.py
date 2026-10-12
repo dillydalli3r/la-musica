@@ -586,6 +586,29 @@ def check_import_chain(check):
           imports.DEFAULT_CHAIN.index(15) > imports.DEFAULT_CHAIN.index(14)
           and imports.DEFAULT_CHAIN.index(15) < imports.DEFAULT_CHAIN.index(4),
           str(imports.DEFAULT_CHAIN))
+    # The chain's GRAPH tables (mlo/scripts.py, spec R388): a key or a dep that
+    # names no script is a rule that quietly stopped applying — the lane a
+    # removed script used to have, or an edge waiting on nothing.
+    from mlo.scripts import SCRIPT_DEPS, SCRIPT_LANES
+    check("every SCRIPT_LANES key is a real script",
+          set(SCRIPT_LANES) <= runners, str(sorted(set(SCRIPT_LANES) - runners)))
+    check("every SCRIPT_DEPS key and dependency names a real script (or the "
+          "import's own advisory step, which is not a script)",
+          set(SCRIPT_DEPS) <= runners
+          and all(dep in runners or dep == "advisories"
+                  for deps in SCRIPT_DEPS.values() for dep in deps),
+          f"keys={sorted(set(SCRIPT_DEPS) - runners)} "
+          f"deps={sorted({d for deps in SCRIPT_DEPS.values() for d in deps} - runners)}")
+    check("a script is never its own dependency",
+          all(sid not in deps for sid, deps in SCRIPT_DEPS.items()),
+          str({sid: deps for sid, deps in SCRIPT_DEPS.items() if sid in deps}))
+    check("the free lane is exactly the scripts that touch no album file",
+          set(SCRIPT_LANES) == {19, 22, 25, 26}, str(sorted(SCRIPT_LANES)))
+    # Advisory-after-lyrics is the owner's rule and it is an EDGE, not a
+    # position: script 8 reads the advisory tags, which read the lyrics.
+    check("Auto Tagging waits for the lyrics AND the advisory step",
+          set(SCRIPT_DEPS.get(8, ())) >= {13, "advisories"},
+          str(SCRIPT_DEPS.get(8)))
 
 
 def check_cli_runners(check):

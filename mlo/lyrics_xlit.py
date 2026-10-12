@@ -208,7 +208,10 @@ def detect_language(text, cfg=None, *declared):
        what a model answered. A declared language the text's own script
        CONTRADICTS is not evidence about this text and is passed over — the
        lyrics are what is being transformed, and a wrong tag must never
-       romanize or skip the wrong thing;
+       romanize or skip the wrong thing. Two LATIN-script languages are the
+       one pair the script cannot separate, so there the text's own distinct
+       function words are counted and a declaration they outvote is passed
+       over too (see the weighing below);
     2. the text's own SCRIPT, for the scripts that belong to one language
        (kana → ja, hangul → ko, … — `_SCRIPT_LANG`);
     3. the function words of the Latin languages a reader realistically
@@ -222,8 +225,33 @@ def detect_language(text, cfg=None, *declared):
     src = dominant_script(text)
     for code in declared:
         lang = declared_language(code)
-        if lang and lang_script(lang) == src:
-            return lang
+        if not lang:
+            continue
+        if lang_script(lang) != src:
+            continue
+        # A Latin-script declaration and a Latin-script text are the one pair
+        # the script cannot separate, and the tag is often the RELEASE's
+        # language (MusicBrainz's `text-representation`, which the import
+        # stamps on every file of the release) rather than THESE words'. So the
+        # text's own DISTINCT function words are weighed against it, and they
+        # win when they favour another language MORE than the declared one — a
+        # wrong tag must never skip the translation a track needs. MEASURED on
+        # the owner's own library (2026-10-12): "Latin Simone (Que Pasa
+        # Contigo)" carries LANGUAGE=eng (the release's text-representation)
+        # over Spanish lyrics, and that one tag made `xlit_needs` read
+        # en == en and write nothing, so the track kept Spanish words with no
+        # TRANSLATION-EN. The declaration itself is left ALONE either way —
+        # `LANGUAGE` is a release fact another source stated and the user's to
+        # edit (spec R167), and outvoting it here is enough for `xlit_needs`,
+        # script 17 and the grader to agree without rewriting the tag.
+        if src == "latin":
+            counts = _latin_counts(text)
+            voted = _latin_lang(text, counts)
+            if (voted and voted != lang
+                    and counts.get(voted, 0) >= _DECLARED_OVERRIDE_MIN
+                    and counts.get(voted, 0) > counts.get(lang, 0)):
+                return voted
+        return lang
     if src != "latin":
         return _SCRIPT_LANG.get(src, "")
     return _latin_lang(text)
@@ -297,17 +325,50 @@ _LATIN_WORDS = {
                     "je".split()),
 }
 
+# How much of another language's vocabulary it takes to OVERRULE a declared
+# one. The declaration comes from MusicBrainz's release text-representation
+# (authoritative about the release) and the vote is a heuristic about these
+# words, so the vote must be STRONG before it wins: three distinct function
+# words of one language, not one or two — a stray article or a syllable a
+# lyric repeats ("la", "no", "y") is not evidence enough to translate a whole
+# track, while a Spanish lyric tagged English shows several at once.
+_DECLARED_OVERRIDE_MIN = 3
 
-def _latin_lang(text):
-    """Best guess at the language of a Latin-script text, "" when undecided.
 
-    A plain vote among `_LATIN_WORDS`; a tie (words shared by two languages,
-    or none at all) is no answer rather than a coin flip."""
+def _latin_counts(text):
+    """DISTINCT function words per Latin language for *text*, as one dict.
+
+    The evidence `_latin_lang` votes with and `detect_language` weighs a
+    declaration against — one counter, so the two can never disagree about
+    which language these words are.
+
+    Each word counts ONCE, however often it repeats: a chorus is one word
+    sung many times, not many words, and the syllables a lyric repeats —
+    "la", "no", "y" — are exactly the ones two Latin languages share. Counted
+    per repetition they outvoted the language a text is really in: measured
+    on the owner's Gorillaz album (2026-10-12), the English "Sound Check
+    (Gravity)" repeats "no" and the "Gravity-y-y-y-y-yyy" h-period, and the
+    repeated "no"/"y" alone gave Spanish a token count (42) its English words
+    never had — so a track whose own words are English would have been read
+    as Spanish and sent off for a translation it does not need.
+    """
     tokens = re.findall(r"[^\W\d_]+", str(text or "").lower(), re.UNICODE)
     if not tokens:
+        return {}
+    seen = set(tokens)
+    return {lang: sum(1 for t in seen if t in words)
+            for lang, words in _LATIN_WORDS.items()}
+
+
+def _latin_lang(text, counts=None):
+    """Best guess at the language of a Latin-script text, "" when undecided.
+
+    A plain vote among `_LATIN_WORDS` on the DISTINCT words each language
+    shares with the text (`_latin_counts`); a tie (words shared by two
+    languages, or none at all) is no answer rather than a coin flip."""
+    counts = _latin_counts(text) if counts is None else counts
+    if not counts:
         return ""
-    counts = {lang: sum(1 for t in tokens if t in words)
-              for lang, words in _LATIN_WORDS.items()}
     best = max(counts, key=lambda k: counts[k])
     if counts[best] < 1:
         return ""
@@ -688,7 +749,10 @@ def run_lyrics_xlit(config):
             # run then read the same stored answer instead of asking again, and
             # the grader never asks a model anything at all. Filled only —
             # a tag another source stated (the import's MusicBrainz language,
-            # the user's own edit) is never overwritten.
+            # the user's own edit) is never overwritten. A declaration the
+            # text's own words OVERRULE is left as it is, too: `detect_language`
+            # has already decided for `xlit_needs` here and for the grader
+            # (spec R167), and `LANGUAGE` is a release fact the user owns.
             tag_lang = str(af.get_tag("LANGUAGE") or "")
             lang = detect_language(text, config, tag_lang)
             if not lang:

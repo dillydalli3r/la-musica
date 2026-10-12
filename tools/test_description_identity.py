@@ -391,5 +391,152 @@ check("Bandcamp answers the album chain when configured",
                                    cfg={"description_sources": ["bandcamp"]}) or {}
        ).get("source") == "bandcamp")
 
+# --------------------------------------------------------------------------- #
+# Album descriptions: identity first, then a STRICT name match. A self-titled
+# record ("Gorillaz" by Gorillaz) must never be described by another album of
+# the same band, which is what the old "title CONTAINS the album title" test
+# accepted ("The Mountain (Gorillaz album)" contains "Gorillaz").
+# --------------------------------------------------------------------------- #
+print()
+print("== album descriptions: identity first, then a strict name match ==")
+
+RG = "d510882e-ef99-4a39-852c-250371ec97ed"
+QID_ALBUM = "Q99999"
+ARTIST = "Gorillaz"
+ALBUM = "Gorillaz"
+BAND_ART = "Gorillaz"
+ALBUM_ART = "Gorillaz (album)"
+OTHER_ART = "The Mountain (Gorillaz album)"
+ALBUM_TEXT = ("Gorillaz is the debut studio album by British virtual band "
+              "Gorillaz, released on 26 March 2001 by Parlophone. " * 20).strip()
+BAND_TEXT2 = ("Gorillaz are an English virtual band formed in London in 1998 "
+              "by Damon Albarn and Jamie Hewlett. " * 20).strip()
+OTHER_TEXT = ("The Mountain is the ninth studio album by British virtual band "
+              "Gorillaz, released in 2026. " * 20).strip()
+ALBUM_HTML = f"<p>{ALBUM_TEXT}</p>"
+BAND_HTML = f"<p>{BAND_TEXT2}</p>"
+OTHER_HTML = f"<p>{OTHER_TEXT}</p>"
+PARSES = {ALBUM_ART: ALBUM_HTML, BAND_ART: BAND_HTML, OTHER_ART: OTHER_HTML}
+SUMMARIES = {
+    ALBUM_ART: ("2001 studio album by Gorillaz", ALBUM_TEXT),
+    BAND_ART: ("English virtual band", BAND_TEXT2),
+    OTHER_ART: ("2026 studio album by Gorillaz", OTHER_TEXT),
+}
+# Every query's hits, older article first, as a search would return them.
+SEARCH_HITS = {
+    f"{ARTIST} {ALBUM} album": [OTHER_ART, BAND_ART, ALBUM_ART],
+    f"{ALBUM} {ARTIST}": [OTHER_ART, ALBUM_ART, BAND_ART],
+    ALBUM: [BAND_ART, ALBUM_ART],
+}
+
+
+def album_routes(sitelink=None, hits=None):
+    hits = SEARCH_HITS if hits is None else hits
+
+    def one(url, params):
+        params = dict(params or {})
+        if "theaudiodb.com" in url:
+            return {"album": [{"strDescription": "TheAudioDB's own album note."}]}
+        if "wikidata.org" in url:
+            if params.get("props") == "sitelinks":
+                item = ({"sitelinks": {"enwiki": {"title": sitelink}}}
+                        if sitelink else {})
+                return {"entities": {params.get("ids"): item}}
+            return None
+        if "rest_v1/page/summary/" in url:
+            title = unquote(url.rsplit("/", 1)[-1]).replace("_", " ")
+            if title not in SUMMARIES:
+                return None
+            short, text = SUMMARIES[title]
+            return {"title": title, "extract": text, "description": short,
+                    "content_urls": {"desktop": {
+                        "page": f"https://en.wikipedia.org/wiki/{title.replace(' ', '_')}"}}}
+        if "en.wikipedia.org" in url:
+            if params.get("list") == "search":
+                return {"query": {"search": [
+                    {"title": t} for t in hits.get(params.get("srsearch"), [])]}}
+            if params.get("action") == "parse":
+                if params.get("page") in PARSES:
+                    return {"parse": {"title": params["page"],
+                                      "text": PARSES[params["page"]]}}
+                return {"error": {"code": "missingtitle"}}
+            return None
+        return None
+
+    return one
+
+
+def searched():
+    return [p.get("srsearch") for u, p in CALLS
+            if "api.php" in u and p.get("list") == "search"]
+
+
+# (a) title == artist: the self-titled album's own article, never a later one.
+print("title == artist picks the self-titled album article")
+clear()
+stub_mb({})
+stub_json(album_routes())
+got = discovery.album_description(ARTIST, ALBUM)
+check("the debut album's article, not The Mountain",
+      got and got.get("title") == ALBUM_ART and got.get("text") == ALBUM_TEXT
+      and OTHER_TEXT not in (got.get("text") or ""), got)
+check("…and its own source_url", got and got.get("source_url") ==
+      "https://en.wikipedia.org/wiki/Gorillaz_(album)", got)
+check("a candidate that only CONTAINS the title was never fetched",
+      OTHER_ART not in wikipedia_titles(), wikipedia_titles())
+
+# (c) the band article, whose title IS the album title, is still rejected.
+check("the band's own article is rejected by its lead, not stored",
+      got and BAND_TEXT2 not in (got.get("text") or ""), got)
+
+# (b) a release-group MBID with a wikipedia url-relation: no search at all.
+print("release-group MBID answers through its own links, before any search")
+clear()
+stub_mb({f"release-group/{RG}": {"relations": [
+    {"type": "wikipedia",
+     "url": {"resource": "https://en.wikipedia.org/wiki/Gorillaz_(album)"}}]}})
+stub_json(album_routes())
+by_id = discovery.album_description(ARTIST, ALBUM, mbid=RG)
+check("the linked article, by identity", by_id and by_id.get("title") == ALBUM_ART
+      and by_id.get("text") == ALBUM_TEXT, by_id)
+check("no wikipedia search was made",
+      not any(p.get("list") == "search" for _u, p in CALLS), searched())
+
+# …and with no wikipedia relation, the release group's Wikidata sitelink does.
+clear()
+stub_mb({f"release-group/{RG}": {"relations": [
+    {"type": "wikidata",
+     "url": {"resource": "https://www.wikidata.org/wiki/Q99999"}}]}})
+stub_json(album_routes(sitelink=ALBUM_ART))
+by_qid = discovery.album_description(ARTIST, ALBUM, mbid=RG)
+check("the sitelink article, still by identity",
+      by_qid and by_qid.get("title") == ALBUM_ART and by_qid.get("text") == ALBUM_TEXT,
+      by_qid)
+check("…and still no search", not any(p.get("list") == "search" for _u, p in CALLS),
+      searched())
+
+# (d) no strict candidate: the chain falls through, never the wrong article.
+print("no strict candidate falls through to the next provider")
+clear()
+stub_mb({})
+stub_json(album_routes(hits={f"{ARTIST} {ALBUM} album": [OTHER_ART],
+                             f"{ALBUM} {ARTIST}": [OTHER_ART],
+                             ALBUM: []}))
+wrong_only = discovery.album_description(ARTIST, ALBUM,
+                                        cfg={"description_sources": ["wikipedia"]})
+check("wikipedia-only chain answers None rather than The Mountain",
+      wrong_only is None, wrong_only)
+check("nothing was fetched for the containing candidate",
+      OTHER_ART not in wikipedia_titles(), wikipedia_titles())
+
+clear()
+stub_json(album_routes(hits={f"{ARTIST} {ALBUM} album": [OTHER_ART],
+                             f"{ALBUM} {ARTIST}": [OTHER_ART], ALBUM: []}))
+fell = discovery.album_description(ARTIST, ALBUM,
+                                   cfg={"description_sources": ["wikipedia", "audiodb"]})
+check("the chain moves on and TheAudioDB answers instead",
+      fell and fell.get("source") == "audiodb"
+      and fell.get("text") == "TheAudioDB's own album note.", fell)
+
 print(f"\n{'FAILURES: ' + ', '.join(FAILS) if FAILS else 'all checks passed'}")
 raise SystemExit(1 if FAILS else 0)

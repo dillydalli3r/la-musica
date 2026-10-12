@@ -241,18 +241,36 @@ finally:
         setattr(imports, _n, _fn)
     script_runners.run_chain = _real_run_chain
 
-# the staging steps, both tag-writing fetches, the genre step AND the chain:
-# once each. The genre step is now always OFFERED — it decides for itself
-# whether there is an identity to ask by (the release in hand, or the album's
-# own tags) — and this fixture's files carry neither a release nor an
-# artist/album tag, so it asks nothing. The fetch it does make when there IS
-# an identity is pinned in the "no release identity" case above.
+# the staging steps, the genre step AND the chain: once each — and NOT the two
+# tag-writing fetches any more. They are STEPS OF THE CHAIN the import hands
+# over (`run_chain(..., extra=…)`, built by `_import_extras`), so the chain stub
+# is what would call them and the direct-call spies above see nothing. The genre
+# step is now always OFFERED — it decides for itself whether there is an
+# identity to ask by (the release in hand, or the album's own tags) — and this
+# fixture's files carry neither a release nor an artist/album tag, so it asks
+# nothing. The fetch it does make when there IS an identity is pinned in the
+# "no release identity" case above.
 assert default_seen == {"rym": 1, "metadata": 1, "cover": 1, "genres": 1,
-                        "advisory": 1, "instrumental": 1, "chain": 1}, default_seen
+                        "chain": 1}, default_seen
 assert default_args["rym"][0][0] == (DF_PATH, DF_CFG), default_args["rym"]
 assert default_args["metadata"][0][0] == (DF_PATH, DF_CFG), default_args["metadata"]
 assert default_args["chain"][0][0][1] == [4, 3], default_args["chain"]
 assert default_args["chain"][0][1]["targets"] == [DF_PATH], default_args["chain"]
+# What the import HANDS the chain instead of calling itself: the two fetches as
+# EXTRA steps — instrumentals first (script 13 reads the INSTRUMENTAL tag it
+# writes), advisories second. This saved chain is [4, 3] — no script 13 — so
+# there is no lyrics script for the advisory decision to wait for: the advisory
+# step carries no dependency and no anchor, keeping the front place it had as a
+# pre-chain stage (see `_import_extras`).
+_extra = default_args["chain"][0][1]["extra"]
+assert [e["key"] for e in _extra] == ["instrumentals", "advisories"], _extra
+assert _extra[0]["label"] == "Checking instrumentals", _extra[0]
+assert _extra[0]["lane"] == "album" and _extra[0]["after"] is None, _extra[0]
+assert "deps" not in _extra[0], _extra[0]
+assert _extra[1]["label"] == "Fetching advisories", _extra[1]
+assert _extra[1]["lane"] == "album", _extra[1]
+assert _extra[1]["deps"] == () and _extra[1]["after"] is None, _extra[1]
+assert all(callable(e["run"]) for e in _extra), _extra
 assert full["chain"] == [4, 3] and full["chained"] is True, full
 assert full["chain_off"] is False and full["scripts"] == [], full
 # the chain was configured but reported no results: the note says exactly that
@@ -261,6 +279,116 @@ assert full["chain_off"] is False and full["scripts"] == [], full
 assert full["note"] == ("the script chain did not run — " + imports.SKIPPED_LYRICS), full
 assert full["skipped_families"] == [imports.SKIPPED_LYRICS], full["skipped_families"]
 assert imports.chain_summary(full) == full["note"], full
+
+# --------------------------------------------------------------------------- #
+# the ORDER the import's own steps run in — the REAL chain, stubbed runners
+# --------------------------------------------------------------------------- #
+# The two fetches above are not stages before the chain any more: they are
+# NODES of it, and their place is a declared edge the chain's scheduler honours.
+# Proven with the REAL `script_runners.run_chain` — only the two script runners
+# and the two fetches are stubbed, so the order observed IS the scheduler's:
+#
+#     instrumentals → 13 (lyrics) → advisories → 8 (auto tagging)
+#
+# instrumentals first (script 13 reads the INSTRUMENTAL tag it writes),
+# advisories after 13 (the advisory decision reads the track's own words —
+# `mlo/advisory.py` `_lyrics_text`), and script 8 last because
+# `mlo.scripts.SCRIPT_DEPS[8]` names the advisory step (8 derives
+# ALBUMITUNESADVISORY from the per-track values the fetch just wrote).
+print("== the order of an import's own chain steps ==")
+order_album = staging_album("Order Album")
+_order_path = os.path.normpath(order_album)
+ORDER_CFG = {"music_folder": MF, "import_scripts": [13, 8],
+             "import_auto_scripts": True, "advisory_auto_fetch": True,
+             "instrumental_auto_fetch": True, "rym_links_auto": False,
+             "metadata_auto_fetch": False, "cover_auto_fetch": False,
+             "genre_autofill": False, "import_autonomy": "automatic"}
+_ord_order = []
+_ord_frames = []
+# the fetches' own RETURNS, distinct per step: the chain must carry each under
+# the extra entry's "stats", and the import copies that back out
+_ord_returns = {"instrumentals": {"written": 7}, "advisories": {"updated": 9}}
+_saved_runners = {sid: script_runners.RUNNERS[sid] for sid in (13, 8)}
+_saved_adv, _saved_inst = imports.fetch_advisories, imports.fetch_instrumentals
+from mlo import stats as _ord_stats
+_saved_hook_order = getattr(_ord_stats, "progress_hook", None)
+
+
+def _ord_hook(done, total, desc, steps=None):
+    _ord_frames.append(desc)
+
+
+try:
+    script_runners.RUNNERS[13] = (
+        _saved_runners[13][0],
+        lambda cfg: _ord_order.append(13) or {"lyrics": 1})
+    script_runners.RUNNERS[8] = (
+        _saved_runners[8][0],
+        lambda cfg: _ord_order.append(8) or {"tagged": 1})
+    imports.fetch_instrumentals = lambda paths, cfg=None: (
+        _ord_order.append("instrumentals")
+        or dict(_ord_returns["instrumentals"]))
+    imports.fetch_advisories = lambda paths, cfg=None: (
+        _ord_order.append("advisories") or dict(_ord_returns["advisories"]))
+    _ord_stats.progress_hook = _ord_hook
+    _ord_extra = imports._import_extras(_order_path, ORDER_CFG, ORDER_CFG, [13, 8])
+    _ord_res = script_runners.run_chain(
+        dict(ORDER_CFG), [13, 8], targets=[_order_path], extra=_ord_extra)
+
+    # the order the steps really ran in — the owner's rule, as an observed fact
+    assert _ord_order == ["instrumentals", 13, "advisories", 8], _ord_order
+    # the run reports in its own order, extras among them, and each extra entry
+    # carries its fetch's RETURN under "stats" (that is what the import copies
+    # back out) — one entry per step, nothing dropped, nothing wrapped
+    assert [e["id"] for e in _ord_res] == ["instrumentals", 13, "advisories", 8], _ord_res
+    _ord_by_id = {e["id"]: e for e in _ord_res}
+    assert _ord_by_id["instrumentals"]["stats"] == _ord_returns["instrumentals"], \
+        _ord_by_id["instrumentals"]
+    assert _ord_by_id["advisories"]["stats"] == _ord_returns["advisories"], \
+        _ord_by_id["advisories"]
+    # The chain NAMES these two steps as it starts and finishes them ("#n/N ·
+    # Fetching advisories"): that is where the text the import used to publish
+    # as a phase frame lives now — the import's own phase vocabulary
+    # (`PHASE_TEXTS`) no longer carries either, and nothing here publishes the
+    # bare text.
+    assert any(t.startswith("#") and t.endswith("· Checking instrumentals")
+               for t in _ord_frames), _ord_frames
+    assert any(t.startswith("#") and t.endswith("· Fetching advisories")
+               for t in _ord_frames), _ord_frames
+    assert all(t.startswith("#") for t in _ord_frames
+               if "Checking instrumentals" in t or "Fetching advisories" in t), \
+        _ord_frames
+    print("order observed:", " → ".join(str(x) for x in _ord_order))
+
+    # …and the import's copy-back reads exactly those entries: `finish_album`
+    # over a scratch album with the same chain fills `out["advisory"]` /
+    # `out["instrumental"]` from the extras' `stats`.
+    _ord_full = imports.finish_album(order_album, dict(ORDER_CFG))
+    assert _ord_full["advisory"] == _ord_returns["advisories"], _ord_full
+    assert _ord_full["instrumental"] == _ord_returns["instrumentals"], _ord_full
+    assert _ord_full["chained"] is True and _ord_full["chain"] == [13, 8], _ord_full
+
+    # The MIRROR: a chain WITHOUT script 13 must still fetch advisories — there
+    # is no lyrics step to wait for, so the step keeps its old front place (no
+    # dependency, no anchor) instead of being dropped with the lyrics family.
+    # …and the chain still runs it (the real scheduler, an ids list that has no
+    # 13).
+    _mirror_extra = imports._import_extras(_order_path, ORDER_CFG, ORDER_CFG, [8])
+    assert [e["key"] for e in _mirror_extra] == ["instrumentals", "advisories"], \
+        _mirror_extra
+    assert _mirror_extra[1]["deps"] == () and _mirror_extra[1]["after"] is None, \
+        _mirror_extra[1]
+    _ord_order.clear()
+    _mirror_res = script_runners.run_chain(
+        dict(ORDER_CFG), [8], targets=[_order_path],
+        extra=imports._import_extras(_order_path, ORDER_CFG, ORDER_CFG, [8]))
+    assert "advisories" in _ord_order, _ord_order
+    assert [e["id"] for e in _mirror_res] == ["advisories", "instrumentals", 8], \
+        _mirror_res
+finally:
+    script_runners.RUNNERS.update(_saved_runners)
+    imports.fetch_advisories, imports.fetch_instrumentals = _saved_adv, _saved_inst
+    _ord_stats.progress_hook = _saved_hook_order
 
 # --------------------------------------------------------------------------- #
 # The metadata step WRITES what is missing (artist image + both descriptions)
@@ -447,8 +575,13 @@ assert all(r[3]["status"] == "imported" for r in progress_rows), progress_rows
 # section at the end of this file.
 PHASE_TEXTS = ("Looking up links…", "Stamping the release's identity…",
                "Fetching genres…", "Settling the digital release…",
-               "Fetching metadata and cover art…", "Fetching advisories…",
-               "Checking instrumentals…")
+               "Fetching metadata and cover art…")
+# (The advisory fetch and the instrumental check are not here any more: they are
+# STEPS OF THE CHAIN the import runs (`_import_extras`), not stages before it,
+# so the chain announces them itself — "#n/N · Fetching advisories" when each
+# starts and finishes. An import frame for either would name work that has not
+# started. The order case above proves the chain's own voice; the phase section
+# at the end of this file pins which frames the import's steps still publish.)
 phase_rows = [row for row in hook_rows if row[2] in PHASE_TEXTS]
 assert phase_rows == [], phase_rows
 
@@ -1345,18 +1478,28 @@ try:
     _chain_ids = []
 
     def _fake_chain(cfg, ids, targets=None, force=None, progress=None,
-                    wait=True, final=None):
+                    wait=True, final=None, extra=None):
         """The one seam: script 13 runs its real runner, everything else is a
-        row without work (no other script may touch these fixtures)."""
+        row without work (no other script may touch these fixtures).
+
+        The import's own extra steps (the advisory fetch, `_import_extras`) run
+        here too, in the chain's own node order — `_node_table` splices them
+        after their anchors — because that is what the real chain does: with
+        `run_chain` faked, the fetches must still be reached or this import
+        would import without its rating.
+        """
         _chain_ids.append(list(ids))
         rows = []
-        for sid in ids:
-            if sid == 13:
+        for key, _label, _deps, _lane, runner in script_runners._node_table(ids, extra):
+            if key == 13:
                 rows.append({"id": 13, "label": "Fetch lyrics",
                              "stats": _lyrics_fetch.run_fetch_lyrics(
                                  dict(cfg, targets=list(targets or [])))})
+            elif runner is not None:
+                rows.append({"id": key, "name": key, "label": None,
+                             "stats": runner(dict(cfg, targets=list(targets or [])))})
             else:
-                rows.append({"id": sid, "label": f"script {sid}", "stats": {}})
+                rows.append({"id": key, "label": f"script {key}", "stats": {}})
         return rows
 
     script_runners.run_chain = _fake_chain
@@ -2012,11 +2155,14 @@ print("== the import's published phases ==")
 # frame is the import's readout BEFORE its first script, so it names work that
 # is really about to happen to THIS album — a step that is a no-op for it (a CD
 # rip has nothing digital to settle), a family that is switched off (links,
-# metadata, cover art, advisories, instrumentals) or a decision the album states
-# nothing for (no release identity to stamp, no genre source to ask) is not
-# announced at all. Asserted as the EXACT sequence, in order, because "which
-# frames" is the whole contract — a count is satisfied by any producer that
-# happens to publish as many.
+# metadata, cover art) or a decision the album states nothing for (no release
+# identity to stamp, no genre source to ask) is not announced at all. Asserted
+# as the EXACT sequence, in order, because "which frames" is the whole contract
+# — a count is satisfied by any producer that happens to publish as many.
+# The advisory fetch and the instrumental check are NOT in this vocabulary any
+# more: they are STEPS of the chain (`_import_extras`), so the CHAIN announces
+# them ("#n/N · Fetching advisories") — never the import, which would name work
+# that has not started. The order case above pins the chain's own frames.
 PHASE_MF = os.path.join(ROOT, "phase_music")
 os.makedirs(PHASE_MF, exist_ok=True)
 PHASE_CFG = {"music_folder": PHASE_MF, "import_auto_scripts": True,
@@ -2038,17 +2184,15 @@ def _phase_hook(done, total, desc, steps=None):
     _phase_rows.append((desc, done, total, steps))
 
 
-# The two writers the chain's own steps would reach are stubbed: this suite
-# runs offline, and what is under test is WHICH phase is announced, not what the
-# fetchers do (tools/test_import_pipeline.py's own advisory section covers them
-# then, with the same stubs).
+# The chain itself is stubbed, so no script really runs here and the import's
+# own extra steps (the advisory fetch and the instrumental check, `_import_extras`)
+# never reach their runners — a grade run would take a minute of this suite's
+# time without telling it anything about phases. The two fetchers are still
+# stubbed, so a step that somehow did run cannot touch the network; what is under
+# test is WHICH phase the import announces, not what the fetchers do.
 _saved_fetch_adv, _saved_fetch_inst = imports.fetch_advisories, imports.fetch_instrumentals
 imports.fetch_advisories = lambda paths, cfg=None: {"updated": 0}
 imports.fetch_instrumentals = lambda paths, cfg=None: {"written": 0}
-# …and the chain itself, so no script really runs here: the fixture's chain is
-# what makes the advisory and instrumental phases real (they are gated on a
-# chain that reads what they write), and a grade run would take a minute of this
-# suite's time without telling it anything about phases.
 _saved_chain_fn_phases = script_runners.run_chain
 script_runners.run_chain = lambda cfg, ids, **kw: [
     {"id": sid, "label": f"Script {sid}", "stats": {}, "error": None}
@@ -2066,7 +2210,7 @@ def published_phases(album, cfg, release=None):
 
     The chain's own frames ("Grade", "#2/4 Key & BPM", …) travel on the same
     hook, so only the vocabulary `imports._phase` publishes is read back:
-    `PHASE_TEXTS` is that list, one entry per step in `_finish_album`.
+    `PHASE_TEXTS` is that vocabulary.
     """
     _phase_rows.clear()
     _stats.progress_hook = _phase_hook
@@ -2081,16 +2225,16 @@ try:
     # (1) an album with a release and a genre source: exactly the steps it
     #     really has, in the order they run — and nothing else (every other
     #     family is off in PHASE_CFG, and this fixture's tracks state no MEDIA,
-    #     so the digital-release settling has nothing to settle either).
+    #     so the digital-release settling has nothing to settle either). The
+    #     advisory/instrumental steps this release's chain would run are chain
+    #     frames, not import phases (see the order case above).
     _got = published_phases(phase_album("Phase One"), PHASE_CFG, PHASE_RELEASE)
-    assert _got == ["Stamping the release's identity…", "Fetching genres…",
-                    "Fetching advisories…", "Checking instrumentals…"], _got
+    assert _got == ["Stamping the release's identity…", "Fetching genres…"], _got
     # (2) …and a GENRE-LESS config skips the genre frame (the owner's example),
     #     keeping every other step exactly where it was.
     _got = published_phases(phase_album("Phase Two"),
                             dict(PHASE_CFG, genre_autofill=False), PHASE_RELEASE)
-    assert _got == ["Stamping the release's identity…",
-                    "Fetching advisories…", "Checking instrumentals…"], _got
+    assert _got == ["Stamping the release's identity…"], _got
     # (3) an album the app knows nothing about: no release, no MusicBrainz
     #     identity, no chain — no step to announce at all.
     _got = published_phases(phase_album("Phase Three"),
@@ -2251,7 +2395,7 @@ _saved_chain_fn = script_runners.run_chain
 
 
 def _blocking_chain(cfg, ids, targets=None, force=None, progress=None,
-                    wait=False, timeout=None, final=None):
+                    wait=False, timeout=None, final=None, extra=None):
     DOUBLE_CHAINS.append(list(ids))
     if len(DOUBLE_CHAINS) == 1:
         # hold the first chain open: the second caller must meet a RUNNING

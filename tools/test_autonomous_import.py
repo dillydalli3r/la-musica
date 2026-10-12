@@ -256,11 +256,23 @@ def stub_genres(album_dir, release, cfg, **kwargs):
 
 
 def stub_chain(cfg, ids, targets=None, force=None, progress=None, wait=True,
-               timeout=None, final=None):
+               timeout=None, final=None, extra=None):
+    # `extra` is the import's own steps of the chain graph (`server/imports
+    # ._import_extras` — the instrumental check, and the advisory fetch, which
+    # runs AFTER the lyrics script because it reads the words). A chain double
+    # RUNS them exactly as the real chain does, in the order it is handed
+    # (extras are nodes of the run, not decorations): the import reads their
+    # answers back out of the chain's results, so a double that skipped them
+    # would report gaps the real run does not have.
+    entries = []
+    for step in extra or ():
+        entries.append({"id": step.get("key"), "label": step.get("label"),
+                        "stats": step["run"](dict(cfg))})
     _chain_calls.append({"name": os.path.basename((targets or [""])[0]),
                          "chain": list(ids), "targets": list(targets or []),
+                         "extra": [dict(step) for step in (extra or [])],
                          "cfg": dict(cfg)})
-    return []
+    return entries
 
 
 for _name, _fn in (("stamp_rym_links", stub_stamp), ("fetch_advisories", stub_advisory),

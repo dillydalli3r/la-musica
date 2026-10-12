@@ -428,6 +428,148 @@ try {
   await app.close();
 }
 
+// --------------------------------------------------------------------------- #
+// 7. staging a NEW album opens the Links step on an EMPTY release-id field
+// --------------------------------------------------------------------------- #
+// The owner's report: opening the import wizard for a new album arrived with a
+// MusicBrainz release id already in the field — the PREVIOUS album's, never
+// typed for this one. `doImport` replaces the album it stages (`setUploaded` /
+// `setAlbumIndex` / `setAlbumPath`) but nothing cleared the release identity, so
+// the field carried album A's id (and URL) onto album B — a claim about the
+// wrong album. The reset is now ONE effect keyed on `albumPath` (the callback
+// `resetAlbumRelease`), so it holds for every way a different album arrives.
+//
+// This drives the real page the way a user stages album after album: stage A
+// (whose OWN tags name a release), read the filled field, walk back to the
+// picker, stage B, and read the field again — it must be EMPTY, never A's id,
+// while C (whose own tags DO name a release) still fills from its own tags.
+const A_ALBUM = "F:/Music/Staged/Album A";
+const B_ALBUM = "F:/Music/Staged/Album B";
+const C_ALBUM = "F:/Music/Staged/Album C";
+const A_MBID = "11111111-1111-4111-8111-111111111111";
+const C_MBID = "33333333-3333-4333-8333-333333333333";
+const UPLOADS = {
+  "01 - Album A.wav": A_ALBUM,
+  "01 - Album B.wav": B_ALBUM,   // deliberately NOT in the library: no MBID tag
+  "01 - Album C.wav": C_ALBUM,
+};
+const stagedTrack = (album, mbid) => ({
+  file: "01.wav", path: `${album}/01.wav`, tracknumber: 1, discnumber: 1,
+  issues: [], values: {}, audit: null, log_grade: null, lyrics_embedded: false,
+  lyrics_lrc: false, unreadable: false, tech: { length: 200 },
+  tags: { TITLE: "One", ARTIST: "Staged", ALBUM: album.split("/").pop(), ...(mbid ? { MUSICBRAINZ_ALBUMID: mbid } : {}) },
+  grade_pass: false, lyrics_present: false,
+});
+const LIB2 = {
+  artists: [{ name: "Staged", albums: [
+    { path: A_ALBUM, tracks: [stagedTrack(A_ALBUM, A_MBID)] },
+    { path: C_ALBUM, tracks: [stagedTrack(C_ALBUM, C_MBID)] },
+  ] }],
+};
+const wav = (name) => ({ name, mimeType: "audio/wav", buffer: Buffer.from("RIFF0000WAVEfmt ") });
+
+const app2 = await createServer({
+  configFile: path.join(webDir, "vite.config.ts"),
+  root: webDir,
+  logLevel: "error",
+  server: { host: "127.0.0.1", port: 8011, strictPort: false },
+});
+await app2.listen();
+const port2 = app2.httpServer.address().port;
+
+const browser2 = await chromium.launch();
+try {
+  const context = await browser2.newContext({ serviceWorkers: "block" });
+  const page = await context.newPage();
+  await page.route("**/sw.js", (route) => route.abort());
+  await page.route("**/api/**", (route) => {
+    const url = route.request().url();
+    const send = (status, body) => route.fulfill({
+      status, contentType: "application/json", body: JSON.stringify(body) });
+    if (url.includes("/api/auth/status")) return send(200, { required: false, authenticated: true });
+    if (url.includes("/api/config")) return send(200, { ...CONFIG, first_run_done: true, metadata_review: false });
+    if (url.includes("/api/library")) return send(200, LIB2);
+    if (url.includes("/api/import/scripts/preview")) return send(200, PREVIEW);
+    if (url.includes("/api/import/prompts")) return send(200, { prompts: [] });
+    if (url.includes("/api/album/mbdetect")) return send(200, { mbid: null });
+    if (url.includes("/api/mb/release?")) {
+      const mbid = new URL(url).searchParams.get("mbid");
+      // The Links step prints the fetched release (artists, media.length, …),
+      // so the stub answers the whole shape, not only the id.
+      return send(200, {
+        id: mbid, title: "Staged", date: "2020", release_group_id: null,
+        artists: [], genres: [], media: [], countries: [], medium_formats: [], medium_count: 1,
+      });
+    }
+    if (url.includes("/api/mb/match")) return send(200, { suggestions: [] });
+    if (url.includes("/api/mb/search/releases")) return send(200, []);
+    if (url.includes("/api/import/upload")) {
+      const td = new URL(url).searchParams.get("target_dir") || "";
+      const album = UPLOADS[td];
+      if (!album) return send(400, { detail: `unexpected target_dir ${td}` });
+      return send(200, { ok: true, saved: [], album_path: album, album_name: td.replace(/\.wav$/, "") });
+    }
+    return undefined;                 // anything else: left unanswered (pending)
+  });
+
+  const FIELD = 'input[placeholder^="MusicBrainz release URL"]';
+  const field = () => page.locator(FIELD);
+  const importButton = () => page.getByRole("button", { name: /Import \d+ album\(s\) into library/ });
+  /** Stage one file as an album and land on the Links step. */
+  const stage = async (name) => {
+    await page.setInputFiles("#import-files", wav(name));
+    await importButton().click();
+    await page.waitForSelector(FIELD, { timeout: 20000 });
+  };
+  /** Back to the picker (step 0) — a fresh pick REPLACES the selection. */
+  const backToPicker = async () => {
+    await page.getByRole("button", { name: "Select & separate" }).click();
+    await page.waitForSelector("text=Drop albums, files or archives here", { timeout: 20000 });
+  };
+
+  await page.goto(`http://127.0.0.1:${port2}/import`);
+  await page.waitForSelector(".panel-hero", { timeout: 20000 });
+
+  // Album A: its own tags name a release, so the field is honestly filled.
+  await stage("01 - Album A.wav");
+  await page.waitForFunction((id) => {
+    const el = document.querySelector('input[placeholder^="MusicBrainz release URL"]');
+    return !!el && el.value.includes(id);
+  }, A_MBID, { timeout: 20000 }).catch(() => {});
+  const aValue = await field().inputValue();
+  check("album A's own tags fill the release field", aValue.includes(A_MBID), aValue);
+
+  // Album B, staged into the SAME wizard instance: A's id must not survive.
+  await backToPicker();
+  await stage("01 - Album B.wav");
+  let sawA = false;
+  let bValue = null;
+  for (let i = 0; i < 40; i++) {
+    bValue = await field().inputValue().catch(() => bValue);
+    if (typeof bValue === "string" && bValue.includes(A_MBID)) sawA = true;
+    await page.waitForTimeout(50);
+  }
+  check("staging album B never shows album A's release id", !sawA,
+        `the field carried ${A_MBID}`);
+  check("album B opens on an EMPTY release-id field", bValue === "",
+        `field = ${JSON.stringify(bValue)}`);
+
+  // Album C: its own tags DO name a release — the reset must not disable the
+  // detection, only drop the WRONG album's answer.
+  await backToPicker();
+  await stage("01 - Album C.wav");
+  await page.waitForFunction((id) => {
+    const el = document.querySelector('input[placeholder^="MusicBrainz release URL"]');
+    return !!el && el.value.includes(id);
+  }, C_MBID, { timeout: 20000 }).catch(() => {});
+  const cValue = await field().inputValue();
+  check("album C's own tags still fill the field after the reset", cValue.includes(C_MBID), cValue);
+  check("…and never show album A's id", !cValue.includes(A_MBID), cValue);
+} finally {
+  await browser2.close();
+  await app2.close();
+}
+
 if (failures.length) {
   console.error(`[minimum] FAILED (${failures.length} of ${checks}):`);
   for (const f of failures) console.error("  - " + f);
@@ -436,5 +578,7 @@ if (failures.length) {
 console.log(`ok  the wizard's minimum entry mode shows the missing family's controls, ` +
   `collapses the rest behind one affordance that reveals it, leaves the ordinary ` +
   `wizard untouched, and runs the import chain — not the Run All order — from ` +
-  `its Finish step; and Done under a held claim completes on the album page with ` +
-  `an "already being finished" status (a 500 still shows an error) (${checks} checks)`);
+  `its Finish step; Done under a held claim completes on the album page with ` +
+  `an "already being finished" status (a 500 still shows an error); and a newly ` +
+  `staged album opens the Links step on an EMPTY release-id field, never the ` +
+  `previous album's, while its own tags still fill it (${checks} checks)`);

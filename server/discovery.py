@@ -35,7 +35,7 @@ import threading
 import time
 import unicodedata
 from html.parser import HTMLParser
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 import httpx
 
@@ -2252,12 +2252,154 @@ def _wikipedia_identity_description(name, mbid=None, cfg=None):
     return _wikipedia_description(title, cfg) if title else None
 
 
+def _mb_wikipedia_title_in(relations):
+    """The English Wikipedia title a MusicBrainz `url-rels` list states, or None.
+
+    A release group's own `wikipedia` relation is the album's article by
+    IDENTITY — the album-side twin of the artist route's Wikidata sitelink — and
+    the reason a self-titled record (album title == artist name) can no longer
+    land on a later album of the same band.
+    """
+    for rel in relations or []:
+        if str(rel.get("type") or "").strip().lower() != "wikipedia":
+            continue
+        resource = str((rel.get("url") or {}).get("resource") or "")
+        match = re.search(r"en\.wikipedia\.org/wiki/(.+?)(?:#.*)?$", resource)
+        if match:
+            title = unquote(match.group(1)).replace("_", " ").strip()
+            if title:
+                return title
+    return None
+
+
+def _wikipedia_album_identity_description(mbid, cfg=None):
+    """The release group's OWN Wikipedia article, by identity rather than title.
+
+    ONE MusicBrainz read answers both hops the artist route takes through
+    Wikidata: the release group's own `wikipedia` url-relation, or — when it
+    states none — the `wikidata` url-relation whose item's enwiki sitelink is
+    the exact article title. None when neither is stated (or the article has no
+    prose), which lets the caller fall back to the strict name search.
+    """
+    if not mbid:
+        return None
+    try:
+        data = integrations.mb_get_cached(f"release-group/{mbid}",
+                                          {"inc": "url-rels", "fmt": "json"})
+    except Exception:
+        data = None
+    relations = (data or {}).get("relations")
+    title = _mb_wikipedia_title_in(relations)
+    if not title:
+        qid = integrations._mb_wikidata_qid_in(relations)
+        title = wikidata_sitelink(qid) if qid else None
+    return _wikipedia_description(title, cfg) if title else None
+
+
+def _disambiguator(title):
+    """`(base title, parenthetical)` for a Wikipedia article title."""
+    match = re.match(r"^(.*?)\s*\(([^()]*)\)\s*$", str(title or ""))
+    if match:
+        return match.group(1).strip(), match.group(2).strip()
+    return str(title or "").strip(), ""
+
+
+def _wikipedia_lead(text):
+    """The article's first prose paragraph (`""` when there is none)."""
+    for block in str(text or "").split("\n\n"):
+        block = block.strip()
+        if block and not block.startswith("=="):
+            return block
+    return ""
+
+
+def _album_lead_is(artist, lead, short=""):
+    """Does *lead* describe an ALBUM by *artist*?
+
+    The artist must be NAMED in it, and the text must read as an album article:
+    its own short description says so when it has one ("2001 studio album by
+    Gorillaz"), otherwise the lead does ("... is the debut studio album by
+    ..."). A band's article carries neither, which is what keeps "Gorillaz" (the
+    act) from answering for "Gorillaz" (the record).
+    """
+    artist_key = _norm(artist)
+    if artist_key and f" {artist_key} " not in f" {_norm(lead)} ":
+        return False
+    if short and re.search(r"\balbum|\bEP\b|\bmixtape|\bsoundtrack", short, re.I):
+        return True
+    return bool(re.search(r"\b(is|was)\b[^.]{0,240}?\balbum\b", lead, re.I))
+
+
+def _wikipedia_album_article(artist, candidate, full):
+    """The candidate article, fetched ONCE, if it really is this album.
+
+    `full` follows `description_full`: the parsed article (its links kept) is
+    fetched and reused as the description when the lead confirms the album; the
+    REST summary answers when the parsed article says nothing, and is the only
+    fetch when full prose is off.
+    """
+    if full:
+        article = wikipedia_text(candidate)
+        if article:
+            if not _album_lead_is(artist, _wikipedia_lead(article.get("extract"))):
+                return None
+            slug = quote(str(article["title"]).replace(" ", "_"), safe="()")
+            return {"text": article["extract"], "title": article["title"],
+                    "source": "wikipedia",
+                    "source_url": f"{WIKIPEDIA_BASE}/wiki/{slug}"}
+    summary = wikipedia_summary(candidate)
+    if not summary or not summary.get("extract"):
+        return None
+    if not _album_lead_is(artist, _wikipedia_lead(summary["extract"]),
+                          summary.get("description") or ""):
+        return None
+    return {"text": summary["extract"], "title": summary["title"],
+            "source": "wikipedia", "source_url": summary.get("url"),
+            "short": summary.get("description") or ""}
+
+
+def _wikipedia_album_search(artist, title, cfg=None):
+    """Strict name-matched album article, or None — never the wrong article.
+
+    A candidate may only be fetched once its TITLE, stripped of its
+    parenthetical disambiguator, EQUALS the album's own name (`_norm`-folded);
+    the artist is then confirmed from that disambiguator ("Plastic Beach
+    (Gorillaz album)") or, for the self-titled shape ("Gorillaz (album)"), from
+    the fetched lead itself (`_album_lead_is`). `wikipedia_search` hits are
+    cheap, so every candidate that cannot match is rejected BEFORE any article
+    fetch; and no candidate at all is better than the wrong one — the caller's
+    chain then falls through to the other providers.
+    """
+    if not str(title or "").strip():
+        return None
+    full = True if not cfg else bool(cfg.get("description_full", True))
+    for query in (f"{artist} {title} album", f"{title} {artist}", title):
+        for candidate in wikipedia_search(query, limit=3):
+            base, disamb = _disambiguator(candidate)
+            if _norm(base) != _norm(title):
+                continue
+            if _norm(artist) and _norm(artist) in _norm(disamb):
+                found = _wikipedia_description(candidate, cfg)
+                if found:
+                    return found
+                continue
+            found = _wikipedia_album_article(artist, candidate, full)
+            if found:
+                return found
+    return None
+
+
 def _description_from_wikipedia(kind, artist, title=None, cfg=None):
     """Artist or album description straight from Wikipedia.
 
     Artists are looked up by name (the identity-resolved article is tried
-    before this, see `_wikipedia_identity_description`); albums by "artist
-    album" search, then by the "(album)" disambiguation Wikipedia uses.
+    before this, see `_wikipedia_identity_description`); a name-search hit that
+    is itself an ALBUM/song article is rejected before any fetch, so an artist
+    whose article shares a name with one of their records still gets the act.
+    Albums go through the strict match (`_wikipedia_album_search`): a candidate
+    whose title merely CONTAINS the album title is never accepted, and the
+    identity-resolved article is tried before this (see
+    `_wikipedia_album_identity_description`).
     """
     def describe(candidate):
         return _wikipedia_description(candidate, cfg)
@@ -2267,19 +2409,14 @@ def _description_from_wikipedia(kind, artist, title=None, cfg=None):
         if found:
             return found
         for candidate in wikipedia_search(artist, limit=3):
-            found = describe(candidate)
-            if found:
-                return found
-        return None
-    queries = [f"{artist} {title} album", f"{title} {artist}", title]
-    for query in queries:
-        for candidate in wikipedia_search(query, limit=3):
-            if _norm(title) not in _norm(candidate):
+            _, disamb = _disambiguator(candidate)
+            if re.search(r"\balbum|\bsong|\bEP\b|\bsoundtrack", disamb, re.I):
                 continue
             found = describe(candidate)
             if found:
                 return found
-    return None
+        return None
+    return _wikipedia_album_search(artist, title, cfg)
 
 
 def artist_description(name, mbid=None, cfg=None, _alias_pass=True):
@@ -2368,10 +2505,21 @@ def album_description(artist, album, mbid=None, cfg=None, _alias_pass=True):
 
     Same rule as `artist_description`: the provider's FULL text (the whole
     Wikipedia article by default, TheAudioDB's `strDescription` — its own
-    complete English prose, there is no longer `strDescriptionEN` variant)."""
+    complete English prose, there is no longer `strDescriptionEN` variant).
+
+    Wikipedia is IDENTITY FIRST when the caller knows the release-group `mbid`
+    (`_wikipedia_album_identity_description`): the article the record itself
+    links to, never a search hit. Without it, or when the identity states no
+    article, the strict name match (`_wikipedia_album_search`) answers — a
+    candidate whose title merely contains the album title is rejected before
+    any fetch, because a self-titled record ("Gorillaz" by Gorillaz) must not
+    be described by a later album of the same band. A strict miss returns None
+    and the chain moves on to the next provider."""
     for source in source_order(cfg, "description_sources", DESCRIPTION_SOURCES):
         if source == "wikipedia":
-            summary = _description_from_wikipedia("album", artist, album, cfg=cfg)
+            summary = _wikipedia_album_identity_description(mbid, cfg) if mbid else None
+            if not summary:
+                summary = _wikipedia_album_search(artist, album, cfg)
             if summary:
                 return _described(summary)
         elif source == "audiodb":

@@ -658,16 +658,16 @@ print("== genre structure ==")
 # are off in these fixtures.
 struct_cfg = dict(mood_cfg, grade_check_genre_count=False, mb_genre_count=3,
                   grade_check_genre_structure=True)
-# Any order of specific names is fine now — a head first with nothing under it
-# is a genre a source may have stated, and specifics after it are specifics.
-set_multi(flac, "GENRE", ["shoegaze", "dream pop", "rock"])
+# Any order of specific names is fine, so long as no name is an ancestor of
+# another in the same list.
+set_multi(flac, "GENRE", ["shoegaze", "dream pop", "idm"])
 res = _grade_album(album, "EMBEDDED", struct_cfg)
 ok(res["tracks"][0]["issues"] == [] and res["pass_count"] == res["total_checks"],
-   f"a list in any order passes ({res['tracks'][0]['issues']})")
+   f"a list with no ancestor edge passes ({res['tracks'][0]['issues']})")
 
-# The OLD shape: a leading head the rest of the list sits under is the family
-# slot this app wrote (`Pop; Art Pop` — nobody stated "Pop"), and it is exactly
-# what Format All's canonical pass drops.
+# The OLD shape: a parent name stored beside its own child is the family slot
+# this app wrote (`Pop; Art Pop` — nobody stated "Pop"), and it is exactly what
+# Format All's canonical pass drops — wherever in the list it sits.
 set_multi(flac, "GENRE", ["rock", "shoegaze", "dream pop"])
 res = _grade_album(album, "EMBEDDED", struct_cfg)
 ok(res["tracks"][0]["issues"] == ["GENRE_STRUCTURE"],
@@ -677,6 +677,13 @@ ok(any(i.startswith("derived parent genre stored") for i in res["issues"]),
    f"the issue names the defect (got {res['issues']})")
 ok(res["total_checks"] - res["pass_count"] == 1,
    f"and costs exactly one grade point ({res['pass_count']}/{res['total_checks']})")
+
+# The head's position stops mattering: mid-list it is the same defect.
+set_multi(flac, "GENRE", ["shoegaze", "rock", "dream pop"])
+res = _grade_album(album, "EMBEDDED", struct_cfg)
+ok(res["tracks"][0]["issues"] == ["GENRE_STRUCTURE"]
+   and any(i.startswith("derived parent genre stored") for i in res["issues"]),
+   f"a mid-list ancestor fails too (got {res['issues']})")
 
 # A head a source really stated, with nothing under it in the list, is data.
 set_multi(flac, "GENRE", ["rock", "jazz"])
@@ -698,10 +705,16 @@ res = _grade_album(album, "EMBEDDED", struct_cfg)
 ok(res["tracks"][0]["issues"] == ["GENRE_STRUCTURE"]
    and any(i.startswith("derived parent genre stored") for i in res["issues"]),
    f"a '; '-joined value is read as the names inside it (got {res['issues']})")
-set_tags(flac, {"GENRE": "shoegaze; dream pop; rock"})
+set_tags(flac, {"GENRE": "shoegaze; rock; dream pop"})
+res = _grade_album(album, "EMBEDDED", struct_cfg)
+ok(res["tracks"][0]["issues"] == ["GENRE_STRUCTURE"]
+   and any(i.startswith("derived parent genre stored") for i in res["issues"]),
+   f"a mid-list ancestor in a '; '-joined value fails too (got {res['issues']})")
+set_tags(flac, {"GENRE": "idm; dream pop; shoegaze"})
 res = _grade_album(album, "EMBEDDED", struct_cfg)
 ok(res["tracks"][0]["issues"] == [],
-   f"and the same names with the head last pass (got {res['tracks'][0]['issues']})")
+   f"a '; '-joined list with no ancestor edge passes in any order "
+   f"(got {res['tracks'][0]['issues']})")
 
 # The OVERFLOW is the count check's business, not this one's: two checks may
 # not both fail one track over the same list.

@@ -51,7 +51,11 @@ const { createServer } = await import(
   `file://${path.join(webDir, "node_modules/vite/dist/node/index.js").replace(/\\/g, "/")}`);
 
 const ALBUM = "F:/Music/Artists/Align Artist/2020 - Align Album";
-const WEB_TAGS = { WEBRATING: "78", WEBRATING_SOURCE: "RateYourMusic; MusicBrainz" };
+// 91 is the owner's own "Clint Eastwood" on the tag now (RYM's 4.54 rounded
+// once, half-up) — 91/20 = 4.55, which the readout prints at the TAG's own
+// resolution (two decimals: `webText` in lib/ratings, spec R358), where the
+// star grid's `half` would have printed it as 4.5/4.6 depending on the float.
+const WEB_TAGS = { WEBRATING: "91", WEBRATING_SOURCE: "RateYourMusic" };
 
 /** One track row of the album payload — the shape tools/check_lyrics_kind.mjs
  *  builds, with the WEBRATING family on the rows that state one. */
@@ -194,6 +198,9 @@ try {
   check("the readouts differ in width (the drift this check is about exists)",
         Math.max(...words) - Math.min(...words) > 12,
         `word widths=${words.map((w) => Math.round(w))}`);
+  check("the web readout prints the tag's own resolution (91 -> \"4.55 Web\", not a re-rounded 4.6)",
+        rows.some((r) => r.text === "4.55 Web"),
+        JSON.stringify(rows.map((r) => r.text)));
   check("the four rows really print the shapes (web / the user's number / nothing)",
         rows.some((r) => /Web/.test(r.text)) && rows.some((r) => r.text === "5") && rows.some((r) => r.text === ""),
         JSON.stringify(rows.map((r) => r.text)));

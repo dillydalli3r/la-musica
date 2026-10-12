@@ -563,8 +563,9 @@ def _format_audio_tags(path, cfg, force=False, af=None):
         # The per-track genre cap (`mb_genre_count`) is swept here too, over
         # the whole library, so an existing album that carries more genres than
         # the setting allows is fixed by running this one script — the same cap
-        # (and the same canonicalization: a leading derived parent genre is
-        # dropped and unknown spellings are resolved) the import and Auto
+        # (and the same canonicalization: a parent name stored beside its
+        # own child, anywhere in the list, is dropped and unknown spellings
+        # are resolved) the import and Auto
         # tagging apply, from one config key. GENRE goes through the write gate the loop above applies
         # to it.
         trimmed = 0

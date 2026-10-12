@@ -674,22 +674,34 @@ def _bar_attach(bar, emit, publish):
     the run's frame writer (`job_locks.publish` with this run's job and the bar
     relay it is entitled to), which is what a frame from the CHAIN itself — a
     step that never entered its runner, the run's opening frame — goes through.
+
+    The CURRENT thread is registered beside the run's own slot, because a chain
+    now runs its steps on pool threads (`_run_chain_locked`): a runner's own
+    bar ticks arrive on whichever thread runs it, and the dispatcher routes by
+    thread. Ownership (`bar["ident"]`, set once at join) is untouched — a step's
+    thread may speak for the run, but it never takes the header away from the
+    run that has been in flight longest.
     """
     _bar_join(bar)
     with _bars_lock:
         bar["emit"] = emit
         bar["publish"] = publish
+        _bars[threading.get_ident()] = bar
 
 
 def _bar_release(bar):
     """Take this run off the bar; the last run out puts the relay back.
 
+    Every slot the run ever registered goes with it — its own ident and the
+    pool threads its steps ran on (see `_bar_attach`) — so a finished run can
+    never be handed a late frame, and the registry cannot grow with threads.
     Safe on a run that never attached (a headless caller has no bar to give up)
     and safe to call twice."""
     global _bar_base
     with _bars_lock:
-        if bar.get("joined") and _bars.get(bar["ident"]) is bar:
-            del _bars[bar["ident"]]
+        for ident, ctx in list(_bars.items()):
+            if ctx is bar:
+                del _bars[ident]
         was = bar.get("joined")
         bar["joined"] = False
         if was and not _bars:
@@ -749,8 +761,18 @@ def _no_bar(*_args, **_kwargs):
     return None
 
 
-def _run_with_progress(runner, cfg, label, chain=None, job=None, bar=None):
+def _run_with_progress(runner, cfg, label, chain=None, job=None, bar=None,
+                       quiet=False):
     """Run *runner* with the UI's progress bar pointed at this script.
+
+    *quiet* is for a step the run is doing BESIDE its spine — a "free"-lane
+    script running concurrently with the album lane (`mlo.scripts.SCRIPT_LANES`).
+    A runner's own bar is built for one script at a time, and two of them
+    publishing into the same run's surfaces would make the header's fraction
+    step backwards and the row's text flip between two scripts; so a quiet step
+    still installs its hooks (no raw runner bar leaks to the header) and
+    publishes NOTHING. The chain announces it when it finishes, if the spine is
+    between steps.
 
     Every runner builds its own tqdm-style bar, and that bar is what the UI
     header follows (``mlo.stats.progress_hook`` → ``server/main.py``'s relay →
@@ -817,7 +839,11 @@ def _run_with_progress(runner, cfg, label, chain=None, job=None, bar=None):
         in it. The bar's relay is asked for explicitly (`_bar_relay`), never
         taken from the installed hook: that hook is the dispatcher which called
         this very function, so handing a frame back to it would feed the run
-        its own text."""
+        its own text.
+
+        A QUIET step (see the doc above) publishes nothing at all."""
+        if quiet:
+            return
         job_locks.publish(done, total, text, steps, job=job, hook=_bar_relay(bar))
 
     def hook(done, total, detail):
@@ -880,14 +906,16 @@ def _run_with_progress(runner, cfg, label, chain=None, job=None, bar=None):
 
 
 def run_script(sid, cfg, targets=None, force=None, skip_disabled=True, chain=None,
-               job=None, bar=None):
+               job=None, bar=None, lane=None):
     """Run one script against *cfg* and report what happened.
 
     *chain* ``(index, count)`` is passed by :func:`run_chain` so a step of a
     multi-script run reports against the WHOLE run's bar; a lone caller leaves
     it None and the script's own counts are the bar (see
     :func:`_run_with_progress`). *job* is the run's in-progress row
-    (:mod:`server.job_locks`), so the same frames reach it.
+    (:mod:`server.job_locks`), so the same frames reach it. *lane* is the
+    step's lane (``mlo.scripts.SCRIPT_LANES``): a "free" step runs beside the
+    album lane, so it stays off the run's bar and row entirely.
 
     Returns ``{"id", "name", "label", "stats"}``, ``{"id", ..., "skipped": True,
     "reason"}`` for a script whose feature is switched off, or ``{"id",
@@ -913,7 +941,7 @@ def run_script(sid, cfg, targets=None, force=None, skip_disabled=True, chain=Non
         return {"id": sid, "name": getattr(runner, "__name__", ""),
                 "label": label,
                 "stats": _run_with_progress(runner, cfg, label, chain, job=job,
-                                            bar=bar)}
+                                            bar=bar, quiet=(lane == "free"))}
     except Exception as e:
         traceback.print_exc()
         return {"id": sid, "name": getattr(runner, "__name__", ""),
@@ -1015,7 +1043,7 @@ def _scope_album(targets):
         pass
     return os.path.basename(folder.rstrip("\\/")) or ""
 
-def run_label(ids, targets=None):
+def run_label(ids, targets=None, extra=()):
     """The run's name in MAINTAIN → In progress.
 
     A run scoped to ONE album is named for that album and how many steps it is
@@ -1023,16 +1051,19 @@ def run_label(ids, targets=None):
     in *ids* (`_chain_ids`), so the count is the work really being done, and
     the album is what the user asked about — where "Remux videos (MKV) + 20
     more" named a script that could never run on an audio-only album AND never
-    said which album the run was finishing. The step it is ON is not this
-    string: every step publishes "#3/18 · <the script running now>" as it
-    starts (see _run_with_progress and _run_chain_locked), so the readout
-    advances with the chain while this stays the run's own name.
+    said which album the run was finishing. *extra* are the run's non-script
+    steps (`run_chain`'s own), which are part of its count as much as a script
+    is. The step it is ON is not this string: every step publishes "#3/18 ·
+    <the step running now>" as it starts (see _run_with_progress and
+    _run_chain_locked), so the readout advances with the chain while this stays
+    the run's own name.
 
     Everything else keeps the name it always had: a lone script is its own name
     (a button pressed for one script says which script), and a run over several
     albums or the whole library starts with the first script and says how many
     follow it."""
     names = [RUNNERS.get(i, (f"Script {i}", None))[0] for i in ids]
+    names += [str(x) for x in (extra or ())]
     if not names:
         return "Script run"
     if len(names) == 1:
@@ -1126,7 +1157,7 @@ def _chain_ids(cfg, ids, targets):
     # answer the user cannot act on — so they run, and each says what it found.
     return kept if kept else ids
 
-def run_start_frame(ids):
+def run_start_frame(ids, extra_labels=()):
     """The frame a run claims its surfaces with: ``(done, total, text, steps)``.
 
     Both surfaces (the header bar and the run's own in-progress row) show the
@@ -1140,12 +1171,16 @@ def run_start_frame(ids):
     once that script starts. A run of ONE script keeps the lone script's
     indeterminate frame (``total=0``): a runner that never ticks (AccurateRip,
     Beets) must not sit at "0/1" reading as hung. ``text`` is "" for a run with
-    nothing to run — it claims nothing at all.
+    nothing to run — it claims nothing at all. *extra_labels* are the run's
+    non-script steps (`run_chain`'s `extra`), which count toward the total like
+    a script does.
     """
-    total = len(ids)
+    labels = [RUNNERS.get(i, (f"Script {i}", None))[0] for i in ids]
+    labels += [str(x) for x in (extra_labels or ())]
+    total = len(labels)
     if not total:
         return 0, 0, "", None
-    label = RUNNERS.get(ids[0], (f"Script {ids[0]}", None))[0]
+    label = labels[0]
     if total == 1:
         return 0, 0, label, None
     return 0, total, f"#1/{total} · {label}", (1, total)
@@ -1242,13 +1277,22 @@ def claim_paths(paths, *, kind, label, wait=False, timeout=None, job=None,
 
 
 def run_chain(cfg, ids, targets=None, force=None, progress=None, wait=False,
-              timeout=None, final=None):
-    """Run *ids* in order against a COPY of *cfg*; report after every script.
+              timeout=None, final=None, extra=None):
+    """Run *ids* against a COPY of *cfg*, in dependency order; report after
+    every script.
 
     ``progress(done, total, label, result)`` is called once per finished
     script. A script that fails is recorded in the returned list and the chain
     carries on — one bad script must never cost the import the rest of the
     pipeline. An id the registry does not know is a failure entry, not a stop.
+
+    The steps run in the order given — UNLESS a declared dependency
+    (`mlo.scripts.SCRIPT_DEPS`) puts one after another, and scripts whose lane
+    is "free" (`SCRIPT_LANES`) run concurrently with the album lane. *extra*
+    adds steps that are not scripts: ``{"key", "label", "run", "deps", "lane"}``,
+    where `run` is a callable taking the run's config — the import's advisory
+    and instrumental fetches, whose place in the graph is what makes "advisory
+    waits for lyrics" a declared edge instead of a comment.
 
     *final* is an optional list the chain fills with the folders it ended on.
     A script can MOVE an album (script 14 imports it into the library and
@@ -1324,7 +1368,11 @@ def run_chain(cfg, ids, targets=None, force=None, progress=None, wait=False,
     # block below, so the refusal is translated there — a PathLocked raised by
     # the body is some other job's collision, not this run's, and stays one.
     paths = held_paths(cfg, targets)
-    label = run_label(ids, scope)
+    # The run's own name counts its NON-script steps too (the import's advisory
+    # and instrumental fetches): they are steps of the run like any other, and
+    # a name that said "18 steps" while 20 ran would be the count lying.
+    extra_labels = [str(s.get("label") or s.get("key") or "") for s in (extra or ())]
+    label = run_label(ids, scope, extra_labels)
     bar = _bar_context()
     # The job this run works as: a chain started inside another job (an import
     # finishing an album it already holds) JOINS it, exactly as the claim below
@@ -1349,14 +1397,14 @@ def run_chain(cfg, ids, targets=None, force=None, progress=None, wait=False,
             # someone else's percentage while this run is still starting, which
             # is what a "half-filled bar at the start of an import chain" was.
             _bar_join(bar)
-            done, total, text, steps = run_start_frame(ids)
+            done, total, text, steps = run_start_frame(ids, extra_labels)
             if text:
                 _bar_frame(bar, done, total, text, job=job, steps=steps)
             with _chain_scan(cfg, targets) as scan_owner:
                 try:
                     return _run_chain_locked(cfg, ids, targets=targets, force=force,
                                              progress=progress, final=final, job=job,
-                                             bar=bar, scan=scan_owner)
+                                             bar=bar, scan=scan_owner, extra=extra)
                 finally:
                     # The library tells the truth about itself after ANY run,
                     # however it ended: a chain that raised, was cancelled or
@@ -1684,16 +1732,92 @@ def _follow_moved_targets(cfg, audio_names, claimed=(), misses=None,
     cfg["targets"] = out
 
 
+def _node_table(ids, extra=None):
+    """The run's steps as nodes: ``(key, label, deps, lane, runner)``.
+
+    A script node's runner is None (it runs through `run_script`, with the
+    gates and the force keys); an EXTRA node carries the callable the caller
+    handed in and runs directly (see `run_chain`). Deps and lanes come from
+    `mlo.scripts.SCRIPT_DEPS` / `SCRIPT_LANES` for a script and from the step
+    itself for an extra; a dep naming a step this run does NOT contain is
+    dropped, so a configured chain that leaves a script out cannot wedge the
+    graph.
+
+    An extra step SITS where it says it sits: after the step named by its
+    ``after`` key (at the front of the run when it names none), so the run's
+    order — which is what the "#n/N" readout and every progress frame count in
+    — reads exactly as the caller meant. This is how the import's advisory
+    fetch is placed AFTER the lyrics script without the chain knowing anything
+    about advisories.
+    """
+    from mlo.scripts import SCRIPT_DEPS, SCRIPT_LANES
+    nodes = []
+    for sid in ids:
+        label = RUNNERS.get(sid, (None, None))[0] or f"Script {sid}"
+        nodes.append((sid, label, tuple(SCRIPT_DEPS.get(sid, ())),
+                      SCRIPT_LANES.get(sid, "album"), None))
+    for step in extra or ():
+        key = step.get("key")
+        nodes.append((key, step.get("label") or str(key),
+                      tuple(step.get("deps") or ()),
+                      step.get("lane", "album"), step.get("run"),
+                      step.get("after")))
+    present = {n[0] for n in nodes}
+    # Extras are spliced in right after their anchor, in the order they were
+    # handed over (an anchor that is not in the run puts the step at the front,
+    # where a step with no dependency belongs).
+    ordered = [n for n in nodes if len(n) == 5]
+    for n in nodes:
+        if len(n) == 6:
+            anchor = n[5]
+            at = next((i + 1 for i, m in enumerate(ordered) if m[0] == anchor), 0)
+            ordered.insert(at, n[:5])
+    return [(key, label, tuple(d for d in deps if d in present), lane, runner)
+            for key, label, deps, lane, runner in ordered]
+
+
 def _run_chain_locked(cfg, ids, targets=None, force=None, progress=None,
-                      final=None, job=None, bar=None, scan=False):
+                      final=None, job=None, bar=None, scan=False, extra=None):
+    """Run the chain's nodes in dependency order, one album-lane step at a time.
+
+    The album lane is the spine and runs steps SERIALLY, on this thread — that
+    is the correctness contract the tag writers need (see
+    `mlo.scripts.SCRIPT_LANES`). A "free"-lane step (artist art, a submission)
+    touches no album file, so it runs on a pool BESIDE the spine: an import's
+    artist photos are fetched while the album chain is still working. Among the
+    steps that are READY the earliest in the run's own order goes first, so a
+    declared dependency (`mlo.scripts.SCRIPT_DEPS`) can only delay a step,
+    never move one forward: with no dependency in the way the order is exactly
+    the configured one.
+
+    Results come back in the run's ORDER (not completion order), so every
+    caller that reads them — the import's chain summary, the API's report —
+    reads the same list it always did.
+    """
+    from concurrent.futures import ThreadPoolExecutor, wait as futures_wait, \
+        FIRST_COMPLETED
     from server import interrupt_recovery
+
     cfg = dict(cfg)
     if targets is not None:
         cfg["targets"] = [os.path.normpath(str(t)) for t in targets]
     _apply_force(cfg, force)
 
-    results = []
-    total = len(ids)
+    nodes = _node_table(ids, extra)
+    order = [n[0] for n in nodes]
+    labels = {n[0]: n[1] for n in nodes}
+    deps = {n[0]: n[2] for n in nodes}
+    lanes = {n[0]: n[3] for n in nodes}
+    runners = {n[0]: n[4] for n in nodes}
+    # Which nodes are SCRIPTS (a runner of None means "run it through
+    # `run_script`") and which are the caller's extra steps. Only a script may
+    # move the album, so only a script gets the follow-up walk below.
+    script_keys = set(ids)
+    total = len(nodes)
+
+    results: dict = {}
+    done_nodes: set = set()
+    started: set = set()
     # Each target's audio, taken before any script runs: the only way to
     # recognise the album again once a script has moved its folder.
     audio_names = {t: _audio_basenames(t) for t in (cfg.get("targets") or [])}
@@ -1701,59 +1825,174 @@ def _run_chain_locked(cfg, ids, targets=None, force=None, progress=None,
     # lookup is a library walk, so it is answered once per target, not once
     # per remaining script (see _follow_moved_targets).
     misses: set = set()
-    for done, sid in enumerate(ids, 1):
-        if interrupt_recovery.is_shutting_down():
-            # The auto-updater is restarting this container: stop at a SCRIPT
-            # BOUNDARY instead of letting the run carry on into Docker's
-            # SIGKILL. Uvicorn waits for this background task BEFORE the
-            # lifespan teardown, so a chain that ignored the flag held the
-            # container open past its stop grace (measured: a 13 s chain kept
-            # `docker stop` waiting for it, with the app's own 120 s grace —
-            # and its journal — never reached). Nothing is half-written either
-            # way (every write is atomic), but this way the run SAYS what it
-            # did not do instead of the log simply stopping.
-            left = [RUNNERS.get(s, (f"Script {s}", None))[0]
-                    for s in ids[done - 1:]]
-            log(f"stopping for an update: {len(left)} script(s) not run — "
-                + ", ".join(left))
-            break
-        result = run_script(sid, cfg, chain=(done, total), job=job, bar=bar)
-        results.append(result)
-        _follow_moved_targets(cfg, audio_names, _claimed_targets(result),
-                              misses, claim_job=job)
-        if scan and _moves_albums(sid, result):
-            # This run armed the chain's album list for itself; a script that
-            # may have moved an album (or failed halfway) makes it a lie, so the
-            # next walker resolves the library again (mlo.stats.chain_scan_drop).
-            mlo_stats.chain_scan_drop()
-        label = RUNNERS.get(sid, (f"Script {sid}", None))[0]
-        # Every step ends announced, including one that never entered its
-        # runner (a switched-off feature, an unavailable module): the header
-        # bar and the in-progress row both move to this step, so neither can
-        # be left showing a script the run has already left behind. It goes
-        # through the RUN's own frame writer (see _bar_frame), which is what
-        # keeps the announcement this run's when another chain is in flight.
-        _bar_frame(bar, done, total, f"#{done}/{total} · {label}", job=job,
-                   steps=(done, total))
+    free_order = [k for k in order if lanes[k] == "free"]
+    free_width = max(1, min(4, len(free_order))) if free_order else 0
+    free_pool = ThreadPoolExecutor(max_workers=free_width,
+                                   thread_name_prefix="mlo-chain-free") \
+        if free_width else None
+    free_futures: dict = {}
+
+    def _ready(key):
+        return key not in started and all(d in done_nodes for d in deps[key])
+
+    def _finish(key, result, announce=True):
+        """Book one finished step: results, the album that may have moved, the
+        bar and the caller's progress callback — the four things every step
+        did when the chain was a straight line.
+
+        *announce* is False for a FREE-lane step. The run's bar and row speak
+        for the SPINE — one step at a time, one numbering — and a side step's
+        label there would flicker the readout between two steps while the
+        spine is still on one (its own start frame claims "#index-1/count",
+        and a side step that completed in between would have pushed the
+        fraction past it: a bar that steps BACKWARDS reads as a stall). The
+        side step is booked in the log instead, and the spine's next frame
+        counts it in `done` like any other finished step.
+        """
+        results[key] = result
+        done_nodes.add(key)
+        if key in script_keys:
+            # Only the scripts may move an album (`_ALBUM_MOVERS`), and they
+            # always run on the spine, so an extra step's result is booked
+            # without the follow-up walk. This is also what re-points the
+            # chain's `targets` at the folder a mover left the album in — and
+            # what the `final` list a caller reads at the end is built from.
+            _follow_moved_targets(cfg, audio_names, _claimed_targets(result),
+                                  misses, claim_job=job)
+            if scan and _moves_albums(key, result):
+                mlo_stats.chain_scan_drop()
+        label = labels[key]
+        done = len(results)
+        if announce:
+            # Every step ends announced, including one that never entered its
+            # runner (a switched-off feature, an unavailable module): the
+            # header bar and the in-progress row both move to this step, so
+            # neither can be left showing a script the run has already left
+            # behind. It goes through the RUN's own frame writer (see
+            # _bar_frame), which is what keeps the announcement this run's
+            # when another chain is in flight. A free-lane step that finishes
+            # while the spine is mid-script is booked in the LOG instead: the
+            # bar and the row speak for the spine (see _run_with_progress's
+            # `quiet`), and a side step's label there would read as the run's
+            # own position.
+            _bar_frame(bar, done, total, f"#{done}/{total} · {label}", job=job,
+                       steps=(done, total))
+        elif lanes[key] == "free":
+            log(f"{label}: done in parallel (#{done}/{total})")
         if progress is not None:
             try:
                 progress(done, total, label, result)
             except Exception:
                 traceback.print_exc()
-    if ids and len(results) < total:
-        # The run was cut short at a script boundary (the auto-updater above):
-        # its last step announce left the bar INSIDE the run, and nothing else
-        # is coming, so end the surface rather than leave a frozen fraction on
-        # it. The bar fills (done == total, the one state a single-line bar can
-        # read as "over") while the readout keeps the honest pair — how many
-        # steps ran of how many were asked for — and the text says which.
+
+    def _drain_free(block):
+        """Collect the free-lane steps that are ready; wait for one when
+        *block* (nothing else can run)."""
+        if not free_futures:
+            return
+        finished, _pending = futures_wait(
+            list(free_futures), timeout=None if block else 0,
+            return_when=FIRST_COMPLETED)
+        for fut in finished or ():
+            key = free_futures.pop(fut)
+            try:
+                value = fut.result()
+            except Exception as e:      # a worker must never kill the run
+                traceback.print_exc()
+                value = {"error": str(e)}
+            # A free-lane step stays off the surfaces (see _finish).
+            _finish(key, value, announce=False)
+
+    try:
+        while len(done_nodes) < total:
+            if interrupt_recovery.is_shutting_down():
+                # The auto-updater is restarting this container: stop at a
+                # SCRIPT BOUNDARY instead of letting the run carry on into
+                # Docker's SIGKILL. Uvicorn waits for this background task
+                # BEFORE the lifespan teardown, so a chain that ignored the
+                # flag held the container open past its stop grace (measured:
+                # a 13 s chain kept `docker stop` waiting for it, with the
+                # app's own 120 s grace — and its journal — never reached).
+                # Nothing is half-written either way (every write is atomic),
+                # but this way the run SAYS what it did not do instead of the
+                # log simply stopping.
+                # A free step that has not STARTED yet is cancelled, not
+                # waited for: the auto-updater is restarting the app, and a
+                # queued artist fetch is not worth holding the container open
+                # for. It is booked as skipped — never as a failure — so the
+                # run's report says what it did not do.
+                for fut, key in list(free_futures.items()):
+                    if fut.cancel():
+                        del free_futures[fut]
+                        _finish(key, {"id": key, "label": labels[key],
+                                      "skipped": True,
+                                      "reason": "stopped for an update"},
+                                announce=False)
+                left = [labels[k] for k in order if k not in started]
+                if left:
+                    log(f"stopping for an update: {len(left)} script(s) not "
+                        "run — " + ", ".join(left))
+                break
+            # The free lane first: those steps are the work happening BESIDE
+            # the spine, and starting them is what makes an import's artist
+            # fetches overlap its album chain.
+            for key in free_order:
+                if free_pool is None or not _ready(key):
+                    continue
+                started.add(key)
+                free_futures[free_pool.submit(_run_node, key, cfg, job, bar,
+                                              script_keys, runners, total,
+                                              order)] = key
+            # …then the spine: ONE album-lane step, on this thread.
+            spine = next((k for k in order
+                          if lanes[k] != "free" and _ready(k)), None)
+            if spine is not None:
+                started.add(spine)
+                if spine not in script_keys:
+                    # An EXTRA step announces itself when it STARTS, exactly as
+                    # a script does (`_run_with_progress` claims the bar at the
+                    # step's slice) — otherwise a long fetch of the import's
+                    # own (the advisory pass) would only reach the header when
+                    # it finished, and a step's whole point is that the user
+                    # can see which one is running.
+                    idx = order.index(spine) + 1
+                    _bar_frame(bar, idx - 1, total,
+                               f"#{idx}/{total} · {labels[spine]}", job=job,
+                               steps=(idx, total))
+                _finish(spine, _run_node(spine, cfg, job, bar, script_keys,
+                                         runners, total, order))
+                _drain_free(block=False)
+                continue
+            if free_futures:
+                _drain_free(block=True)
+                continue
+            # Nothing is ready and nothing is running: every step left waits on
+            # a dependency the run cannot satisfy (a cycle, or a step cut short
+            # above). Stop rather than spin, and say which steps never ran.
+            left = [labels[k] for k in order if k not in started]
+            if left:
+                log("cannot run " + ", ".join(left)
+                    + " — their dependencies did not finish")
+            break
+        _drain_free(block=True)
+    finally:
+        if free_pool is not None:
+            free_pool.shutdown(wait=True)
+    if nodes and len(results) < total:
+        # The run was cut short (the auto-updater above, or an unsatisfiable
+        # dependency): its last step announce left the bar INSIDE the run, and
+        # nothing else is coming, so end the surface rather than leave a frozen
+        # fraction on it. The bar fills (done == total, the one state a
+        # single-line bar can read as "over") while the readout keeps the
+        # honest pair — how many steps ran of how many were asked for — and the
+        # text says which.
         ran = len(results)
         _bar_frame(bar, total, total,
                    f"#{ran}/{total} · "
-                   f"{run_label(ids, targets if targets is not None else cfg.get('targets'))}"
+                   f"{run_label(ids, targets if targets is not None else cfg.get('targets'), extra)}"
                    f" stopped", job=job,
                    steps=(ran, total))
-    if ids:
+    if nodes:
         try:
             removed = _prune_empty_target_dirs(cfg)
         except Exception:
@@ -1770,4 +2009,42 @@ def _run_chain_locked(cfg, ids, targets=None, force=None, progress=None,
     # it came from, which holds no audio once the chain is done.
     if final is not None:
         final[:] = list(cfg.get("targets") or [])
-    return results
+    # The ORDER the run was asked for, not the order the steps finished in:
+    # every caller that reads the chain's results reads the same list it always
+    # read (`server.imports.chain_summary` names the failures, the API reports
+    # the run).
+    return [results[k] for k in order if k in results]
+
+
+def _run_node(key, cfg, job, bar, script_keys, runners, total, order):
+    """One node's work, on whichever thread the scheduler picked.
+
+    A SCRIPT node (its key is in *script_keys*) goes through `run_script` — its
+    gates, its force keys, the whole contract; an EXTRA node is the caller's own
+    callable, called with the run's config. Both are wrapped so an exception is
+    a result, never a dead scheduler.
+
+    A FREE-lane node gets its own copy of the config: it runs beside the spine,
+    and the spine's steps write their own force keys and re-point `targets` on
+    the shared dict (`_follow_moved_targets`) as they go — a snapshot is what
+    keeps the two from reading each other's kernel state. Free-lane work is
+    keyed to the ARTIST folder or to nothing on disk, so a target the spine
+    moved afterwards is not its business.
+    """
+    index = order.index(key) + 1
+    lane = _lane_of(key)
+    if key in script_keys:
+        step_cfg = dict(cfg) if lane == "free" else cfg
+        return run_script(key, step_cfg, chain=(index, total), job=job, bar=bar,
+                          lane=lane)
+    try:
+        return {"id": key, "name": key, "label": None,
+                "stats": runners[key](dict(cfg))}
+    except Exception as e:
+        traceback.print_exc()
+        return {"id": key, "name": key, "label": None, "error": str(e)}
+
+
+def _lane_of(key):
+    from mlo.scripts import SCRIPT_LANES
+    return SCRIPT_LANES.get(key, "album")

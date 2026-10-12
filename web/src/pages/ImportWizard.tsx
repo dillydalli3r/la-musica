@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { useSearchParams, Link } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -968,6 +968,29 @@ export default function ImportWizard() {
   // never ran and the button had to be pressed by hand on every album.
   const autoDetected = useRef<{ path: string | null; done: boolean }>({ path: null, done: false });
   const [detectStatus, setDetectStatus] = useState<"idle" | "scanning" | "found" | "none">("idle");
+
+  /** Everything the wizard settled about the PREVIOUS album's release: the id,
+   *  its URL, the fetched payload and the tag-detection outcome. Staging an
+   *  album REPLACES the one the steps were about, and a release id left over
+   *  from it is a false claim about the new one — the field must open empty and
+   *  let the detection effect below fill it from THIS album's OWN tags. This is
+   *  the ONE reset: it is keyed on `albumPath`, so every way a different album
+   *  arrives (doImport's staging, switchAlbum, openPrompt, the organize finish)
+   *  is covered, and a site added later cannot forget it — it only sets
+   *  `albumPath`. Declared BEFORE the detection effect so the reset takes
+   *  effect first and the detection fills the new album, never a stale value. */
+  const resetAlbumRelease = useCallback(() => {
+    setRelease(null);
+    setReleaseId("");
+    setMbLink("");
+    setDetectedFromTags(false);
+    setDetectStatus("idle");
+    autoDetected.current = { path: null, done: false };
+  }, []);
+  useEffect(() => {
+    resetAlbumRelease();
+  }, [albumPath, resetAlbumRelease]);
+
   useEffect(() => {
     if (step !== 1 || !albumPath || releaseId) return;
     const attempt = autoDetected.current;
@@ -3317,18 +3340,16 @@ const finish = async (closeByNavigation: boolean) => {
 
   const switchAlbum = (i: number) => {
     setAlbumIndex(i);
+    // The release id / mbLink / release payload reset is NOT here: the ONE
+    // `resetAlbumRelease` effect keyed on `albumPath` (above) owns it, so this
+    // picker, doImport's staging and every other album change share it.
     setAlbumPath(uploaded[i].path);
-    autoDetected.current = { path: null, done: false };
-    setDetectedFromTags(false);
-    setRelease(null);
-    setReleaseId("");
     setSourceDraft("");
     setSourceNotice(null);
     setSettleResult(null);
     setSuggestions([]);
     setGenres({});
     setDiscGenres({});
-    setMbLink("");
     setRymLink("");
     setRymValid(null);
     setRymKind(null);

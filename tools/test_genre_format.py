@@ -6,17 +6,16 @@ What this pins:
   * `mlo.genres.normalize_genres` is THE list policy: every name resolved to
     MusicBrainz's own spelling when MusicBrainz publishes it (and kept verbatim
     when it does not — dropping what a source said would be worse), duplicates
-    collapsed on the casefolded name, the FAMILY derived from the first
-    specific genre and moved to the FIRST slot, the result capped at the
-    configured count, and a name that IS a family used as the family slot
-    rather than repeated as a specific genre;
+    collapsed on the casefolded name, every name another member of the SAME
+    list sits under dropped (the old app-written family slot, wherever it sits),
+    and the result capped at the configured count — nothing is ever added;
   * `format_genres` / `split_stored` round-trip: the rendered
     "rock / shoegaze" string reads back as exactly the names inside it, which
     is what lets the display spelling (and the one another tagger stores) be
     read back;
-  * `issues` reports the structural problems — too many, a duplicate, a family
-    that is not first, spacing, a name MusicBrainz does not publish — and
-    nothing else;
+  * `issues` reports the structural problems — too many, a duplicate, a parent
+    name stored beside its own child anywhere in the list, spacing, a name
+    MusicBrainz does not publish — and nothing else;
   * `server.genre_ai.infer_genres` asks for at most `count - 1` SPECIFIC
     genres (the family is the app's to put in front of them), names the
     release and the fetched candidates in its prompt, states the family rule,
@@ -30,9 +29,9 @@ What this pins:
     an import that re-runs costs no second request;
   * `mlo.autotag.trim_genres` routes through `normalize_genres`: a
     case-insensitive duplicate and a non-canonical spelling are fixed as well
-    as the overflow, the family lands first, its return value is still "how
-    many values were removed", and a list that is already canonical is never
-    rewritten;
+    as the overflow, an ancestor stored beside its own child is dropped, its
+    return value is still "how many values were removed", and a list that is
+    already canonical is never rewritten;
   * `server.integrations.genre_chain` asks the AI only as a LAST RESORT: when
     the sources already fill every slot the writer would write, no model call
     is spent (a mere disagreement between them is not a reason to call it);
@@ -65,13 +64,16 @@ from server import integrations as intg
 # CAPITALIZED for display (mlo.genres.display_name): the vocabulary keeps them
 # lowercase, a tag is read by a person. Nothing is ever ADDED — the level above
 # a name is derived at read time (G.path_of), never written into the list.
-assert G.normalize_genres(["shoegaze", "rock"]) == ["Shoegaze", "Rock"]
+assert G.normalize_genres(["shoegaze", "rock"]) == ["Shoegaze"]
 assert G.normalize_genres(["idm", "shoegaze"]) == ["IDM", "Shoegaze"]
 assert G.normalize_genres(["shoegaze", "dream pop", "idm"], 3) == [
     "Shoegaze", "Dream Pop", "IDM"]
 # Spelling is resolved to the vocabulary's own first: any casing of "Shoegaze"
 # resolves (the vocabulary lookup folds case) and the alias table runs too.
-assert G.normalize_genres(["Shoegaze", "Rock"]) == ["Shoegaze", "Rock"]
+assert G.normalize_genres(["Shoegaze", "Rock"]) == ["Shoegaze"]
+# …and a parent name is dropped whatever slot the source put it in: the rule is
+# about the pair, never about position.
+assert G.normalize_genres(["Rock", "Shoegaze"]) == ["Shoegaze"]
 # Duplicates collapse on the casefolded name, the FIRST spelling surviving.
 assert G.normalize_genres(["Shoegaze", "shoegaze", "SHOEGAZE", "IDM"], 3) == [
     "Shoegaze", "IDM"]
@@ -87,15 +89,25 @@ assert G.normalize_genres(["Nonsense"]) == ["Nonsense"]
 # check flags it (mlo.grader.grade_check_genre_vocab), which is honest.
 assert G.normalize_genres(["shoegaze", "Nonsense"], 3) == [
     "Shoegaze", "Nonsense"]
-# The OLD family-first shape — what this app wrote before the parent became a
-# view — loses exactly the slot it invented, and only when the rest of the
-# list sits under it. A head a source really stated survives.
+# The OLD family slot — what this app wrote before the parent became a view —
+# loses exactly the name it invented, WHEREVER the source put it. Order stops
+# mattering, and a head no member of the list sits under survives.
 assert G.normalize_genres(["rock", "shoegaze"]) == ["Shoegaze"]
+assert G.normalize_genres(["shoegaze", "rock"]) == ["Shoegaze"]      # either order
 assert G.normalize_genres(["pop", "art pop"]) == ["Art Pop"]
+assert G.normalize_genres(["art pop", "pop"]) == ["Art Pop"]
 assert G.normalize_genres(["pop", "art pop", "synth-pop"], 3) == [
     "Art Pop", "Synth-Pop"]
+assert G.normalize_genres(["pop", "art pop", "house"], 3) == [
+    "Art Pop", "House"]                                             # three names
+assert G.normalize_genres(["trip hop", "alternative rock"], 3) == [
+    "Trip Hop", "Alternative Rock"]                                 # no ancestor edge
 assert G.normalize_genres(["rock", "jazz"]) == ["Rock", "Jazz"]
 assert G.normalize_genres(["rock"]) == ["Rock"]
+# An unrecognised name is neither resolved nor dropped: it is kept verbatim and
+# never treated as an ancestor of anything.
+assert G.normalize_genres(["Nonsense", "Pop", "Electropop"], 3) == [
+    "Electropop", "Nonsense"]
 # A single stored value another tagger joined is read as the names inside it.
 assert G.split_stored("Rock; Shoegaze") == ["Rock", "Shoegaze"]
 assert G.split_stored("shoegaze / rock") == ["shoegaze", "rock"]
@@ -124,16 +136,18 @@ assert G.issues(["shoegaze", "dream pop", "idm"], 3) == []
 assert G.issues([]) == ["missing"]
 assert G.issues(["shoegaze", "dream pop", "idm"], 2) == ["too many (3 > 2)"]
 assert G.issues(["shoegaze", "shoegaze"]) == ["duplicate"]
-# There is no ORDER rule any more: a GENRE tag holds specific names and the
-# level above them is derived, so a head in a later slot is just a name.
-assert G.issues(["shoegaze", "rock"]) == []
+# There is no ORDER rule beyond this: a GENRE tag holds specific names and the
+# level above them is derived, so position means nothing — EXCEPT that a parent
+# name stored beside its own child is the old app-written family SLOT, a
+# derived value standing in for a fact, and it is reported WHEREVER it sits.
 assert G.issues(["shoegaze", "idm"]) == []
-assert G.issues(["art pop", "pop"]) == []
-# What IS still reported is the old app-written family SLOT: a LEADING head the
-# rest of the list sits under is a derived value standing in for a fact.
 assert G.issues(["rock", "shoegaze"]) == ["derived parent genre stored"]
+assert G.issues(["shoegaze", "rock"]) == ["derived parent genre stored"]
 assert G.issues(["Pop", "Art Pop"]) == ["derived parent genre stored"]
+assert G.issues(["art pop", "pop"]) == ["derived parent genre stored"]
+assert G.issues(["pop", "art pop", "house"], 3) == ["derived parent genre stored"]
 assert G.issues(["rock", "jazz"]) == []          # a head nobody sits under
+assert G.issues(["trip hop", "alternative rock"]) == []   # no ancestor edge
 assert G.issues(["rock"]) == []
 # A name the vocabulary does not publish is its own line (the writer kept it,
 # the grader reports it). Surrounding and internal whitespace is not a problem

@@ -161,7 +161,7 @@ def _provider(artist, title, album, duration, cfg, yt):
 
 
 def stub_chain(cfg, ids, targets=None, force=None, progress=None, wait=True,
-               timeout=None, final=None):
+               timeout=None, final=None, extra=None):
     """The chain, with script 1 and script 13 run for real over the album.
 
     Script 1's own per-file pass is `mlo.lyrics._process_lyrics_for_audio` (the
@@ -169,6 +169,11 @@ def stub_chain(cfg, ids, targets=None, force=None, progress=None, wait=True,
     `mlo.lyrics_fetch.fetch_one`; every other id is a no-op, because what this
     suite is about is the lyrics. Recorded, so a case can say whether the
     fetch ran at all.
+
+    `extra` is the import's own non-script steps (the instrumental check and
+    the advisory fetch, `imports._import_extras`): both switches are OFF in this
+    suite's config, so none is handed over and there is nothing to run — but the
+    keyword is part of the seam and must be accepted.
     """
     names = []
     for target in (targets or []):

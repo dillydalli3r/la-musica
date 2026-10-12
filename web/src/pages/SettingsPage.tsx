@@ -1428,7 +1428,7 @@ export default function SettingsPage() {
     },
     {
       k: "grade_check_genre_structure", label: "Genre structure (no duplicates, no derived parent)", type: "bool",
-      help: "A GENRE tag holds the specific names a source stated; the level above them is derived and never stored. Reported per track as GENRE_STRUCTURE: a repeated name, or a LEADING head another member of the list sits under (the family slot older builds wrote). Script 10 / Optimize remove both with the same predicate the check reads.",
+      help: "A GENRE tag holds the specific names a source stated; the level above them is derived and never stored. Reported per track as GENRE_STRUCTURE: a repeated name, or a parent name stored beside its own child, anywhere in the list (the family slot older builds wrote). Script 10 / Optimize remove both with the same predicate the check reads.",
     },
     {
       k: "grade_check_genre_vocab", label: "Genre vocabulary (MusicBrainz)", type: "bool",

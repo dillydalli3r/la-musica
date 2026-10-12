@@ -197,17 +197,53 @@ When they do ask for one:
 - **GENRE holds the names a SOURCE stated; the level above them is derived,
   never written.** `mlo.genre_vocab.path_of` walks `deep house` → `house` →
   `electronic` (three levels, one node per name — a parent in one place and a
-  genre in another is the same node), `normalize_genres` drops the derived
-  parent slot older builds wrote and ADDS nothing, and grading's
-  `GENRE_STRUCTURE` reports the two defects that remain (a repeat, that old
-  slot). The genre chain is RYM (per TRACK, through the release page's own
-  `/song/` links) → MusicBrainz (per recording) → AOTY (album level ONLY: the
-  site publishes no per-track genre), a track is settled by a track-level
-  answer or the cap, and a RYM page is trusted only for the EDITION whose track
-  list covers the album's own titles. Web ratings run the same three sources
-  the other way — RYM → AOTY → MusicBrainz — and all three answer per track
-  (AOTY's own album rows are its per-track scores). See spec R37/R38/R38a/R93
-  and R358/R358b.
+  genre in another is the same node), `normalize_genres` drops EVERY name that
+  is a strict ancestor of another name in the SAME list — wherever the source
+  put it, so order can never decide what a tag holds — and ADDS nothing, and
+  grading's `GENRE_STRUCTURE` reports the two defects that remain (a repeat,
+  that redundant parent). `mlo.genres._drop_derived_parents` is that one
+  predicate; script 10, the import and the grader all call it. The genre chain
+  is RYM (per TRACK, through the release page's own `/song/` links) →
+  MusicBrainz (per recording) → AOTY (album level ONLY: the site publishes no
+  per-track genre), a track is settled by a track-level answer or the cap, and
+  a RYM page is trusted only for the EDITION whose track list covers the
+  album's own titles. See spec R37/R38/R38a/R93.
+- **A web rating is ONE SOURCE'S OWN number, never a blend.** `WEBRATING` /
+  `ALBUMWEBRATING` (0-100, Picard's scale) carry the FIRST source in the
+  configured chain that answered — the order IS the hierarchy (RYM → AOTY →
+  MusicBrainz), a TRACK-level answer beats an album-level one whoever stated
+  it, and the walk STOPS there (`mlo.web_ratings.choose`), so the number is a
+  score a reader can open the site and check. All three answer per track
+  (AOTY's own album rows are its per-track scores); `*_SOURCE` names the one
+  source whose number the file carries. See spec R358/R358a/R358b.
+- **The chain is a graph: one album-lane step at a time, the free lane beside
+  it.** `mlo.scripts.SCRIPT_DEPS`/`SCRIPT_LANES` + `run_chain(..., extra=...)`
+  (spec R388). Every script that reads or writes the album's own files is
+  "album" lane and runs ONE AT A TIME — a tag writer loads a whole container
+  and writes it back, so two of them on one file lose one side's writes, and
+  no such pair may be run concurrently without a per-file write lock. Artist
+  art / submission steps (19, 22, 25, 26) are "free" lane and run beside the
+  spine, off the run's bar. The import's advisory fetch is a NODE of that
+  graph, AFTER script 13 (lyrics) — an advisory is never decided before the
+  words it reads.
+- **An album description is fetched by IDENTITY first, and a name match must be
+  STRICT.** `server.discovery.album_description` reads the release group's own
+  `wikipedia` (or `wikidata` → sitelink) relation when it has the MBID, and
+  otherwise accepts a search hit only when the article title, stripped of its
+  parenthetical, EQUALS the album title and the artist is confirmed (from the
+  disambiguator, or from the fetched lead, which must read as an album). A hit
+  whose title merely CONTAINS the album title is rejected before any fetch —
+  otherwise a self-titled record stores a different album's article (the
+  owner's *Gorillaz* held *The Mountain*). Nothing strict → the chain falls
+  through; a wrong description is worse than none. Spec R389.
+- **Two Latin-script languages are separated by the LYRICS' own words, not by
+  the tag.** `mlo.lyrics_xlit.detect_language` weighs a declared `LANGUAGE`
+  against the text's function words and lets the text win when its count for
+  another language EXCEEDS the declared one — a release's own
+  text-representation is often not the words on the track (the owner's Spanish
+  "Latin Simone" carried `eng` from the release and got no translation). The
+  tag itself is still filled-only: the app never rewrites a stored language.
+  Spec R167.
 - **Writers fill, they do not overwrite** — except the four families an import
   decides (lyrics, genre, advisory, embedded cover), which
   `server/imports.drop_arrived_values` clears first so the import's values land.

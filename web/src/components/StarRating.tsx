@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Star } from "lucide-react";
-import { half, MAX_RATING, parseRatingText, snap } from "../lib/ratings";
+import { half, MAX_RATING, parseRatingText, snap, webText as webTextOf } from "../lib/ratings";
 import { useI18n } from "../lib/i18n";
 import { toast } from "../store";
 
@@ -205,10 +205,10 @@ export default function StarRating({
   const shown = previewing ? (hover as number) : webOnly ? webDrawn : drawn;
   const text = value > 0 ? `${half(value)} of ${MAX_RATING}` : "unrated";
   // Everything said about the web value is built once, so the readout, the
-  // tooltip and what a screen reader hears can never disagree. `half` is the
-  // grid's own writer, but the web number is NOT on that grid: 4.4 is the
-  // web's own reading and is printed as 4.4.
-  const webText = hasWeb ? half(web) : "";
+  // tooltip and what a screen reader hears can never disagree. The web number
+  // is NOT on the star grid and is printed at the resolution of the tag it
+  // came from (see `webText`): 4.55 stays 4.55.
+  const webText = hasWeb ? webTextOf(web) : "";
   const webReadoutText = hasWeb
     ? t(webKind === "album" ? "rating.webAlbumReadout" : "rating.webReadout", { value: webText })
     : "";

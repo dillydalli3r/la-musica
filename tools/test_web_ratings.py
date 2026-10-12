@@ -18,8 +18,10 @@ What this pins, and what it refuses to guess:
     returns and the saved page. A payload that states no rating —
     MusicBrainz's `{"value": null, "votes-count": 0}`, an AOTY answer with no
     user score — is a MISS and contributes nothing, never a zero.
-  * the AGGREGATION: a vote-count-weighted mean over the sources that answered,
-    a source with no count counting once, and None when nobody answered.
+  * the CHOICE: the configured order IS the hierarchy, so the value is the
+    FIRST source that answered — a source below it is not even asked — and a
+    TRACK-level answer beats an album-level one whoever stated it. Never a
+    mean: the file carries a score a reader can open the site and check.
   * the WRITER: fill-only. A value already on the file survives a second run
     byte for byte unless the run is forced, and a switched-off family writes
     nothing. Proven on a REAL FLAC (tags read back off disk with mutagen) and
@@ -477,7 +479,34 @@ eq(_served["asked"],
     "/song/radiohead/paranoid-android-1/"],
    "…after walking the two LIVE candidates, then giving up")
 
-print("== a track's aggregate over RYM and MusicBrainz ==")
+print("== the choice: the order IS the hierarchy ==")
+# RYM answers the track at TRACK level, so it IS the value — and MusicBrainz,
+# below it in the configured chain, is never even asked. The numbers are the
+# owner's own live read of "Clint Eastwood" (2026-10-11): RYM 4.54 from 3 458
+# votes, AOTY's row 95 from 1 394, MB's recording 83 from 20 — whose
+# vote-weighted mean is 92, i.e. the file read 4.6 while the site said 4.54.
+# A score a person can open and check beats a blend no site publishes.
+_asked = []
+
+
+def _clint_fetch(source, kind, ident, cfg):
+    _asked.append((source, kind))
+    if source == "rateyourmusic":
+        return {"rating": {"value": 4.54, "count": 3458}}
+    raise AssertionError(f"{source} must not be asked once RYM answered ({kind})")
+
+
+clint = wr.track_rating("Gorillaz", "Clint Eastwood", "rec-mbid", {},
+                        _clint_fetch,
+                        album={"artist": "Gorillaz", "album": "Gorillaz",
+                               "mbid": "rg-mbid"})
+eq(clint["value"], 91, "RYM's own 4.54 -> 91 (half-up once), not the mean's 92")
+eq(clint["sources"], ["RateYourMusic"],
+   "…and only the source whose number the file carries is named")
+eq(clint["asked"], ["rateyourmusic"],
+   "…and the walk STOPS there: no lower source is asked at all")
+eq(clint["levels"], {"rateyourmusic": "track"}, "…at track level")
+eq(_asked, [("rateyourmusic", "track")], "exactly one request was made")
 
 
 def _rym_mb_fetch(source, kind, ident, cfg):
@@ -491,40 +520,59 @@ def _rym_mb_fetch(source, kind, ident, cfg):
 
 track = wr.track_rating("Radiohead", "Paranoid Android", "rec-mbid", {},
                         _rym_mb_fetch)
-eq(track["sources"], ["RateYourMusic", "MusicBrainz"],
-   "a track's WEBRATING_SOURCE can now read RateYourMusic; MusicBrainz")
-eq(track["value"], 93,
-   "…and the vote-weighted mean is RYM's own 93 (17 654 votes vs 18)")
-eq(track["levels"], {"rateyourmusic": "track", "musicbrainz": "track"},
-   "…and every source that answered did so at TRACK level")
+eq(track["sources"], ["RateYourMusic"],
+   "a track's WEBRATING_SOURCE names the ONE source whose number it carries")
+eq(track["value"], 93, "…RYM's own song score (4.67 -> 93)")
+eq(track["asked"], ["rateyourmusic"],
+   "…and MusicBrainz, below it in the chain, was not asked")
+eq(track["levels"], {"rateyourmusic": "track"},
+   "…and the answer is at TRACK level")
 
 # A source that states NOTHING for the track itself falls back to its ALBUM
-# answer — still that source's data, marked `album` in `levels`. AOTY has no
-# track answer here, but its album payload answers, so it stays in the mean.
+# answer — still that source's data, marked `album` in `levels` — but an
+# ALBUM-level answer does NOT end the walk: a source further down may still
+# state the track's OWN score, and that one wins.
 def _album_fallback_fetch(source, kind, ident, cfg):
-    """RYM and MB answer the TRACK; AOTY only answers for the ALBUM."""
+    """RYM does not answer this track at all; AOTY only answers for the ALBUM."""
     if source == "albumoftheyear":
         if kind == "album":
             return {"rating": {"value": 90, "count": 10}}
         return None
     if source == "rateyourmusic":
-        return {"rating": {"value": 4.67, "count": 17654}}   # the song page
+        return None                    # no song page, no release page either
     if source == "musicbrainz":
-        return MB_TRACK_OWN                                  # 4.2/5, 18 votes
+        return MB_TRACK_OWN            # 4.2/5, 18 votes
     return None
 
 
-fb = wr.track_rating("Radiohead", "Paranoid Android", "rec-mbid", {},
+fb = wr.track_rating("Radiohead", "A Song Rym Does Not Have", "rec-mbid", {},
                      _album_fallback_fetch,
                      album={"artist": "Radiohead", "album": "In Rainbows",
                             "mbid": "rg-mbid"})
-eq(fb["sources"], ["RateYourMusic", "Album of the Year", "MusicBrainz"],
-   "a track source that missed but whose ALBUM payload answered is kept")
-eq(fb["levels"], {"rateyourmusic": "track", "albumoftheyear": "album",
-                  "musicbrainz": "track"},
-   "…and the level it answered at is reported as `album`")
-eq(fb["value"], 93,
-   "…its 90/10 album answer is weighted in with the two track answers")
+eq(fb["asked"], ["rateyourmusic", "albumoftheyear", "musicbrainz"],
+   "a track nobody above states is asked all the way down the chain")
+eq(fb["levels"], {"albumoftheyear": "album", "musicbrainz": "track"},
+   "…the album-level answer is kept while the walk continues")
+eq(fb["value"], 84,
+   "…and MusicBrainz's TRACK answer beats AOTY's ALBUM answer from above")
+eq(fb["sources"], ["MusicBrainz"], "…so the file carries its number and name")
+
+# …and when NO source states the track, the first ALBUM-level answer stands.
+def _album_only_fetch(source, kind, ident, cfg):
+    """Only AOTY answers, and only for the ALBUM — nobody states the track."""
+    if source == "albumoftheyear" and kind == "album":
+        return {"rating": {"value": 90, "count": 10}}
+    return None
+
+
+none_row = wr.track_rating("Radiohead", "A Song Aoty Has Not Rated", "rec-mbid",
+                           {}, _album_only_fetch,
+                           album={"artist": "Radiohead", "album": "In Rainbows",
+                                  "mbid": "rg-mbid"})
+eq(none_row["levels"], {"albumoftheyear": "album"},
+   "no track-level answer from anyone -> the album answer stands, marked `album`")
+eq(none_row["value"], 90, "…and its number is the file's")
+eq(none_row["sources"], ["Album of the Year"], "…attributed to that source")
 
 # …and when the source's album payload carries the TRACK's OWN row, that row is
 # the track's answer, at TRACK level: AOTY states every track's score on the
@@ -541,9 +589,10 @@ def _album_rows_fetch(source, kind, ident, cfg):
                                 "rating": {"value": 94, "count": 40}}]}
         return None
     if source == "rateyourmusic":
-        return {"rating": {"value": 4.67, "count": 17654}}
+        return None
     if source == "musicbrainz":
-        return MB_TRACK_OWN
+        return {"recording": {"rating": {"value": None, "votes-count": 0}},
+                "work": {"rating": {"value": None, "votes-count": 0}}}
     return None
 
 
@@ -562,31 +611,24 @@ eq(wr.track_row("musicbrainz", {"tracks": [{"title": "Karma Police",
    "no other source has per-track rows in its album payload")
 eq(row["levels"]["albumoftheyear"], "track",
    "AOTY's own row answers at TRACK level, not the album's")
-eq(row["value"], 93,
-   "…so the mean uses 96/37 for that source instead of 90/10")
+eq(row["value"], 96, "…so the file carries 96, the row's own score")
 
-# The album-wide value is still the fallback when NO row matches the title.
-none_row = wr.track_rating("Radiohead", "A Song Aoty Has Not Rated", "rec-mbid",
-                           {}, _album_fallback_fetch,
-                           album={"artist": "Radiohead", "album": "In Rainbows",
-                                  "mbid": "rg-mbid"})
-eq(none_row["levels"]["albumoftheyear"], "album",
-   "no matching row -> the album answer stands, marked `album`")
-
-print("== aggregation ==")
-# 87 and 84 over 31 and 49 366 votes: the big one decides the number.
-agg = wr.aggregate([(87, 31, "MusicBrainz"), (84, 49366, "RateYourMusic")])
-eq(agg["value"], 84, "the mean is weighted by votes, not by source count")
-eq(agg["sources"], ["MusicBrainz", "RateYourMusic"],
-   "…and the contributing sources are named, in the order asked")
-eq(wr.aggregate([(90, None, "A"), (80, "", "B")])["value"], 85,
-   "a source with no count counts exactly ONCE (90+80)/2")
-eq(wr.aggregate([(50, 1, "A"), (51, 1, "B")])["value"], 51,
-   "a .5 tie rounds UP, so any two reads of the same answers agree")
-eq(wr.aggregate([None, None]), None, "no answers at all aggregates to None")
-eq(wr.aggregate([]), None, "…and so does an empty list")
-eq(wr.aggregate([(120, 1, "A"), (200, 1, "B")])["value"], 100,
-   "the mean is clamped into 0-100")
+print("== the choice function ==")
+eq(wr.choose([((84, 31, "MusicBrainz"), "track")]),
+   {"value": 84, "sources": ["MusicBrainz"]},
+   "one answer is that answer, whatever its count")
+eq(wr.choose([((90, 10, "Album of the Year"), "album"),
+              ((84, 18, "MusicBrainz"), "track")]),
+   {"value": 84, "sources": ["MusicBrainz"]},
+   "a TRACK-level answer beats an album-level one stated above it")
+eq(wr.choose([((90, 10, "Album of the Year"), "album"),
+              ((95, 105, "MusicBrainz"), "album")]),
+   {"value": 90, "sources": ["Album of the Year"]},
+   "two album-level answers: the FIRST in the configured order wins")
+eq(wr.choose([((4, 1, "A"), "album")]), {"value": 4, "sources": ["A"]},
+   "a low count is not a weaker answer — the order decides, never the votes")
+eq(wr.choose([]), None, "no answers at all chooses None")
+eq(wr.choose([(None, "album")]), None, "…and a missing entry is skipped")
 
 print("== the source order ==")
 eq(wr.provider_order({}), [s for s in wr.SOURCES if s in wr.SOURCE_PARSERS],
@@ -823,9 +865,10 @@ else:
     # over the same album content: one pinned to one lane per album (so the
     # track asks are serial, `track_width` 1), one with a wide track pool. The
     # injected fetcher makes RYM the slow one, so within a track the fast MB
-    # answer lands first — a completion-ordered aggregation would title the
-    # provenance "MusicBrainz; RateYourMusic"; the contract says the CONFIGURED
-    # order. Every tag on disk must be byte-identical between the two runs.
+    # answer lands first — a completion-ordered choice would write MB's 84 and
+    # name MusicBrainz; the contract says the CONFIGURED order decides, and MB
+    # (below RYM) is not even asked. Every tag on disk must be byte-identical
+    # between the two runs.
     import threading
     import time as _time
 
@@ -847,7 +890,7 @@ else:
         return folder
 
     def slow_fetch(source, kind, ident, cfg):
-        """MB answers at once; RYM answers LAST, deliberately."""
+        """RYM answers LAST, deliberately; MB answers at once."""
         if source == "rateyourmusic":
             _time.sleep(0.08 if kind == "album" else 0.05)
             if kind == "album":
@@ -894,11 +937,11 @@ else:
             eq(list(b.get(tag) or []), list(a.get(tag) or []),
                f"{name}: {tag} is byte-identical to the serial run")
     eq(list(FLAC(os.path.join(conc_dir, names[0])).get("WEBRATING_SOURCE")),
-       ["RateYourMusic; MusicBrainz"],
-       "…and the labels are the CONFIGURED order, never the completion order")
-    ok(all(FLAC(os.path.join(conc_dir, n)).get("WEBRATING")
+       ["RateYourMusic"],
+       "…and the label is the CONFIGURED order's answer, never the fastest one")
+    ok(all(FLAC(os.path.join(conc_dir, n)).get("WEBRATING") == ["93"]
            for n in names),
-       "…and every track carries a WEBRATING from both sources")
+       "…and every track carries RYM's own 93, though MusicBrainz answered first")
     shutil.rmtree(base, ignore_errors=True)
 
     for d in (tmp, library):

@@ -6,9 +6,12 @@ sees on MusicBrainz, RateYourMusic, Album of the Year or Discogs — and this
 module is that layer:
 
   * the SOURCE layer, one parser per provider turning the payload the app
-    would already have fetched into ``(value, weight, label)`` on the app's
+    would already have fetched into ``(value, count, label)`` on the app's
     own 0-100 scale;
-  * the NORMALISER, a weighted mean over the sources that answered;
+  * the CHOICE, the FIRST source that answered — the configured order IS the
+    hierarchy (RateYourMusic, then Album of the Year, then MusicBrainz), so
+    the number on the file is a score a reader can open the site and check,
+    never a blend no site publishes;
   * the WRITER, which fills the four tags and never replaces a value the file
     already holds unless it is forced to;
   * the SCRIPT runner (id 24), album-scoped like its neighbours.
@@ -212,11 +215,15 @@ def _weight(count):
 
 
 def _rating_pair(value, count, scale_max=SOURCE_SCALE_MAX):
-    """``(value_0_100, weight)`` from a raw ``(value, count)`` pair, or None.
+    """``(value_0_100, count)`` from a raw ``(value, count)`` pair, or None.
 
     The shared tail of every parser: a payload that states no value is not an
     answer at all (MusicBrainz answers ``{"value": null, "votes-count": 0}``
     for an unrated entity — that is "nobody rated this", not "rated zero").
+    The COUNT travels with the value — it is part of the source's own answer
+    (a 3 458-vote average and a single vote are different reads of the same
+    payload) — but it never decides which source's score the file gets: the
+    configured ORDER does (`choose`).
     """
     score = scale_to_100(value, scale_max)
     if score is None:
@@ -528,36 +535,47 @@ def parse_source(source, payload, kind="album"):
 
 
 # --------------------------------------------------------------------------- #
-# Aggregation
+# The choice
 # --------------------------------------------------------------------------- #
-def aggregate(answers):
-    """The weighted mean of the answers that came back, or None.
+def choose(answers):
+    """The FIRST source's own answer — the order IS the hierarchy, or None.
 
-    ``answers`` are ``(value_0_100, weight, label)`` triples (or None, which
-    each source contributes when it has nothing to say). The mean is over
-    VOTES, not sources: a score 49 366 people voted on carries 49 366 times
-    the weight of one with a single vote, which is the owner's rule and the
-    only one that makes two hundreds-of-votes sources agree on a number
-    instead of on an average of averages.
+    ``answers`` are ``((value_0_100, count, label), level)`` pairs in the
+    order the sources were asked, each ``level`` "track" or "album".
 
-    Returns ``{"value": int, "sources": [label, ...]}`` — the labels in the
-    order they were asked (the configured order), deduped — or None when no
-    source answered.
+    Two rules, in this order:
+
+    * a TRACK-level answer beats an album-level one, whoever stated it — the
+      value on a track is the track's own score, and an album's score standing
+      in for it is a fallback, not a verdict;
+    * within one level the ORDER decides, so the configured chain
+      (``web_ratings_sources``, RateYourMusic first) is a true hierarchy: the
+      first source that answers is the value on the file.
+
+    NOT a mean. The weighted mean this replaced was unreproducible for the
+    person reading the tag — MEASURED 2026-10-11 on the owner's "Clint
+    Eastwood": RYM 4.54 (91, 3 458 votes), AOTY 95 (1 394), MusicBrainz 83
+    (20), whose vote-weighted mean is 92, i.e. the file read 4.6 while the
+    site the owner checked said 4.54. A score a person can open and verify
+    beats a blend no site publishes.
+
+    Returns ``{"value": int, "sources": [label]}`` or None when no source
+    answered. ``sources`` is the one name whose number the file carries — it
+    is the provenance of THIS value, and a source that answered for nothing is
+    never named.
     """
-    kept = [a for a in (answers or []) if a and a[0] is not None]
-    if not kept:
+    first_album = None
+    for got, level in answers or ():
+        if not got or got[0] is None:
+            continue
+        if level == "track":
+            return {"value": got[0], "sources": [str(got[2] or "").strip()] if got[2] else []}
+        if first_album is None:
+            first_album = got
+    if first_album is None:
         return None
-    weight = sum(_weight(a[1]) for a in kept)
-    if weight <= 0:
-        return None
-    total = sum(float(a[0]) * _weight(a[1]) for a in kept)
-    value = max(0, min(RATING_MAX, _round_half_up(total / weight)))
-    labels = []
-    for _value, _w, label in kept:
-        text = str(label or "").strip()
-        if text and text not in labels:
-            labels.append(text)
-    return {"value": value, "sources": labels}
+    return {"value": first_album[0],
+            "sources": [str(first_album[2] or "").strip()] if first_album[2] else []}
 
 
 def provider_order(cfg=None):
@@ -584,22 +602,31 @@ def provider_order(cfg=None):
 def _rate(kind, ident, cfg, fetch, album=None):
     """``{"value", "sources"}`` for one entity, or None when nobody answered.
 
-    *fetch* is the injected callable (see the module docstring). It is called
-    for every source in the configured order and its payload parsed by the one
-    table above. It is allowed to raise — this is where a caller's fetcher
-    meets a stranger's network — and a raise is that source's miss, counted in
-    ``answered`` rather than thrown at the caller.
+    *fetch* is the injected callable (see the module docstring). The sources
+    are asked in the configured order (the hierarchy) and the walk STOPS at
+    the first answer that can decide the value — `choose`'s two rules: a
+    TRACK-level answer settles a track, and the first answer settles an album
+    — so a source below the one that answered is never asked at all. That is
+    both the rule and the speed: an album whose RYM page answers costs one
+    request, not three.
+
+    The callable is allowed to raise — this is where a caller's fetcher meets
+    a stranger's network — and a raise is that source's miss, not the
+    caller's.
 
     For a TRACK, a source that states nothing for the track itself falls back
-    to its ALBUM answer (`album` is that entity's identity, when the caller has
-    it) — the owner's rule: track, then album, then artist, per platform. The
-    level each source actually answered at is reported in ``levels``, so a
-    track whose value came from the album says so.
+    to its ALBUM answer (`album` is that entity's identity, when the caller
+    has it) — the owner's rule: track, then album, then artist, per platform.
+    An album-level answer does NOT end the walk (a later source may state the
+    track's own score), and the level each source actually answered at is
+    reported in ``levels``, so a track whose value came from the album says
+    so.
     """
     allowed = TRACK_SOURCES if kind == "track" else ALBUM_SOURCES
     order = [s for s in provider_order(cfg) if s in allowed]
-    answers, answered, levels = [], [], {}
+    answers, asked, answered, levels = [], [], [], {}
     for source in order:
+        asked.append(source)
         level = kind
         try:
             payload = fetch(source, kind, ident, cfg)
@@ -625,25 +652,24 @@ def _rate(kind, ident, cfg, fetch, album=None):
                     level = "album"
         if got is None:
             continue
-        answers.append(got)
+        answers.append((got, level))
         answered.append(source)
         levels[source] = level
-    result = aggregate(answers)
+        if level == kind:
+            # The level the caller asked for just answered: nothing below it
+            # in the hierarchy can change the value (`choose`).
+            break
+    result = choose(answers)
     if result is None:
         return None
-    result["asked"] = order
+    result["asked"] = asked
     result["answered"] = answered
     result["levels"] = levels
     return result
 
 
 def album_rating(artist, album, rg_mbid, cfg, fetch):
-    """The ALBUM's aggregated web rating, or None.
-
-    The identity is the release-group MBID when the file states one (an
-    identity, never a title guess) and the artist/album names otherwise —
-    which is all RYM and Discogs can search by.
-    """
+    """The ALBUM's web rating — the first source in the chain that answers."""
     return _rate("album", {"artist": str(artist or "").strip(),
                            "album": str(album or "").strip(),
                            "mbid": str(rg_mbid or "").strip()},
@@ -651,13 +677,16 @@ def album_rating(artist, album, rg_mbid, cfg, fetch):
 
 
 def track_rating(artist, title, recording_mbid, cfg, fetch, album=None):
-    """The TRACK's aggregated web rating, or None.
+    """The TRACK's web rating — the track's own score when any source states
+    one, else the first source's ALBUM score for it.
 
     Every source is asked for the TRACK first (RYM's song page, AOTY's song
     page, MusicBrainz's recording), and a source that states nothing for the
     track falls back to its ALBUM answer — `album` is the album's identity
-    (``{"artist", "album", "mbid"}``) when the caller has it. The level each
-    source answered at is on the result's ``levels`` map.
+    (``{"artist", "album", "mbid"}``) when the caller has it. The walk stops
+    at the first TRACK-level answer; an album-level one is kept only while
+    nothing better arrives. The level each source answered at is on the
+    result's ``levels`` map.
     """
     return _rate("track", {"artist": str(artist or "").strip(),
                            "title": str(title or "").strip(),

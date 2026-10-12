@@ -384,8 +384,8 @@ assert got["sources"][FILE_TWO][0] == "rateyourmusic", got["sources"]
 # The chain follows `genre_sources`: reversing the order reverses the merge.
 # MusicBrainz answers only at ALBUM level here (MB_ALBUM_RELEASE), so the
 # reversed list really does ask Album of the Year first and MusicBrainz
-# second — a track-level MusicBrainz answer would instead end the search at
-# MusicBrainz, and that is the same early stop the case must not rely on here.
+# second — and, unlike the forward case, no source answers at track level, so
+# nothing ends the search early.
 clear()
 full_stack()
 reversed_got = intg.genre_chain(artist="Test Artist", album="Test Album",
@@ -396,13 +396,18 @@ assert reversed_got["per_track"][(1, 1)] == ["Shoegaze", "Dream Pop",
                                              "Progressive Rock", "Rock",
                                              "Art Rock"], \
     reversed_got["per_track"][(1, 1)]
-# Album of the Year and MusicBrainz together fill the 5-slot cap, so the chain
-# stops before RateYourMusic — the early stop here is the CAP, not a
-# track-level answer (no source answers at track level in this fixture).
+# The merge yields FOUR SPECIFIC names, not five: `Rock` sits beside its own
+# children (`Progressive Rock`, `Art Rock`) and the new rule drops a parent
+# name wherever it sits, so `_genre_complete` sees 4 and the 5-slot cap is
+# never filled. Every source is asked and no source answers at TRACK level, so
+# nothing sets `stopped_after` — the run ends because it ran out of SOURCES,
+# not because the cap was reached.
+assert reversed_got["levels"][FILE_ONE] == "album"
 assert reversed_got["sources"][FILE_ONE] == ["albumoftheyear", "musicbrainz"], \
     reversed_got["sources"]
-assert reversed_got["stopped_after"] == "musicbrainz", \
-    reversed_got["stopped_after"]
+assert reversed_got["asked"] == ["albumoftheyear", "musicbrainz",
+                                 "rateyourmusic"], reversed_got["asked"]
+assert reversed_got["stopped_after"] is None, reversed_got["stopped_after"]
 
 # The cap is enforced PER TRACK, not across the album. RateYourMusic states
 # only two specifics for track 1 (the hierarchy above them is derived, never

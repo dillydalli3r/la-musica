@@ -102,6 +102,36 @@ Grade script (4) over an album and reading the report.
   chains, the keyless/keyed gating and the Last.fm placeholder rule, stubbed
   offline) and verified live for the two keyless ones.
 
+- **R389 — an album description is fetched by IDENTITY first, and a name match
+  must be STRICT.** `server.discovery.album_description` no longer hands
+  `"{artist} {album} album"` to Wikipedia's search and takes the first hit that
+  CONTAINS the album title: for a self-titled record that test passes the
+  band's whole discography — MEASURED on the owner's library (2026-10-11), the
+  album *Gorillaz* (2001) by Gorillaz stored the article for *The Mountain*, a
+  different Gorillaz album, because every one of their album articles contains
+  "Gorillaz". The order is now:
+  * **the release group's own links** when the caller knows the MBID:
+    `release-group/<mbid>?inc=url-rels` and its `wikipedia` url-relation — the
+    exact article, no search — else the release group's `wikidata` item and its
+    enwiki sitelink (the same identity chain the ARTIST route has used since
+    R7b;
+  * **a strict title test** otherwise: a search hit is fetched only when its
+    article title, stripped of its parenthetical disambiguator, EQUALS the
+    album title (`_norm`-folded), and the artist is confirmed — from that
+    disambiguator ("Gorillaz (album)", "Plastic Beach (Gorillaz album)"), or
+    from the fetched lead, which must name the artist AND read as an album
+    article. A hit whose title merely CONTAINS the album title is rejected
+    before any article fetch; a band article whose title equals the album title
+    is rejected too;
+  * **nothing when nothing matches strictly** — the chain falls through to
+    TheAudioDB / Last.fm / Discogs / Bandcamp / MusicBrainz rather than storing
+    the wrong article (`tools/test_description_identity.py` pins the
+    self-titled case, the MBID route, the containing-only rejection and the
+    fall-through). Verified live on the owner's album: the stored text now
+    begins "Gorillaz is the debut album by the English virtual band Gorillaz"
+    and `artwork.json` records
+    `https://en.wikipedia.org/wiki/Gorillaz_(album)`.
+
 - **R7a — the artist image is judged on its decoded pixels**, never on its name
   or suffix: Pillow reads the stored file, and every issue names the numbers it
   judged. OVERSIZED fails (`image_policy()`'s ceiling: `artist_image_target_size`,
@@ -921,14 +951,22 @@ rating.
   level above a name is DERIVED (`mlo.genre_vocab.path_of`), never written, so
   position carries no meaning and a list in any order is in shape. Two things
   remain defects, and they are what `GENRE_STRUCTURE` reports: a repeated name,
-  and a LEADING head another member of the list sits under — the family SLOT
-  older builds wrote (`Pop; Art Pop`, where nobody stated `Pop`).
-  `mlo.genres.normalize_genres` drops that slot on every write (script 10 and
-  Optimize through the same predicate, `_drop_derived_head`), a head a source
-  really stated — alone, or beside a genre it does not contain (`Rock` +
-  `Jazz`) — is left exactly as it came, and the check names the files the app
-  has not rewritten yet. The old `grade_check_genre_order` key is GONE (a saved
-  copy is inert: nothing reads it).
+  and ANY name another member of the same list sits under — the family SLOT
+  older builds wrote, and the same redundancy wherever a source put it
+  (`Pop; Art Pop` and `Art Pop; Pop` both mean `Art Pop`, where nobody stated
+  `Pop`). MEASURED on the owner's own library (2026-10-11): the rule used to
+  drop the redundant name only when it was FIRST, so the same pair in the
+  source's other order kept it, and 15 of 31 tracks carried an ancestor beside
+  its child while a sibling track did not — "the parent genres of some tracks
+  are the normal genre of others". The drop is now POSITION-FREE:
+  `mlo.genres.normalize_genres` removes every name that is a strict ancestor of
+  another name in the SAME list, `mlo.genres._drop_derived_parents` is that one
+  predicate (script 10, the import's canonical pass and the grader all call
+  it), a head a source really stated — alone, or beside a genre it does NOT
+  contain (`Rock` + `Jazz`, `Hip Hop` + `Electropop`) — is left exactly as it
+  came, and the check names the files the app has not rewritten yet. The old
+  `grade_check_genre_order` key is GONE (a saved copy is inert: nothing reads
+  it).
 - **R38a — the hierarchy is a three-level-deep VIEW of one node graph.** Every
   name resolves to its IMMEDIATE parent and, through it, to one of the 28 heads:
   `deep house` → `house` → `electronic` (`parent_of` / `path_of` / `top_of` in
@@ -2951,6 +2989,22 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   release-group id resolves in both routes, never the group's own id) and
   verified live against the real page (link A → link B through the wizard).
 
+- **R390 — the wizard's release identity belongs to ONE album, and a new album
+  starts empty.** `web/src/pages/ImportWizard.tsx` holds the Links step's
+  release id, its MusicBrainz link and the fetched release payload; ONE
+  mechanism owns them now — `resetAlbumRelease`, run by a single effect keyed
+  on `albumPath` — so staging another album through `doImport` (the drop path
+  that used to leave the previous album's id in the field, which is the owner's
+  report), switching between staged albums, opening the wizard on a prompt and
+  the organize-finish path all start from the same empty state. The
+  TAG-BASED detection is not disabled by it, and must not be: the reset effect
+  is declared BEFORE the auto-detection effect, so on an album change the reset
+  commits first and the detection then fills the field from the NEW album's own
+  `MUSICBRAINZ_ALBUMID` (or the live `mbdetect` scan) — an honest fill. Pinned
+  in `tools/check_import_minimum.mjs`, driven on the real page: album A's id is
+  shown for A, staging B never shows A's id (the field settles empty), and
+  staging C fills C's own id.
+
 - **R348 — the library refreshes itself after any write, and the refresh ENDS
   on the fresh tree.** Every mutating request that can touch the library
   publishes one coalesced `library_changed` frame — an HTTP middleware
@@ -3241,7 +3295,17 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   `language`/`script`, stamped by `_stamp_mb_tags`; the app writes it only into
   an empty slot, so the user's own value stands) — when the text's script
   agrees with it (a wrong tag never romanizes or skips the wrong thing: the
-  lyrics are what is being transformed); (2) the text's own **script**, for the
+  lyrics are what is being transformed); **two LATIN-script languages are the
+  one pair the script cannot separate, so there the text's own function words
+  are counted and a declaration they outvote is passed over too** (the voted
+  language wins only when its hit count EXCEEDS the declared language's, so a
+  stray foreign word cannot flip a declaration — and a text whose vote is a tie
+  or empty keeps it). MEASURED 2026-10-11 on the owner's own library: "Latin
+  Simone (Que Pasa Contigo)" carries `LANGUAGE=eng` (the Plastic Beach
+  RELEASE's text representation, on every file of the release) over Spanish
+  lyrics, and that one tag made the rule read en == en and write nothing — the
+  track kept Spanish words with no `TRANSLATION-EN` until the vote was weighed;
+  (2) the text's own **script**, for the
   scripts that belong to one language (kana → ja, hangul → ko, …); (3) the
   function words of the Latin languages (`_latin_lang`). `xlit_needs` then
   decides from that answer: transliteration for non-Latin text in a script the
@@ -4586,6 +4650,57 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   module level. Measured: 3 container parses per file (MEDIA pass, verdict pass,
   write) become 1 read + 1 write; 60 opens for a 20-track run become 40 on a
   re-run.
+- **R388 — the chain is a GRAPH with two lanes, and a dependency can only ever
+  DELAY a step.** `run_chain`'s steps are nodes (`server.script_runners
+  ._node_table`): a script's edges come from `mlo.scripts.SCRIPT_DEPS` and its
+  lane from `SCRIPT_LANES`, and an IMPORT adds its own nodes through
+  `run_chain(..., extra=...)`. Among the READY steps the earliest in the run's
+  own order goes first, so with no dependency in the way the order is exactly
+  the configured list — a declared edge never moves a step FORWARD.
+  * **The album lane is the spine, one step at a time** (the default): every
+    script that reads or writes the album's own files. This is not a
+    preference — a tag writer loads a whole container, changes it and writes it
+    back (`mlo.audio.AudioFile` + `mlo.atomic`), so two of them on one file
+    lose one side's writes — scripts 8 and 13 both write tags, `mlo/autotag.py`
+    holds a file under `defer_save` for a whole album pass, and that is why the
+    two-are-one-lane rule is measured rather than chosen.
+  * **The free lane runs BESIDE it** (19, 22, 25, 26): work keyed to the ARTIST
+    folder or to nothing on disk, which touches no album file. A free step gets
+    its own copy of the run's config (the spine writes force keys and re-points
+    `targets` as it goes), it is logged, and it stays OFF the run's bar and row:
+    the surfaces speak for the spine, one numbering, and a side step's label
+    would flicker the readout between two steps while the spine is still on one
+    (its start frame claims "#index-1/count", so a side step completing in
+    between would push the fraction past it — a bar that steps BACKWARDS reads
+    as a stall). MEASURED 2026-10-12 on a scratch copy of the owner's album:
+    script 13 alone (16 tracks of lyric fetches, network) 5.8 s, scripts 25+26
+    alone 0.2 s cached / 1.3 s cold, together 5.8 s — the side steps ride
+    inside the spine instead of adding to it.
+  * **The edges that matter**: 8 (Auto Tagging, whose advisory decision reads
+    the track's own words) waits for 13 (Fetch lyrics) — the owner's rule, and
+    the reason the import's advisory fetch is a NODE now: `server/imports
+    ._import_extras` hands the chain `instrumentals` at the front (script 13
+    reads the INSTRUMENTAL tag it writes) and `advisories` AFTER 13, and
+    `SCRIPT_DEPS[8]` names both, so an advisory is never decided before the
+    lyrics it would read. 15 waits for 14 (the manifest is built from the ids
+    beets wrote), 9 for 2 (its ArCueDotNet pass reads the CD-N .cue names), 6
+    for 9 (the audit's AccurateRip leg), 17 for 13 (it transforms the stored
+    lyrics), and 4 (Grade) for everything it grades. An id the run does not
+    contain is NOT a wait, so a configured chain that leaves a step out cannot
+    wedge the graph.
+  * **The two fetches are announced by the CHAIN** ("#n/N · Fetching
+    advisories" when the step starts), so the frames the import publishes
+    before the chain no longer name work that has not started. `tools/
+    test_chain_bar.py` proves the lanes with runners that could not pass on a
+    straight line (each waits for the other's START, and two album-lane steps
+    record non-overlapping intervals), and `tools/test_import_pipeline.py`
+    pins the order instrumentals → 13 → advisories → 8.
+  * **Results come back in the run's ORDER**, not completion order, so every
+    caller that reads them reads the list it always read, and the run still
+    PRUNES the folders it emptied and still reports where the album ended
+    (`final`). A step that fails is still a failure entry and the chain carries
+    on — unchanged — and a step's results are never lost to another step's.
+
 - **R208 — a chain's decodes are not shareable, and that is measured, not
   assumed.** Each script that decodes a track decodes it for its own question —
   `flac -t`'s frame CRCs and stream MD5 (3, 6), AudioAuditor's spectral pass (6),
@@ -6800,27 +6915,46 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   request was reported as "refused without a Cloudflare challenge" and the 403
   branch never used the detector at all (caught live: a 27-pair signed-in
   cookie, 403 + `<title>Just a moment...</title>`).
-- **R358 — a web rating is a SECOND opinion, kept apart from your own.** Script
+- **R358 — a web rating is a SECOND opinion, kept apart from your own, and it
+  is ONE SOURCE'S OWN NUMBER.** Script
   24 (`mlo.web_ratings.run_web_ratings`) fetches the public score for an ALBUM
   and for each TRACK and writes them to four tags on the same 0–100 Picard
   scale as `RATING` (which stays yours): `WEBRATING` + `WEBRATING_SOURCE` per
   track, `ALBUMWEBRATING` + `ALBUMWEBRATING_SOURCE` for the album — the album
   value written to every track of the folder, the app's established way to
-  carry an album-level fact (`ALBUMITUNESADVISORY`), with the _SOURCE tag a
-  "; "-joined list in the order the sources were asked. The two are separate
+  carry an album-level fact (`ALBUMITUNESADVISORY`), with the _SOURCE tag
+  naming the ONE source whose number the file carries. The two are separate
   facts and neither is invented from the other: a track whose recording has no
-  rating keeps no `WEBRATING` even when the album has one. Every source is
-  normalised to 0–100 (MusicBrainz is 1–5 and ×20; Album of the Year is already
-  0–100) and the aggregate is a weighted mean over the sources
-  that ANSWERED, weighted by each source's own vote count — so 49,000 ratings
-  outvote sixteen — rounded half-up. Nothing is folded in that a source did not
-  state, and a miss writes nothing at all: absence is not a zero. Writing is
+  rating keeps no `WEBRATING` even when the album has one. THE VALUE IS THE
+  FIRST SOURCE IN THE CHAIN THAT ANSWERED (`mlo.web_ratings.choose`): the
+  configured order IS the hierarchy, a TRACK-level answer beats an album-level
+  one whoever stated it, and within one level the earlier source wins — so the
+  number on the file is a score a reader can open the site and check. Every
+  source is normalised to 0–100 by the ONE conversion (`scale_to_100`:
+  MusicBrainz is 0–5 and ×20, RateYourMusic 0.5–5, Album of the Year already
+  0–100), rounded half-up exactly once, and the walk STOPS at the answer that
+  settles the value: a source below the one that answered is not asked at all.
+  Nothing is invented and a miss writes nothing: absence is not a zero.
+  **NOT a mean.** The vote-count-weighted mean this replaced was unreproducible
+  for the person reading the tag — MEASURED 2026-10-11 on the owner's own
+  "Clint Eastwood": RateYourMusic 4.54 (3 458 ratings), Album of the Year 95
+  (1 394) and MusicBrainz 83 (20) averaged to 92, so the file read 4.6 while
+  the site the owner checked said 4.54. The file now carries RYM's own 91, its
+  `WEBRATING_SOURCE` reads `RateYourMusic` alone, and every track of the two
+  albums re-tagged that way took its number from RYM (31 of 31;
+  `tools/test_web_ratings.py` pins the choice, the level rule and the early
+  stop, and the owner's own figures are the case). Writing is
   FILL-ONLY (an existing value survives every run unless `force_web_ratings` is
   set by hand), the four tags are registered everywhere a tag must be declared
   (`mlo.audio.TAG_MAP`, the allow-list and tag family in `mlo/config.py`,
   `server/tags_registry.py`, `server/library.py`), and the whole family is
   gated by `web_ratings_enabled` (`SCRIPT_GATES[24]` and the write-gate family
   switch both read it, so an install with it off neither asks nor writes).
+  On the WEB the tag is drawn at its own resolution: `web/src/lib/ratings.ts`
+  `webText` prints the 0-100 integer as 0-5 with ONE decimal when it lands on
+  a tenth (92 → "4.6") and TWO when it does not (91 → "4.55"), because `half`,
+  the star grid's writer, would put a SECOND rounding on a number that was
+  already rounded once.
 - **R358a — RateYourMusic leads the shipped sources, and all three are read
   LIVE.** `web_ratings_sources` ships
   `["rateyourmusic", "albumoftheyear", "musicbrainz"]` (`normalize_config`
@@ -6828,8 +6962,13 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   RYM leads because it is the widest public verdict the app can read — one score
   from tens of thousands of ratings — and its ALBUM rating rides the SAME page
   fetch its genres already make (one request, one cache entry, one refusal
-  latch); the list's order is also the order the names appear in
-  `WEBRATING_SOURCE`. All three answer per track and fall back to the album when
+  latch); the list's order is the HIERARCHY R358 describes, so the first source
+  that answers supplies the number and `WEBRATING_SOURCE` names it alone. A
+  source below the one that answered is never asked, which is also what makes a
+  run cheaper than it used to be: MEASURED on the owner's two albums (2026-10-11),
+  31 of 31 tracks took their score from RateYourMusic and Album of the Year and
+  MusicBrainz were asked for nothing. All three answer per track and fall back to
+  the album when
   the track itself is unrated. RateYourMusic and Album of the Year are scraped
   LIVE through Cloudflare — a cleared `rym_cookie`/`aoty_cookie` (or the
   solver), with RYM's `cf_clearance` bound to the configured `rym_user_agent` —

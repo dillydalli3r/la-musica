@@ -134,3 +134,87 @@ else:
 shutil.rmtree(ROOT, ignore_errors=True)
 print(f"chain bar: the run's own {len(frames)} frames are what the strip draws "
       f"({TICKS} ticks per script over 2 scripts)")
+
+# --------------------------------------------------------------------------- #
+# The LANES: an album-lane step at a time, a free-lane step beside the spine
+# --------------------------------------------------------------------------- #
+# The scheduler's own contract (mlo.scripts.SCRIPT_LANES + SCRIPT_DEPS), proved
+# with runners that could not pass if the chain were still a straight line: two
+# steps that each wait for the other's START only both finish when they ran at
+# the same time, and two album-lane steps that record their own intervals can
+# never overlap.
+import threading                                                     # noqa: E402
+
+LANE_ROOTS = tempfile.mkdtemp(prefix="mlo_chain_lanes_")
+LANE_ALBUM = os.path.join(LANE_ROOTS, "Artists", "Lane Album")
+os.makedirs(LANE_ALBUM, exist_ok=True)
+with open(os.path.join(LANE_ALBUM, "01 - Track.flac"), "w", encoding="utf-8") as fh:
+    fh.write("not really audio")
+
+lane_frames = []
+
+
+def lane_record(done, total, desc, steps=None):
+    lane_frames.append({"desc": desc, "steps": list(steps) if steps else None})
+
+
+real_runners = dict(script_runners.RUNNERS)
+real_hook = getattr(_stats, "progress_hook", None)
+_stats.progress_hook = lane_record
+try:
+    # 25 is a REAL free-lane script (Fetch artist images); 3 and 5 are real
+    # album-lane scripts. Their bodies are replaced — the lanes are what is
+    # under test, not what the scripts fetch.
+    spine_started = threading.Event()
+    free_started = threading.Event()
+    intervals = []
+    lock = threading.Lock()
+
+    def spine_one(cfg):
+        with lock:
+            if len(intervals) == 0:
+                intervals.append([time.time(), None])
+        spine_started.set()
+        # If the free lane were serialized behind the spine this would time out
+        # and the assert below would say so, instead of hanging the suite.
+        assert free_started.wait(10), "the free-lane step never ran beside the spine"
+        with lock:
+            intervals[0][1] = time.time()
+        return {"modified_count": 0}
+
+    def spine_two(cfg):
+        start = time.time()
+        time.sleep(0.05)
+        with lock:
+            intervals.append([start, time.time()])
+        return {"modified_count": 0}
+
+    def free_step(cfg):
+        free_started.set()
+        assert spine_started.wait(10), "the spine never started its step"
+        return {"modified_count": 0}
+
+    script_runners.RUNNERS[3] = ("Optimize FLACs", spine_one)
+    script_runners.RUNNERS[5] = ("Process images", spine_two)
+    script_runners.RUNNERS[25] = ("Fetch artist images", free_step)
+    results = script_runners.run_chain({"music_folder": LANE_ROOTS}, [3, 5, 25],
+                                       targets=[LANE_ALBUM])
+finally:
+    _stats.progress_hook = real_hook
+    script_runners.RUNNERS.clear()
+    script_runners.RUNNERS.update(real_runners)
+
+assert [r.get("id") for r in results] == [3, 5, 25], results
+assert intervals and all(end is not None for _s, end in intervals), intervals
+assert intervals[0][1] <= intervals[1][0], \
+    f"two album-lane steps overlapped: {intervals}"
+# The free step was announced on the LOG, never as a frame: the bar and the row
+# speak for the spine, and a side step's label there would read as the run's
+# own position (a frame whose text names the free script would have to be
+# "#n/3 · Fetch artist images").
+assert not any("Fetch artist images" in f["desc"] for f in lane_frames), lane_frames
+assert any("Optimize FLACs" in f["desc"] for f in lane_frames), lane_frames
+assert lane_frames[-1]["steps"] == [3, 3], lane_frames[-1]
+shutil.rmtree(LANE_ROOTS, ignore_errors=True)
+print("chain lanes: the free-lane step ran beside the spine (no album-lane "
+      "step overlapped another), and the spine's frames are the strip's")

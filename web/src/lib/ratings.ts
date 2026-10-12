@@ -140,6 +140,21 @@ export function webRatingOf(raw: unknown): number | undefined {
   return Math.min(100, n) / 20;
 }
 
+/** A web rating WRITTEN OUT, at the resolution its tag really has.
+ *
+ *  `WEBRATING` is a 0-100 integer, so on this control's 0-5 scale its steps are
+ *  0.05s: 91 is 4.55, 92 is 4.6, 83 is 4.15. `half` — the grid's own writer —
+ *  would put 4.55 through a SECOND rounding (toFixed(1): "4.5" or "4.6"
+ *  depending on the float) on a number that was already rounded once, when the
+ *  source's score became that integer. So a value that lands on a tenth keeps
+ *  one decimal and one that does not keeps two: the printed number is exactly
+ *  the tag, which is exactly one source's own score (`mlo.web_ratings.choose`
+ *  takes the first source in the chain that answered, never a blend). */
+export function webText(value: number): string {
+  const hundredths = Math.round(value * 100);
+  return hundredths % 10 === 0 ? half(hundredths / 100) : (hundredths / 100).toFixed(2);
+}
+
 /** The `*_SOURCE` tag as a tooltip wants it: the trimmed names, or undefined
  *  when the tag is absent or blank. */
 export function webSourcesOf(raw: unknown): string | undefined {

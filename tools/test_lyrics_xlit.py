@@ -155,6 +155,47 @@ ok(xl.detect_language("Привет, как дела", None) == "",
    "…and with none declared the script alone does not guess")
 ok(xl.detect_language("君の名は", None) == "ja",
    "kana still states its own language outright")
+# The owner's own report: a track whose lyrics are Spanish carries the
+# RELEASE's LANGUAGE=eng (MusicBrainz's text-representation), and two
+# Latin-script languages are the one pair the script cannot separate. The
+# words that repeat in every line decide it — and they must OUTWEIGH the
+# declaration, so a wrong tag never skips a translation the track needs.
+LATIN_SIMONE = ("[00:21.65]Déjalo si quieres continuar, hermano\n"
+                "[00:31.71]Sal ilumina tu vida\n"
+                "[00:37.23]Todo el cielo aplatándote\n"
+                "[00:41.61]Dime que harás, inténtalo\n"
+                "[00:48.57]Ilumina ese amor\n"
+                "[00:51.39]Antes que se vaya")
+ok(xl.detect_language(LATIN_SIMONE, None, "eng") == "es",
+   f"Spanish lyrics tagged eng read as Spanish (got {xl.detect_language(LATIN_SIMONE, None, 'eng')!r})")
+_ls = xl.xlit_needs(LATIN_SIMONE, {"lyrics_translation_langs": "en"}, declared="eng")
+ok(_ls["language"] == "es" and _ls["translation"] is True and _ls["langs"] == ["en"],
+   f"…so the Spanish track is translated for the English reader ({_ls})")
+# Traps the weighing must NOT spring. A stray Spanish token in an English
+# lyric stays English; a few English words in a Spanish one stay Spanish.
+EN_STRAY = ("The way you walk is everything to me\n"
+            "And I want it all tonight\n"
+            "La la la, que pasara")
+ok(xl.detect_language(EN_STRAY, None, "eng") == "en",
+   "an English lyric with stray Spanish tokens stays English")
+# …and a word a chorus repeats is ONE word, not a vote per repetition: the
+# syllables "no"/"y" a sung hook repeats must not outvote the English words
+# around them ("Sound Check (Gravity)" on the same album is exactly this).
+EN_VOCAL = ("[00:00.12]Gravity-y-y-y-y-yyy on me\n"
+            "[00:25.46]Gravity-y-y-y-y-yyy, with me\n"
+            "[00:33.56]Never let me go, no, no")
+ok(xl.detect_language(EN_VOCAL, None, "eng") == "en",
+   f"repeated sung syllables do not outvote the English words "
+   f"(got {xl.detect_language(EN_VOCAL, None, 'eng')!r})")
+ES_FEW_EN = ("Todo el cielo y el mar\nYo te quiero mas\n"
+             "I love you baby yes\nPara siempre")
+ok(xl.detect_language(ES_FEW_EN, None, "eng") == "es",
+   "a Spanish lyric with a few English words stays Spanish")
+# An undecided vote is no evidence at all: the declared language stands.
+ok(xl.detect_language("La la la\nQue sera sera", None, "de") == "de",
+   "a tie in the function words keeps the declared language")
+ok(xl.detect_language("君の名は\n忘れられない", None, "jpn") == "ja",
+   "a Japanese-script declaration still reads as ja (the script path)")
 
 print("== translation languages ==")
 ok(xl.translation_langs({"lyrics_translation_langs": " EN, de ;"}) == ["en", "de"],

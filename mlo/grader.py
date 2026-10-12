@@ -2249,12 +2249,13 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                 track["issues"].append("GENRE_COUNT")
 
         # Genre STRUCTURE (grade_check_genre_structure) — the two defects a list can
-        # carry that no other check sees: a repeated name, and the derived
-        # parent slot this app used to WRITE (`Pop; Art Pop` — the `Pop` was
-        # never stated by anyone). The vocabulary owns unknown names, the count
-        # owns the overflow, and the presence check owns `missing`, so this one
-        # reports only the structural lines `mlo.genres.issues` produces — the
-        # same predicate Format All's canonical pass removes them with.
+        # carry that no other check sees: a repeated name, and a parent name stored
+        # beside its own child, anywhere in the list — the derived parent slot
+        # this app used to WRITE (`Pop; Art Pop` — the `Pop` was never stated
+        # by anyone). The vocabulary owns unknown names, the count owns the
+        # overflow, and the presence check owns `missing`, so this one reports
+        # only the structural lines `mlo.genres.issues` produces — the same
+        # predicate Format All's canonical pass removes them with.
         if cfg.get("grade_check_genre_structure", True) \
                 and should_write_audio_tag(cfg, "GENRE", filepath=ap):
             total_checks += 1
