@@ -456,6 +456,40 @@ def parse_aoty_track(payload):
     return _aoty_pair(payload.get("rating"))
 
 
+def _fold_title(text):
+    """A track title folded for matching: case, punctuation and spacing gone.
+
+    "Welcome to the World of the Plastic Beach", "Welcome To The World Of The
+    Plastic Beach!" and "welcome to the world of the plastic beach" are one
+    song; AOTY and the file agree on the words, not on the trimmings.
+    """
+    return re.sub(r"[^a-z0-9]+", "", str(text or "").casefold())
+
+
+def track_row(source, payload, title):
+    """A TRACK's own score inside a source's ALBUM answer, or None.
+
+    Album of the Year states EVERY track's score on the album page (its
+    per-track rows), so when the track-level lookup comes back empty — the
+    site has no separate page for that song, which is the common case — the
+    album payload the caller already fetched answers for this track, and at
+    TRACK level: the number IS that song's, not the album's. Any other source's
+    album payload carries no per-track rows and answers None, which leaves the
+    caller's own album-level fallback in charge.
+    """
+    if str(source or "").strip().lower() != "albumoftheyear":
+        return None
+    if not isinstance(payload, dict):
+        return None
+    want = _fold_title(title)
+    if not want:
+        return None
+    for row in payload.get("tracks") or []:
+        if isinstance(row, dict) and _fold_title(row.get("title")) == want:
+            return parse_aoty_track(row)
+    return None
+
+
 # The one dispatch: source id -> parser. A source absent from here cannot
 # answer at all, so adding a source is one entry in SOURCES, one parser and one
 # entry here.
@@ -573,15 +607,22 @@ def _rate(kind, ident, cfg, fetch, album=None):
             payload = None
         got = parse_source(source, payload, kind)
         if got is None and kind == "track" and album is not None:
-            # This source cannot answer for the track: its ALBUM answer stands
-            # in — still this source's data, marked album level.
+            # This source cannot answer for the TRACK: its ALBUM answer is
+            # fetched — and the album's own per-track rows are read first,
+            # because a row for this title IS this track's score (AOTY states
+            # one for every row of its album page). Only when no row matches
+            # does the album-wide value stand in, marked album level.
             try:
                 payload = fetch(source, "album", album, cfg)
             except Exception:
                 payload = None
-            got = parse_source(source, payload, "album")
-            if got is not None:
-                level = "album"
+            row = track_row(source, payload, ident.get("title"))
+            if row is not None:
+                got = row
+            else:
+                got = parse_source(source, payload, "album")
+                if got is not None:
+                    level = "album"
         if got is None:
             continue
         answers.append(got)

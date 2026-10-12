@@ -4,13 +4,17 @@
 What this pins, with every HTTP seam stubbed (no network at all):
 
   * the DEFAULT priority list is an explicit, documented promise:
-    rateyourmusic → albumoftheyear → musicbrainz, equal to
+    rateyourmusic → musicbrainz → albumoftheyear, equal to
     `mlo.config.DEFAULT_CONFIG["genre_sources"]` — the only three genre sources
-    this build knows;
+    this build knows. RYM is the only one that classifies a TRACK, MusicBrainz
+    answers per recording, and AOTY publishes no per-track genre at all;
   * the sources are asked IN ORDER until every track is FULL: the writer's own
-    policy decides that (`_genre_complete` — at `mb_genre_count = 2` one
-    specific genre plus its derived family), a source below that point is never
-    asked (`asked`/`stopped_after`), and a source that cannot answer is skipped
+    policy decides that (`_genre_complete` — `limit` SPECIFIC genres, the
+    hierarchy above them is derived and never stored), and a source below that
+    point is never asked (`asked`/`stopped_after`). A track-level answer
+    (`level == "track"` from the merge) settles a track by itself, so
+    MusicBrainz's per-recording genres end the search at MB and AOTY is never
+    asked for such a release. A source that cannot answer is skipped
     BEFORE any request — no credential (RateYourMusic's `rym_cookie`,
     Album of the Year's `aoty_cookie`, or a Cloudflare solver URL) — with the
     reason in `notes`/`skipped`;
@@ -72,7 +76,7 @@ discovery._HOST_WAIT.clear()
 # The priority list the module documents and ships (see the GENRE_SOURCES
 # comment in server/integrations.py), spelled out here so a silent reorder
 # fails the run instead of passing unnoticed.
-DOCUMENTED_SOURCES = ["rateyourmusic", "albumoftheyear", "musicbrainz"]
+DOCUMENTED_SOURCES = ["rateyourmusic", "musicbrainz", "albumoftheyear"]
 
 # The default configuration (no saved `genre_sources`): the chain must use the
 # module default. Every test below therefore runs the REAL priority list.
@@ -83,7 +87,7 @@ CFG = {"mb_genre_count": 3, "rym_cookie": "cf_clearance=test",
        "aoty_cookie": "cf_clearance=aoty"}
 # An explicit, hand-picked list — for the order-honouring tests (§1 reversed,
 # §9) where a shorter list keeps the expectation readable.
-ORDER = ["rateyourmusic", "albumoftheyear", "musicbrainz"]
+ORDER = ["rateyourmusic", "musicbrainz", "albumoftheyear"]
 
 FILE_ONE = "1-01 Track One.flac"
 FILE_TWO = "1-02 Track Two.flac"
@@ -105,6 +109,20 @@ RELEASE = {
 # The same release with NO MusicBrainz genres of its own: what a release whose
 # only answer is another source's album-level one looks like.
 BARE_RELEASE = dict(RELEASE, genres=[], media=[
+    {"disc": 1, "position": 1, "title": "Track One", "recording_mbid": "rec-1",
+     "genres": []},
+    {"disc": 1, "position": 2, "title": "Track Two", "recording_mbid": "rec-2",
+     "genres": []},
+])
+
+# The same release with MusicBrainz's per-RECORDING genres removed but its
+# release-wide tier (release group → release → artist) intact: MusicBrainz
+# then answers only at ALBUM level, so it does NOT settle a track and the
+# chain keeps walking to the next source. This is the fixture the ORDER cases
+# need — a track-level MusicBrainz answer ends the search by itself (see
+# `tracks_full`), so Album of the Year (and RateYourMusic, under a reversed
+# list) would never be asked.
+MB_ALBUM_RELEASE = dict(RELEASE, media=[
     {"disc": 1, "position": 1, "title": "Track One", "recording_mbid": "rec-1",
      "genres": []},
     {"disc": 1, "position": 2, "title": "Track Two", "recording_mbid": "rec-2",
@@ -320,25 +338,27 @@ def chain(limit=None, release=None, **kwargs):
 # --------------------------------------------------------------------------- #
 clear()
 full_stack()
-got = chain(limit=20)
+# MusicBrainz answers only at ALBUM level here (MB_ALBUM_RELEASE): with a
+# per-recording answer it would settle every track by itself and end the
+# search before Album of the Year was ever asked. That is what lets this case
+# show the whole shipped order merging, source by source.
+got = chain(limit=20, release=MB_ALBUM_RELEASE)
 
-# RateYourMusic's album genres first, then Album of the Year's album row, then
-# MusicBrainz's own per-recording answer and its release-group/release/artist
-# tiers — the shipped order, source by source.
+# RateYourMusic's album genres first, then MusicBrainz's release-group/
+# release/artist tiers, then Album of the Year's album row — the shipped order.
 assert got["per_track"][(1, 1)] == [
     "Heavy Metal", "Groove Metal",                    # rateyourmusic (album)
-    "Shoegaze", "Dream Pop",                          # albumoftheyear (album)
-    "Alternative Metal",                              # musicbrainz (recording)
     "Progressive Rock",                               # musicbrainz (release group)
     "Rock",                                           # musicbrainz (release)
     "Art Rock",                                       # musicbrainz (artist)
+    "Shoegaze", "Dream Pop",                          # albumoftheyear (album)
 ], got["per_track"][(1, 1)]
 # The source order holds across the whole merge: a source asked later can
 # never jump one asked earlier.
 assert (got["per_track"][(1, 1)].index("Heavy Metal")
+        < got["per_track"][(1, 1)].index("Progressive Rock"))
+assert (got["per_track"][(1, 1)].index("Progressive Rock")
         < got["per_track"][(1, 1)].index("Shoegaze"))
-assert (got["per_track"][(1, 1)].index("Shoegaze")
-        < got["per_track"][(1, 1)].index("Alternative Metal"))
 
 # Provenance: the contributing sources, in ask order, per PATH — and the
 # per-track map is keyed the same way the ONE writer (`_write_album_genres`)
@@ -346,13 +366,14 @@ assert (got["per_track"][(1, 1)].index("Shoegaze")
 from server import imports
 
 assert imports._parse_trackno(FILE_ONE) in got["per_track"]
-assert got["sources"][FILE_ONE] == ["rateyourmusic", "albumoftheyear",
-                                    "musicbrainz"], got["sources"]
+assert got["sources"][FILE_ONE] == ["rateyourmusic", "musicbrainz",
+                                    "albumoftheyear"], got["sources"]
 assert got["per_track_sources"][(1, 1)] == got["sources"][FILE_ONE]
-# `levels` reports the MOST SPECIFIC tier that answered this track — with
-# MusicBrainz's per-recording genres in the list, that is the track level (an
-# album-only answer is "album", see §3).
-assert got["levels"][FILE_ONE] == "track", got["levels"]
+# `levels` reports the MOST SPECIFIC tier that answered this track — every
+# source here answered at ALBUM level, so that is "album". A per-recording
+# MusicBrainz answer would make it "track" and end the search, see §1's cap
+# case and §3.
+assert got["levels"][FILE_ONE] == "album", got["levels"]
 
 # Track 2 states its own genre on the RYM page, so that row answers it — and
 # the track level is what the provenance reports.
@@ -361,42 +382,56 @@ assert got["levels"][FILE_TWO] == "track", got["levels"]
 assert got["sources"][FILE_TWO][0] == "rateyourmusic", got["sources"]
 
 # The chain follows `genre_sources`: reversing the order reverses the merge.
+# MusicBrainz answers only at ALBUM level here (MB_ALBUM_RELEASE), so the
+# reversed list really does ask Album of the Year first and MusicBrainz
+# second — a track-level MusicBrainz answer would instead end the search at
+# MusicBrainz, and that is the same early stop the case must not rely on here.
 clear()
 full_stack()
 reversed_got = intg.genre_chain(artist="Test Artist", album="Test Album",
-                                release=RELEASE, cfg=CFG, limit=6,
+                                release=MB_ALBUM_RELEASE, cfg=CFG, limit=5,
                                 sources=list(reversed(ORDER)),
                                 files=[FILE_ONE])
-assert reversed_got["per_track"][(1, 1)] == ["Alternative Metal",
+assert reversed_got["per_track"][(1, 1)] == ["Shoegaze", "Dream Pop",
                                              "Progressive Rock", "Rock",
-                                             "Art Rock", "Shoegaze",
-                                             "Dream Pop"], \
+                                             "Art Rock"], \
     reversed_got["per_track"][(1, 1)]
-# MusicBrainz and Album of the Year together fill the 6-slot list, so the
-# chain stops before RateYourMusic — the early stop, honoured per the list.
-assert reversed_got["sources"][FILE_ONE] == ["musicbrainz", "albumoftheyear"], \
+# Album of the Year and MusicBrainz together fill the 5-slot cap, so the chain
+# stops before RateYourMusic — the early stop here is the CAP, not a
+# track-level answer (no source answers at track level in this fixture).
+assert reversed_got["sources"][FILE_ONE] == ["albumoftheyear", "musicbrainz"], \
     reversed_got["sources"]
+assert reversed_got["stopped_after"] == "musicbrainz", \
+    reversed_got["stopped_after"]
 
-# The cap is enforced PER TRACK, not across the album — and once every track
-# holds a list the writer would write in full (RYM answered two specifics, and
-# the family is derived from the first), the chain STOPS: the sources below it
-# could only repeat what is already there, so they are never asked.
+# The cap is enforced PER TRACK, not across the album. RateYourMusic states
+# only two specifics for track 1 (the hierarchy above them is derived, never
+# stored, so they cannot fill a three-slot list) while its own name fills
+# track 2 — so the chain walks on, and MusicBrainz's per-recording answer
+# settles both tracks. The early stop here is a TRACK-LEVEL ANSWER, and the
+# trimmed report is the cap taking MusicBrainz's album-wide names off the end.
 clear()
 full_stack()
 got = chain()
-assert got["per_track"][(1, 1)] == ["Heavy Metal", "Groove Metal"], got["per_track"]
+assert got["per_track"][(1, 1)] == ["Heavy Metal", "Groove Metal",
+                                    "Alternative Metal"], got["per_track"]
 assert got["per_track"][(1, 2)] == ["Industrial Metal", "Heavy Metal",
                                     "Groove Metal"], got["per_track"]
 assert got["genres"] == ["Heavy Metal", "Groove Metal",
                          "Industrial Metal"], got["genres"]
-assert got["asked"] == ["rateyourmusic"], got["asked"]
-assert got["stopped_after"] == "rateyourmusic", got["stopped_after"]
+assert got["asked"] == ["rateyourmusic", "musicbrainz"], got["asked"]
+# Every track got a `level == "track"` answer from MusicBrainz, so the search
+# ended there — Album of the Year is never asked.
+assert got["stopped_after"] == "musicbrainz", got["stopped_after"]
 # The report says how much each source said (its release-wide row answers both
 # tracks, and its one per-track row answers a third time), and what the cap
-# left out.
+# left out — MusicBrainz's release-group/release/artist names past the slots.
 assert got["per_source_counts"]["rateyourmusic"] == {
     "names": 3, "tracks": 3}, got["per_source_counts"]
-assert got["per_track_trimmed"] == {}, got["per_track_trimmed"]
+assert got["per_track_trimmed"] == {
+    (1, 1): ["Progressive Rock", "Rock", "Art Rock"],
+    (1, 2): ["Nu Metal", "Progressive Rock", "Rock", "Art Rock"],
+}, got["per_track_trimmed"]
 # A different cap is honoured too.
 clear()
 full_stack()
@@ -412,12 +447,14 @@ stub_aoty(AOTY_ALBUM_PAGE, AOTY_ARTIST_PAGE)
 stub_mb({"release-group/rg-1": {"genres": [{"name": "Progressive Rock"}]}})
 buf = io.StringIO()
 with contextlib.redirect_stdout(buf):
-    got = chain(limit=6)
+    # MusicBrainz answers only at ALBUM level here, so Album of the Year is
+    # asked too (a track-level MusicBrainz answer would end the chain first).
+    got = chain(limit=6, release=MB_ALBUM_RELEASE)
 assert got["notes"]["rateyourmusic"].startswith(
     "skipped: RateYourMusic refused this cookie"), got["notes"]
-# Album of the Year is asked before MusicBrainz in the shipped order, so its
+# MusicBrainz is asked before Album of the Year in the shipped order, so its
 # own album answer is what leads the merged list.
-assert got["per_track"][(1, 1)][0] == "Shoegaze", got["per_track"]
+assert got["per_track"][(1, 1)][0] == "Progressive Rock", got["per_track"]
 assert "rateyourmusic" not in got["sources"][FILE_ONE], got["sources"]
 assert buf.getvalue().count("rateyourmusic") == 1, buf.getvalue()
 
@@ -457,7 +494,9 @@ try:
         "url": "https://www.albumoftheyear.org/album/1-x.php",
         "at": time.time()}
     with contextlib.redirect_stdout(io.StringIO()):
-        got = chain(limit=6)
+        # MusicBrainz must answer only at ALBUM level for the chain to reach
+        # Album of the Year at all, which is the refusal this case is about.
+        got = chain(limit=6, release=MB_ALBUM_RELEASE)
     assert got["notes"]["albumoftheyear"].startswith(
         "Album of the Year was challenged by Cloudflare"), got["notes"]
     assert "albumoftheyear" not in got["per_source"], got["per_source"]
@@ -478,7 +517,8 @@ def dead_aoty(artist, album="", cfg=None, kind="album"):
 
 intg.aoty_page = dead_aoty
 stub_mb({})
-got = chain(limit=6)
+# MusicBrainz answers only at ALBUM level here, so the dead scrape is reached.
+got = chain(limit=6, release=MB_ALBUM_RELEASE)
 assert got["notes"]["albumoftheyear"].startswith("failed: "), got["notes"]
 assert "albumoftheyear" not in got["per_source"], got["per_source"]
 assert got["per_track"][(1, 1)][:2] == ["Heavy Metal", "Groove Metal"], got["per_track"]
@@ -495,9 +535,10 @@ try:
 finally:
     intg.rym_genres = _real_rym
 assert got["notes"]["rateyourmusic"].startswith("failed: "), got["notes"]
-# Album of the Year is asked before MusicBrainz in the shipped order, so its
-# own album answer is what leads the merged list.
-assert got["per_track"][(1, 1)][0] == "Shoegaze", got["per_track"]
+# MusicBrainz is asked before Album of the Year and answers this track at
+# TRACK level, so its own recording genre leads the merged list — and the
+# track-level answer ends the search, so Album of the Year is never asked.
+assert got["per_track"][(1, 1)][0] == "Alternative Metal", got["per_track"]
 
 # (a4) A host the SOLVER could not pass is skipped before any request, with the
 # solver's own words in the note. This is the fix for the import that spent
@@ -515,8 +556,11 @@ try:
     calls = stub_aoty(AOTY_ALBUM_PAGE, AOTY_ARTIST_PAGE)
     stub_mb({"release-group/rg-1": {"genres": [{"name": "Progressive Rock"}]}})
     with contextlib.redirect_stdout(io.StringIO()):
+        # MusicBrainz answers only at ALBUM level here, so the loop reaches
+        # Album of the Year (last in the shipped order) and its own skip note
+        # exists — a track-level MusicBrainz answer would end the chain first.
         got = intg.genre_chain(artist="Test Artist", album="Test Album",
-                               release=RELEASE, cfg=_arch, limit=6,
+                               release=MB_ALBUM_RELEASE, cfg=_arch, limit=6,
                                files=[FILE_ONE, FILE_TWO])
     assert got["asked"] == ["musicbrainz"], got["asked"]
     assert fake.calls == [], fake.calls                 # not one RYM request
@@ -527,7 +571,7 @@ try:
         assert note.startswith(f"skipped: FlareSolverr could not pass {host}"), note
         assert "Timeout after 60.0 seconds." in note, note
     # …and MusicBrainz still answered, so the import is not "no genres".
-    assert got["per_track"][(1, 1)][0] == "Alternative Metal", got["per_track"]
+    assert got["per_track"][(1, 1)][0] == "Progressive Rock", got["per_track"]
 finally:
     intg.cfchallenge.clear()
 
@@ -796,18 +840,20 @@ try:
     rym = stub_rym({"rateyourmusic.com": RYM_PAGE})
     aoty = stub_aoty(AOTY_ALBUM_PAGE, AOTY_ARTIST_PAGE)
     stub_mb(MB_DEFAULT)
-    first = chain(limit=12)
+    # MusicBrainz answers only at ALBUM level here and RateYourMusic alone
+    # cannot fill a 12-slot list, so no source settles the tracks and all
+    # three are asked — which is what a cache test needs to prove anything
+    # about them. (A track-level answer would end the chain at MusicBrainz and
+    # leave Album of the Year uncached.)
+    first = chain(limit=12, release=MB_ALBUM_RELEASE)
     assert first["per_track"][(1, 1)][0] == "Heavy Metal", first["per_track"]
     rym_calls, aoty_calls = len(rym.calls), len(aoty)
-    # The cap is what keeps the other sources in play: RateYourMusic alone
-    # fills only a part of a list of 12, and a cache test with nothing cached
-    # beyond it would prove nothing about them.
     assert rym_calls and aoty_calls, (rym_calls, aoty_calls)
 
     # Forget the in-process memos only: what answers now is the DISK cache.
     intg._GENRE_CACHE.clear()
     discovery._CACHE.clear()
-    again = chain(limit=12)
+    again = chain(limit=12, release=MB_ALBUM_RELEASE)
     assert again["per_track"] == first["per_track"], again["per_track"]
     assert again["sources"] == first["sources"], again["sources"]
     assert len(rym.calls) == rym_calls, rym.calls[rym_calls:]
@@ -819,13 +865,17 @@ finally:
 # 9) The default priority list is the documented one, both old defaults migrate
 # --------------------------------------------------------------------------- #
 assert list(intg.GENRE_SOURCES) == DOCUMENTED_SOURCES, intg.GENRE_SOURCES
-# RATINGS walk the SAME hierarchy: the user asked for one order (RYM → AOTY →
-# MusicBrainz) across both, so the two chains' source lists are the same ids in
-# the same order — one place to change them, and no way for a genre chain and a
-# rating chain to disagree about who is asked first.
+# RATINGS are their own priority list: the SAME three ids, but Album of the
+# Year BEFORE MusicBrainz — the ratings chain reads a public verdict for the
+# album and for each track, while the GENRE chain now puts MusicBrainz (the
+# only source that answers a RECORDING) ahead of AOTY (whose genre row is the
+# RELEASE's). Each registry must match its OWN shipped default, so neither
+# chain can drift from the list the config ships.
 from mlo import web_ratings as _wr                                      # noqa: E402
-assert list(_wr.SOURCES) == list(intg.GENRE_SOURCES), (_wr.SOURCES, intg.GENRE_SOURCES)
-assert list(mcfg.DEFAULT_CONFIG["web_ratings_sources"]) == list(intg.GENRE_SOURCES), \
+assert set(_wr.SOURCES) == set(intg.GENRE_SOURCES), (_wr.SOURCES, intg.GENRE_SOURCES)
+assert list(_wr.SOURCES) == ["rateyourmusic", "albumoftheyear", "musicbrainz"], \
+    _wr.SOURCES
+assert list(mcfg.DEFAULT_CONFIG["web_ratings_sources"]) == list(_wr.SOURCES), \
     mcfg.DEFAULT_CONFIG["web_ratings_sources"]
 # The registry and the SHIPPED default are the same list: every source is both
 # selectable in Settings → Discovery / listed in Sources health AND asked by
@@ -894,7 +944,7 @@ mlo_main.load_config = lambda *a, **k: {"music_folder": JOB_MUSIC,
                                         "mb_genre_count": 3}
 _client = TestClient(mlo_main.app)   # no lifespan: no workers, no slskd boot
 
-JOB_SOURCES = ("rateyourmusic", "albumoftheyear", "musicbrainz")
+JOB_SOURCES = ("rateyourmusic", "musicbrainz", "albumoftheyear")
 JOB_NOTES = {"rateyourmusic": "no data", "musicbrainz": "answered"}
 # The chain's report, in the shape `_run_genre_chain` passes through: per-source
 # counts, what was actually asked and where it stopped, what was skipped and
@@ -904,7 +954,7 @@ JOB_RESULT = {"updated": 2, "genres": ["Shoegaze"],
               "per_track": {(1, 1): ["Shoegaze"]}, "sources": {}, "levels": {},
               "per_source_counts": {"musicbrainz": {"names": 1, "tracks": 2}},
               "asked": ["musicbrainz"], "stopped_after": "musicbrainz",
-              "order": ["rateyourmusic", "albumoftheyear", "musicbrainz"],
+              "order": ["rateyourmusic", "musicbrainz", "albumoftheyear"],
               "skipped": {"rateyourmusic": "skipped: no rym_cookie"},
               "level_counts": {"track": 1, "album": 1, "artist": 0},
               # The chain keys this by (disc, position) TUPLES. A tuple key
@@ -1070,9 +1120,9 @@ print("== AI genre fallback: published names only ==")
 from server import genre_ai as _ga                                    # noqa: E402
 
 # A published, specific name survives (resolved to the published spelling); a
-# FAMILY is dropped (the app derives and appends it); an invented compound is
-# dropped however plausible it reads; case-duplicates collapse; the limit is
-# the ask.
+# FAMILY is dropped (the tag holds specifics only — the hierarchy above them
+# is a derived VIEW, never stored); an invented compound is dropped however
+# plausible it reads; case-duplicates collapse; the limit is the ask.
 _got = _ga._specifics(["Shoegaze", "rock", "neon-gaze fusion", "shoegaze"],
                       [], 2)
 assert _got == ["shoegaze"], _got
@@ -1083,8 +1133,12 @@ assert _got == ["shoegaze"], _got
 assert _ga.canonical("funeral doom") is None, "fixture: MB does not list it"
 assert _ga._specifics(["Funeral Doom"], ["Funeral Doom"], 1) == ["Funeral Doom"]
 
-# One slot belongs to the derived family, so there is nothing to ask for.
-assert _ga.infer_genres(artist="a", album="b", count=1) is None
+# Every slot is a SPECIFIC genre now (the family is derived, never stored), so
+# a one-slot budget is a real ask for one name — the old "the slot belongs to
+# the family, nothing to ask for" case is gone. `_prompt` is what carries the
+# ask, and it is a pure function (no model call, no endpoint needed).
+assert "AT MOST 1 SPECIFIC genre(s)" in \
+    _ga._prompt("a", "b", "", "", [], 1, None, False)
 
 # The prompt states the taxonomy the names must come from, the heads the app
 # files them under (so a detailed answer lands INSIDE that space), and the
@@ -1113,7 +1167,11 @@ from server import cfchallenge as _cfc
 clear()
 full_stack()
 with _cfc.budget(0):
-    _bounded = chain(limit=2)
+    # MusicBrainz answers only at ALBUM level (MB_ALBUM_RELEASE) and its three
+    # album names do not fill a 4-slot list, so the loop reaches BOTH scraped
+    # sources and each gets the budget skip — a track-level MusicBrainz answer
+    # would end the chain first and Album of the Year's skip would never exist.
+    _bounded = chain(limit=4, release=MB_ALBUM_RELEASE)
 assert "budget" in _bounded["skipped"].get("rateyourmusic", ""), _bounded["skipped"]
 assert "budget" in _bounded["skipped"].get("albumoftheyear", ""), _bounded["skipped"]
 assert "rateyourmusic" not in _bounded["asked"], _bounded["asked"]

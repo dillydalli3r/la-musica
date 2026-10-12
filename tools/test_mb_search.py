@@ -483,8 +483,12 @@ assert kaye["attributes"] == ["guitar"], kaye
 # --- and with no MB ID and no credit tags, the identity block still names
 # --- the file: the panel's header comes from the tags, so this is an answer
 TAGS_BACKUP = dict(TAGS[TRACK_FILES[0]])
+# Drop every MusicBrainz-derived tag the FILE-rows merge would otherwise turn
+# into a row (its own credit PERFORMER and the MUSICBRAINZ_* ids): the case is
+# about a file that states no MusicBrainz data at all.
 TAGS[TRACK_FILES[0]] = {k: v for k, v in TAGS_BACKUP.items()
-                        if k not in ("MUSICBRAINZ_TRACKID", "PERFORMER")}
+                        if k not in ("MUSICBRAINZ_TRACKID", "PERFORMER",
+                                     "MUSICBRAINZ_ALBUMID")}
 mb = _install(FakeMB())
 r = _client.get("/api/credits", params={"path": TRACK_FILES[0]})
 assert r.status_code == 200, (r.status_code, r.text)

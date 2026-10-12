@@ -105,6 +105,15 @@ LEGACY_DEFAULT_GENRE_SOURCES = (
         "lastfm", "theaudiodb", "wikidata", "bandcamp", "discogs", "deezer",
         "spotify",
     ],
+    #   [5] the three-source chain with Album of the Year SECOND — the default
+    #       until the owner asked for the genres to follow what each site can
+    #       actually answer per track (RYM, then MusicBrainz, then AOTY, whose
+    #       genre row is the release's). Same rule as every entry above: a
+    #       list byte-for-byte equal to it was never a decision, so it follows
+    #       the new order; a list the user edited is kept.
+    [
+        "rateyourmusic", "albumoftheyear", "musicbrainz",
+    ],
 )
 
 # The ONLY genre sources this build asks. `server.integrations.GENRE_SOURCES`
@@ -736,11 +745,16 @@ DEFAULT_CONFIG = {
     # genre is a complete answer (the family is optional), so there is no
     # exact-count quota and nothing is ever topped up to fill a slot.
     "grade_check_genre_count": True,
-    # Genre ORDER: the list is a hierarchy with the FAMILY FIRST
-    # ("rock / shoegaze / dream pop"). Fails a list whose family sits in a
-    # later slot or repeats; the names themselves are graded by
-    # grade_check_genre_vocab below (see mlo/genres.py).
-    "grade_check_genre_order": True,
+    # Genre STRUCTURE: no repeated name and no derived parent left in the tag
+    # (issue codes GENRE_STRUCTURE per track). A GENRE tag holds the specific
+    # names a source stated and the level above them is derived, never stored
+    # (mlo.genres) — so a LEADING head another member of the list sits under is
+    # the family slot this app used to write, and a repeat is a repeat. Both
+    # survive in files written before the model changed and in downloads
+    # another tagger touched, and script 10 / the Optimize strip pass remove
+    # them through the same predicate (mlo.genres._drop_derived_head), so the
+    # check and the writers cannot disagree.
+    "grade_check_genre_structure": True,
     # Genre VOCABULARY: every stored name must be a MusicBrainz genre
     # (mlo.genres.canonical). The app's own writers only ever store names
     # MusicBrainz publishes, so a name it does not know is either a source's
@@ -1605,41 +1619,35 @@ DEFAULT_CONFIG = {
     # 700 MB re-encode keeps the disc's feature, not the re-encode). On by
     # default — a re-encode cannot be undone — and off leaves the choice to
     # the rest of the policy, exactly as before this rule existed.
-    # Genres imported per release/track (top voted first). Sources are tried
-    # in this order and merged, and EVERY source is asked for EVERY track
-    # (server.integrations._genre_source_answers). The registry of every
-    # source the app can ask is `server.integrations.GENRE_SOURCES`; this is
-    # the SHIPPED default (what an empty saved list falls back to) and it
-    # follows that list's own order — RateYourMusic first, MusicBrainz
-    # second — with the rationale for each position documented there and in
-    # `server/integrations.py` above GENRE_SOURCES. An install that never
-    # touched the Settings list follows this change: the previous two-source
-    # default is in `LEGACY_DEFAULT_GENRE_SOURCES` (see normalize_config).
     # GENRES PER TRACK — one knob for three places, so they can never
-    # disagree: how many genres an import writes onto a track (highest-voted
-    # source first), how many a track may KEEP (script 8's auto tagging, the
-    # genre import and script 10's canonical pass all trim the rest off), and
-    # the most grading accepts (`grade_check_genre_count`). Default 2: the
-    # family and one specific genre ("rock / shoegaze"). The family is DERIVED
-    # (mlo.genre_vocab.parent_of), never asked of a model and never invented,
-    # and it takes the FIRST slot — so 3 means "the family and two specific
-    # genres", not a third synonym. Raising it past 3 would say less about the
-    # music, not more (GENRE_COUNT_MAX), and a merged "Rock; Alternative Rock;
-    # Indie; Shoegaze; Post-Rock" list helps no one.
+    # disagree: how many SPECIFIC genres an import writes onto a track
+    # (highest-priority source first), how many a track may KEEP (script 8's
+    # auto tagging, the genre import and script 10's canonical pass all trim
+    # the rest off), and the most grading accepts (`grade_check_genre_count`).
+    # Default 2. It counts only the names a source STATED: the hierarchy above
+    # them (the parent genre, and its own parent up to a family head) is
+    # derived by `mlo.genre_vocab.path_of` and never stored, so raising this
+    # adds genres rather than levels — a track's GENRE tag is what it sounds
+    # like, and "where a name sits" is a view the app draws from that.
     "mb_genre_count": 2,
-    # Genre sources, in priority order. The owner narrowed this to three, and
-    # in THIS order: RateYourMusic (the release page's own curated genres),
-    # then Album of the Year, then MusicBrainz (open data, the identity
-    # anchor). These are the ONLY sources the app asks for genres — the
-    # registry `server.integrations.GENRE_SOURCES` is exactly this list, and
+    # Genre sources, in priority order. The owner's order, and the reason for
+    # it: RateYourMusic first (the release page's own curated genres, and the
+    # only one of the three that states a genre PER TRACK — its rows link each
+    # track's own page), MusicBrainz second (open data, keyless, the identity
+    # anchor: recording → work → release group → release → artist), Album of
+    # the Year last (its genre row is the RELEASE's — the site publishes no
+    # per-track genre at all — so it is the album-level floor under the other
+    # two). These are the ONLY sources the app asks for genres — the registry
+    # `server.integrations.GENRE_SOURCES` is exactly this list, and
     # `tools/test_genres.py` asserts the two are equal. The chain is a
-    # priority list that STOPS once a track's list is complete
-    # (`_genre_complete`), so AOTY and MusicBrainz are fallbacks: a release
-    # RYM can answer never pays for them, and RYM has the top tier whether it
-    # answers at track, album or artist level. Every position's rationale is
-    # above `server.integrations.GENRE_SOURCES`.
+    # priority list that STOPS as soon as a track has a track-level answer (or
+    # the cap is filled), so the sources below it are fallbacks: a release RYM
+    # can answer per track never pays for them, and a release it cannot answer
+    # at all falls through MusicBrainz to AOTY rather than ending with no
+    # genres. Every position's rationale is above
+    # `server.integrations.GENRE_SOURCES`.
     "genre_sources": [
-        "rateyourmusic", "albumoftheyear", "musicbrainz",
+        "rateyourmusic", "musicbrainz", "albumoftheyear",
     ],
     # Optional credentials. A stored `rym_cookie` is the persistent, explicit
     # signed-in session for RateYourMusic; release pages refuse anonymous

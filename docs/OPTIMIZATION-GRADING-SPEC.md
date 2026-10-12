@@ -127,7 +127,7 @@ An issue is `{code, label, where, reason}` for album-level and artist problems
 | `UNREADABLE` | the file could not be opened/decoded |
 | `TITLE`, `ARTIST`, `ALBUM`, `ALBUMARTIST`, `DATE`, `TRACKNUMBER`, `DISCNUMBER`, `GENRE`, `MOOD`, `ENERGY`, `ITUNESADVISORY`, `INSTRUMENTAL`, `DYNAMIC RANGE`, `REPLAYGAIN_*`, `INITIALKEY`, `BPM`, `MEDIA`, `SOURCE`, `ENCODER_*`, `ACOUSTID_ID`, `ACOUSTID_FINGERPRINT`, `LOG_GRADE` | the tag (or its presence check) failed; the tag's own name is the code |
 | `MOOD_MISSING`, `ENERGY_MISSING`, `GENRE_MISSING` | the per-tag presence checks (`TAG_PRESENCE_CHECKS`) |
-| `GENRE_COUNT`, `GENRE_ORDER`, `GENRE_VOCAB`, `GENRE_CASE` | genre count, arrangement, vocabulary, and the spelling every writer produces (`metal` → `Metal`) |
+| `GENRE_COUNT`, `GENRE_STRUCTURE`, `GENRE_VOCAB`, `GENRE_CASE` | genre count, structure (a repeat, or the derived parent slot older builds wrote), vocabulary, and the spelling every writer produces (`metal` → `Metal`) |
 | `TAGS` | excess tags |
 | `PATH`, `PATH_CASE` | naming-script mismatch / case-only mismatch |
 | `LYRICS` | lyrics missing, wrongly formatted, or present on an instrumental |
@@ -467,7 +467,7 @@ group still renders (section *Other checks*).
 | `grade_check_energy` | Energy tag present | ON | `ENERGY` (0-100) exists (`ENERGY_MISSING`) |
 | `grade_check_genre` | Genre tag present | ON | `GENRE` exists (`GENRE_MISSING`) |
 | `grade_check_genre_count` | Genre count per track | ON | at most `mb_genre_count` genres (default 2, max 3) — a ceiling, never a quota (`GENRE_COUNT`) |
-| `grade_check_genre_order` | Genre order (family first) | ON | the family slot, if present, is FIRST and no genre repeats (`GENRE_ORDER`) |
+| `grade_check_genre_structure` | Genre structure | ON | no repeated name and no derived parent slot in `GENRE` (`GENRE_STRUCTURE`) — the tag holds what a source stated, and the level above a name is derived, never stored |
 | `grade_check_genre_vocab` | Genre vocabulary | ON | every name is one MusicBrainz publishes (`GENRE_VOCAB`); grading never rewrites the tag |
 | `grade_check_web_rating` | Web rating present | ON | `WEBRATING` (0-100) exists on every audio track (`WEBRATING_MISSING`) — the public verdict script 24 gathers, required per track like the genre beside it. The check **stands down** with `web_ratings_enabled` off (nothing gathers a rating, so nothing is failed for its absence) and never applies to a music-video container, which carries no `WEBRATING` tag |
 | `grade_check_replaygain` | ReplayGain tags present | ON | opt-in per file: any `REPLAYGAIN_*` tag means all four must exist |
@@ -548,8 +548,16 @@ group still renders (section *Other checks*).
 not graded there. Videos are still graded on tags, links, naming and format.
 **R15 — the excess-tag vocabulary is one predicate.** `tag_key_allowed()`
 (which reads `TAG_ALLOWLIST` = `TAG_MAP` + encoder markers + `BEETS_TAGS` +
-`BEETS_ID3_FRAMES`) is used by the grade *and* by the Optimize/Format All strip
-pass, so a strip can never leave what the grade flags or delete what it needs.
+`PICARD_TAGS` + `PICARD_MP4_ATOMS` + the alias families, plus the raw ID3
+frames in `BEETS_ID3_FRAMES`) is used by the grade *and* by the
+Optimize/Format All strip pass, so a strip can never leave what the grade flags
+or delete what it needs. The vocabulary spans everything another MusicBrainz
+tagger can write: `BEETS_TAGS` was enumerated from the installed mediafile
+(`MediaFile.fields()` storage keys) and `PICARD_TAGS` / `PICARD_MP4_ATOMS` /
+the extra `BEETS_ID3_FRAMES` from Picard's documented Tag Mapping appendix —
+so a beets- or Picard-tagged file is never flagged for its own data, while a
+genuine vendor/ripper name (`WM/AlbumTitle`, `RIPPER`, `ENCODED-BY`, the
+ID3v2.3 `TDAT`/`TORY`, `POPM`) still is.
 **R15a — the metadata import is complete, and complete means allowlisted.**
 Every MusicBrainz field with a home in the container's tag system is written
 (§6), and every one of them goes into that SAME predicate — so a credit the app
@@ -903,13 +911,43 @@ rating.
   groups left by omitted conditionals are removed, runs of whitespace collapse,
   and trailing dots/spaces are stripped.
 
-### 7.2 Genre vocabulary, count and order
+### 7.2 Genre names, count and the derived hierarchy
 
-- **R37** — at most `mb_genre_count` genres per track (default **2**, hard
-  ceiling `GENRE_COUNT_MAX = 3`) — a ceiling, never a quota: nothing is padded.
-- **R38** — slot order: the **family first**, the specific genre(s) behind it
-  (`Rock / Shoegaze`). A family in a later slot, or a repeated genre, fails as
-  `GENRE_ORDER`.
+- **R37** — at most `mb_genre_count` genre NAMES per track (default **2**, hard
+  ceiling `GENRE_COUNT_MAX = 3`) — a ceiling, never a quota: nothing is padded,
+  and the cap counts only names a source STATED. The hierarchy above them is
+  free: a three-level genre costs one slot.
+- **R38 — a GENRE tag holds the names a source stated, and nothing else.** The
+  level above a name is DERIVED (`mlo.genre_vocab.path_of`), never written, so
+  position carries no meaning and a list in any order is in shape. Two things
+  remain defects, and they are what `GENRE_STRUCTURE` reports: a repeated name,
+  and a LEADING head another member of the list sits under — the family SLOT
+  older builds wrote (`Pop; Art Pop`, where nobody stated `Pop`).
+  `mlo.genres.normalize_genres` drops that slot on every write (script 10 and
+  Optimize through the same predicate, `_drop_derived_head`), a head a source
+  really stated — alone, or beside a genre it does not contain (`Rock` +
+  `Jazz`) — is left exactly as it came, and the check names the files the app
+  has not rewritten yet. The old `grade_check_genre_order` key is GONE (a saved
+  copy is inert: nothing reads it).
+- **R38a — the hierarchy is a three-level-deep VIEW of one node graph.** Every
+  name resolves to its IMMEDIATE parent and, through it, to one of the 28 heads:
+  `deep house` → `house` → `electronic` (`parent_of` / `path_of` / `top_of` in
+  `mlo/genre_vocab.py`). A name that is a parent in one place and a genre in
+  another needs no special case — `house` is one NODE, and a track may hold it
+  outright — because the app only ever asks "what is above X?". The rules come
+  from a curated middle table (`_PARENT_OF`, 268 edges) plus the 284-entry
+  `_FAMILY_OF`, then keyword rules: token matching first, prefix/suffix as a
+  second pass only, and no bare substring (MEASURED over MusicBrainz's 2 202
+  names: substring matching misfired on 21% of the names it answered —
+  `detroit techno` and `harsh noise` were `punk` from the `oi` inside
+  "detroit"/"noise", `graphical sound` was `hip hop`; after the two-pass rule
+  995 names have a head and `rocksteady` stays reggae rather than rock). Every
+  table name is a real MusicBrainz genre and every chain ends on a head
+  (`tools/test_genre_vocab.py`), a head has NO parent, and no parent is
+  preferred to a wrong one. Read by: `/api/genres/facets` (each row carries
+  `path`, "Pop › Synth-Pop"), the browse buckets (`genre_category` files by
+  HEAD), the genre page's chips, the import wizard's per-track line, and the
+  recommendation shelves
 - **R39** — every name must exist in MusicBrainz's 2 202-name list
   (`mlo/_genre_names.py`, canonicalized through `mlo/genre_vocab.py`); an alias
   table folds the spellings sources emit (`rnb` → `r&b`, `synthpop` →
@@ -917,9 +955,16 @@ rating.
   what a source said is worse) and is what `GENRE_VOCAB` reports.
 - **R39a — the source list ships complete, and the ask stops when a track is
   full.** `genre_sources` is a PRIORITY list: `GENRE_SOURCES`
-  (`server/integrations.py`) is the shipped order — RateYourMusic, Album of the
-  Year, MusicBrainz — and `mlo.config.DEFAULT_CONFIG["genre_sources"]` IS that
-  list (`tools/test_genres.py` asserts the two are equal). `normalize_config`
+  (`server/integrations.py`) is the shipped order — **RateYourMusic,
+  MusicBrainz, Album of the Year** — and
+  `mlo.config.DEFAULT_CONFIG["genre_sources"]` IS that list
+  (`tools/test_genres.py` asserts the two are equal). The order is the owner's,
+  and it follows what each site can actually answer: RYM is the only one of the
+  three that classifies a TRACK (its release rows link each track's own
+  `/song/…` page), MusicBrainz answers per RECORDING and is keyless and
+  challenge-free, and AOTY publishes no per-track genre at all — its genre row
+  is the RELEASE's — so it is the album-level floor under both. The previous
+  order (AOTY second) is in `LEGACY_DEFAULT_GENRE_SOURCES`. `normalize_config`
   migrates every order this app ever shipped — the four older chains and the
   11-source order that preceded them (`LEGACY_DEFAULT_GENRE_SOURCES`,
   `LEGACY_GENRE_SOURCES`) — to the current default, and DROPS every id this
@@ -930,12 +975,15 @@ rating.
   RESORT rather than the first move: it is handed the merged list only when the
   three sources did not settle the track themselves (they disagree, or answer
   nothing at all); otherwise every field is exactly what the sources produced.
-  The sources are asked in that order until every track holds
-  what the writer would write (`_genre_complete` — the early stop): at
-  `mb_genre_count = 2` one specific genre plus its derived family IS the track's
-  answer, so the sources below the one that supplied it are never asked; a
-  source that would only repeat the answer must not be paid a request for it,
-  and the ones below are fallbacks rather than a second opinion. The surfaces
+  The sources are asked in that order until every track is SETTLED (`tracks_full`
+  — the early stop), which happens when either (a) the merged list reaches the
+  cap, or (b) ANY source answered at TRACK level for that track (`level ==
+  "track"`). A track-level answer is the strongest thing a source can say, so it
+  ends the search by itself; an ALBUM- or ARTIST-level answer does NOT, because
+  stopping on one is what kept the later sources' per-track tiers from ever
+  being asked. A source that could only repeat a classification already in hand
+  must not be paid a request for it, and the sources below are fallbacks rather
+  than a second opinion. The surfaces
   offer ONE `Import genres` action with the source tray beside it: the tray
   lists every source the app knows, ticks the enabled ones, says what each one
   provides, and carries the reset back to the shipped default. An IMPORT runs
@@ -945,9 +993,14 @@ rating.
   with the genres its sources can supply, and a Genres family the user kept for
   themselves is both left alone AND reported as a gap, so the prompt still says
   what is waiting.
-- **R40** — the family is *derived* from a curated 28-family table plus keyword
-  rules, never asked of a model; a genre with no known family gets **no** family
-  slot rather than a wrong one.
+- **R40** — the family is *derived*, never asked of a model and never stored
+  (R38/R38a); a genre with no known parent gets **no** level above it rather
+  than a wrong one. MEASURED live on the owner's own album: RYM's per-track rows
+  answered 15 of 16 tracks at `level: track` (`Orchestral Intro` → `Cinematic
+  Classical`, `White Flag` → `Experimental Hip Hop`), AOTY answered the RELEASE
+  only (`level: album`, 0 per-track rows — confirmed, see R93), and the derived
+  paths read `Classical › Cinematic Classical`, `Hip Hop › Experimental Hip
+  Hop`, `Pop › Synth-Pop`
 - **R41** — the stored value IS the display form, and it is title-cased with
   explicit exceptions (small connectives lowercased; `IDM`, `EDM`, `UK`, `R&B`,
   `DnB`, `DJ`, … upper-cased; each hyphenated chunk capitalized): every writer
@@ -997,11 +1050,25 @@ rating.
   can write a COMPLETE list, so the entries below the answering one are
   fallbacks, not a second opinion. Each one answers at the FINEST level it has
   and falls back track → album → artist, and each source's own level is fixed
-  and documented in `GENRE_SOURCES`: rateyourmusic per track where its release
-  page states one, else album, then artist; albumoftheyear at its finest GENRE
-  level — the album (its song pages carry only a score, never a genre), then the
-  artist page; musicbrainz per recording (with the work's genres behind it),
-  then the release group/release, then artist. RateYourMusic and Album of the
+  and documented in `GENRE_SOURCES`: rateyourmusic per track — the release
+  page's rows LINK each track's own `/song/…` page, which is where the track's
+  own genre lives (its release-level list, then the artist page, behind it);
+  musicbrainz per recording (with the work's genres behind it), then the release
+  group/release, then artist; albumoftheyear at its finest GENRE level — the
+  release, then the artist page. **AOTY has NO per-track genre** (VERIFIED live,
+  2026-10-11: its album page carries only a release-level genre row, and its
+  song pages carry scores, never genres), so an AOTY answer is always
+  `level: album` and the chain never pretends otherwise. **The album's own
+  track TITLES decide the EDITION**: a release page whose own track list covers
+  less than `RYM_COVERAGE_MIN` of them is not trusted as this release, and the
+  page's OWN version list is walked — no search, no slug guess, each candidate
+  verified the same way — so a library holding the deluxe pressing reads the
+  edition that matches (MEASURED on the owner's album: the release page links
+  36 per-edition URLs; `tools/test_rym_links.py` pins the standard-vs-deluxe
+  case). RYM's genre extraction is scoped to the page MINUS its track rows: a
+  row's own genre is that track's and is never promoted to the release, and the
+  release's own list is read from the head — the 8 anchors on `Plastic Beach`
+  are RYM's own genre list for the record, byte-for-byte what the site prints. RateYourMusic and Album of the
   Year are read LIVE through Cloudflare — a challenge needs a cleared
   `rym_cookie`/`aoty_cookie` or the configured `cf_solver_url` — while
   MusicBrainz is the keyless, challenge-free floor under both. A source
@@ -1025,8 +1092,8 @@ rating.
   answered at `level: track` (`Orchestral Intro` → `Cinematic Classical`,
   `White Flag` → `Experimental Hip Hop`, `Glitter Freeze` → `Electroclash`),
   and the files written with `Classical; Cinematic Classical`, `Hip Hop;
-  Experimental Hip Hop`, … (canonicalized family first, capped at
-  `mb_genre_count`).
+  Experimental Hip Hop`, … (each name canonicalized, the derived parent NOT
+  written, capped at `mb_genre_count`).
 
 ### 7.3 ReplayGain and dynamic range
 
@@ -6532,7 +6599,19 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   FALLBACK and only the fallback: `source` flips to `"tags"` when the MB side
   answers no rows at all (no MBID, or a release MusicBrainz describes with no
   relation), and a tag fallback is never mixed into an MB answer, so the badge
-  beside the rows always says which kind of evidence they are. **The identity
+  beside the rows always says which kind of evidence they are. On the PATH
+  branch the file's OWN MusicBrainz-derived tags are merged in BESIDE the live
+  rows: the roles and ids a tagger wrote on the file (PERFORMER, PRODUCER …
+  PUBLISHER, LABEL, CATALOGNUMBER, BARCODE, ISRC, WORK, the `MUSICBRAINZ_*`
+  ids, RELEASESTATUS/TYPE, ORIGINALDATE) become rows carrying `source: "file"`
+  (`server.main._file_credit_rows`), de-duplicated against the live rows on
+  (role, case-folded name, attributes) so a file credit naming the same
+  person/instrument as a live one is dropped for the live row (which has the
+  MBID). A live row keeps the bare `{role, attributes, artist, mbid}` shape;
+  the panel marks the `source: "file"` rows. Because those rows are read
+  locally, the PATH branch answers 200 even when MusicBrainz is down and even
+  when the file cannot be read (an empty answer, never a 500) — the live
+  lookup is best-effort there, and the ALBUM branch keeps the 502. **The identity
   block is what the panel is titled by** — `title`, `artist`, `album`,
   `album_artist`, `catalog_number`, `label`, `barcode`, `date`, `original_date`,
   `country`, `release_type`, `media`, the five MBIDs and `path`, every key
@@ -6540,11 +6619,13 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   `track_mbid`/`recording_mbid` (a file's TITLE names ONE of its recordings) and
   sets `title` to the release's own name; a track request carries
   `track_mbid == recording_mbid` from `MUSICBRAINZ_TRACKID`. **An empty row
-  list is an ANSWER, not a 404**: the only refusals are "no such file/folder",
-  "outside the music folder" and "an album holding no audio", because a file
-  with no MBID and no credit tag still has a title, an artist and an album to
-  name itself by — the 404 that used to answer it is what left the panel's
-  header printing a raw path. The panel itself
+  list is an ANSWER, not a 404**: the album branch's only refusals are "no such
+  folder", "outside the music folder" and "an album holding no audio"; a path
+  that is missing or unreadable is a 200 with its (empty) file rows, because a
+  file with no MBID and no credit tag still has a title, an artist and an album
+  to name itself by — the 404 that used to answer it is what left the panel's
+  header printing a raw path, and the same route now never 500s on a file it
+  cannot open. The panel itself
   (`web/src/components/TrackDetails.tsx`) draws that header — the title as the
   heading, then one label/value line per fact with its own copy button, the ids
   last and the path last of all, small and dimmed — and then EVERY row the
@@ -6560,8 +6641,9 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   drop their old subtitle — it was the raw path — so the header is the one place
   the subject is named. Pinned by `tools/test_credits.py` (identity filled and
   offline, the work's own roles merged on both branches, the non-destructive
-  tidy) and `tools/test_mb_search.py` (the tag fallback, and empty rows as a
-  200).
+  tidy, the file rows beside the live ones and their dedupe, a dead MB/missing
+  file still a 200 on the path branch) and `tools/test_mb_search.py` (the tag
+  fallback, and empty rows as a 200).
 
 
 ### 7.73 Loading is near-instant: a bounded list, a small shell, and bytes the server already made
@@ -6775,6 +6857,21 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
     Computer scratch album: **48.5 s**; Paranoid Android was answered by RYM +
     MusicBrainz, Airbag fell back to MusicBrainz. That first pass included
     misses; each miss is cached for 30 days, so it is not paid on the next run.
+  - **Album of the Year** — the ALBUM page for the album (a 0-100 user score)
+    and the same page for a TRACK: AOTY states a score for every row of its
+    album page, so that row IS the track's score. The song-page lookup is tried
+    first and, when the site has no page for that track (the common case), the
+    row from the album payload the caller already fetched answers — at TRACK
+    level, never demoted to the album's score
+    (`mlo.web_ratings.track_row`; a title match folds case and punctuation).
+    Only when NO row matches does the album-wide value stand in, marked
+    `album` in `levels`. VERIFIED live, 2026-10-11, on the owner's own album
+    (`Plastic Beach`, no cookie stored, hidden browser): ALBUM → 78 from
+    RYM + AOTY + MusicBrainz (all album level), TRACK `Stylo` → 88 from the
+    SAME three sources, ALL THREE at `level: track` (RYM's song page, AOTY's
+    own album row, MusicBrainz's recording) — and the file's own tags now read
+    `RateYourMusic; Album of the Year; MusicBrainz` where they carried
+    MusicBrainz alone.
   - Consequence for the star field: a TRACK is rated by every source that
     states one of its own and its `WEBRATING_SOURCE` reads e.g.
     `RateYourMusic; Album of the Year; MusicBrainz`; the album's score still

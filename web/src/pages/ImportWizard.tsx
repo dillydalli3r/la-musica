@@ -32,7 +32,7 @@ import type {
 import { DEFAULT_RUN_ALL, SCRIPT_LABEL } from "../lib/scripts";
 import { forceDict } from "../lib/force";
 import { fmtCounts, fmtSteps } from "../lib/fmt";
-import { GENRE_COUNT_MAX, GENRE_FAMILIES, canonicalGenre, familyOf, splitGenres } from "../lib/genres";
+import { GENRE_COUNT_MAX, GENRE_FAMILIES, canonicalGenre, splitGenres } from "../lib/genres";
 import { dismiss as dismissNotification, importSessionNotificationId } from "../lib/notifications";
 
 const STEPS = ["Select & separate", "Links", "Match", "Covers", "Genres", "Lyrics", "Advisory", "Finish"];
@@ -2532,16 +2532,6 @@ export default function ImportWizard() {
 
   const genreList = (path: string): string[] => genres[path] ?? [];
 
-  /** A list in the order the app WRITES it: the family first, the specific
-   *  genres after it (`mlo.genres.normalize_genres`, and the slots the
-   *  grader's GENRE_ORDER check reads). A list typed or read in another order
-   *  is put right here, so the chips, the written tag and the grade all
-   *  describe one order. */
-  const familyFirst = (list: string[]): string[] => {
-    const family = list.find((g) => GENRE_FAMILIES[g.toLowerCase()]);
-    return family ? [family, ...list.filter((g) => g !== family)] : list;
-  };
-
   /** Every genre currently on ANY track, with how many tracks carry it, most
    *  common first — the album-wide cleanup control renders one chip per entry. */
   const allGenres = useMemo(() => {
@@ -2566,14 +2556,8 @@ export default function ImportWizard() {
         if (key && !byName.has(key)) byName.set(key, g);
       }
     }
-    const names = [...byName.values()];
-    // `familyOf` reads a list's first slot, so ask it one name at a time — the
-    // union arrives in whatever order the sources answered in.
-    const family = names.find((g) => familyOf([g]));
-    return family ? [family, ...names.filter((g) => g !== family)] : names;
+    return [...byName.values()];
   }, [genreJobResult]);
-  /** The family chip of that report: the first slot, by construction above. */
-  const jobFamily = familyOf(jobGenres);
   /** The per-source half of the report: one row per source that answered, its
    *  own names as chips beside it — the names used to be a `title` only, so
    *  they were invisible on the page. */
@@ -2600,12 +2584,9 @@ export default function ImportWizard() {
       toast(`Genres per track is ${genreCap} — raise it in Settings → Import to add more`);
       return;
     }
-    // A list that already opens with its family keeps that slot: inserting
-    // before it would push the family down and make it look like one more
-    // specific genre (the chip's own `familyOf` reads the FIRST element),
-    // while the server would reorder on write anyway.
-    const family = familyOf(list);
-    setGenreList(path, family ? [family, ...list.slice(1), v] : [...list, v]);
+    // Appended, always: there is no family slot to insert before any more —
+    // the tag is the track's own genres and their order carries no meaning.
+    setGenreList(path, [...list, v]);
   };
 
   const removeGenre = (path: string, genre: string) =>
@@ -2616,7 +2597,7 @@ export default function ImportWizard() {
     if (!paths.length) return;
     setGenres((g) => {
       const next = { ...g };
-      for (const p of paths) next[p] = familyFirst(splitGenres(value)).slice(0, genreCap);
+      for (const p of paths) next[p] = splitGenres(value).slice(0, genreCap);
       return next;
     });
     setDiscGenres((m) => ({ ...m, [disc]: "" }));
@@ -2647,13 +2628,12 @@ export default function ImportWizard() {
     try {
       // GENRE goes as a LIST, so the server writes one field per name. Sent as
       // the joined string it used to be, every genre list became ONE tag
-      // literally named "shoegaze; rock". The family is not added here — the
-      // server derives it (mlo.genres.normalize_genres) — but every list goes
-      // in the order that write produces: the family first, then the
-      // specifics, which is what the grader's GENRE_ORDER check reads.
+      // literally named "shoegaze; rock". Nothing is added or reordered here:
+      // the names are the track's own genres, and the level above them is
+      // derived by the server (mlo.genre_vocab.path_of), never stored.
       const writes: Record<string, Record<string, string | string[] | null>> = {};
       for (const [p, list] of Object.entries(genres))
-        writes[p] = { GENRE: list.length ? familyFirst(list) : null };
+        writes[p] = { GENRE: list.length ? list : null };
       await api.mbAssign(writes, staged);
       toast("Genres saved");
       setStep(5);
@@ -4736,24 +4716,22 @@ const finish = async (closeByNavigation: boolean) => {
                   {genreJobResult.updated} track(s) updated
                   {jobGenres.length ? "" : " — no genres returned"}
                 </div>
-                {/* What the run wrote, one chip per name with the family first
-                    — the order the write puts it in. This printed the union as
-                    one comma-joined line in the sources' own spelling, so
-                    three genres read as one name. */}
+                {/* What the run wrote: one chip per name, exactly the names
+                    the sources stated. This printed the union as one
+                    comma-joined line in the sources' own spelling, so three
+                    genres read as one name. The level above each chip is
+                    derived (`/api/genres/facets` carries each name's `path`),
+                    so nothing here is labelled as a slot. */}
                 {jobGenres.length > 0 && (
                   <div className="flex flex-wrap items-center gap-1.5">
                     {jobGenres.map((g) => (
                       <span
                         key={g}
-                        className={
-                          g === jobFamily
-                            ? "chip bg-raise border border-border text-zinc-400"
-                            : "chip bg-accent/10 text-accent-soft border border-accent/25"
-                        }
+                        className="chip bg-accent/10 text-accent-soft border border-accent/25"
+                        title={genreFacets?.genres.find(
+                          (row) => row.name.toLowerCase() === g.toLowerCase()
+                        )?.path || undefined}
                       >
-                        {g === jobFamily && (
-                          <span className="text-[9px] uppercase tracking-wider text-zinc-600">family</span>
-                        )}
                         {g}
                       </span>
                     ))}
@@ -4827,15 +4805,9 @@ const finish = async (closeByNavigation: boolean) => {
                 {allGenres.map(([gen, n]) => (
                   <button
                     key={gen}
-                    className={`chip border ${GENRE_FAMILIES[gen.toLowerCase()]
-                      ? "bg-raise border-border text-zinc-500"
-                      : "bg-raise border-border text-zinc-300"} hover:border-red-800 hover:text-red-200`}
+                    className="chip bg-raise border border-border text-zinc-300 hover:border-red-800 hover:text-red-200"
                     onClick={() => removeGenreEverywhere(gen)}
-                    title={GENRE_FAMILIES[gen.toLowerCase()]
-                      // A derived family comes back on the next write, so this
-                      // only helps while the step is open — say so.
-                      ? `Remove “${gen}” (a derived family) from all ${n} track(s) for this run`
-                      : `Remove “${gen}” from all ${n} track(s)`}
+                    title={`Remove “${gen}” from all ${n} track(s)`}
                   >
                     {gen}
                     <span className="text-[10px] text-zinc-500 tabular-nums">{n}</span>
@@ -4883,7 +4855,13 @@ const finish = async (closeByNavigation: boolean) => {
               >
                 {g.rows.map((t) => {
                   const list = genreList(t.path);
-                  const family = familyOf(list);
+                  // The DERIVED hierarchy of the first name ("Pop › Synth-Pop"),
+                  // straight from the facets payload: shown, never written.
+                  const derived = list.length
+                    ? genreFacets?.genres.find(
+                        (row) => row.name.toLowerCase() === list[0].toLowerCase()
+                      )?.path ?? null
+                    : null;
                   const typed = genreAddValues[t.path] ?? "";
                   const unknown = !!typed.trim() && !genreSuggestions.has(typed.trim().toLowerCase());
                   return (
@@ -4891,37 +4869,15 @@ const finish = async (closeByNavigation: boolean) => {
                       <TrackNoBadge disc={discNoOf(t.path)} track={trackNoOf(t.path)} />
                       <span className="flex-1 truncate text-sm">{displayTitle(t.path)}</span>
                       <div className="flex items-center gap-1.5 flex-wrap justify-end">
-                        {family ? (
-                          // The family's own slot: it is DERIVED from the
-                          // specific genre and written FIRST — the slot the
-                          // grader's GENRE_ORDER check reads — so it is
-                          // labelled and rendered first rather than shown as
-                          // one more name to edit.
+                        {derived && (
                           <span
-                            className="chip bg-raise border border-border text-zinc-400"
-                            title={`${family} is the family — the app derives it from the specific genre and writes it in the first slot`}
+                            className="text-[10px] text-zinc-500 truncate max-w-[16rem]"
+                            title={`Where ${list[0]} sits — derived from the genre tree (mlo.genre_vocab.path_of), never stored on the file`}
                           >
-                            <span className="text-[9px] uppercase tracking-wider text-zinc-600">family</span>
-                            {family}
-                            <button
-                              className="hover:text-white transition-colors"
-                              onClick={() => removeGenre(t.path, family)}
-                              title={`Remove ${family} for this run — the app derives it again when it writes`}
-                            >
-                              <X className="h-3 w-3" />
-                            </button>
+                            {derived}
                           </span>
-                        ) : (
-                          list.length > 0 && (
-                            <span
-                              className="chip bg-raise border border-dashed border-border text-zinc-600"
-                              title={`The app derives the family of ${list[0]} when it writes — it is not typed in here`}
-                            >
-                              family derived on save
-                            </span>
-                          )
                         )}
-                        {list.filter((x) => x !== family).map((gen) => (
+                        {list.map((gen) => (
                           <span key={gen} className="chip bg-accent/10 text-accent-soft border border-accent/25">
                             {gen}
                             <button

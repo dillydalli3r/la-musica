@@ -526,6 +526,53 @@ eq(fb["levels"], {"rateyourmusic": "track", "albumoftheyear": "album",
 eq(fb["value"], 93,
    "…its 90/10 album answer is weighted in with the two track answers")
 
+# …and when the source's album payload carries the TRACK's OWN row, that row is
+# the track's answer, at TRACK level: AOTY states every track's score on the
+# album page, so a missing song page (the common case — the site has no page
+# for most tracks) must not demote the track to the album's score.
+def _album_rows_fetch(source, kind, ident, cfg):
+    """AOTY answers the ALBUM payload, which carries a row per track."""
+    if source == "albumoftheyear":
+        if kind == "album":
+            return {"rating": {"value": 90, "count": 10},
+                    "tracks": [{"title": "Paranoid Android",
+                                "rating": {"value": 96, "count": 37}},
+                               {"title": "Karma Police",
+                                "rating": {"value": 94, "count": 40}}]}
+        return None
+    if source == "rateyourmusic":
+        return {"rating": {"value": 4.67, "count": 17654}}
+    if source == "musicbrainz":
+        return MB_TRACK_OWN
+    return None
+
+
+row = wr.track_rating("Radiohead", "Paranoid Android", "rec-mbid", {},
+                      _album_rows_fetch,
+                      album={"artist": "Radiohead", "album": "In Rainbows",
+                             "mbid": "rg-mbid"})
+eq(wr.track_row("albumoftheyear",
+                {"tracks": [{"title": "Karma  Police!",
+                             "rating": {"value": 94, "count": 40}}]},
+                "Karma Police")[0], 94,
+   "a row matches on the folded title (punctuation and case are not the song)")
+eq(wr.track_row("musicbrainz", {"tracks": [{"title": "Karma Police",
+                                            "rating": {"value": 94}}]},
+                "Karma Police"), None,
+   "no other source has per-track rows in its album payload")
+eq(row["levels"]["albumoftheyear"], "track",
+   "AOTY's own row answers at TRACK level, not the album's")
+eq(row["value"], 93,
+   "…so the mean uses 96/37 for that source instead of 90/10")
+
+# The album-wide value is still the fallback when NO row matches the title.
+none_row = wr.track_rating("Radiohead", "A Song Aoty Has Not Rated", "rec-mbid",
+                           {}, _album_fallback_fetch,
+                           album={"artist": "Radiohead", "album": "In Rainbows",
+                                  "mbid": "rg-mbid"})
+eq(none_row["levels"]["albumoftheyear"], "album",
+   "no matching row -> the album answer stands, marked `album`")
+
 print("== aggregation ==")
 # 87 and 84 over 31 and 49 366 votes: the big one decides the number.
 agg = wr.aggregate([(87, 31, "MusicBrainz"), (84, 49366, "RateYourMusic")])

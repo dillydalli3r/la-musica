@@ -634,6 +634,19 @@ function RoleGroups({ rows }: { rows: CreditRow[] }) {
                     {a}
                   </span>
                 ))}
+                {/* A row read from the FILE's own MusicBrainz tags (not the
+                    live lookup) says so: the top-level badge names the reply's
+                    source, and a file row can sit beside live rows that badge
+                    would misdescribe. Same subdued chip the app uses for the
+                    "file tags" fallback badge. */}
+                {r.source === "file" && (
+                  <span
+                    className="chip bg-amber-950/30 border border-amber-900/40 text-amber-300/90 text-[10px]"
+                    title="Read from the file's own MusicBrainz tags, not a live MusicBrainz lookup"
+                  >
+                    file
+                  </span>
+                )}
               </li>
             ))}
           </ul>

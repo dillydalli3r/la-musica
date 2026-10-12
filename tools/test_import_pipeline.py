@@ -881,12 +881,11 @@ try:
     # The list goes in as REPEATED GENRE fields, not one "; "-joined value:
     # the grader counts the values a file carries, so a joined string would
     # read as one genre and fail the per-track count check. The names are
-    # canonicalised to MusicBrainz's own spelling and the FAMILY is derived
-    # into the FIRST slot — the stub above answers "Shoegaze / Noise Pop", and
-    # what lands is `rock` followed by the specific `shoegaze` (mb_genre_count
-    # = 2, so the second specific genre yields the family's slot).
-    assert _written["01 - track.wav"]["GENRE"] == ["Rock", "Shoegaze"], _written["01 - track.wav"]
-    assert _written["02 - track.wav"]["GENRE"] == ["Rock", "Shoegaze"], _written["02 - track.wav"]
+    # canonicalised to MusicBrainz's own spelling and NOTHING is added — the
+    # stub above answers "Shoegaze / Noise Pop", and what lands is exactly those
+    # two, capitalized (the derived family is a view, never stored: R38/R38a).
+    assert _written["01 - track.wav"]["GENRE"] == ["Shoegaze", "Noise Pop"], _written["01 - track.wav"]
+    assert _written["02 - track.wav"]["GENRE"] == ["Shoegaze"], _written["02 - track.wav"]
 
     # A stated rating IS written, for every track — and the provider that
     # stated it is reported back per track.
@@ -1163,6 +1162,10 @@ _real_fetch_lyrics = _lyrics_fetch.fetch_lyrics
 # release's genre chain, the advisory providers, and the lyrics service.
 _intg.genre_chain = lambda **kw: {"per_track": {(1, 1): ["Shoegaze"]},
                                   "sources": {}, "levels": {}}
+# What that stub's answer lands as: ONE name, capitalized, nothing added (the
+# derived parent is a view — R38/R38a). The assertion below reads it from here
+# so the stub and the expectation cannot drift.
+expected_genres = "Shoegaze"
 # 1 states explicit — and the fixtures arrive rated 0, so a value that was NOT
 # replaced shows up as a 0 rather than as a coincidence.
 _intg.resolve_advisory_route = lambda **kw: {"value": 1, "source": "deezer-isrc",
@@ -1205,7 +1208,7 @@ try:
     assert "the lyric the import fetched" in (af.get_lyrics() or ""), af.get_lyrics()
     # A READER sees the repeated GENRE fields joined ("; "), whatever the writer
     # handed over — the release's genres, and not the peer's.
-    assert af.get_tag("GENRE") == "Rock; Shoegaze", af.get_tag("GENRE")
+    assert af.get_tag("GENRE") == expected_genres, af.get_tag("GENRE")
     assert af.get_tag("ITUNESADVISORY") == "1", af.get_tag("ITUNESADVISORY")
 
     # …and the album's own cover is what the files carry afterwards: script 10's
@@ -1274,7 +1277,7 @@ try:
     af = arrived(wired_track)
     assert res["dropped"] == {"checked": 1, "failed": 0, "lyrics": 0, "genre": 1,
                               "advisory": 0, "cover": 1, "alias": 0}, res["dropped"]
-    assert af.get_tag("GENRE") == "Rock; Shoegaze", af.get_tag("GENRE")
+    assert af.get_tag("GENRE") == expected_genres, af.get_tag("GENRE")
     assert af.embedded_pictures() == [], af.embedded_pictures()
     assert "peer lyric" in (af.get_lyrics() or ""), af.get_lyrics()
     assert af.get_tag("ITUNESADVISORY") == "0", af.get_tag("ITUNESADVISORY")
@@ -1378,7 +1381,7 @@ try:
     assert "the lyric the import fetched" in (af.get_lyrics() or ""), af.get_lyrics()
     assert "peer lyric" not in (af.get_lyrics() or ""), af.get_lyrics()
     assert not os.path.exists(e2e_sidecar), "the arrived .lrc is gone, not kept"
-    assert af.get_tag("GENRE") == "Rock; Shoegaze", af.get_tag("GENRE")
+    assert af.get_tag("GENRE") == expected_genres, af.get_tag("GENRE")
     assert af.get_tag("ITUNESADVISORY") == "1", af.get_tag("ITUNESADVISORY")
 
     # ---- a CONFIGURED skip is REPORTED, never silent ------------------------

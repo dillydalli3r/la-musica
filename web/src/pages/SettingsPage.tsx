@@ -80,7 +80,7 @@ const TAG_FAMILIES = ["AUDIT", "LOG_GRADE", "REPLAYGAIN", "DYNAMIC_RANGE", "MEDI
  *  the same values when it loads the file) instead of an empty field. */
 const CFG_DEFAULTS: Record<string, unknown> = {
   mb_genre_count: 2,
-  genre_sources: ["rateyourmusic", "albumoftheyear", "musicbrainz"],
+  genre_sources: ["rateyourmusic", "musicbrainz", "albumoftheyear"],
   advisory_auto_fetch: true,
   metadata_auto_fetch: true,
   metadata_review: false,
@@ -1306,7 +1306,7 @@ export default function SettingsPage() {
       fields: [
         {
           k: "mb_genre_count", label: "Genres per track (import, trimming and grading)", type: "number", min: 1, max: 3,
-          help: "One value, three consumers: an import writes up to this many genres onto a track (specific genres first, the derived FAMILY last), script 8 / the genre import / script 10 trim any excess off, and grading fails a track carrying more than this. Fewer is fine — the family is derived from the specific genre, so one specific genre is a complete answer and nothing is topped up with filler. A per-run import limit may only lower this. Default 2.",
+          help: "How many genre NAMES a track may hold — every one of them a genre a source stated. The hierarchy above them (the parent genre, and up to a family head) is derived by the app and never written, so raising this adds genres, not levels. One value, three consumers: an import writes up to this many, script 8 / the genre import / script 10 trim any excess off, and grading fails a track carrying more. Fewer is fine — one track-level genre is a complete answer and nothing is topped up with filler. A per-run import limit may only lower this. Default 2.",
         },
         {
           k: "genre_sources", label: "Genre sources — every ticked source is asked; unticked ones are never used", type: "multi",
@@ -1314,7 +1314,7 @@ export default function SettingsPage() {
           // /api/sources/health = server/integrations.GENRE_SOURCES), and each
           // row says whether it can answer per track or only for the release.
           options: genreOptions,
-          help: "The genres the sources answer with are merged, deduped and capped at the count above, per track. MusicBrainz is the app's own identity anchor — it also supplies the family every list ends with — so leave it on in most setups.",
+          help: "Asked top to bottom, and the chain stops for a track once it has a track-level answer (its own page) or the cap above is filled; an unticked source is never asked. The shipped order is RateYourMusic, MusicBrainz, Album of the Year: RYM is the only one of the three that classifies a TRACK, MusicBrainz answers per RECORDING and is keyless, and AOTY publishes no per-track genre at all — its genre row is the RELEASE's — so it is the album-level floor. The names are merged, deduped and capped per track, and the level above them is derived, never stored.",
         },
         {
           k: "web_ratings_enabled", label: "Web ratings (script 24)", type: "bool",
@@ -1427,8 +1427,8 @@ export default function SettingsPage() {
       help: "A track may hold at most the 'Genres per track' value — only an overflow fails (issue code GENRE_COUNT). There is no lower bound and no quota; keep the two in step.",
     },
     {
-      k: "grade_check_genre_order", label: "Genre order (the family, if present, comes first)", type: "bool",
-      help: "The family must be the FIRST genre, e.g. Rock / Shoegaze (issue code GENRE_ORDER). A family in a later slot, or a genre repeated, fails. The names themselves are graded by the vocabulary check below.",
+      k: "grade_check_genre_structure", label: "Genre structure (no duplicates, no derived parent)", type: "bool",
+      help: "A GENRE tag holds the specific names a source stated; the level above them is derived and never stored. Reported per track as GENRE_STRUCTURE: a repeated name, or a LEADING head another member of the list sits under (the family slot older builds wrote). Script 10 / Optimize remove both with the same predicate the check reads.",
     },
     {
       k: "grade_check_genre_vocab", label: "Genre vocabulary (MusicBrainz)", type: "bool",

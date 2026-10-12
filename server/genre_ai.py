@@ -45,10 +45,10 @@ SYSTEM = (
 )
 
 # The shape the answer must have, spelled out in full: the model answers with
-# the SPECIFIC genres only, most specific first — the broad family is the
-# app's to derive (`mlo.genre_vocab.parent_of`) and put in front of them, so
-# asking for it would be asking for a slot the caller has to throw away, and a
-# model left to itself answers with a flat bag of near-synonyms plus a family.
+# the SPECIFIC genres only, most specific first — the level above them is the
+# app's to derive (`mlo.genre_vocab.parent_of`), so asking for it would be
+# asking for a slot the caller has to throw away, and a model left to itself
+# answers with a flat bag of near-synonyms plus a family.
 # Kept in the prompt rather than re-derived from the reply, because "which
 # genre is more specific" is a judgement no word list reproduces.
 _SLOTS = (
@@ -237,10 +237,11 @@ def _specifics(names, candidates, limit):
     resolved to MusicBrainz's spelling when it is one, de-duplicated
     case-insensitively, and in the model's own order (which IS the ranking).
 
-    A name that IS a family is dropped rather than returned: the app derives
-    and appends the family itself (mlo.genres.normalize_genres), so a family
-    here would either duplicate the derived slot or take a specific genre's
-    place. A name the app cannot resolve — neither a published MusicBrainz/
+    A name that IS a family is dropped rather than returned: a family is a
+    LEVEL, not a genre this app stores (mlo.genres keeps the tag to what a
+    source stated, and `mlo.genre_vocab.path_of` derives the level above it),
+    so a family here would take a specific genre's place. A name the app
+    cannot resolve — neither a published MusicBrainz/
     RateYourMusic genre nor one of the fetched candidates — is DROPPED too:
     the model was told to use published names only, and storing an invented
     one would put a genre in the file that no source publishes and that
@@ -275,10 +276,10 @@ def infer_genres(*, artist, album, title="", track_path="", candidates=None,
     canonicalization — the caller's own source list (which is at least ordered
     by source priority) is the better answer then.
 
-    *count* is the track's total slot budget (`mb_genre_count`): at most
-    `count - 1` SPECIFIC genres are asked for, because the first slot belongs
-    to the derived family. A *count* of 1 has no room for a specific genre at
-    all, so there is nothing to ask and the answer is None.
+    *count* is the track's slot budget (`mb_genre_count`), all of it for
+    SPECIFIC genres: the levels above them are DERIVED and never stored
+    (`mlo.genres`), so the model is asked for up to `count` names — the same
+    answer the sources are held to.
 
     *candidates* are the genres the sources already answered with, best first
     (the chain's merged order); *extra* is any further context worth naming in
@@ -288,10 +289,10 @@ def infer_genres(*, artist, album, title="", track_path="", candidates=None,
         count = max(1, int(count))
     except (TypeError, ValueError):
         count = DEFAULT_GENRE_COUNT
-    # The family takes the first slot, so the model is asked for the ones
-    # behind it — at most `count - 1`, and never more than the ceiling
-    # mlo.genres enforces (a hand-edited config file cannot widen the ask).
-    ask = min(GENRE_COUNT_MAX, count) - 1
+    # Every slot is a specific genre, so the model is asked for up to `count`
+    # of them — never more than the ceiling mlo.genres enforces (a
+    # hand-edited config file cannot widen the ask).
+    ask = min(GENRE_COUNT_MAX, count)
     if ask < 1:
         return None
     cfg = _config()

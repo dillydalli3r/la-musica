@@ -1,15 +1,19 @@
 /** The genre contract every genre-rendering screen shares with the backend.
  *
- *  A GENRE tag is a LIST of repeated fields: the FAMILY first, the SPECIFIC
- *  genres after it (`mlo/genres.py`, `mlo/genre_vocab.py`). A file's repeats
- *  read back joined with "; " (mlo/audio.py) and the rendered form joins the
- *  slots with " / " (GENRE_ORDER_SEPARATOR) — so the display is one name per
- *  chip, split on both, and never the joined string. */
+ *  A GENRE tag is a LIST of repeated fields, and every one of them is a genre
+ *  a SOURCE stated — the level above them (the parent genre, and its own
+ *  parent up to a family head) is DERIVED by the server and never stored
+ *  (`mlo/genres.py`, `mlo/genre_vocab.path_of`). A file's repeats read back
+ *  joined with "; " (mlo/audio.py) and the rendered form joins them with " / "
+ *  (GENRE_ORDER_SEPARATOR) — so the display is one name per chip, split on
+ *  both, and never the joined string. Position means nothing: there is no
+ *  family slot any more, and `/api/genres/facets` carries each name's derived
+ *  `path` ("Pop › Synth-Pop") for the places that want to show it. */
 
-/** The 28 families `mlo.genre_vocab.FAMILIES` publishes: the broad head a
- *  specific genre sits under, which the app derives from the specific genre
- *  instead of asking for it. Bundled rather than fetched — ~400 bytes, and a
- *  screen has to know which chip is the family slot before any request
+/** The 28 families `mlo.genre_vocab.FAMILIES` publishes: the heads of the
+ *  genre tree, which the app derives from a name instead of storing. Bundled
+ *  rather than fetched — ~400 bytes, and a screen has to know which chip is a
+ *  head (a name a source may state in its own right) before any request
  *  answers. */
 export const GENRE_FAMILIES: Record<string, true> = {
   metal: true, punk: true, "hip hop": true, rock: true, pop: true, jazz: true,
@@ -43,10 +47,14 @@ export const splitGenres = (value: unknown): string[] =>
 export const canonicalGenre = (name: unknown): string =>
   String(name ?? "").trim().replace(/\s+/g, " ").toLowerCase();
 
-/** The derived family slot of a genre list, or null when it holds none yet.
- *  Mirrors `mlo.genres.normalize_genres`, which writes the family FIRST: a
- *  list opening with a family already carries its family slot. */
+/** The family a list's names sit under, or null when none of them is known.
+ *
+ *  A render-time convenience only, and deliberately the WEAKEST form of the
+ *  server's answer: the real hierarchy is `mlo.genre_vocab.path_of`, which the
+ *  server ships per name in `/api/genres/facets` (`path`). This looks at the
+ *  names alone, so it can only see the head a name IS — enough to mark a chip
+ *  that is itself a family, never enough to claim where a name sits. */
 export const familyOf = (list: string[]): string | null => {
-  const first = list[0];
-  return first && GENRE_FAMILIES[first.toLowerCase()] ? first : null;
+  const name = list.find((g) => GENRE_FAMILIES[g.toLowerCase()]);
+  return name ?? null;
 };

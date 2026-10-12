@@ -17,9 +17,21 @@ Two ideas, and nothing else:
 The curated table is the part to extend when a new family matters; a name that
 falls through every rule is still stored (lossless) — it simply fails the
 "recognised genre" grade check until it is mapped or renamed.
+
+MEASURED 2026-10-11 over MusicBrainz's own 2 202 names: with the row-matching
+rules alone 717 answered and 21% of those were substring artifacts (`detroit
+techno` and `harsh noise` were `punk` — the `oi` inside "detroit"/"noise";
+`graphical sound` was `hip hop`; `melodic dubstep` was `reggae`). Token matching
+fixed those but lost real compounds, so the walk now reads a keyword as a whole
+token first and as a prefix/suffix of the name only as a second pass, with
+short keywords (`oi`, `ska`, `emo`, `wave`) exempt: 995 names have a head, the
+268 mid-level edges of `_PARENT_OF` give the ones that need a middle step
+(`deep house` → `house` → `electronic`), and the answers above survive
+(`rocksteady` stays reggae, not rock).
 """
 from __future__ import annotations
 
+import re
 from typing import Optional
 
 from ._genre_names import MB_GENRES
@@ -192,6 +204,117 @@ _KEYWORDS = (
     ("instrumental", ("instrumental",)),
 )
 
+# The MIDDLE of the tree: genres that are neither a head nor the end of the
+# line, and the genre directly above them. Only curated, well-known steps are
+# here — a name with no entry simply hangs off its family, which is exactly
+# where it hung before this table existed (`deep house` used to answer
+# `electronic`; now it answers `house`, whose own parent is `electronic`).
+#
+# WHY it exists at all: a genre is a NODE, and a node's role comes from its
+# edges, never from its name — `house` is the parent of `deep house` AND a
+# genre a track can hold outright (MusicBrainz lists it, so a source may state
+# it), and `triphop`'s cousin `ambient house` sits under it too. The old model
+# could not say that: it asked "is this WORD one of the 28 heads?" and pulled
+# any head-named genre into a parent slot, which is the collision this table
+# removes by making "what is above X?" answerable for every X.
+#
+# Every parent here must be a real MusicBrainz genre, and every chain must
+# land on the SAME head the curated/keyword answer gives (`tools/test_genre_vocab.py`
+# asserts both) — a middle step that moved a genre between families would
+# silently re-bucket the library's browse facets.
+_PARENT_OF = {
+    "2 tone": "reggae", "2-step": "uk garage", "abstract hip hop": "hip hop",
+    "acid house": "house", "acid jazz": "jazz", "acid techno": "techno",
+    "acid trance": "trance", "acoustic blues": "blues", "afro-cuban jazz": "jazz",
+    "afrobeat": "funk", "aggrotech": "industrial", "alternative country": "country",
+    "alternative hip hop": "hip hop", "alternative rock": "rock", "ambient dub": "ambient",
+    "ambient house": "house", "ambient techno": "techno", "americana": "country",
+    "anarcho-punk": "punk", "anti-folk": "folk", "art pop": "pop",
+    "art punk": "punk", "atmospheric black metal": "black metal", "atmospheric drum and bass": "drum and bass",
+    "avant-garde jazz": "jazz", "bachata": "latin", "ballet": "classical",
+    "baroque": "classical", "baroque pop": "pop", "bassline": "uk garage",
+    "bebop": "jazz", "bedroom pop": "pop", "big band": "jazz",
+    "big beat": "electronic", "black metal": "metal", "blue-eyed soul": "soul",
+    "bluegrass": "country", "bolero": "latin", "boom bap": "hip hop",
+    "bossa nova": "latin", "breakbeat": "electronic", "breakcore": "drum and bass",
+    "britpop": "rock", "brostep": "dubstep", "brutal death metal": "death metal",
+    "bubblegum pop": "pop", "celtic": "folk", "chamber pop": "pop",
+    "chicago blues": "blues", "chicago house": "house", "chicha": "latin",
+    "chillout": "downtempo", "cinematic classical": "classical", "city pop": "pop",
+    "cloud rap": "hip hop", "conscious hip hop": "hip hop", "contemporary classical": "classical",
+    "contemporary folk": "folk", "contemporary r&b": "r&b", "cool jazz": "jazz",
+    "country pop": "country", "country rock": "rock", "country soul": "soul",
+    "crossover thrash": "thrash metal", "crunk": "hip hop", "crust punk": "punk",
+    "cumbia": "latin", "dance-pop": "pop", "dancehall": "reggae",
+    "dark ambient": "ambient", "darkstep": "drum and bass", "death metal": "metal",
+    "death-doom metal": "doom metal", "deathcore": "metal", "deep drum and bass": "drum and bass",
+    "deep house": "house", "deep soul": "soul", "delta blues": "blues",
+    "depressive black metal": "black metal", "detroit techno": "techno", "dirty south": "hip hop",
+    "disco": "dance", "djent": "metal", "doom metal": "metal",
+    "downtempo": "electronic", "dream pop": "rock", "dream trance": "trance",
+    "drill": "hip hop", "drill and bass": "idm", "drone": "ambient",
+    "drone metal": "doom metal", "dub": "reggae", "dub techno": "techno",
+    "east coast hip hop": "hip hop", "ebm": "industrial", "edm": "electronic",
+    "electric blues": "blues", "electro": "electronic", "electro house": "house",
+    "electro-funk": "funk", "electro-industrial": "industrial", "electroacoustic": "experimental",
+    "electropop": "pop", "emo": "punk", "epic doom metal": "doom metal",
+    "ethio-jazz": "jazz", "eurodance": "dance", "europop": "pop",
+    "exotica": "easy listening", "experimental hip hop": "hip hop", "fado": "folk",
+    "field recording": "experimental", "filk": "folk", "flamenco": "latin",
+    "folk metal": "metal", "forró": "latin", "freak folk": "folk",
+    "free jazz": "jazz", "funeral doom metal": "doom metal", "future garage": "dubstep",
+    "futurepop": "industrial", "g-funk": "hip hop", "gabber": "electronic",
+    "gangsta rap": "hip hop", "garage house": "house", "ghetto house": "house",
+    "glitch": "idm", "goa trance": "trance", "gothic metal": "metal",
+    "gothic rock": "rock", "grime": "uk garage", "grindcore": "metal",
+    "groove metal": "thrash metal", "grunge": "rock", "happy hardcore": "electronic",
+    "hard bop": "jazz", "hard house": "house", "hard rock": "rock",
+    "hard techno": "techno", "hard trance": "trance", "hardcore hip hop": "hip hop",
+    "hardcore punk": "punk", "hardcore techno": "electronic", "hardstep": "drum and bass",
+    "hardstyle": "electronic", "heavy metal": "metal", "hi-nrg": "dance",
+    "hip house": "house", "honky tonk": "country", "impressionism": "classical",
+    "indie pop": "pop", "indie rock": "rock", "industrial techno": "techno",
+    "italo-disco": "dance", "j-pop": "pop", "jazz fusion": "jazz",
+    "jump blues": "blues", "jump up": "drum and bass", "jungle": "drum and bass",
+    "k-pop": "pop", "klezmer": "folk", "krautrock": "rock",
+    "liquid funk": "drum and bass", "lo-fi hip hop": "hip hop", "lounge": "easy listening",
+    "lovers rock": "reggae", "mambo": "latin", "martial industrial": "industrial",
+    "math rock": "rock", "medieval": "classical", "melodic black metal": "black metal",
+    "melodic death metal": "death metal", "melodic techno": "techno", "merengue": "latin",
+    "metalcore": "metal", "microhouse": "house", "minimal techno": "techno",
+    "minimalism": "classical", "modal jazz": "jazz", "modern classical": "classical",
+    "musique concrète": "experimental", "neo soul": "r&b", "neofolk": "folk",
+    "neurofunk": "drum and bass", "new wave": "rock",
+    "no wave": "experimental", "noise": "experimental", "northern soul": "soul",
+    "nu disco": "dance", "nu jazz": "downtempo", "nu metal": "metal",
+    "nu skool breaks": "electronic", "opera": "classical", "orchestral": "classical",
+    "outlaw country": "country", "outsider house": "house", "p-funk": "funk",
+    "phonk": "hip hop", "piano blues": "blues", "piedmont blues": "blues",
+    "pop punk": "punk", "post-bop": "jazz", "post-dubstep": "dubstep",
+    "post-hardcore": "punk", "post-punk": "punk", "post-rock": "rock",
+    "power metal": "metal", "power pop": "pop", "progressive house": "house",
+    "progressive metal": "metal", "progressive rock": "rock", "progressive trance": "trance",
+    "psychedelic rock": "rock", "psychedelic soul": "soul", "psytrance": "trance",
+    "quiet storm": "r&b", "ragga": "reggae", "ragga jungle": "drum and bass",
+    "ragtime": "jazz", "reggaeton": "latin", "renaissance": "classical",
+    "riddim dubstep": "dubstep", "rockabilly": "country", "rocksteady": "reggae",
+    "romantic classical": "classical", "roots reggae": "reggae", "salsa": "latin",
+    "schranz": "techno", "serialism": "classical", "shoegaze": "rock",
+    "singer-songwriter": "folk", "ska": "reggae", "ska punk": "punk",
+    "slowcore": "rock", "sludge metal": "metal", "smooth jazz": "jazz",
+    "son cubano": "latin", "sophisti-pop": "pop", "sound collage": "experimental",
+    "space ambient": "ambient", "speed garage": "uk garage", "spiritual jazz": "jazz",
+    "stoner metal": "metal", "stoner rock": "rock", "street punk": "punk",
+    "sunshine pop": "pop", "swing": "jazz", "symphonic black metal": "black metal",
+    "symphonic metal": "metal", "synth-pop": "pop", "tango": "latin",
+    "tech house": "house", "technical death metal": "death metal", "teen pop": "pop",
+    "texas blues": "blues", "thrash metal": "metal", "timba": "latin",
+    "trap": "hip hop", "trap soul": "hip hop", "tribal house": "house",
+    "trip hop": "electronic", "vocal house": "house", "vocal jazz": "jazz",
+    "vocal trance": "trance", "war metal": "black metal", "west coast hip hop": "hip hop",
+    "western swing": "country",
+}
+
 # Spellings that are NOT MusicBrainz names but are the same thing. Every value
 # must be a real MusicBrainz genre (tested), and every key is a spelling the
 # app itself, RYM, or a model has been seen to produce.
@@ -266,29 +389,148 @@ def canonical(name) -> Optional[str]:
     return None
 
 
+# A keyword may match a compound as a prefix/suffix only from this length up
+# (see `_keyword_parent`'s second pass).
+PREFIX_KEYWORD_MIN_LEN = 4
+
+
+def _table_key(name) -> str:
+    """The lookup key for *name*: its MusicBrainz spelling when it is one.
+
+    The tables are written in MusicBrainz's own spelling, and a source's own
+    spelling of the same genre can differ by a hyphen or an alias ("italo
+    disco" vs MusicBrainz's "italo-disco", "synthpop" vs "synth-pop"), so a
+    lookup folds the name through `canonical` FIRST and only then falls back
+    to the raw text. That is what lets one table entry answer for every
+    spelling a source emits.
+    """
+    return _fold(canonical(name)) or _fold(name)
+
+
+def _keyword_parent(text):
+    """The head a keyword rule gives *text*, or None.
+
+    The keyword must be a WHOLE TOKEN — the text split on spaces, hyphens and
+    slashes — or it does not count. MEASURED 2026-10-11 over MusicBrainz's own
+    2 202 names: plain substring matching answered for 717 names, and 154 of
+    those (21%) came from a keyword sitting INSIDE another word — `detroit
+    techno` and `harsh noise` were `punk` (the `oi` of "detroit"/"noise"),
+    `graphical sound` was `hip hop` (`rap` in "graphical"), `melodic dubstep`
+    was `reggae` (`dub` first), `neurofunk` was `funk`. Token matching keeps
+    the rules that earn their keep (`folk metal` → metal) and drops the noise.
+    """
+    tokens = [t for t in re.split(r"[\s\-/]+", text) if t]
+    # Pass 1: a whole TOKEN (or a multi-word phrase) — the precise reading, and
+    # the one that decides whenever it can (`rocksteady` is reggae's own
+    # keyword, so `rock` never gets to claim it).
+    for family, words in _KEYWORDS:
+        for word in words:
+            parts = word.split(" ")
+            if len(parts) == 1:
+                if word in tokens:
+                    return family
+            elif " ".join(parts) in text:
+                # A multi-word keyword ("drum and bass", "spoken word") has to
+                # appear as the phrase; the token pass above cannot see a
+                # phrase that spans a hyphen ("drum-and-bass" is three tokens).
+                return family
+    # Pass 2 (only when nothing matched): a keyword that is a PREFIX or SUFFIX
+    # of the name, which is how a compound is spelled — `electroclash`,
+    # `vaportrap`, `spacesynth`, `orchestral song`. Never a bare substring: the
+    # 21% misfire rate this whole helper was written for came from `oi` inside
+    # "detroit", `rap` inside "graphical", `pop` inside "upopo", and none of
+    # those is a prefix or a suffix. Short keywords are exempt — `oi`, `emo`,
+    # `ska`, `dub`, `wave` name too many things that merely start with them.
+    for family, words in _KEYWORDS:
+        for word in words:
+            if len(word) < PREFIX_KEYWORD_MIN_LEN or " " in word:
+                continue
+            if text.startswith(word) or text.endswith(word):
+                return family
+    return None
+
+
 def is_parent(name) -> bool:
-    """True when *name* is one of the broad families."""
-    return _fold(name) in _FAMILY_SET
+    """True when *name* is one of the broad families (a head of the tree)."""
+    return _table_key(name) in _FAMILY_SET
 
 
 def parent_of(name) -> Optional[str]:
-    """The broad family *name* belongs to, or None when none is known.
+    """The genre directly ABOVE *name*, or None when nothing above is known.
 
-    No family is better than a wrong one: an unmapped genre simply gets no
-    parent slot, and the track is graded on the genres it does have.
+    One step, never the whole walk: `parent_of("deep house")` is `house`, and
+    `path_of` is what turns that into the head. A genre's role comes from its
+    edges — `house` is a middle node here AND a genre a track may hold, and
+    this function answers for both uses the same way, because it only ever
+    says "what is above X?".
+
+    A head has no parent (None), so a caller that wants the top of a chain
+    asks `top_of`. No parent is better than a wrong one: a name no rule knows
+    simply answers None and is graded on its own.
     """
-    text = _fold(name) or _fold(canonical(name))
+    text = _table_key(name)
     if not text:
         return None
     if text in _FAMILY_SET:
-        return text
+        return None
+    middle = _PARENT_OF.get(text)
+    if middle:
+        return middle
     family = _FAMILY_OF.get(text)
     if family:
         return family
-    for family, words in _KEYWORDS:
-        if any(w in text for w in words):
-            return family
-    return None
+    return _keyword_parent(text)
+
+
+# How far a walk up may go. The tables above are hand-written and a cycle
+# would hang every facet, so the walk is bounded rather than trusted.
+_MAX_DEPTH = 8
+
+
+def path_of(name) -> list:
+    """*name* and everything above it, top first: ["electronic", "house",
+    "deep house"].
+
+    The app's whole hierarchy view comes from this — browse buckets, the chip
+    beside a genre, the credits-style "where does this sit" line — and it is
+    DERIVED, never stored: a track's GENRE tag holds the specific names a
+    source stated, and the levels above them are looked up here, so improving
+    this table fixes every already-tagged file at once.
+    """
+    text = _table_key(name)
+    if not text:
+        return []
+    chain = [text]
+    seen = {text}
+    for _ in range(_MAX_DEPTH):
+        above = _PARENT_OF.get(text) or _FAMILY_OF.get(text)
+        if not above:
+            if text in _FAMILY_SET:
+                break
+            above = _keyword_parent(text)
+            if not above:
+                break
+        if above in seen:
+            break
+        chain.append(above)
+        seen.add(above)
+        text = above
+    chain.reverse()
+    return chain
+
+
+def top_of(name) -> Optional[str]:
+    """The head *name* hangs under, or None when it hangs under nothing.
+
+    `top_of("deep house")` is "electronic" even though its PARENT is "house":
+    the facets and the genre browse bucket by head, and the middle step is
+    what the UI draws between them.
+    """
+    chain = path_of(name)
+    if not chain:
+        return None
+    head = chain[0]
+    return head if head in _FAMILY_SET else None
 
 
 _FAMILY_SET = frozenset(FAMILIES)

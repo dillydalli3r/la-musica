@@ -29,7 +29,7 @@ import re
 import threading
 from collections import Counter
 
-from mlo.genre_vocab import is_parent, parent_of
+from mlo.genre_vocab import is_parent, parent_of, top_of
 from mlo.genres import canonical, display_name, split_stored
 
 # What each signal is worth. Genre names the music, so it carries almost half;
@@ -122,13 +122,14 @@ def _genres(tags):
             folded = " ".join(str(known or name).split()).casefold()
             if not folded:
                 continue
-            (fams if is_parent(folded) else specs).add(folded)
-    if not fams:
-        for name in sorted(specs):
-            parent = parent_of(name)
-            if parent:
-                fams.add(parent.casefold())
-                break
+            specs.add(folded)
+            # The HEAD of every stored name, not a slot read off position: the
+            # tag holds specifics (mlo.genres), so the family a shelf groups by
+            # is derived here — a `deep house` track lands under electronic
+            # through house, and a track whose only genre IS a head keeps it.
+            head = top_of(name)
+            if head:
+                fams.add(head.casefold())
     return frozenset(specs), frozenset(fams)
 
 

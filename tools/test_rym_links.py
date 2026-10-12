@@ -1021,6 +1021,64 @@ assert rows[0]["level"] == "track", rows[0]
 assert any(u.endswith("/song/rihanna/sm") for u in fake.calls), fake.calls
 
 # ----------------------------------------------------------------------- #
+# The EDITION: a deluxe library against a standard-edition page
+# ----------------------------------------------------------------------- #
+# MEASURED 2026-10-11, the owner's own case: the library holds one pressing and
+# the page RYM (or MusicBrainz's own url relation) points at is another. The
+# shared tracks still answer; the bonus ones would silently fall back to the
+# release's own genres. So a page that covers less than `RYM_COVERAGE_MIN` of
+# the album's OWN titles is not trusted — the page's own version list is walked
+# (no search, no slug guess) and the edition that covers the album wins.
+def _page(rows, extra_href=""):
+    body = "".join(
+        f'<div class="tracklist_line"><span class="tracklist_num">{i}</span>'
+        f'<span class="tracklist_title">'
+        f'<a href="/song/gorillaz/{t.lower().replace(" ", "-")}">{t}</a>'
+        f"</span>lyrics 3:0{i}</div>"
+        for i, t in enumerate(rows, 1))
+    return ('<html><body><h1 class="album_title">Plastic Beach</h1>'
+            '<a href="/artist/gorillaz">Gorillaz</a>'
+            '<a href="/genre/electropop">Electropop</a>'
+            f"{extra_href}{body}</body></html>")
+
+
+_std = "/release/album/gorillaz/plastic_beach/"
+_dlx = "/release/album/gorillaz/plastic-beach-deluxe/"
+_ALBUM = ["Orchestral Intro", "Welcome to the World", "White Flag", "Bonus Cut"]
+fake = run({
+    _std: ok(_page(["Orchestral Intro", "Welcome to the World"],
+                   extra_href=f'<a href="{_dlx}">Deluxe Edition</a>')),
+    _dlx: ok(_page(["Orchestral Intro", "Welcome to the World",
+                    "White Flag", "Bonus Cut"])),
+    "/song/gorillaz/orchestral-intro": ok(_song_page("Cinematic Classical")),
+    "/song/gorillaz/bonus-cut": ok(_song_page("Electropop")),
+})
+_stated_titles = list(_ALBUM)
+got = intg.rym_genres("Gorillaz", "Plastic Beach", CFG, "",
+                      titles=_stated_titles)
+assert got, got
+assert got["source_url"].endswith(_dlx), got["source_url"]
+assert len(got["tracks"]) == 4, got["tracks"]
+assert [r["title"] for r in got["tracks"]] == _ALBUM, got["tracks"]
+# …and the bonus track's own page, reachable from the EDITION's rows, is what
+# answered for it once the tier ran (the chain's per-track read).
+assert fake.calls.count(f"{BASE}{_dlx}") == 1, fake.calls
+
+# A page that already covers the album costs no version walk at all.
+fake = run({_std: ok(_page(_ALBUM, extra_href=f'<a href="{_dlx}">x</a>'))})
+got = intg.rym_genres("Gorillaz", "Plastic Beach", CFG, "",
+                      titles=list(_ALBUM))
+assert got and len(got["tracks"]) == 4, got
+assert f"{BASE}{_dlx}" not in fake.calls, fake.calls
+# …and one that is a different release entirely is NOT read as this album: it
+# is still the answer when nothing better exists (the caller falls back), but
+# the coverage is what says so.
+assert intg._rym_coverage([{"title": "Orchestral Intro"}], _ALBUM) == 0.25
+assert intg._rym_coverage([], []) == 1.0, "no titles to compare -> trusted"
+assert intg._rym_coverage([{"title": "Bonus  Cut!"}],
+                          ["Bonus Cut"]) == 1.0, "titles fold for matching"
+
+# ----------------------------------------------------------------------- #
 # A browser ERROR DOCUMENT is not a page, and is not served from the cache
 # ----------------------------------------------------------------------- #
 # MEASURED 2026-10-11, on the owner's own library: the release page's cache

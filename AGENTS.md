@@ -194,6 +194,20 @@ When they do ask for one:
   bar whose controls do nothing. The app commands additionally need the manifest
   in `build.rs`, which is what gives them a permission to be granted at all, so
   its command list and `generate_handler!` must stay equal.
+- **GENRE holds the names a SOURCE stated; the level above them is derived,
+  never written.** `mlo.genre_vocab.path_of` walks `deep house` → `house` →
+  `electronic` (three levels, one node per name — a parent in one place and a
+  genre in another is the same node), `normalize_genres` drops the derived
+  parent slot older builds wrote and ADDS nothing, and grading's
+  `GENRE_STRUCTURE` reports the two defects that remain (a repeat, that old
+  slot). The genre chain is RYM (per TRACK, through the release page's own
+  `/song/` links) → MusicBrainz (per recording) → AOTY (album level ONLY: the
+  site publishes no per-track genre), a track is settled by a track-level
+  answer or the cap, and a RYM page is trusted only for the EDITION whose track
+  list covers the album's own titles. Web ratings run the same three sources
+  the other way — RYM → AOTY → MusicBrainz — and all three answer per track
+  (AOTY's own album rows are its per-track scores). See spec R37/R38/R38a/R93
+  and R358/R358b.
 - **Writers fill, they do not overwrite** — except the four families an import
   decides (lyrics, genre, advisory, embedded cover), which
   `server/imports.drop_arrived_values` clears first so the import's values land.

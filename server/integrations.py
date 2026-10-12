@@ -62,7 +62,7 @@ from mlo.naming import is_derived_type
 # mean another ("new wave" — a rock movement the keyword table's "wave" rule
 # read as electronic). mlo.genre_vocab imports nothing from server/, so this is
 # no cycle, and it is the same vocabulary the writers and the grader use.
-from mlo.genre_vocab import parent_of as _genre_family
+from mlo.genre_vocab import parent_of as _genre_family, top_of as _genre_head
 # The script reading the alias rule is built on (mlo.lyrics_xlit): whether a
 # name is written in non-Latin script at all (`non_latin_ratio` /
 # `dominant_script`, the pair that decides a lyric transliteration) and the
@@ -2354,8 +2354,8 @@ def genre_cascade(release, limit=None):
     MusicBrainz's own spelling) and capped at `limit` per track. limit=None
     imports everything. Returns per-track genres plus the fallback chain used
     for each track. The caller that writes these to a file canonicalizes them
-    (`_write_album_genres` in server.main), so the family slot and the cap are
-    applied once, by the one writer."""
+    (`_write_album_genres` in server.main), so the cap and the hierarchy are
+    applied once: the tag keeps the names, the levels are derived."""
     rg = release.get("release_group_id")
     rg_genres = release_group_genres(rg) if rg else []
     artist_genres_all = []
@@ -3925,7 +3925,114 @@ def _rym_album_answer(html, url):
     return out
 
 
-def _rym_live_album_answer(artist, album, cfg, album_url=""):
+# How much of an album's own track list a RYM page has to cover before it is
+# read as THAT release rather than as another pressing of it. A deluxe edition
+# in the library against a standard-edition page lands around 16/20 (0.8) for
+# the shared tracks; a different release entirely lands far below this.
+RYM_COVERAGE_MIN = 0.6
+
+_RYM_RELEASE_HREF_RE = re.compile(r'href="(/release/album/[^"?]+)"', re.I)
+
+
+def _rym_fold_title(text):
+    """A title folded for matching: case, punctuation and spacing gone."""
+    return re.sub(r"[^a-z0-9]+", "", str(text or "").casefold())
+
+
+def _rym_coverage(rows, titles):
+    """How much of *titles* a page's own track list covers, 0..1.
+
+    1.0 when there is nothing to compare against (the Auto-tagging hook and
+    the Sources test pass no titles), so a caller that cannot say never
+    triggers a version walk.
+    """
+    want = {_rym_fold_title(t) for t in (titles or []) if str(t or "").strip()}
+    if not want:
+        return 1.0
+    have = {_rym_fold_title(r.get("title")) for r in (rows or [])}
+    return len(want & have) / len(want)
+
+
+def _rym_version_paths(html, path, artist, album):
+    """The OTHER editions of the same release linked by its own page.
+
+    MEASURED 2026-10-11 on the owner's own album: the `Plastic Beach` release
+    page links 36 `/release/album/gorillaz/plastic-beach-N/` URLs — RYM's own
+    per-edition pages, deluxe pressings included — beside the page's other
+    releases. Only URLs that name the SAME artist segment and whose album slug
+    starts with this release's own slug stem are kept (that is what an edition
+    of the same release is), the current page is excluded, and the list is
+    capped: each one costs a request, and RYM lists the closest editions first.
+    """
+    if not html:
+        return []
+    # RYM spells a release slug with UNDERSCORES in some paths and dashes in
+    # others (the same release: `/release/album/the_beatles/abbey_road/` vs the
+    # legacy `abbey-road`), and a page fetched under one form links its own
+    # editions under the other — so the stem compare folds the two separators,
+    # or half the version lists would filter themselves out.
+    stem = str(path or "").rsplit("/", 2)[-2].replace("_", "-")
+    if not stem:
+        return []
+    a_seg = _rym_slug(artist)
+    out, seen = [], {str(path)}
+    for url in _RYM_RELEASE_HREF_RE.findall(html):
+        if url in seen:
+            continue
+        parts = [p for p in url.split("/") if p]
+        if len(parts) != 4 or parts[0] != "release" or parts[1] != "album":
+            continue
+        if parts[2] != a_seg or not parts[3].replace("_", "-").startswith(stem):
+            continue
+        seen.add(url)
+        out.append(url)
+        if len(out) >= 4:
+            break
+    return out
+
+
+def _rym_best_version(html, path, got, cfg, artist, album, titles):
+    """The edition of this release that best covers *titles*, or *got*.
+
+    A library often holds the DELUXE pressing while the page RYM (or
+    MusicBrainz's own URL relation) points at is the standard one: the shared
+    tracks still answer, and the bonus ones would fall back to the release's
+    own genres. When the page found covers less than `RYM_COVERAGE_MIN` of the
+    album's titles, the page's OWN version list is walked — no search, no
+    guess, every candidate verified the same way — and the best-scoring
+    edition wins. A page that is already a good match costs nothing: this runs
+    only when the coverage is poor, and it never replaces the answer with a
+    worse one.
+    """
+    if not titles or _rym_coverage(got.get("tracks") or [], titles) >= RYM_COVERAGE_MIN:
+        return got
+    best, best_score = got, _rym_coverage(got.get("tracks") or [], titles)
+    for url in _rym_version_paths(html, path, artist, album):
+        if _rym_expired_or_blocked(cfg):
+            break
+        page = _rym_verified(url, cfg, artist, album)
+        if not page:
+            continue
+        alt = _rym_album_answer(page, url)
+        if not alt:
+            continue
+        score = _rym_coverage(alt.get("tracks") or [], titles)
+        if score > best_score:
+            best, best_score = alt, score
+        if best_score >= RYM_COVERAGE_MIN:
+            break
+    return best
+
+
+def _rym_expired_or_blocked(cfg):
+    """Whether RYM has refused this run — the one condition a walk checks."""
+    try:
+        return bool(_rym_blocked(cfg))
+    except Exception:
+        return False
+
+
+def _rym_live_album_answer(artist, album, cfg, album_url="", titles=None):
     """The three LIVE routes of `rym_genres`, best first, or None.
 
     The genre chain's only routes: there is no archived fallback behind them
@@ -3961,6 +4068,8 @@ def _rym_live_album_answer(artist, album, cfg, album_url=""):
         if html:
             got = _rym_album_answer(html, path)
             if got:
+                got = _rym_best_version(html, path, got, cfg, artist, album,
+                                        titles)
                 _rym_track_genres(got.get("tracks") or [], cfg)
                 return got
     # 2) RYM's own release slugs (see `_rym_release_paths` for the order).
@@ -3970,6 +4079,8 @@ def _rym_live_album_answer(artist, album, cfg, album_url=""):
             if html:
                 got = _rym_album_answer(html, url)
                 if got:
+                    got = _rym_best_version(html, url, got, cfg, artist, album,
+                                            titles)
                     _rym_track_genres(got.get("tracks") or [], cfg)
                     return got
             if _rym_expired(started) or _rym_blocked(cfg):
@@ -3992,6 +4103,8 @@ def _rym_live_album_answer(artist, album, cfg, album_url=""):
             continue
         got = _rym_album_answer(page, rel_url)
         if got:
+            got = _rym_best_version(page, rel_url, got, cfg, artist, album,
+                                    titles)
             _rym_track_genres(got.get("tracks") or [], cfg)
         if not got:
             continue
@@ -4000,7 +4113,7 @@ def _rym_live_album_answer(artist, album, cfg, album_url=""):
     return None
 
 
-def rym_genres(artist, album, cfg=None, album_url=""):
+def rym_genres(artist, album, cfg=None, album_url="", titles=None):
     """RateYourMusic genres for an album, or None when RYM cannot answer.
 
     The LIVE release page decides it (`_rym_live_album_answer` — the page
@@ -4011,6 +4124,13 @@ def rym_genres(artist, album, cfg=None, album_url=""):
     is answered by the solver (`cf_solver_url`) or reported by the source's own
     sentence, never filled from a capture.
 
+    *titles* are the album's OWN track titles (from the release payload or the
+    files), which is what lets the EDITION be checked rather than trusted: a
+    library holding the deluxe pressing against a standard-edition page walks
+    that page's own version list and reads the edition that covers the album
+    (see `_rym_best_version`). Without titles the first verified page answers,
+    exactly as before.
+
     A user-initiated check (the Sources panel's Test) clears the refusal latch
     first — `_rym_clear_block` — so the saved cookie is really put to RYM
     instead of being answered "blocked" from an earlier run.
@@ -4019,7 +4139,7 @@ def rym_genres(artist, album, cfg=None, album_url=""):
     album = str(album or "").strip()
     if not artist or not album:
         return None
-    return _rym_live_album_answer(artist, album, cfg, album_url)
+    return _rym_live_album_answer(artist, album, cfg, album_url, titles)
 
 
 def rym_artist_genres(artist, cfg=None):
@@ -5163,22 +5283,29 @@ def bandcamp_album(artist="", album="", titles=None):
 # one answers at the FINEST level it has and falls back track → album → artist,
 # and every one of them is read LIVE (no Internet Archive):
 #
-#   a. rateyourmusic  the release page — per TRACK where the page states one,
-#                     else album, then the artist page. FIRST by the owner's
-#                     own requirement: its curated genre + descriptor
-#                     classification is the one they want. Live pages sit
-#                     behind Cloudflare, so they need a cleared `rym_cookie`
-#                     (or a solver, `cf_solver_url`); a refused page is
-#                     reported honestly — see RYM_BASE and `_rym_note`.
-#   b. albumoftheyear the album page's genre row for the release, plus each
-#                     track's own genre from its AOTY song page, then the
-#                     artist page. SECOND by the owner's requirement. Also
-#                     Cloudflare-fronted: `aoty_cookie` (or the solver).
-#   c. musicbrainz    recording → work → release → release group → artist.
-#                     Curated, keyless, and the app's identity anchor. THIRD:
-#                     it is the floor that answers when the two scraped
-#                     sources cannot, and it never meets a challenge.
-GENRE_SOURCES = ["rateyourmusic", "albumoftheyear", "musicbrainz"]
+#   a. rateyourmusic  the release page — per TRACK where its rows link a
+#                     `/song/…` page that states the track's own genre, that
+#                     page first; else the release's own list; then the artist
+#                     page. FIRST by the owner's requirement: its curated
+#                     genre + descriptor classification is the one they want,
+#                     and it is the only one of the three that classifies a
+#                     TRACK. Live pages sit behind Cloudflare, so they need a
+#                     cleared `rym_cookie` (or a solver, `cf_solver_url`) or
+#                     the browser route; a refused page is reported honestly —
+#                     see RYM_BASE and `_rym_note`.
+#   b. musicbrainz    recording → work → release → release group → artist.
+#                     Curated, keyless, and the app's identity anchor. SECOND
+#                     by the owner's requirement: it answers PER RECORDING,
+#                     so it is the real per-track fallback when RYM cannot be
+#                     read, and it never meets a challenge.
+#   c. albumoftheyear the album page's genre row for the release, then the
+#                     artist page. LAST because the site publishes NO
+#                     per-track genre at all (a song page carries a score and
+#                     nothing else — see `_genre_source_answers`), so it is
+#                     the album-level floor under the other two rather than a
+#                     track answer, and a track answered by it is marked
+#                     `level: album` like every other wide answer.
+GENRE_SOURCES = ["rateyourmusic", "musicbrainz", "albumoftheyear"]
 
 # How long the WHOLE source loop of a synchronous genre import may spend.
 # MEASURED, 2026-10-10: with no cleared cookie and a solver that cannot pass
@@ -5338,13 +5465,12 @@ def _genre_complete(names, limit):
     """Whether *names* fill every slot the writer would write.
 
     This is the chain's one notion of "the answer is already there", and it is
-    judged by the policy the WRITERS apply (`mlo.genres.normalize_genres`),
-    not by a second rule of the chain's own: `limit` names, and — past a
-    single slot — the family in the first one. At `mb_genre_count = 2` that is
-    exactly "the derived family plus one specific genre", which is what makes
-    a single good answer enough; a name with no family in the vocabulary
-    (an unrecognised one, or a RYM descriptor like "Concept Album") cannot
-    complete a track and keeps the chain going.
+    judged by the policy the WRITERS apply (`mlo.genres.normalize_genres`):
+    `limit` stored names. The derived family is gone from the list, so it can
+    no longer stand in for a name a source never stated — at
+    `mb_genre_count = 2` a track needs two genres (or one, from a source that
+    answers at TRACK level — see `tracks_full`), where the old rule accepted
+    one genre plus its own derivable head.
     """
     if not names:
         return False
@@ -5353,15 +5479,7 @@ def _genre_complete(names, limit):
         got = normalize_genres(names, limit)
     except Exception:
         return False
-    if len(got) < max(1, int(limit)):
-        return False
-    if int(limit) <= 1:
-        return True
-    try:
-        from mlo.genre_vocab import is_parent
-        return any(is_parent(n) for n in got)
-    except Exception:
-        return False
+    return len(got) >= max(1, int(limit))
 
 
 def _genre_needs_ai(genres, limit, picks):
@@ -5897,7 +6015,13 @@ def _genre_source_answers(source, artist, album, release, cfg, tracks):
                                    (release or {}).get("release_group_id")) or {}
         except Exception:
             stated = {}
-        data = (rym_genres(artist, album, cfg, stated.get("album") or "")
+        # The album's own titles, off the release payload: what the page's
+        # own track list is scored against, so a deluxe library against a
+        # standard-edition page walks to the edition that matches (see
+        # `_rym_best_version`).
+        titles = [t.get("title") for t in (tracks or []) if t.get("title")]
+        data = (rym_genres(artist, album, cfg, stated.get("album") or "",
+                           titles=titles)
                 or rym_artist_genres(artist, cfg))
         if not data:
             return {}
@@ -6295,7 +6419,21 @@ def _genre_chain_names(artist="", album="", release=None, limit=None,
         """
         if not tracks:
             return _genre_complete(merge(None)[0], limit)
-        return all(_genre_complete(merge(t)[0], limit) for t in tracks)
+
+        def settled(track):
+            """One track: the cap is filled, OR a source answered ITS OWN page.
+
+            A track-level answer is the strongest thing any source can say
+            about a track, so it ends the search by itself — the cap is a
+            maximum, not a quota (spec R37: one good genre is a complete
+            answer). Album- and artist-level answers do NOT: they are the
+            release's classification, and stopping on one is what kept the
+            per-track tiers below from ever being asked.
+            """
+            genres, _sources, level, _picks, _dropped = merge(track)
+            return _genre_complete(genres, limit) or level == "track"
+
+        return all(settled(t) for t in tracks)
 
     answers_by_source, per_source, per_source_counts = {}, {}, {}
     notes, skipped, asked = {}, {}, []
@@ -6509,17 +6647,18 @@ OTHER_CATEGORY = "Other"
 def genre_category(name):
     """The fixed bucket a genre name belongs to (never None).
 
-    The name's FAMILY is bucketed first (mlo.genre_vocab.parent_of), so a genre
-    is filed by what it is rather than by how its spelling happens to read; a
-    name the vocabulary cannot place, or a family this table has no keyword for,
+    The name's HEAD is bucketed first (mlo.genre_vocab.top_of — the top of its
+    chain, so `deep house` files as Electronic through House), because a genre
+    is filed by what it IS rather than by how its spelling happens to read; a
+    name the vocabulary cannot place, or a head this table has no keyword for,
     falls back to the keyword match on the name itself. No I/O and nothing
-    allocated: one family lookup plus at most two passes over these nine keyword
+    allocated: one chain walk plus at most two passes over these nine keyword
     tuples per call, and it runs once per distinct library genre.
     """
     text = str(name or "").strip().lower()
     if not text:
         return OTHER_CATEGORY
-    for candidate in (_genre_family(name), text):
+    for candidate in (_genre_head(name), text):
         if not candidate:
             continue
         for category, keys in GENRE_CATEGORIES:

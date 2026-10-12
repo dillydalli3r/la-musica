@@ -5001,6 +5001,119 @@ def _mb_credit_rows(fetch, mbid):
         raise HTTPException(502, f"MusicBrainz credits unavailable: {e}")
 
 
+# --------------------------------------------------------------------------- #
+# The FILE's own MusicBrainz-derived tags -> credit rows
+# --------------------------------------------------------------------------- #
+# Every name below is one a MusicBrainz tagger (Picard/beets) writes onto the
+# file itself, so a track's panel can show the roles and ids the FILE carries
+# even when MusicBrainz cannot be reached. Values arrive "; "-joined from
+# `AudioFile.all_tags` (a repeated Vorbis comment / ID3 list is joined with
+# "; "), which is what `_split_tag_values` undoes. PERFORMER is separate: its
+# Vorbis shape carries the instrument in parentheses ("Name (instrument)").
+_FILE_CREDIT_TAGS = (
+    ("PRODUCER", "producer"), ("MIXER", "mixer"), ("ENGINEER", "engineer"),
+    ("ARRANGER", "arranger"), ("WRITER", "writer"), ("LYRICIST", "lyricist"),
+    ("COMPOSER", "composer"), ("CONDUCTOR", "conductor"),
+    ("DJMIXER", "djmixer"), ("REMIXER", "remixer"), ("PUBLISHER", "publisher"),
+    ("DIRECTOR", "director"),   # music videos — the old tag fallback's role
+)
+_FILE_FACT_TAGS = (
+    ("LABEL", "label"), ("CATALOGNUMBER", "catalog number"),
+    ("BARCODE", "barcode"), ("ISRC", "isrc"), ("WORK", "work"),
+    ("RELEASESTATUS", "release status"), ("RELEASETYPE", "release type"),
+    ("ORIGINALDATE", "original date"),
+)
+_FILE_ID_TAGS = (
+    ("MUSICBRAINZ_TRACKID", "musicbrainz recording id"),
+    ("MUSICBRAINZ_ALBUMID", "musicbrainz release id"),
+    ("MUSICBRAINZ_ARTISTID", "musicbrainz artist id"),
+    ("MUSICBRAINZ_ALBUMARTISTID", "musicbrainz release artist id"),
+    ("MUSICBRAINZ_RELEASEGROUPID", "musicbrainz release group id"),
+    ("MUSICBRAINZ_WORKID", "musicbrainz work id"),
+    ("MUSICBRAINZ_RELEASETRACKID", "musicbrainz track id"),
+    ("MUSICBRAINZ_COMPOSERID", "musicbrainz composer id"),
+    ("MUSICBRAINZ_ORIGINALALBUMID", "musicbrainz original release id"),
+    ("MUSICBRAINZ_ORIGINALARTISTID", "musicbrainz original artist id"),
+    ("MUSICBRAINZ_DISCID", "musicbrainz disc id"),
+    ("MUSICBRAINZ_TRMID", "musicbrainz trm id"),
+    ("MUSICBRAINZ_ALBUMTYPE", "musicbrainz album type"),
+    ("MUSICBRAINZ_ALBUMSTATUS", "musicbrainz album status"),
+)
+
+
+def _split_tag_values(value):
+    """The pieces of one tag value all_tags() joined with "; " (blank dropped).
+
+    A single value with no "; " comes back as itself; an empty/absent tag as
+    []."""
+    return [p.strip() for p in str(value or "").split(";") if p.strip()]
+
+
+def _file_credit_rows(tags):
+    """Credit/fact rows read from ONE file's own MusicBrainz-derived tags.
+
+    `tags` is a raw all_tags() dump (keys already canonicalised to PERFORMER /
+    COMPOSER / MUSICBRAINZ_TRACKID … by the container). Each row is
+    `{role, attributes, artist, mbid, source="file"}`; `source` is the one key
+    the live MusicBrainz rows do NOT carry (their source is the reply's own
+    `source: "musicbrainz"` badge), so the panel can mark a file-sourced row.
+    Nothing here touches the network — which is exactly why the route can
+    always answer with these rows even when MusicBrainz is down.
+    """
+    if not isinstance(tags, dict):
+        return []
+    by_key = {str(k).strip().upper(): v for k, v in tags.items()}
+    rows = []
+
+    def add(role, name, attributes=()):
+        name = str(name or "").strip()
+        if name:
+            rows.append({"role": role, "attributes": list(attributes),
+                         "artist": name, "mbid": "", "source": "file"})
+
+    # PERFORMER: one Vorbis value per player, the instrument in parentheses
+    # (Picard's own shape), so split it back like credit_rows_from_tags does.
+    for part in _split_tag_values(by_key.get("PERFORMER")):
+        m = re.match(r"^(.*?)\s*\(([^()]*)\)$", part)
+        add("performer", m.group(1) if m else part,
+            [m.group(2).strip()] if m else [])
+    for tag, role in _FILE_CREDIT_TAGS + _FILE_FACT_TAGS + _FILE_ID_TAGS:
+        for value in _split_tag_values(by_key.get(tag)):
+            add(role, value)
+    return rows
+
+
+def _credit_row_key(row):
+    """What makes two credit rows the same: role, person and attributes. The
+    MBID is deliberately NOT part of it, so a file row naming the same person
+    as a live MusicBrainz row is dropped in favour of the live row (which
+    carries the person's MBID)."""
+    return (str(row.get("role") or "").strip().lower(),
+            str(row.get("artist") or "").strip().lower(),
+            tuple(str(a).strip() for a in row.get("attributes") or []))
+
+
+def _merge_credit_rows(live_rows, file_rows):
+    """Live MusicBrainz rows first, then every FILE row the live set does not
+    already state. Live rows keep their `{role, attributes, artist, mbid}`
+    shape; file rows carry `source: "file"`."""
+    out, seen = [], set()
+    for row in live_rows or []:
+        key = _credit_row_key(row)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(dict(row))
+    for row in file_rows or []:
+        key = _credit_row_key(row)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(dict(row))
+    out.sort(key=lambda r: (r["role"], r["artist"].lower()))
+    return out
+
+
 @app.get("/api/credits")
 def credits(path: str = Query(""), album: str = Query("")):
     """Credits / performers for one track (`path`) or a whole album (`album`).
@@ -5017,6 +5130,18 @@ def credits(path: str = Query(""), album: str = Query("")):
     relations, each recording's AND each of their works' are merged (a work
     states the composer / lyricist / writer).
 
+    On the FILE branch (`path`) the file's OWN MusicBrainz-derived tags are
+    merged in BESIDE the live rows: the roles/ids a MusicBrainz tagger wrote
+    there (PERFORMER, PRODUCER … PUBLISHER, LABEL, CATALOGNUMBER, BARCODE,
+    ISRC, WORK, the MUSICBRAINZ_* ids, RELEASESTATUS/TYPE, ORIGINALDATE), each
+    file-sourced row carrying `source: "file"` and de-duplicated against the
+    live rows (a file credit naming the same role/person/instrument is dropped
+    for the live row, which has the MBID). A file that cannot be read — and a
+    MusicBrainz that cannot answer — is therefore still a 200: the file rows
+    are read locally and the live lookup is best-effort. The `album` branch
+    keeps its own contract unchanged (its live release request still reports
+    MB's reason as a 502).
+
     The reply also carries an `identity` block: title, artist, album, album
     artist, label, catalog number, barcode, dates, country, release type,
     medium, every MusicBrainz id it resolved and the path that was asked for,
@@ -5024,7 +5149,8 @@ def credits(path: str = Query(""), album: str = Query("")):
     as its header — the title is the heading and the raw path only rides along
     at the bottom — and the block is always present ("" where the files state
     nothing), which is why an empty `rows` is an answer here rather than a 404.
-    Rows are `{role, attributes[], artist, mbid}`.
+    Rows are `{role, attributes[], artist, mbid}`; a file-sourced row adds
+    `source: "file"`.
     """
     folder = _music_folder()
     source = "musicbrainz"
@@ -5032,11 +5158,20 @@ def credits(path: str = Query(""), album: str = Query("")):
     identity = intg.identity_from_tags({})
     if path:
         p = os.path.normpath(mbresolve.resolve_track(path) or path)
-        if not os.path.isfile(p):
-            raise HTTPException(404, "file not found")
         if not _in_music_folder(p, folder):
             raise HTTPException(400, "file outside music folder")
-        tags = tagcache.read_track(p, None)[0] or {}
+        # A file the route cannot read is an EMPTY answer, not an error: the
+        # panel was opened on a track the library lists, and a missing/locked/
+        # never-scanned path carries no tags — 200 with whatever the file DOES
+        # state beats a 404 (or a 500) for a file the rest of the app still
+        # shows.
+        tags = {}
+        try:
+            if os.path.isfile(p):
+                tags = tagcache.read_track(p, None)[0] or {}
+        except Exception:
+            tags = {}
+        file_rows = _file_credit_rows(tags)
         identity = intg.identity_from_tags(tags, p)
         artist = str(tags.get("ARTIST") or tags.get("ALBUMARTIST") or "").strip()
         album_name = (str(tags.get("ALBUM") or "").strip()
@@ -5046,10 +5181,18 @@ def credits(path: str = Query(""), album: str = Query("")):
         # already carries as `track_mbid` — so the header never shows the tag's
         # spelling beside the route's answer.
         identity["track_mbid"] = identity["recording_mbid"] = track_mbid
+        live_rows = []
         if track_mbid:
-            rows = _mb_credit_rows(intg.recording_credits, track_mbid)
-        if not rows:
-            source, rows = "tags", intg.credit_rows_from_tags(tags)
+            try:
+                live_rows = _mb_credit_rows(intg.recording_credits, track_mbid)
+            except HTTPException:
+                # MusicBrainz unavailable: the file's own tags are still an
+                # answer, so a dead or throttled MB never turns a credits
+                # request into an error while the file states its own data.
+                live_rows = []
+        rows = _merge_credit_rows(live_rows, file_rows)
+        if not live_rows:
+            source = "tags"
     elif album:
         d = os.path.normpath(mbresolve.resolve_album(album) or album)
         if not os.path.isdir(d):
@@ -5084,7 +5227,13 @@ def credits(path: str = Query(""), album: str = Query("")):
                 rows += intg.credit_rows_from_tags(t)
     else:
         raise HTTPException(404, "path or album is required")
-    rows = intg.tidy_credit_rows(rows)
+    if not path:
+        # The album branch (which never carries file rows) still normalises
+        # and de-duplicates its rows here — the tag fallback appends one tidied
+        # list per file, so the union may repeat a credit. The FILE branch has
+        # already merged+tidied, and a second tidy would strip the per-row
+        # `source` the panel reads.
+        rows = intg.tidy_credit_rows(rows)
     # An empty row list is an ANSWER, not a 404: the identity block names the
     # file or release from the tags themselves, so the panel always has the
     # header the report was about to draw — a track MusicBrainz states no
@@ -5729,19 +5878,16 @@ def _run_genre_chain(paths, limit=None, progress=None, sources=None, staged=Fals
     """Import GENRE from EVERY configured genre source, per track.
 
     The chain runs in the order of `genre_sources` (RateYourMusic →
-    Discogs/Last.fm/TheAudioDB → Deezer/iTunes → MusicBrainz), merges
-    what each source answers, dedupes case-insensitively and caps them at
-    `mb_genre_count` — the requested `limit` (the wizard's per-run "Max
-    genres") may only LOWER it, through the one helper that reads the setting
-    (`mlo.autotag.genre_count`), so a per-run control can never write more
-    genres than the user configured.
+    MusicBrainz → Album of the Year), merges what each source answers, dedupes
+    case-insensitively and caps them at `mb_genre_count` — the requested
+    `limit` (the wizard's per-run "Max genres") may only LOWER it, through the
+    one helper that reads the setting (`mlo.autotag.genre_count`), so a
+    per-run control can never write more genres than the user configured.
 
-    It STOPS asking once every track is full: at `mb_genre_count = 2` one good
-    specific genre plus its derived family is the whole answer, and the sources
-    below the one that supplied it are not asked at all (`asked`,
+    It STOPS asking once every track is settled: its cap of specific names is
+    filled, or a source answered that track's OWN page (`asked`,
     `stopped_after`). A source that cannot answer is skipped before any request
-    — unconfigured (Discogs/Last.fm/Spotify), known-blocked (RateYourMusic) —
-    and named in `skipped`. MusicBrainz
+    — known-blocked (RateYourMusic) — and named in `skipped`. MusicBrainz
     recording genres refine each track when the album names a release.
 
     The report is what the wizard and the Settings panel render: `per_source`
@@ -5874,6 +6020,21 @@ def genres_import(req: GenreChainImportRequest):
                             staged=req.staged)
 
 
+def _genre_path(name):
+    """The display form of a genre's derived hierarchy: "Pop › Synth-Pop".
+
+    One name when nothing is known above it (a head, or a name outside the
+    vocabulary) — the view never invents a level. `mlo.genre_vocab.path_of`
+    is the single place the walk lives.
+    """
+    try:
+        from mlo.genre_vocab import path_of
+        from mlo.genres import display_name
+        return " › ".join(display_name(n) for n in path_of(name))
+    except Exception:
+        return ""
+
+
 @app.get("/api/genres/facets")
 def genres_facets():
     """GENRE tags across the library, counted and bucketed.
@@ -5885,7 +6046,11 @@ def genres_facets():
     exactly one bucket, so the counts stay honest. A name is reported in
     MusicBrainz's own spelling (`mlo.genres.canonical`) and a stored value
     another tagger joined ("Rock / Shoegaze") counts as the two genres it
-    names, exactly as the writers and the grader read it."""
+    names, exactly as the writers and the grader read it. Every row also
+    carries `path`: the DERIVED hierarchy above the name, head first
+    ("Electronic › House › Deep House") — the tag stores names, and this is
+    where each one sits, computed by `mlo.genre_vocab.path_of` rather than
+    read out of any file."""
     from mlo.genres import canonical, split_stored
     from server import library as lib_mod
 
@@ -5902,7 +6067,7 @@ def genres_facets():
                 for piece in split_stored(raw):
                     text = canonical(piece) or piece
                     counts[text] = counts.get(text, 0) + 1
-    genres = [{"name": n, "count": c}
+    genres = [{"name": n, "count": c, "path": _genre_path(n)}
               for n, c in sorted(counts.items(), key=lambda x: (-x[1], x[0].lower()))]
     buckets = {}
     for row in genres:

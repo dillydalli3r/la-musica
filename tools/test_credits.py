@@ -20,9 +20,16 @@ mb_get_cached and tagcache.read_track; no socket is opened):
   * every reply carries an `identity` object (the album/track's own tags plus
     the MBIDs the route resolved) whose unknown fields are `""` — never
     absent, never `None`;
-  * every row is exactly `{role, attributes, artist, mbid}`;
-  * MusicBrainz refusing is 502 carrying MB's own reason — never a 500 — and
-    a path outside the music folder is 400, neither `path` nor `album` 404.
+  * a live row is exactly `{role, attributes, artist, mbid}`;
+  * a FILE row — one read from the track's own MusicBrainz-derived tags — sits
+    beside the live rows, carries `source: "file"`, and is de-duplicated
+    against them (a file credit naming the same role/person/instrument is
+    dropped for the live row, which has the MBID);
+  * on the FILE branch a dead MusicBrainz and an unreadable/missing file are
+    both a 200 that still reports the file's own rows — never a 500;
+  * the ALBUM branch keeps its contract: MusicBrainz refusing is 502 carrying
+    MB's own reason;
+  * a path outside the music folder is 400, neither `path` nor `album` 404.
 
 Run:  python tools/test_credits.py
 """
@@ -108,6 +115,16 @@ FALLBACK = track(TAGS_ONLY_ALBUM, "01 - tagged.flac", {
 BARE = track(BARE_ALBUM, "01 - bare.flac", {
     "ARTIST": "Bare Artist", "ALBUM": "Bare Album", "TITLE": "Bare One"})
 LOOSE = track(OUTSIDE, "loose.flac", {})
+# A file whose OWN tags carry the MusicBrainz vocabulary (roles, ids, the
+# release facts), so the FILE rows can be told apart from the live ones and
+# de-duplicated against them. Carol appears BOTH here (PERFORMER) and in the
+# live recording relations, so the dedupe is exercised by name.
+FR_MBID = "11112222-3333-4444-5555-666677778888"
+FR = track(ALBUM, "03 - file rows.flac", dict(
+    ALBUM_TAGS, TITLE="Three", MUSICBRAINZ_TRACKID=FR_MBID,
+    PERFORMER="Carol (lead vocals); Dave (double bass)",
+    PRODUCER="Alice", COMPOSER="Frank", WORK="Credits Song",
+    ISRC="USRC17607839"))
 
 _real_read_track = tagcache.read_track
 tagcache.read_track = \
@@ -352,6 +369,12 @@ MB_ANSWER[f"recording/{TRACK_MBID}"] = {
                   work("w-1", "Credits Song", WORK_RELATIONS)]}
 TAGS[T1]["MUSICBRAINZ_TRACKID"] = TRACK_MBID
 
+# the file-row fixture's live recording: Carol is stated by BOTH the file
+# (PERFORMER) and here, so the merge must keep her once — the live row.
+MB_ANSWER[f"recording/{FR_MBID}"] = {
+    "relations": [credit("c-1", "Carol", "performer", ["lead vocals"]),
+                  credit("b-1", "Bob", "engineer")]}
+
 
 def test_track_recording_request():
     MB_CALLS.clear()
@@ -415,11 +438,12 @@ def test_tag_fallback_no_request():
     assert body["source"] == "tags", body
     assert "cached" not in body, body
     assert body["track_mbid"] == "" and "release_mbid" not in body, body
-    # Vorbis' "Name (instrument)" comes back apart: artist + attribute
+    # Vorbis' "Name (instrument)" comes back apart: artist + attribute — and
+    # every row here is FILE-sourced, so each carries `source: "file"`.
     assert {"role": "performer", "attributes": ["double bass"],
-            "artist": "Dave", "mbid": ""} in body["rows"], body
+            "artist": "Dave", "mbid": "", "source": "file"} in body["rows"], body
     assert {"role": "composer", "attributes": [], "artist": "Eve",
-            "mbid": ""} in body["rows"], body
+            "mbid": "", "source": "file"} in body["rows"], body
 
 
 def test_identity_offline_for_tag_only_track():
@@ -456,6 +480,81 @@ def test_identity_offline_for_tag_only_album():
     assert [ident[k] for k in ("track_mbid", "release_mbid",
                                "release_group_mbid", "artist_mbid",
                                "recording_mbid")] == [""] * 5, ident
+
+
+# --------------------------------------------------------------------------- #
+# file rows: the track's own MusicBrainz tags beside the live rows
+# --------------------------------------------------------------------------- #
+def test_file_rows_beside_live_rows():
+    MB_CALLS.clear()
+    body = get(path=slash(FR)).json()
+    assert body["source"] == "musicbrainz", body
+    assert MB_CALLS == [f"recording/{FR_MBID}"], MB_CALLS
+    rows = body["rows"]
+    # live rows keep the 4-key shape (their provenance is the reply's source)…
+    assert {"role": "engineer", "attributes": [], "artist": "Bob",
+            "mbid": "b-1"} in rows, rows
+    # …and every FILE row carries the source label
+    assert {"role": "producer", "attributes": [], "artist": "Alice",
+            "mbid": "", "source": "file"} in rows, rows
+    assert {"role": "performer", "attributes": ["double bass"],
+            "artist": "Dave", "mbid": "", "source": "file"} in rows, rows
+    assert {"role": "composer", "attributes": [], "artist": "Frank",
+            "mbid": "", "source": "file"} in rows, rows
+    assert {"role": "work", "attributes": [], "artist": "Credits Song",
+            "mbid": "", "source": "file"} in rows, rows
+    # the file's ids / release facts are rows too, labelled file
+    assert {"role": "musicbrainz recording id", "attributes": [],
+            "artist": FR_MBID, "mbid": "", "source": "file"} in rows, rows
+    assert {"role": "musicbrainz release id", "attributes": [],
+            "artist": REL_MBID, "mbid": "", "source": "file"} in rows, rows
+    assert {"role": "label", "attributes": [], "artist": "Credits Label",
+            "mbid": "", "source": "file"} in rows, rows
+    assert {"role": "catalog number", "attributes": [], "artist": "CRED-001",
+            "mbid": "", "source": "file"} in rows, rows
+    assert {"role": "barcode", "attributes": [], "artist": "0123456789012",
+            "mbid": "", "source": "file"} in rows, rows
+    assert {"role": "release type", "attributes": [], "artist": "Album",
+            "mbid": "", "source": "file"} in rows, rows
+    assert {"role": "original date", "attributes": [], "artist": "1990-05-02",
+            "mbid": "", "source": "file"} in rows, rows
+    assert {"role": "isrc", "attributes": [], "artist": "USRC17607839",
+            "mbid": "", "source": "file"} in rows, rows
+
+
+def test_file_rows_deduped_against_live():
+    rows = get(path=slash(FR)).json()["rows"]
+    carols = [r for r in rows if r["artist"] == "Carol"]
+    assert carols == [{"role": "performer", "attributes": ["lead vocals"],
+                       "artist": "Carol", "mbid": "c-1"}], carols
+
+
+def test_dead_mb_on_file_still_200_with_file_rows():
+    MB_ANSWER[f"recording/{FR_MBID}"] = intg.MusicBrainzError(
+        "MusicBrainz 503 Service Unavailable after 5 attempts")
+    try:
+        r = get(path=slash(FR))
+    finally:
+        MB_ANSWER[f"recording/{FR_MBID}"] = {
+            "relations": [credit("c-1", "Carol", "performer", ["lead vocals"]),
+                          credit("b-1", "Bob", "engineer")]}
+    assert r.status_code == 200, (r.status_code, r.text)
+    body = r.json()
+    assert body["source"] == "tags", body
+    # the file's own rows are still there…
+    assert {"role": "producer", "attributes": [], "artist": "Alice",
+            "mbid": "", "source": "file"} in body["rows"], body
+    # …and Carol survives as the FILE's PERFORMER (no live row to win)
+    assert {"role": "performer", "attributes": ["lead vocals"],
+            "artist": "Carol", "mbid": "", "source": "file"} in body["rows"], body
+
+
+def test_missing_file_is_200_not_500():
+    r = get(path=slash(os.path.join(ALBUM, "does not exist.flac")))
+    assert r.status_code == 200, (r.status_code, r.text)
+    body = r.json()
+    assert body["rows"] == [], body
+    assert body["source"] == "tags" and body["track_mbid"] == "", body
 
 
 # --------------------------------------------------------------------------- #
@@ -504,6 +603,11 @@ try:
          test_identity_offline_for_tag_only_track),
         ("tags: identity offline, empty rows is an answer",
          test_identity_offline_for_tag_only_album),
+        ("file: own MB tags beside live rows", test_file_rows_beside_live_rows),
+        ("file: rows deduped against live", test_file_rows_deduped_against_live),
+        ("file: dead MB still 200 with file rows",
+         test_dead_mb_on_file_still_200_with_file_rows),
+        ("file: missing file is 200, not 500", test_missing_file_is_200_not_500),
         ("mb 503 -> 502", test_mb_refusal_is_502),
         ("outside music folder -> 400", test_outside_music_folder_is_400),
         ("no path/album -> 404", test_no_path_is_404),

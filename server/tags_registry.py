@@ -507,7 +507,7 @@ CHECK_PREFIXES = ("grade_check_", "grade_include_")
 # PER_TRACK_TAGS / ALBUM_TAGS / TAG_PRESENCE_CHECKS). Verified against
 # DEFAULT_CONFIG at build time.
 TAG_CHECKS = {
-    "GENRE": ("grade_check_genre_count", "grade_check_genre_order",
+    "GENRE": ("grade_check_genre_count", "grade_check_genre_structure",
               "grade_check_genre_vocab"),
     "INITIALKEY": ("grade_check_key_bpm",),
     "BPM": ("grade_check_key_bpm",),
@@ -593,7 +593,7 @@ CHECK_LABELS = {
     "grade_check_energy": "Energy tag present",
     "grade_check_genre": "Genre tag present",
     "grade_check_genre_count": "Genre count per track",
-    "grade_check_genre_order": "Genre order (family first)",
+    "grade_check_genre_structure": "Genre structure (no duplicates, no derived parent)",
     "grade_check_genre_vocab": "Genre vocabulary",
     "grade_check_web_rating": "Web rating present (per track)",
     "grade_check_sidecar_format": "Sidecar text files canonically formatted",

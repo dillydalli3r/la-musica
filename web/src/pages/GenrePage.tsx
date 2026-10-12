@@ -79,11 +79,11 @@ export default function GenrePage() {
   };
 
   const chip = (name: string, count?: number) => {
-    // A family is the DERIVED first slot of a track's genre list
-    // (mlo.genre_vocab.parent_of). The library holds it as a genre of its own,
-    // so it is labelled here instead of left looking like one more specific
-    // genre sitting under this card's head — the hierarchy the old
-    // parent/main/sub model implied is gone.
+    // A family is the HEAD of the genre tree (mlo.genre_vocab.FAMILIES) — a
+    // level, not a slot: a track's own genre can BE one ("Rock" alone is an
+    // answer), so it is marked here rather than shown as one more specific
+    // name. The level above any name is derived (mlo.genre_vocab.path_of) and
+    // never stored, which is why nothing depends on position.
     const family = GENRE_FAMILIES[name.toLowerCase()];
     // The CHIP prints the reader's form; `open()` and the filter match keep the
     // stored lower-case name (see `titleCaseGenre` — the app's genre buckets
@@ -95,7 +95,7 @@ export default function GenrePage() {
         className={`chip border ${family ? "bg-panel border-dashed border-border text-zinc-400" : "bg-raise border-border text-zinc-300"} hover:text-white hover:border-accent transition-colors tap`}
         onClick={() => open(name)}
         title={family
-          ? `${shown} is a family — the app derives it from a track's specific genre and writes it first. Open the library filtered to ${shown}`
+          ? `${shown} is a family (the head of the genre tree). Open the library filtered to ${shown}`
           : `Open the library filtered to ${shown}`}
       >
         {family && <span className="text-[9px] uppercase tracking-wider text-zinc-600">family</span>}
@@ -191,7 +191,7 @@ export default function GenrePage() {
           {categories.map((cat) => {
             const rows = cat.genres
               .map((name) => genres.find((g) => g.name === name))
-              .filter((g): g is { name: string; count: number } => !!g);
+              .filter((g): g is { name: string; count: number; path: string } => !!g);
             if (!rows.length) return null;
             const total = rows.reduce((n, g) => n + g.count, 0);
             return (

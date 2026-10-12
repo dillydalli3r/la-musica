@@ -350,12 +350,65 @@ BEETS_TAGS = {
     "MUSICBRAINZ_DISCID", "MUSICBRAINZ_ALBUMRELEASECOUNTRY",
     "MUSICBRAINZ_RELEASECOUNTRY", "MUSICBRAINZ_ALBUMARTISTSORT",
     "ARTISTSORT", "ALBUMARTISTSORT", "TITLESORT",
+    # mediafile's (beets' tag reader/writer) OWN extra spellings of shared
+    # fields and the fields its third-party plugins carry — enumerated from
+    # the installed mediafile 2.13.1 `MediaFile.fields()` storage keys on
+    # 2026-10-11, the executable source of truth on this machine. The
+    # plural/credit/sort pair spellings (`ALBUMARTISTS`, `ARTISTS_SORT`,
+    # `ALBUMARTIST_CREDIT`…), the alternate disc/track totals (`DISCC`,
+    # `TRACKC`), the barcode synonyms (`EAN`/`UPC`/`UPN`), the EBU R128
+    # loudness pair, the discogs plugin ids, its `encoder`/`url` fields and
+    # the album comment `albumdisambig` stores. All are names beets itself
+    # writes, so an imported file is never flagged for carrying them.
+    "ALBUMARTISTS", "ALBUMARTIST_CREDIT", "ALBUMARTISTS_CREDIT",
+    "ARTISTS_CREDIT", "ARTIST_CREDIT", "ARTISTS_SORT", "ALBUMARTISTS_SORT",
+    "DISCC", "TRACKC", "EAN", "UPC", "UPN",
+    "CATALOGID", "DISCOGS_CATALOG", "ENCODER",
+    "R128_ALBUM_GAIN", "R128_TRACK_GAIN", "REMIXERS",
+    "MUSICBRAINZ_ALBUMCOMMENT",
+    # mediafile's own `grouping` / `subtitle` fields (vorbis GROUPING /
+    # SUBTITLE, ID3 TIT1 / TIT3, MP4 ©grp / the SUBTITLE freeform atom).
+    "GROUPING", "SUBTITLE",
 }
 
-# ID3 frames beets or the encoder write that have no TAG_MAP entry: TCMP =
-# compilation, TSOC = composer sort, TSSE/TENC = encoder identity (the MP3
-# counterpart of the ENCODER_* vorbis tags above).
-BEETS_ID3_FRAMES = {"TCMP", "TSOC", "TSSE", "TENC"}
+# Picard's documented tag mapping (picard-docs "Appendix A: Tag Mapping",
+# read 2026-10-11) adds names neither TAG_MAP nor mediafile spells: the
+# classical/works set, the encoder-settings and original-filename fields,
+# MusicIP's fingerprint pair, the official-website relationship and the two
+# extra ReplayGain measurements. Standard Picard output, so never excess.
+PICARD_TAGS = {
+    "KEY",                    # initial key: Picard's Vorbis spelling (TAG_MAP
+                              # holds INITIALKEY, beets' spelling)
+    "MOVEMENTNAME",           # Picard's Vorbis name for the movement's title
+    "SHOWMOVEMENT",           # "show work & movement" flag (TXXX/vorbis)
+    "ENCODERSETTINGS",        # encoder settings (ID3 TSSE / vorbis)
+    "ORIGINALFILENAME",       # the file's name at rip time (ID3 TOFN / vorbis)
+    "MUSICIP_PUID", "FINGERPRINT",   # MusicIP PUID / fingerprint
+    "WEBSITE",                # official artist website (a MusicBrainz rel)
+    "REPLAYGAIN_ALBUM_RANGE", "REPLAYGAIN_TRACK_RANGE",  # Picard>=2.2 RG pair
+}
+
+# Raw MP4 atom names Picard writes (its iTunes/MP4 column) that the app's
+# TAG_MAP has no entry for: album sort (soal), grouping (©grp), the movement
+# triple (©mvn / mvc / mvi), work title (©wrk) and the "show work & movement"
+# flag (shwm). all_tags() emits these raw when no canonical entry matches, so
+# without them a Picard-tagged .m4a failed the excess check for its own data.
+PICARD_MP4_ATOMS = {"soal", "©grp", "©mvn", "mvc", "mvi", "©wrk", "shwm"}
+
+# ID3 frames beets, Picard or the encoder write that have no TAG_MAP entry:
+# TCMP = compilation, TSOC = composer sort, TSSE/TENC = encoder identity (the
+# MP3 counterpart of the ENCODER_* vorbis tags above), plus Picard's
+# documented ID3v2.4 frames the app has no semantic name for — album sort
+# (TSOA), grouping (TIT1), mood (TMOO), original album/artist/filename
+# (TOAL/TOPE/TOFN), official website (WOAR), license URL (WCOP) and synced
+# lyrics (SYLT). Deliberately NOT here: POPM (the standalone rating frame is
+# the listener's own opinion, not MusicBrainz data, and tools/
+# test_grading_paths.py pins it excess) and the ID3v2.3 legacy date frames
+# TYER/TDAT/TORY, GRP1 and IPLS — mutagen rewrites those to the v2.4
+# spellings the app reads, so a file still carrying one is stale, not tagged.
+BEETS_ID3_FRAMES = {"TCMP", "TSOC", "TSSE", "TENC",
+                    "TSOA", "TIT1", "TIT3", "TMOO", "TOAL", "TOPE", "TOFN",
+                    "WOAR", "WCOP", "SYLT"}
 
 
 def _tag_key_norm(key):
@@ -393,14 +446,15 @@ TAG_NAME_PREFIXES = ("TRANSLATION-", "TRANSLITERATION-") + tuple(
     f"{_t}-" for _t in ALIAS_TAGS)
 
 # Every tag name this app (TAG_MAP), its encoder markers, and beets/Picard
-# (BEETS_TAGS) may write — normalized with _tag_key_norm. THE single source
-# of truth: the excess-tag grade below and the Optimize/Format All strip pass
-# (mlo.format_all, which imports tag_key_allowed) must agree, or a strip
-# leaves a tag the grader flags, or deletes one it requires.
+# (BEETS_TAGS + PICARD_TAGS + PICARD_MP4_ATOMS) may write — normalized with
+# _tag_key_norm. THE single source of truth: the excess-tag grade below and
+# the Optimize/Format All strip pass (mlo.format_all, which imports
+# tag_key_allowed) must agree, or a strip leaves a tag the grader flags, or
+# deletes one it requires.
 TAG_ALLOWLIST = frozenset(
     _tag_key_norm(k) for k in (
         *TAG_MAP, "ENCODER_PROGRAM", "ENCODER_QUALITY", "ENCODER_VERSION",
-        *BEETS_TAGS, *ALIAS_TAGS))
+        *BEETS_TAGS, *PICARD_TAGS, *PICARD_MP4_ATOMS, *ALIAS_TAGS))
 
 
 def _tag_name_allowed(name):
@@ -1783,7 +1837,6 @@ _PODCAST_MUSIC_ONLY_CHECKS = (
     "grade_check_album_description",
     "grade_check_genre",
     "grade_check_genre_count",
-    "grade_check_genre_order",
     "grade_check_genre_vocab",
 )
 
@@ -2195,17 +2248,14 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                           basename)
                 track["issues"].append("GENRE_COUNT")
 
-        # Genre ORDER (grade_check_genre_order) — the hierarchy half of the
-        # same contract: the FAMILY, if present, comes FIRST and the specific
-        # genres follow it ("rock / shoegaze / dream pop"). The rules
-        # themselves live in mlo.genres, which the import and scripts 8/10
-        # also apply, so the grader cannot fail a list those would leave alone.
-        #
-        # Only the order and duplicate lines are reported here. The count and
-        # the vocabulary belong to their own checks — a disabled check must not
-        # reappear under another code — and the spaces line is already the
-        # GENRE presence check's.
-        if cfg.get("grade_check_genre_order", True) \
+        # Genre STRUCTURE (grade_check_genre_structure) — the two defects a list can
+        # carry that no other check sees: a repeated name, and the derived
+        # parent slot this app used to WRITE (`Pop; Art Pop` — the `Pop` was
+        # never stated by anyone). The vocabulary owns unknown names, the count
+        # owns the overflow, and the presence check owns `missing`, so this one
+        # reports only the structural lines `mlo.genres.issues` produces — the
+        # same predicate Format All's canonical pass removes them with.
+        if cfg.get("grade_check_genre_structure", True) \
                 and should_write_audio_tag(cfg, "GENRE", filepath=ap):
             total_checks += 1
             try:
@@ -2215,20 +2265,15 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
             values = [v for v in (str(x).strip() for x in af.tag_values("GENRE")) if v]
             if len(values) == 1 and ";" in values[0]:
                 values = [p.strip() for p in values[0].split(";") if p.strip()]
-            order_issues = [
+            struct_issues = [
                 msg for msg in genre_issues(values, want)
-                # Absence is the PRESENCE check's code (GENRE_MISSING), and a
-                # switched-off presence check must not reappear here.
-                if msg != "missing"
-                and not msg.startswith("too many")
-                and not msg.startswith("not a known genre")
-                and not msg.startswith("Genre has ")
+                if msg == "duplicate" or msg == "derived parent genre stored"
             ]
-            if order_issues:
+            if struct_issues:
                 failed_checks += 1
-                for msg in order_issues:
+                for msg in struct_issues:
                     add_issue(msg, basename)
-                track["issues"].append("GENRE_ORDER")
+                track["issues"].append("GENRE_STRUCTURE")
 
         # Genre VOCABULARY (grade_check_genre_vocab) — every stored name must
         # be a MusicBrainz genre (mlo.genres.canonical). The app's writers only

@@ -556,12 +556,16 @@ export interface CookieFromBrowserReply extends CookieList {
 /** One credit row of `/api/credits`: who did what on a track or an album.
  *  `role` arrives already lower-cased and grouped-ready, `attributes` are the
  *  instrument / vocal part the relation stated, and `mbid` is empty on rows
- *  that came from the files' own tags. */
+ *  that came from the files' own tags. `source` is present only on a FILE row
+ *  (one read from the file's own MusicBrainz-derived tags beside the live
+ *  lookup) — a live MusicBrainz row leaves it undefined, its provenance being
+ *  the reply's own `source: "musicbrainz"`. */
 export interface CreditRow {
   role: string;
   attributes: string[];
   artist: string;
   mbid: string;
+  source?: "file";
 }
 
 /** The `identity` block `/api/credits` carries beside the rows: everything the
@@ -3776,7 +3780,7 @@ export const api = {
   /** Genre browsing surface: every genre with its track count, plus the
    *  category cards that group them. */
   genresFacets: () =>
-    json<{ genres: { name: string; count: number }[]; categories: { name: string; genres: string[] }[] }>(
+    json<{ genres: { name: string; count: number; path: string }[]; categories: { name: string; genres: string[] }[] }>(
       `${API}/genres/facets`
     ),
 

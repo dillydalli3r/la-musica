@@ -42,7 +42,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from mlo.config import DEFAULT_CONFIG
 from mlo.format_all import excess_tags, run_format_all
-from mlo.grader import _grade_album
+from mlo.grader import _grade_album, tag_key_allowed
 from mlo.taghygiene import run_tag_hygiene
 from mlo.tagtext import (CANONICAL_VALUES, canonical_text, canonical_value,
                          collapse_spacing, has_internal_space_run,
@@ -622,6 +622,70 @@ ok(not [i for i in graded["issues"]
    f"({graded['issues']})")
 
 # --------------------------------------------------------------------------- #
+print("== completeness: the whole beets/Picard/MusicBrainz vocabulary ==")
+# The allow-list must hold every name beets (mediafile), MusicBrainz Picard
+# (its documented Tag Mapping appendix) and the MusicBrainz schema itself can
+# write onto a file, so a file another MusicBrainz tagger produced is never
+# flagged or stripped. The names below are the ones ADDED for that (the
+# pre-existing TAG_MAP/BEETS_TAGS vocab is exercised elsewhere); written onto
+# a real FLAC and judged by the SAME `excess_tags` the grade and every strip
+# pass read.
+VOCAB_VORBIS = {
+    # mediafile's own extra spellings / plugin fields
+    "ALBUMARTISTS": "x", "ALBUMARTIST_CREDIT": "x", "ALBUMARTISTS_CREDIT": "x",
+    "ARTISTS_CREDIT": "x", "ARTIST_CREDIT": "x", "ARTISTS_SORT": "x",
+    "ALBUMARTISTS_SORT": "x", "DISCC": "1", "TRACKC": "1", "EAN": "1",
+    "UPC": "1", "UPN": "1",
+    "CATALOGID": "CAT-1", "DISCOGS_CATALOG": "D-1", "ENCODER": "reference",
+    "R128_ALBUM_GAIN": "-1.00", "R128_TRACK_GAIN": "-1.00", "REMIXERS": "x",
+    "MUSICBRAINZ_ALBUMCOMMENT": "x", "GROUPING": "x", "SUBTITLE": "x",
+    # Picard's documented mapping
+    "KEY": "Am", "MOVEMENTNAME": "x", "SHOWMOVEMENT": "1",
+    "ENCODERSETTINGS": "x", "ORIGINALFILENAME": "x", "MUSICIP_PUID": "x",
+    "FINGERPRINT": "x", "WEBSITE": "http://example.org",
+    "REPLAYGAIN_ALBUM_RANGE": "1", "REPLAYGAIN_TRACK_RANGE": "1",
+}
+vocab = tempfile.mkdtemp(prefix="mlo_tag_vocab_")
+vocab_album = os.path.join(vocab, "Album")
+os.makedirs(vocab_album)
+vocab_flac = os.path.join(vocab_album, "01 - vocab.flac")
+make_flac(vocab_flac)
+raw_tags(vocab_flac, VOCAB_VORBIS)
+V_CFG = dict(DEFAULT_CONFIG, music_folder=vocab, locale="en",
+             strip_unknown_tags=True, grade_check_excess_tags=True)
+left = sorted(str(k).upper() for k in excess_tags(AudioFile(vocab_flac), V_CFG))
+ok(left == [], f"the added vocabulary survives excess_tags (left {left})")
+graded = _grade_album(vocab_album, "EMBEDDED", V_CFG)
+ok(not [i for i in graded["issues"] if i.startswith("Excess tags")],
+   f"…and passes the excess grade ({graded['issues']})")
+# The raw ID3 frames and MP4 atoms a FLAC cannot hold are judged by the same
+# predicate directly.
+for _key in ("TSOA", "TIT1", "TIT3", "TMOO", "TOAL", "TOPE", "TOFN",
+             "WOAR", "WCOP", "SYLT", "soal", "©grp", "©mvn", "mvc", "mvi",
+             "©wrk", "shwm"):
+    ok(tag_key_allowed(_key), f"{_key} (frame/atom a FLAC cannot hold) allowed")
+# And the list must stay NARROW: a genuine vendor/ripper tag is still excess.
+for _key in ("WM/AlbumTitle", "RIPPER", "ENCODED-BY", "TDAT", "TORY",
+             "POPM:user@example.com", "TXXX:MusicMagic Junk"):
+    ok(not tag_key_allowed(_key), f"{_key} is still excess")
+junk_flac = os.path.join(vocab_album, "02 - junk.flac")
+make_flac(junk_flac)
+raw_tags(junk_flac, {"WM/AlbumTitle": "The Album", "RIPPER": "some ripper",
+                     "COMMENT": "ripped by some tool"})
+got = sorted(str(k).upper() for k in excess_tags(AudioFile(junk_flac), V_CFG))
+ok(got == ["COMMENT", "RIPPER", "WM/ALBUMTITLE"],
+   f"vendor junk + a valued COMMENT are the ONLY excess tags ({got})")
+st_v = run_tag_hygiene(dict(V_CFG, targets=[vocab_album]))
+held_v = {str(k).upper() for k in (AudioFile(junk_flac).all_tags() or {})}
+ok(not (held_v & {"COMMENT", "RIPPER", "WM/ALBUMTITLE"})
+   and st_v["tags_removed"] == 3 and not st_v["error_count"],
+   f"…and the strip deletes exactly those three "
+   f"({sorted(held_v)}, removed={st_v['tags_removed']})")
+ok(not ({str(k).upper() for k in (AudioFile(vocab_flac).all_tags() or {})}
+        & {"COMMENT", "RIPPER", "WM/ALBUMTITLE"}),
+   "…while the clean vocabulary file is left untouched")
+
+# --------------------------------------------------------------------------- #
 print("== the registry exposes the canonical vocabulary ==")
 from server.tags_registry import registry                               # noqa: E402
 
@@ -663,4 +727,5 @@ ok("grade_check_alias_excess" in {c["key"] for c in reg["checks"]}
 shutil.rmtree(tmp, ignore_errors=True)
 shutil.rmtree(lib, ignore_errors=True)
 shutil.rmtree(hyg, ignore_errors=True)
+shutil.rmtree(vocab, ignore_errors=True)
 print(f"\nPASS — {passed} assertion(s)")
