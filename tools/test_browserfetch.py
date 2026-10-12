@@ -121,10 +121,23 @@ threading.Thread(target=ws_server.serve_forever, daemon=True).start()
 
 
 def _install_stub():
-    """Point the module at the stub instead of a real browser."""
+    """Point the module at the stub instead of a real browser.
+
+    `browser_exe` is stubbed too, and not only the three seams below: what this
+    file proves is the DevTools PROTOCOL (which val. the module reads, which
+    page counts as a page, which cookies travel), and every case past this
+    point is about a browser the stub stands in for. Without this the suite
+    needed a Chrome INSTALLED on the machine running it — true on the owner's
+    Windows box and false on the Linux CI runner, where `available()` answered
+    False and five cases failed for a reason that has nothing to do with the
+    module (MEASURED 2026-10-12: `browserfetch: 32 passed, 5 failed` in CI, the
+    same suite green on Windows). The route's own "no browser ⇒ not available"
+    answer is pinned by the cases ABOVE, which patch `browser_exe` themselves.
+    """
     browserfetch.ensure = lambda timeout=40.0: "http://127.0.0.1:1"
     browserfetch._version = lambda timeout=1.5: {"Browser": "stub"}
     browserfetch._target = lambda: f"ws://127.0.0.1:{ws_port}/"
+    browserfetch.browser_exe = lambda: r"C:\fake\chrome.exe"
     # The session fallback reads THIS machine's own browsers through yt-dlp
     # (see `browserfetch._browser_session`); a suite must never do that — the
     # case below patches it again to exercise the fallback itself.
