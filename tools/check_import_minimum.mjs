@@ -834,6 +834,7 @@ let lUpload = null;
 let lCommit = null;
 let lExpected = null;
 const lReleaseCalls = [];
+let lReleaseQuery = null;
 
 const app5 = await createServer({
   configFile: path.join(webDir, "vite.config.ts"),
@@ -867,6 +868,7 @@ try {
       // to the deluxe has to come back AS the deluxe (two discs, three tracks).
       const id = new URL(url).searchParams.get("mbid") || L_REL;
       lReleaseCalls.push(id);
+      lReleaseQuery = new URL(url).searchParams.get("match");
       const deluxe = id === L_REL2;
       return send(200, {
         id, title: deluxe ? "Test Album (Deluxe)" : "Test Album", date: "2020-01-01",
@@ -939,6 +941,8 @@ try {
         String(lUpload));
   check("…and asks for the re-match that makes the added file a row",
         !!lUpload, String(lUpload));
+  check("the release pick asks for the local match in the SAME request (one round trip)",
+        lReleaseQuery === L_ALBUM, String(lReleaseQuery));
 
   await page.getByRole("button", { name: "Save matching" }).click();
   await page.waitForFunction(() => true, null, { timeout: 300 }).catch(() => {});

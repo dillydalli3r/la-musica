@@ -314,10 +314,22 @@ async function main() {
   await page.screenshot({ path: path.join(SHOTS, "03-archive-drop.png") });
 
   // ---- 6. committing it really creates the album -------------------------
-  await page.click("button.btn-primary:has-text('Import 1 album')");
+  const commitLabel = (await page.locator("[data-import-commit]").innerText()).trim();
+  check("the Import button names the albums it will import",
+        /^Import \d+ album\(s\)/.test(commitLabel), commitLabel);
+  await page.click("[data-import-commit]");
   await page.waitForFunction(`document.body.innerText.includes("Links")`,
     null, { timeout: 60000 }).catch(() => {});
-  const staged = await fetch(`${BASE}/api/library`).then((r) => r.json());
+  // The library payload is SERVED stale-while-revalidate (R338): the rebuild
+  // lands a beat after the write, so the check polls like a page reload would
+  // instead of reading once and seeing the tree from before the import.
+  let staged = { artists: [] };
+  for (let i = 0; i < 60; i++) {
+    staged = await fetch(`${BASE}/api/library`).then((r) => r.json());
+    const paths = (staged.artists || []).flatMap((a) => (a.albums || []).map((x) => x.path));
+    if (paths.some((p) => /The Album/i.test(p))) break;
+    await new Promise((r) => setTimeout(r, 250));
+  }
   const albums = (staged.artists || []).flatMap((a) => (a.albums || []).map((x) => x.path));
   const made = albums.find((p) => /The Album/i.test(p));
   check("pressing Import really lands the archive's album in the library",

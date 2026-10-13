@@ -5348,6 +5348,15 @@ def match_tracks(local_tracks, release):
     """
     release_media = release.get("media", [])
     by_pos = {(m["disc"], m["position"]): m for m in release_media}
+    # A file that states a disc the release does not have falls back to disc 1
+    # ONLY when the release carries a single medium — there, disc 1 is the one
+    # place its track can be — and even then at a LOWER score, because the
+    # number the file states did not answer. On a multi-disc release the
+    # disc-1 fallback is gone: it silently attached a disc-2 file to disc 1's
+    # same-numbered track at score 1.0 (a wrong MUSICBRAINZ_TRACKID written to
+    # the file, and the wrong recording's ratings/genres behind it), and the
+    # title pass below is the honest answer instead.
+    single_medium = len({m["disc"] for m in release_media}) <= 1
     suggestions = []
     for lt in local_tracks:
         tn = lt.get("tracknumber")
@@ -5355,9 +5364,13 @@ def match_tracks(local_tracks, release):
         match = None
         score = 0.0
         if tn is not None:
-            m = by_pos.get((dn, tn)) or by_pos.get((1, tn))
+            m = by_pos.get((dn, tn))
             if m:
                 match, score = m, 1.0
+            elif single_medium and dn != 1:
+                m = by_pos.get((1, tn))
+                if m:
+                    match, score = m, 0.5
         if match is None and lt.get("title"):
             best, best_score = None, 0.0
             kind = title_variant_kind(lt["title"])

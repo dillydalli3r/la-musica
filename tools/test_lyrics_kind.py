@@ -296,6 +296,67 @@ finally:
     api_lyrics.load_config = _real_load_config
     api_lyrics.fetch_one = _real_fetch_one
 
+# --------------------------------------------------------------------------- #
+# 2d) the no-lyrics answer is settled ONCE for the whole batch, and the strip
+#     hears the fetch track by track: the route defers the answer
+#     (`mark_absent=False`, exactly like script 13's run), then asks
+#     `lyrics_absent` a single time for every track that needed it — the
+#     per-track fan-out inside the lanes was the biggest waste of a lyrics
+#     step (the module's own comment), and it is why one chunk could hold
+#     "0/19" on screen for minutes (the owner's report). Frames: one per
+#     completed track, bracketed by 0/N and N/N.
+# --------------------------------------------------------------------------- #
+from server import instrumental as _inst_mod  # noqa: E402
+from server import job_locks as _jl  # noqa: E402
+
+_mark_flags, _absent_batches, _frames, _real_wc2 = [], [], [], api_lyrics.worker_count
+
+
+def _deferred_fetch(path, cfg, replace=False, mark_absent=True):
+    _mark_flags.append(mark_absent)
+    return {"path": path, "status": "skipped", "provider": None,
+            "provider_label": None, "kind": None, "synced": False,
+            "wrote": {"embedded": False, "lrc": None},
+            "reason": "no confident match", "error": "", "needs_absent": True}
+
+
+def _one_absent_pass(paths, cfg=None):
+    _absent_batches.append(list(paths))
+    return {"updated": 0, "values": {}, "evidence": {}, "reason": {},
+            "skipped": "recorded"}
+
+
+_real_absent_fn = _inst_mod.lyrics_absent
+_real_publish_fn = _jl.publish
+api_lyrics.load_config = lambda *a, **k: dict(CFG)
+api_lyrics.fetch_one = _deferred_fetch
+api_lyrics.worker_count = lambda *a, **k: 4
+_inst_mod.lyrics_absent = _one_absent_pass
+_jl.publish = (lambda done=None, total=None, text="", steps=None, job=None, hook=None:
+               _frames.append((done, total)))
+try:
+    _deferred = api_lyrics.lyrics_auto(api_lyrics.LyricsPathsRequest(paths=LANE_PATHS))
+finally:
+    api_lyrics.load_config = _real_load_config
+    api_lyrics.fetch_one = _real_fetch_one
+    api_lyrics.worker_count = _real_wc2
+    _inst_mod.lyrics_absent = _real_absent_fn
+    _jl.publish = _real_publish_fn
+
+check("the route DEFERS the no-lyrics answer on every track",
+      _mark_flags == [False] * len(LANE_PATHS), str(_mark_flags))
+check("ONE absent pass for the whole batch, naming every track that needed it",
+      len(_absent_batches) == 1 and sorted(_absent_batches[0]) == sorted(LANE_PATHS),
+      str(_absent_batches))
+check("the deferral's own flag never leaks into the reply rows",
+      all("needs_absent" not in r for r in _deferred["results"]),
+      str(_deferred["results"][:1]))
+check("the strip hears a frame per track, bracketed by 0/N and N/N",
+      bool(_frames) and _frames[0] == (0, len(LANE_PATHS))
+      and _frames[-1] == (len(LANE_PATHS), len(LANE_PATHS))
+      and {d for d, _t in _frames} == set(range(len(LANE_PATHS) + 1)),
+      str(_frames))
+
 shutil.rmtree(TMP, ignore_errors=True)
 
 if failures:

@@ -380,6 +380,39 @@ function groupByDisc<T>(rows: T[], discOf: (r: T) => number | null): { disc: num
     .map((d) => ({ disc: d, rows: groups.get(d)! }));
 }
 
+/** The ONE order every track list of the wizard reads in: disc, then track
+ *  number, then title — the order a CD player shows. A row with no disc
+ *  number is disc 1 (a single-disc album's files carry none; the same
+ *  fallback `match_tracks` and the library payload use), and a row with no
+ *  track number sorts after the numbered ones on its disc.
+ *
+ *  Every step used to keep whatever order its source handed over — the folder
+ *  scan, a filename sort, the release payload — so one album could read disc 2
+ *  first on one step and disc 1 first on the next, and the numbers shown had
+ *  nothing to do with the order they were shown in (the report this fixes). */
+function trackOrder<T>(
+  rows: T[],
+  discOf: (r: T) => number | null,
+  trackOf: (r: T) => number | null,
+  titleOf: (r: T) => string
+): T[] {
+  return [...rows].sort((a, b) => {
+    const da = discOf(a) ?? 1;
+    const db = discOf(b) ?? 1;
+    if (da !== db) return da - db;
+    const ta = trackOf(a);
+    const tb = trackOf(b);
+    if (ta !== tb) {
+      if (ta === null) return 1;
+      if (tb === null) return -1;
+      return ta - tb;
+    }
+    const na = titleOf(a) || "";
+    const nb = titleOf(b) || "";
+    return na.localeCompare(nb);
+  });
+}
+
 /** Detect album boundaries inside an import set.
  *  An album = any dir with immediate audio children (disc-like dirs such as
  *  CD1/Disc 2 merge into their parent). Group names fall back to
@@ -1227,20 +1260,44 @@ export default function ImportWizard() {
         : scannedTracks;
     // Suggestion rows carry no lyrics of their own: the folder scan knows
     // what these files actually hold, so it fills the state in.
-    if (!scannedTracks.length || base === scannedTracks) return base;
-    const onDisk = new Map(scannedTracks.map((t) => [t.path, t]));
-    return base.map((t) => {
-      const s = onDisk.get(t.path);
-      return s
-        ? {
-            ...t,
-            lyrics_embedded: s.lyrics_embedded,
-            lyrics_lrc: s.lyrics_lrc,
-            lyrics_present: s.lyrics_present,
-            lyrics_kind: s.lyrics_kind,
-          }
-        : t;
-    });
+    const rows =
+      !scannedTracks.length || base === scannedTracks
+        ? base
+        : (() => {
+            const onDisk = new Map(scannedTracks.map((t) => [t.path, t]));
+            return base.map((t) => {
+              const s = onDisk.get(t.path);
+              return s
+                ? {
+                    ...t,
+                    lyrics_embedded: s.lyrics_embedded,
+                    lyrics_lrc: s.lyrics_lrc,
+                    lyrics_present: s.lyrics_present,
+                    lyrics_kind: s.lyrics_kind,
+                  }
+                : t;
+            });
+          })();
+    // EVERY step reads this list in disc/track order (see `trackOrder`), so a
+    // two-disc album reads 1.01…1.15 then 2.01…2.04 wherever the scan or the
+    // payload happened to put disc 2. The numbers come from the file's own
+    // tags — the payload's own fields already fall back to the filename stem
+    // — the same precedence the badges' fallback uses.
+    const numOf = (t: Track) => {
+      const dd = ((t.file || t.path).split("/").pop() ?? "")
+        .replace(/\.[^.]+$/, "")
+        .match(/^\s*(\d+)\s*-\s*(\d+)/);
+      return {
+        disc: parseDisc(t.tags?.DISCNUMBER) ?? t.discnumber ?? (dd ? Number(dd[1]) : null),
+        track: parseDisc(t.tags?.TRACKNUMBER) ?? t.tracknumber ?? (dd ? Number(dd[2]) : null),
+      };
+    };
+    return trackOrder(
+      rows,
+      (t) => numOf(t).disc,
+      (t) => numOf(t).track,
+      (t) => String(t.tags?.TITLE ?? "")
+    );
   }, [trackList, suggestions, scannedTracks]);
 
   // ---- per-disc grouping helpers (shared by Match and Genres steps) ----
@@ -1914,13 +1971,22 @@ export default function ImportWizard() {
       // resolves a RELEASE-GROUP id to its best edition, so `rel.id` is the
       // concrete release and it is what the id state and every writer below
       // use: a group id must never be written as MUSICBRAINZ_ALBUMID.
-      const rel = await withRetry(() => api.mbRelease(id));
+      // ONE request for both halves: the route resolves + aliases the release
+      // AND matches the folder in the same call (`?match=`), where the pick
+      // used to cost two round trips and two folder scans (the second
+      // re-resolving the release it already had). A payload without
+      // `suggestions` (an older server) falls back to the match endpoint —
+      // which is still the way a re-match is asked for, below and after
+      // "Add tracks…".
+      const rel = await withRetry(() => api.mbRelease(id, { match: target ?? undefined, staged }));
       const newest = seq === releaseSeq.current;
       if (newest) currentReleaseId.current = rel.id;
       setRelease(rel);
       setReleaseId(rel.id);
       setFetchStatus("Matching local tracks to the release…");
-      const matched = await api.mbMatch(target!, rel.id, staged);
+      const matched = rel.suggestions
+        ? { suggestions: rel.suggestions }
+        : await api.mbMatch(target!, rel.id, staged);
       setSuggestions(matched.suggestions);
       if (!matched.suggestions.length) {
         toast("No audio tracks found in this folder — check the album folder contains the music files");
@@ -2043,6 +2109,46 @@ export default function ImportWizard() {
       qc.invalidateQueries({ queryKey: ["album", target] });
     } catch (e) {
       setRatingError(String(e));
+      toast.error(String(e));
+    } finally {
+      setAct(null);
+      setBusy(false);
+    }
+  };
+
+  /** Remove the web-rating tags from these tracks — the ratings step's CLEAR.
+   *
+   *  The fetch is fill-only, so a value a source wrote is otherwise permanent
+   *  from the wizard — and a WRONG one (a single-vote source score, a value
+   *  left by a release the album no longer points at) had no way out short of
+   *  editing tags by hand. This is the same `/api/tags/bulk` delete the
+   *  library's batch tools use, over the four tags the pair carries; nothing
+   *  is re-fetched, so the row reads "no source stated a score" until Import
+   *  is pressed again. */
+  const clearRatings = async (paths: string[]) => {
+    if (!paths.length) return;
+    setBusy(true);
+    setAct({ label: `Clearing web ratings for ${paths.length} track(s)…` });
+    try {
+      const res = await api.tagsBulk({
+        paths,
+        remove: ["WEBRATING", "WEBRATING_SOURCE", "ALBUMWEBRATING", "ALBUMWEBRATING_SOURCE"],
+        set: {},
+      });
+      // The rows came from a server read AFTER the run: dropping them puts the
+      // list back on the files' own tags, and the rescan is what re-reads them.
+      setRatingRows(null);
+      await rescanTracks();
+      qc.invalidateQueries({ queryKey: ["tags"] });
+      qc.invalidateQueries({ queryKey: ["library"] });
+      toast(
+        res.failed
+          ? `Cleared ${res.removed} tag(s) — ${res.failed} file(s) failed`
+          : res.removed
+            ? `Cleared ${res.removed} web-rating tag(s)`
+            : "No web-rating tags to clear"
+      );
+    } catch (e) {
       toast.error(String(e));
     } finally {
       setAct(null);
@@ -2287,6 +2393,15 @@ export default function ImportWizard() {
     setSuggestions((ss) => ss.map((s) => (s.local === path ? { ...s, matched: !!m, confidence: 1, release_track: m ?? null } : s)));
   };
 
+  /** The release's media in disc/track order — the order its own tracklist
+   *  reads in, whatever order MusicBrainz returned (a payload can list disc 2
+   *  first). Used by the per-row select and the missing-track chips: they
+   *  read the same sorted list {@link missingTracks} filters. */
+  const orderedMedia = useMemo(
+    () => [...(release?.media ?? [])].sort((a, b) => a.disc - b.disc || a.position - b.position),
+    [release]
+  );
+
   /** The release's own tracks that no local file was matched to — the album's
    *  gaps, named. A deluxe pressing carries a second disc nobody has ripped
    *  yet, and this step listed only the LOCAL rows: what the release still
@@ -2297,8 +2412,8 @@ export default function ImportWizard() {
     const taken = new Set(
       suggestions.filter((s) => s.release_track)
         .map((s) => `${s.release_track!.disc}-${s.release_track!.position}`));
-    return (release.media ?? []).filter((m) => !taken.has(`${m.disc}-${m.position}`));
-  }, [release, suggestions]);
+    return orderedMedia.filter((m) => !taken.has(`${m.disc}-${m.position}`));
+  }, [release, suggestions, orderedMedia]);
 
   /** "Add tracks…": audio the user picks joins THIS album —
    *  `/api/import/upload?album=…`, fill-only, so nothing the album holds is
@@ -2307,17 +2422,23 @@ export default function ImportWizard() {
    *  and no `(2)` folder is opened. This is how a second disc (or one track a
    *  rip left behind) reaches an album that is already in the library. */
   const [addBusy, setAddBusy] = useState(false);
+  const [addDragOver, setAddDragOver] = useState(false);
   const addFilesRef = useRef<HTMLInputElement>(null);
-  const addTracks = async (files: File[]) => {
+  /** Hand bytes (and/or already-staged paths) to the album's own folder —
+   *  fill-only, so nothing the album holds is replaced — then re-match, so
+   *  the arriving files land as ROWS wherever the release puts them. Returns
+   *  false when the upload itself failed (the caller keeps any unpacked
+   *  trees then, so a retry can still use them). */
+  const addToAlbum = async (list: File[], stagedPaths: string[] = []): Promise<boolean> => {
     const target = albumPath;
-    if (!target || !files.length) return;
+    if (!target || (!list.length && !stagedPaths.length)) return false;
     setAddBusy(true);
-    setAct({ label: `Adding ${files.length} track${files.length === 1 ? "" : "s"} to the album…` });
+    setAct({ label: `Adding ${list.length + stagedPaths.length} file(s) to the album…` });
     try {
       const res = await api.importUpload(
         currentAlbumName || target.split(/[\\/]/).pop() || "Album",
-        files.map((f) => ({ file: f, relPath: f.name })),
-        undefined,
+        list.map((f) => ({ file: f, relPath: f.name })),
+        stagedPaths.length ? stagedPaths : undefined,
         target
       );
       const added = res.saved?.length ?? 0;
@@ -2334,12 +2455,53 @@ export default function ImportWizard() {
         setSuggestions(matched.suggestions);
       }
       toast(`Added ${added} file${added === 1 ? "" : "s"} — check the matches below`);
+      return true;
     } catch (e) {
       toast.error(String(e));
+      return false;
     } finally {
       setAddBusy(false);
       setAct(null);
     }
+  };
+
+  /** "Add tracks…" — every way a file can arrive, the same breadth step 0's
+   *  own drop has: the picker or a drag hands over audio (any type the app
+   *  reads), `.cue` / `.log` / `.accurip` sidecars, artwork, and ARCHIVES.
+   *  An archive is unpacked server-side first (`/api/import/unpack`), and
+   *  everything the tree holds that the importer accepts is moved into the
+   *  album from there (`staged`) instead of being uploaded twice. Nothing is
+   *  filtered to audio alone: a file the server does not know still joins the
+   *  album as a sidecar, which is exactly what a rip log or a scan is. */
+  const addTracks = async (files: File[]) => {
+    if (!files.length) return;
+    const archives = files.filter((f) => ARCHIVE_RE.test(f.name));
+    const plain = files.filter((f) => !ARCHIVE_RE.test(f.name));
+    const stagedPaths: string[] = [];
+    const unpacked: string[] = [];
+    if (archives.length) {
+      setAddBusy(true);
+      setAct({ label: `Unpacking ${archives.length} archive${archives.length === 1 ? "" : "s"}…` });
+      try {
+        for (const a of archives) {
+          const tree = await api.importUnpack(a);
+          unpacked.push(tree.dir);
+          for (const f of tree.files ?? []) {
+            if (ALLOWED.test(f.relPath)) stagedPaths.push(f.path);
+          }
+        }
+      } catch (e) {
+        toast.error(String(e));
+      } finally {
+        setAddBusy(false);
+        setAct(null);
+      }
+    }
+    const placed = await addToAlbum(plain, stagedPaths);
+    // The bytes are in the album now (or were refused with the trees kept for
+    // a retry): the unpacked trees are the wizard's scratch — a closed wizard
+    // would have them swept, this is the immediate hand-back.
+    if (placed && unpacked.length) void api.importUnpackDiscard(unpacked).catch(() => {});
   };
 
   /** Write ONE album's matched rows to its files. The wizard's only tag
@@ -2972,6 +3134,35 @@ export default function ImportWizard() {
     return parseDisc(t.tags?.DISCNUMBER) ?? t.discnumber ?? numsFromName(t.file || p).disc;
   };
 
+  /** The Match step's rows in the same disc/track order as every other list —
+   *  numbered the way the badges number them (a matched row by its release
+   *  position, an unmatched one by its own tags/name). */
+  const orderedSuggestions = useMemo(
+    () =>
+      trackOrder(
+        suggestions,
+        (s) => discNoOf(s.local),
+        (s) => trackNoOf(s.local),
+        (s) => displayTitle(s.local)
+      ),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [suggestions, stepTracks]
+  );
+
+  /** The Ratings step's rows in the same disc/track order: the server's own
+   *  rows after a run, the files' tags before one. */
+  const orderedRatingRows = useMemo(
+    () =>
+      trackOrder(
+        ratingDisplayRows,
+        (r) => discNoOf(r.file),
+        (r) => trackNoOf(r.file),
+        (r) => r.title ?? ""
+      ),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [ratingDisplayRows, stepTracks]
+  );
+
   /** What a track's lyrics ARE right now — the one question the lyrics step
    *  asks, in the two shapes its own mark needs:
    *
@@ -2998,13 +3189,25 @@ export default function ImportWizard() {
       toast("No tracks to fetch lyrics for");
       return;
     }
+    // One-shot Force — the same shared control every other step renders
+    // (`forceSel["lyrics"]` is the lyrics key the Force menu and script 13
+    // read): on, a track that already carries lyrics is re-fetched and the
+    // stored text replaced, which is the ONE way a wrong or stale lyric
+    // leaves the file from this step.
+    const forced = forceRun && !!forceSel["lyrics"];
     setBusy(true);
+    // The COUNTED bar is the SERVER's now: the route registers the job and
+    // publishes one progress frame per completed track, so the strip moves per
+    // track instead of per chunk of eight. A chunk whose slowest lane sat in a
+    // provider walk or the deferred instrumentals pass used to hold the
+    // readout at "0/19" for minutes (the report this fixes); `beginRun`
+    // claims the strip for exactly these frames.
+    beginRun(
+      targets.length === 1
+        ? `Fetching lyrics for ${displayTitle(targets[0])}…`
+        : "Fetching lyrics…"
+    );
     try {
-      // Chunked and COUNTED. One POST for the whole album left the strip
-      // indeterminate, and because the server writes each track as it goes,
-      // the row kept reading "Fetching lyrics for 16 track(s)…" long after
-      // the lyrics were on disk (the report this fixes). Eight at a time
-      // keeps each request short and lets the bar say where the batch is.
       const CHUNK = 8;
       let ok = 0;
       let skipped = 0;
@@ -3012,15 +3215,7 @@ export default function ImportWizard() {
       const byProvider: Record<string, number> = {};
       for (let i = 0; i < targets.length; i += CHUNK) {
         const slice = targets.slice(i, i + CHUNK);
-        setAct({
-          label:
-            targets.length === 1
-              ? `Fetching lyrics for ${displayTitle(targets[0])}…`
-              : `Fetching lyrics — ${i}/${targets.length}…`,
-          done: i,
-          total: targets.length,
-        });
-        const res = await api.lyricsAuto(slice, false, staged);
+        const res = await api.lyricsAuto(slice, forced, staged);
         ok += res.ok;
         skipped += res.skipped;
         failed += res.failed;
@@ -3065,6 +3260,40 @@ export default function ImportWizard() {
       // The files changed on disk: re-read them so the step's "Lyrics" marks
       // come from what the fetch actually wrote.
       await rescanTracks();
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setAct(null);
+      setBusy(false);
+    }
+  };
+
+  /** Remove ONE track's stored lyrics — the lyrics family's Clear, beside the
+   *  ratings step's. `/api/lyrics/remove` takes the LYRICS tag, the `.lrc`
+   *  sidecars that belong to this track's own name (`.lrc` / `.romaji.lrc` /
+   *  `.<lang>.lrc`) and the TRANSLITERATION-* / TRANSLATION-* tags: the fetch
+   *  fills, so a stale or wrong text could otherwise only be corrected by
+   *  hand. Nothing else changes — INSTRUMENTAL stays, a re-fetch can refill. */
+  const removeLyricsRow = async (path: string) => {
+    setBusy(true);
+    setAct({ label: `Removing lyrics for ${displayTitle(path)}…` });
+    try {
+      const res = await api.lyricsRemove([path], staged);
+      const row = res.results.find((r) => r.path === path);
+      setLyricsDrafts((d) => {
+        const next = { ...d };
+        delete next[path];
+        return next;
+      });
+      setLyrResults((m) => {
+        const next = { ...m };
+        delete next[path];
+        return next;
+      });
+      await rescanTracks();
+      qc.invalidateQueries({ queryKey: ["tags"] });
+      qc.invalidateQueries({ queryKey: ["library"] });
+      toast(row?.removed ? "Lyrics removed" : "This track had no stored lyrics");
     } catch (e) {
       toast.error(String(e));
     } finally {
@@ -4279,6 +4508,7 @@ const finish = async (closeByNavigation: boolean, runScripts = true) => {
               <div className="flex flex-wrap items-center gap-2">
                 <button
                   className="btn-primary tap"
+                  data-import-commit=""
                   onClick={() => void doImport()}
                   disabled={uploading || autoBusy || !pendingAlbums}
                 >
@@ -4495,21 +4725,39 @@ const finish = async (closeByNavigation: boolean, runScripts = true) => {
             <div className="text-sm text-zinc-400 flex-1 min-w-[16rem]">
               Confirm each local track's MusicBrainz track/disc. Unmatched rows stay blank — you can also fix them manually later on the track page.
             </div>
-            {/* Adding audio to the album the wizard is ON. Shown here because
-                this is the step that decides which tracks the album holds: a
-                second disc, one track a rip left behind, or the audio of a
-                release track listed below as not in the folder. Files join
-                the album's own folder (fill-only — nothing it holds is
-                replaced) and are re-matched into rows. */}
-            {albumPath && !staged && (
-              <>
+            {/* Adding files to the album the wizard is ON. Shown here because this is
+                the step that decides which tracks the album holds: a second disc,
+                one track a rip left behind, or the audio of a release track
+                listed below as not in the folder. Every way in is allowed —
+                pick or drag, audio or artwork, `.cue` / `.log` sidecars, or an
+                archive that is unpacked server-side — and the files join the
+                album's own folder (fill-only — nothing it holds is replaced)
+                and are re-matched into rows. */}
+            {albumPath && (
+              <div
+                className={`panel px-3 py-2 flex flex-wrap items-center gap-2 ${
+                  addDragOver ? "border-accent/60 bg-accent/5" : ""
+                }`}
+                data-add-tracks-zone=""
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  setAddDragOver(true);
+                }}
+                onDragLeave={() => setAddDragOver(false)}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  setAddDragOver(false);
+                  const files = Array.from(e.dataTransfer.files ?? []);
+                  if (files.length) void addTracks(files);
+                }}
+              >
                 <input
                   ref={addFilesRef}
                   type="file"
                   multiple
                   data-add-tracks-input=""
                   className="hidden"
-                  accept=".flac,.mp3,.m4a,.mp4,.ogg,.oga,.opus,.wav,.wv,.ape,.aiff,.aif,.dsf,.dff,.wma,.mpc,.tta"
+                  accept={ACCEPT}
                   onChange={(e) => {
                     const files = Array.from(e.target.files ?? []);
                     e.target.value = "";
@@ -4521,16 +4769,20 @@ const finish = async (closeByNavigation: boolean, runScripts = true) => {
                   data-add-tracks=""
                   onClick={() => addFilesRef.current?.click()}
                   disabled={addBusy}
-                  title="Add audio files to this album — they join its folder and are matched here"
+                  title="Add files to this album — audio, artwork, .cue / .log sidecars, or an archive; they join its folder (nothing replaced) and are matched here"
                 >
                   {addBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />}
                   Add tracks…
                 </button>
-              </>
+                <span className="text-[11px] text-zinc-500 min-w-0">
+                  …or drop files / an archive (.zip, .7z, .rar, .tar) here — audio, artwork, .cue / .log. Files
+                  join this album's folder (fill-only) and come back below to match.
+                </span>
+              </div>
             )}
           </div>
           {suggestions.length === 0 && <div className="text-xs text-zinc-500">No data — go back and fetch the release.</div>}
-          {groupByDisc(suggestions, discOfSuggestion).map((g) => (
+          {groupByDisc(orderedSuggestions, discOfSuggestion).map((g) => (
             <DiscSection
               key={g.disc ?? "unmatched"}
               disc={g.disc}
@@ -4555,7 +4807,7 @@ const finish = async (closeByNavigation: boolean, runScripts = true) => {
                       }}
                     >
                       <option value="">— none —</option>
-                      {release?.media.map((m) => (
+                      {orderedMedia.map((m) => (
                         <option key={`${m.disc}-${m.position}`} value={`${m.disc}-${m.position}`}>
                           {m.disc}.{m.position} {m.title}
                         </option>
@@ -5293,6 +5545,15 @@ const finish = async (closeByNavigation: boolean, runScripts = true) => {
               >
                 <CloudDownloadIcon /> Import web ratings
               </button>
+              <button
+                className="btn-ghost tap"
+                data-rating-clear-all=""
+                onClick={() => clearRatings(orderedRatingRows.map((r) => r.file))}
+                disabled={busy || !orderedRatingRows.some((r) => r.value || r.source)}
+                title="Remove WEBRATING / ALBUMWEBRATING (and their sources) from every track of this album — the way a wrong value the fill-only fetch will not replace leaves the files"
+              >
+                <Trash2 className="h-3.5 w-3.5" /> Clear all web ratings
+              </button>
               {/* The same one-shot Force the Finish step uses: with it on and
                   "24 · Web ratings re-fetch" ticked, this press re-asks and
                   REPLACES the values it finds (script 24's own force key). */}
@@ -5328,8 +5589,9 @@ const finish = async (closeByNavigation: boolean, runScripts = true) => {
             {/* One row per track — the value the file holds, whether it is the
                 track's OWN score or the album's, and the source the writer left
                 beside it — the same row recipe every other step's list uses. */}
-            {ratingDisplayRows.map((r) => (
-              <div key={r.file} className={ROW}>
+            {orderedRatingRows.map((r) => (
+              <div key={r.file} className={ROW_WRAP}>
+                <TrackNoBadge disc={discNoOf(r.file)} track={trackNoOf(r.file)} />
                 <span className="flex-1 truncate text-sm">{r.title || defaultTrackName(r.file)}</span>
                 <div className="flex items-center gap-1.5 flex-wrap justify-end">
                   {r.value ? (
@@ -5348,6 +5610,15 @@ const finish = async (closeByNavigation: boolean, runScripts = true) => {
                   {r.source && (
                     <span className="chip bg-raise border border-border text-zinc-400">{r.source}</span>
                   )}
+                  <button
+                    className="btn-ghost !py-0.5 !px-2 text-[11px] shrink-0 tap"
+                    data-rating-clear={r.file}
+                    disabled={busy || (!r.value && !r.source)}
+                    onClick={() => clearRatings([r.file])}
+                    title="Remove the web-rating tags from this track (WEBRATING / ALBUMWEBRATING and their sources)"
+                  >
+                    <Trash2 className="h-3 w-3" /> Clear
+                  </button>
                 </div>
               </div>
             ))}
@@ -5358,6 +5629,8 @@ const finish = async (closeByNavigation: boolean, runScripts = true) => {
               the source beside it) is never replaced. Turn Force on and tick "24 · Web ratings
               re-fetch" to re-ask and replace. The chip says whether the number is this track's own
               or the album's; a track nothing rated keeps no value rather than an invented one.
+              Clear removes the pair from one track (or, in the header, from every track) — the way
+              a value the fill-only fetch will not replace leaves the files.
             </span>
           </MinBlock>
         </div>
@@ -5386,9 +5659,11 @@ const finish = async (closeByNavigation: boolean, runScripts = true) => {
                 <button className="btn-primary text-xs tap" onClick={() => autoImportLyrics()} disabled={busy}>
                   <CloudDownloadIcon /> Auto-import lyrics
                 </button>
+                <ForceControl forceRun={forceRun} toggle={toggleForce} forceSel={forceSel} setSel={setSel} />
                 <span className="text-xs text-zinc-500">
                   Tries every provider in the saved order (Settings → Lyrics) and writes them straight to the
-                  files. Review below — Space stamps time while previewing; INSTRUMENTAL=1 skips lyrics.
+                  files. Review below — Space stamps time while previewing; INSTRUMENTAL=1 skips lyrics. Force
+                  re-fetches a track that already carries lyrics (the one way a stored lyric is replaced).
                 </span>
               </div>
               <div className="flex flex-wrap items-center gap-2">
@@ -5504,6 +5779,15 @@ const finish = async (closeByNavigation: boolean, runScripts = true) => {
                       title={inst === "1" ? "Marked instrumental — uncheck INSTRUMENTAL to edit lyrics" : "Open the lyrics editor for this track"}
                     >
                       {open ? "Hide" : "Edit"}
+                    </button>
+                    <button
+                      className="btn-ghost !py-1 text-xs shrink-0 tap"
+                      data-lyrics-remove={t.path}
+                      onClick={() => removeLyricsRow(t.path)}
+                      disabled={busy || (kind === null && !lyricsDrafts[t.path]?.trim())}
+                      title="Remove this track's stored lyrics — the LYRICS tag, its .lrc sidecars and the transliteration/translation tags"
+                    >
+                      Remove
                     </button>
                   </div>
                   {open && inst !== "1" && (
@@ -5871,18 +6155,32 @@ const finish = async (closeByNavigation: boolean, runScripts = true) => {
             ) : (
               <button className="btn-primary tap" onClick={() => finish(false)}>Done</button>
             )}
-            {/* Close: the SAME settle + organize + dismiss as Done, and the
-                same close, but it never runs the tacked-on script chain — the
-                steps have already written what they were meant to, and editing
-                the album from its page is what comes next. Its own toast says
-                the scripts were skipped rather than reporting a graded album. */}
-            <button
-              className="btn-ghost tap"
-              onClick={() => finish(false, false)}
-              title="Close the wizard without running the script chain — the release is settled and organized, the ticked scripts are skipped"
-            >
-              Close
-            </button>
+            {/* Close: the SAME settle + organize + dismiss as Done and the
+                same LANDING — it opens the album the run just finished, the
+                one thing it does not do is run the tacked-on script chain
+                (the steps have already written what they were meant to, and
+                editing the album from its page is what comes next). Its own
+                toast says the scripts were skipped rather than reporting a
+                graded album. A run with no album path keeps the plain
+                button, which just closes the wizard. */}
+            {albumPath ? (
+              <Link
+                to={releaseId ? `/album/mb:${encodeURIComponent(releaseId)}` : `/album/${encodeURIComponent(albumPath)}`}
+                className="btn-ghost tap"
+                onClick={() => finish(true, false)}
+                title="Close the wizard and open the album — the release is settled and organized, the ticked scripts are skipped"
+              >
+                Close
+              </Link>
+            ) : (
+              <button
+                className="btn-ghost tap"
+                onClick={() => finish(false, false)}
+                title="Close the wizard without running the script chain — the release is settled and organized, the ticked scripts are skipped"
+              >
+                Close
+              </button>
+            )}
           </div>
         </div>
       )}

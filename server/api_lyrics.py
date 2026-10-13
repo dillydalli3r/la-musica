@@ -6,7 +6,7 @@ click and a script run produce byte-identical files. Provider order and the
 plain-vs-synced policy come from the config the settings page edits.
 """
 import os
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
@@ -125,6 +125,7 @@ def lyrics_auto(req: LyricsPathsRequest):
     resolved, rejected = _batch_paths(req.paths, cfg, req.staged)
     for path, error in rejected:
         results.append({"path": path, "status": "failed", "error": error})
+    total = len(resolved)
     # ONE TRACK PER LANE (`worker_count`, the one knob every multi-file runner
     # reads), because each track's fetch is its OWN question — its own tags
     # decide what is searched and what is written — and the lanes only overlap
@@ -132,14 +133,68 @@ def lyrics_auto(req: LyricsPathsRequest):
     # `mlo.lyrics_providers._request` spaces requests PER HOST (its lock guards
     # the timestamp bookkeeping alone, never the request), so two lanes asking
     # lrclib queue behind each other while a lane asking NetEase does not wait
-    # for them. Writes are per file (one track, one handle), and `ex.map` hands
-    # the rows back in REQUEST ORDER, so the reply is the serial loop's own,
+    # for them. Writes are per file (one track, one handle), and the rows are
+    # reassembled in REQUEST ORDER, so the reply is the serial loop's own,
     # row for row.
-    workers = worker_count(cfg, maximum=8, items=len(resolved))
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        fetched = list(ex.map(
-            lambda full: fetch_one(full, cfg, replace=bool(req.force)),
-            [full for _, full in resolved]))
+    #
+    # The job is what makes the fetch VISIBLE while it runs: a frame per
+    # completed track reaches the header bar and the wizard's own strip over
+    # the progress socket, and the In-progress page lists the row meanwhile.
+    # The wizard's counted bar used to advance only when a whole chunk of
+    # eight came back, so one slow lane held the readout at "0/19" for minutes
+    # (the report this fixes).
+    workers = worker_count(cfg, maximum=8, items=total)
+    job = job_locks.new_job()
+    job_locks.register(job, kind="lyrics", label="Fetch lyrics")
+    fetched: list = [None] * total
+    try:
+        if total:
+            job_locks.publish(0, total, f"Fetching lyrics — 0/{total}…", job=job)
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                futures = {
+                    ex.submit(fetch_one, full, cfg, replace=bool(req.force),
+                              mark_absent=False): i
+                    for i, (_as_sent, full) in enumerate(resolved)
+                }
+                done = 0
+                for fut in as_completed(futures):
+                    i = futures[fut]
+                    try:
+                        fetched[i] = fut.result()
+                    except Exception as e:
+                        # fetch_one absorbs its own failures; this is belt and
+                        # braces so one broken lane cannot strand the reply.
+                        fetched[i] = {"path": resolved[i][1], "status": "failed",
+                                      "error": str(e)}
+                    done += 1
+                    job_locks.publish(done, total,
+                                      f"Fetching lyrics — {done}/{total}…", job=job)
+            # The no-lyrics answer runs ONCE for the whole batch, never once
+            # per track: `lyrics_absent` cross-references LRCLIB, Spotify and
+            # the AI per track, and the per-track fan-out inside the lanes was
+            # measured as the single biggest waste of a lyrics step (the
+            # module's own comment; script 13's run defers it exactly this
+            # way, and the same values land on the same files either way).
+            missing = [i for i, r in enumerate(fetched)
+                       if r and r.get("needs_absent")]
+            if missing:
+                job_locks.publish(total, total,
+                                  "Marking the tracks nothing had as instrumental…",
+                                  job=job)
+                from mlo.lyrics_fetch import _apply_absent
+                from server import instrumental as inst
+
+                try:
+                    marked = inst.lyrics_absent([resolved[i][1] for i in missing], cfg)
+                except Exception:
+                    marked = {}
+                for i in missing:
+                    # `needs_absent` is the deferral's own flag, never part of
+                    # the reply row — the chain pops it the same way.
+                    fetched[i].pop("needs_absent", None)
+                    _apply_absent(fetched[i], resolved[i][1], marked or {})
+    finally:
+        job_locks.release(job)
     for (path, _full), res in zip(resolved, fetched):
         res["path"] = path
         results.append(res)
@@ -262,6 +317,47 @@ def lyrics_offset(req: LyricsOffsetRequest):
         raise HTTPException(404, "this track has no lyrics to shift")
     tagcache.invalidate_path(full)
     return {"ok": True, "lrc": text, "targets": targets}
+
+
+@router.post("/api/lyrics/remove")
+@job_locks.holds(lambda req: req.paths, kind="lyrics", label="Remove lyrics")
+def lyrics_remove(req: LyricsPathsRequest):
+    """Remove the lyrics these tracks store — the lyrics step's Remove button.
+
+    Three places per track, all of them through the one implementation
+    (`mlo.lyrics.remove_stored_lyrics`): the LYRICS tag, the `.lrc` sidecars
+    named after the track itself (`.lrc` / `.romaji.lrc` / `.<lang>.lrc`) and
+    the TRANSLITERATION-* / TRANSLATION-* tags. The fetch only ever fills, so
+    without this a wrong or stale text could only leave a file by hand.
+
+    A track that held none of the three is answered `empty` — nothing was
+    wrong with the press — and a path outside the folder is answered the same
+    way the other lyrics routes answer it, as that path's own failure.
+    """
+    from mlo.lyrics import remove_stored_lyrics
+
+    cfg = load_config()
+    if len(req.paths) > MAX_PATHS:
+        raise HTTPException(
+            413, f"too many paths in one request ({len(req.paths)} > {MAX_PATHS})")
+    resolved, rejected = _batch_paths(req.paths, cfg, req.staged)
+    results = [{"path": p, "status": "failed", "error": e} for p, e in rejected]
+    for as_sent, full in resolved:
+        try:
+            gone = remove_stored_lyrics(full)
+            results.append({"path": as_sent,
+                            "status": "ok" if gone["removed"] else "empty",
+                            **gone})
+            if gone["removed"]:
+                tagcache.invalidate_path(full)
+        except Exception as e:
+            results.append({"path": as_sent, "status": "failed", "error": str(e)})
+    return {
+        "results": results,
+        "removed": sum(1 for r in results if r.get("removed")),
+        "failed": sum(1 for r in results if r["status"] == "failed"),
+        "paths": [p for p, _ in resolved],
+    }
 
 
 @router.get("/api/lyrics/find")

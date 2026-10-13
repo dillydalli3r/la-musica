@@ -53,7 +53,11 @@ class AssignTagsRequest(BaseModel):
 # MusicBrainz / LRCLIB / RYM
 # --------------------------------------------------------------------------- #
 @router.get("/api/mb/release")
-def mb_release_query(mbid: str = Query(...)):
+def mb_release_query(
+    mbid: str = Query(...),
+    match: Optional[str] = Query(None),
+    staged: bool = Query(False),
+):
     """Full release by ID or URL; a RELEASE-GROUP id resolves to its best edition.
 
     The wizard's link field accepts either ("release or release-group — the
@@ -61,7 +65,12 @@ def mb_release_query(mbid: str = Query(...)):
     404s. Resolving here, through the same release-choice policy the import and
     the bulk queue use, means the payload's `id` is always the concrete release
     — so a caller that writes it writes a release id, never a group's.
-    """
+
+    ``match`` names the album folder to match against: the payload then carries
+    `suggestions` (the same rows ``/api/mb/match`` returns) beside the release.
+    ONE call is what the wizard's pick makes now — the release is resolved
+    once and the folder scanned once, where two requests re-resolved the
+    release from the cache and re-scanned the folder a second time."""
     rid = intg._mbid(mbid)
     if not rid:
         raise HTTPException(400, "invalid MusicBrainz ID or URL")
@@ -79,6 +88,16 @@ def mb_release_query(mbid: str = Query(...)):
     except Exception:
         # Aliases are a nicety; a release that resolved is still an answer.
         pass
+    if match:
+        album_dir = os.path.normpath(match)
+        if not os.path.isdir(album_dir):
+            raise HTTPException(404, "album not found")
+        _guard_folder(album_dir, staged, "album")
+        local_tracks = _scan_album_tracks(album_dir)
+        for lt in local_tracks:
+            lt.pop("tags", None)
+            lt.pop("tech", None)
+        release["suggestions"] = intg.match_tracks(local_tracks, release)
     return release
 
 

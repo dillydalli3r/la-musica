@@ -3061,3 +3061,60 @@ assert _inside["peak"] == 1, f"nothing to overlap with: {_events}"
 
 shutil.rmtree(SET_MF, ignore_errors=True)
 print("the settle's legs: description beside the tag writers — all assertions passed")
+
+# --------------------------------------------------------------------------- #
+# the match POLICY, and the one-request pick: an exact (disc, track) hit is
+# 1.0; a file claiming a disc the release does not carry is NEVER silently
+# rewritten to disc 1's same-numbered track on a multi-disc release (it wrote
+# a wrong MUSICBRAINZ_TRACKID at score 1.0, and the wrong recording's ratings
+# behind it — R414); a single-medium release keeps the fallback, at 0.5.
+# --------------------------------------------------------------------------- #
+from server import api_mb as _api_mb_mod  # noqa: E402
+from server import integrations as _match_intg  # noqa: E402
+
+_multi = {"media": [{"disc": 1, "position": 1, "title": "One"},
+                    {"disc": 2, "position": 1, "title": "Two"}]}
+_hit = _match_intg.match_tracks(
+    [{"path": "p", "tracknumber": 1, "discnumber": 2, "title": "Two"}], _multi)[0]
+assert _hit["matched"] and _hit["confidence"] == 1.0 \
+    and _hit["release_track"]["disc"] == 2, _hit
+_cross = _match_intg.match_tracks(
+    [{"path": "p", "tracknumber": 1, "discnumber": 3, "title": ""}], _multi)[0]
+assert not _cross["matched"], \
+    f"a disc the release does not carry must not claim disc 1's track: {_cross}"
+_single_media = {"media": [{"disc": 1, "position": 4, "title": "Four"}]}
+_fb = _match_intg.match_tracks(
+    [{"path": "p", "tracknumber": 4, "discnumber": 2, "title": ""}], _single_media)[0]
+assert _fb["matched"] and _fb["confidence"] == 0.5, \
+    f"a single-medium release keeps the disc-1 fallback, at a LOWER score: {_fb}"
+
+# `?match=` carries the local match beside the release: ONE request for the
+# wizard's pick. The remote halves and the scanner are stubbed — the contract
+# is that the route runs the SAME match_tracks over the folder it was named.
+_MATCH_DIR = tempfile.mkdtemp(prefix="mlo-match-album-")
+_MATCH_REL = {"id": "11111111-2222-3333-4444-555555555555", "title": "Match Album",
+              "media": _single_media["media"]}
+_real_resolve_m = _match_intg.resolve_release
+_real_aliases_m = _match_intg.attach_recording_aliases
+_real_scan_m = _api_mb_mod._scan_album_tracks
+_real_guard_m = _api_mb_mod._guard_folder
+_match_intg.resolve_release = lambda mbid: (dict(_MATCH_REL), "")
+_match_intg.attach_recording_aliases = lambda release, rid: None
+_api_mb_mod._scan_album_tracks = lambda album: [
+    {"path": os.path.join(album, "04 - Four.flac"), "tracknumber": 4,
+     "discnumber": 1, "title": "Four"}]
+_api_mb_mod._guard_folder = lambda folder, staged, what: None
+try:
+    _rel_out = _api_mb_mod.mb_release_query(
+        mbid="0b1a2c3d-4e5f-6789-abcd-ef0123456789", match=_MATCH_DIR, staged=True)
+finally:
+    _match_intg.resolve_release = _real_resolve_m
+    _match_intg.attach_recording_aliases = _real_aliases_m
+    _api_mb_mod._scan_album_tracks = _real_scan_m
+    _api_mb_mod._guard_folder = _real_guard_m
+assert _rel_out.get("suggestions") and _rel_out["suggestions"][0]["matched"] \
+    and _rel_out["suggestions"][0]["release_track"]["title"] == "Four", \
+    _rel_out.get("suggestions")
+shutil.rmtree(_MATCH_DIR, ignore_errors=True)
+print("the match policy: exact hits keep 1.0, a missing disc never claims disc "
+      "1's, a single-medium fallback is 0.5, and ?match= rides the release")

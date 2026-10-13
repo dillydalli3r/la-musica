@@ -389,6 +389,35 @@ eq((_rows["01 - rated.flac"]["level"], _rows["01 - rated.flac"]["source"]),
    "…and says which tag pair carries it and who wrote it")
 eq(_res["counts"]["written"], 1, "the run's own counts ride along")
 
+print("== the ratings rows read in (disc, track) order ==")
+# The rows the step draws keep (disc, track) order — never the directory
+# listing's own filename sort, which put disc 2 first on some rips (the
+# report this fixes). A file whose NAME sorts first but whose TAGS say disc 2
+# must come back second.
+from mutagen.flac import FLAC as _OFLAC  # noqa: E402
+
+_ord_dir = os.path.join(MF, "Album", "Order Test")
+make_flac("Order Test/aa - second disc.flac")
+make_flac("Order Test/zz - first disc.flac")
+_second = _OFLAC(os.path.join(_ord_dir, "aa - second disc.flac"))
+_second["DISCNUMBER"], _second["TRACKNUMBER"] = ["2"], ["1"]
+_second.save()
+_first = _OFLAC(os.path.join(_ord_dir, "zz - first disc.flac"))
+_first["DISCNUMBER"], _first["TRACKNUMBER"] = ["1"], ["9"]
+_first.save()
+eq([os.path.basename(r["file"]) for r in api_imports._rating_rows(_ord_dir)],
+   ["zz - first disc.flac", "aa - second disc.flac"],
+   "disc 1 is listed before disc 2 whatever the file names sort like")
+# With no disc tags at all, the "D-TT" file name is the fallback the wizard's
+# own lists use — and the numbers are compared as NUMBERS ("2-9" before
+# "2-10", where a plain string sort reads "2-10" first).
+_n_dir = os.path.join(MF, "Album", "Order Names")
+make_flac("Order Names/2-10 - ten.flac")
+make_flac("Order Names/2-9 - nine.flac")
+eq([os.path.basename(r["file"]) for r in api_imports._rating_rows(_n_dir)],
+   ["2-9 - nine.flac", "2-10 - ten.flac"],
+   "no tags: the D-TT names decide, and 9 comes before 10")
+
 # The switch off is REPORTED, not answered as an empty run — and the route
 # still asks the chain's entry point (which itself refuses; see its docstring).
 _rating_calls.clear()
@@ -456,8 +485,9 @@ auto_flac = make_flac("01 - auto.flac")
 # manual-only override (a run never replaces stored words — R#): the chain must
 # not pass it, the route passes its own `force` through it.
 def record_fetch(calls):
-    def fetch_one(path, config, replace=False):
-        calls.append({"path": os.path.basename(path), "replace": replace})
+    def fetch_one(path, config, replace=False, mark_absent=True):
+        calls.append({"path": os.path.basename(path), "replace": replace,
+                      "mark_absent": mark_absent})
         return {"path": path, "status": "skipped", "provider": None,
                 "provider_label": None, "synced": False,
                 "wrote": {"embedded": False, "lrc": None},
@@ -486,11 +516,15 @@ with patched(lyrics_fetch, fetch_one=fetch_recorder), patched(api_lyrics, fetch_
     fetch_calls.clear()
     route = call(lambda: CLIENT.post("/api/lyrics/auto", json={"paths": [manual_flac]}))
     ok(route.status_code == 200, "POST /api/lyrics/auto answers", str(route.status_code))
-    eq(fetch_calls, [{"path": os.path.basename(manual_flac), "replace": False}],
-       "the route hands fetch_one the track the caller named")
+    eq(fetch_calls, [{"path": os.path.basename(manual_flac), "replace": False,
+                      "mark_absent": False}],
+       "the route hands fetch_one the track the caller named, with the "
+       "no-lyrics answer DEFERRED to the batch's one pass")
     eq([c["replace"] for c in fetch_calls], [c["replace"] for c in chain],
        "the route and script 13 fetch through one entry point (the route's "
        "`force` IS `replace`; a run never replaces)")
+    eq([c["mark_absent"] for c in fetch_calls], [False],
+       "…and both DEFER the no-lyrics answer (the batch settles it once, R413)")
     print(f"        cross-check: manual={fetch_calls} chain={chain}")
 
 with patched(lyrics_xlit, run_lyrics_xlit=record_xlit(xlit_calls)):

@@ -841,6 +841,10 @@ export interface MBRelease {
   media: MBTrack[];
   medium_count: number;
   medium_formats?: string[];
+  /** The album's local match — present only when the caller asked for it
+   *  (`GET /api/mb/release?match=<album>`): the release fetch and the local
+   *  match in ONE request, so picking a release is one round trip. */
+  suggestions?: MatchSuggestion[];
 }
 
 /** One row of the in-app MusicBrainz browser's search (`GET /api/mb/search`).

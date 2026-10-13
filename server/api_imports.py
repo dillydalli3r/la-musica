@@ -535,6 +535,40 @@ class RatingsRequest(BaseModel):
     force: bool = False
 
 
+def _leading_int(value):
+    """The first integer in *value* ("2", "2/2", "Disc 2"), or None."""
+    digits = ""
+    for ch in str(value or ""):
+        if ch.isdigit():
+            digits += ch
+        elif digits:
+            break
+    return int(digits) if digits else None
+
+
+def _row_numbers(name, af):
+    """``(disc, track, name)`` for one album file — the sort key of the rows.
+
+    Tags first and the ``D-TT`` file name second, the same precedence the
+    wizard's own lists use (the library payload derives the same way), so the
+    step's rows read in the order the files' own numbers do whatever order the
+    directory listing came back in — a plain filename sort put disc 2 first on
+    some rips (the report this fixes)."""
+    disc = _leading_int(af.get_tag("DISCNUMBER"))
+    track = _leading_int(af.get_tag("TRACKNUMBER"))
+    if disc is None or track is None:
+        stem = os.path.splitext(name)[0]
+        head, dash, rest = stem.partition("-")
+        if dash:
+            disc = disc if disc is not None else _leading_int(head)
+            track = track if track is not None else _leading_int(rest)
+        else:
+            track = track if track is not None else _leading_int(stem)
+    return (disc if disc is not None else 1,
+            track if track is not None else 10_000,
+            name.lower())
+
+
 def _rating_rows(album_dir):
     """One row per readable track of *album_dir* AFTER a run.
 
@@ -545,6 +579,9 @@ def _rating_rows(album_dir):
     SOURCE tag beside it. `level` names which pair answered for this row, and a
     file no source answered for is reported with an empty value rather than
     left out, so the step can say so per track.
+
+    Ordered by (disc, track) — the one order every list of the wizard reads
+    in — never by the directory listing's own filename sort.
     """
     from mlo.audio import AudioFile
     from mlo.paths import LIB_AUDIO_EXTS
@@ -554,6 +591,7 @@ def _rating_rows(album_dir):
         names = sorted(os.listdir(album_dir))
     except OSError:
         return rows
+    entries = []
     for name in names:
         if os.path.splitext(name)[1].lower() not in LIB_AUDIO_EXTS:
             continue
@@ -566,16 +604,17 @@ def _rating_rows(album_dir):
             album_web = str(af.get_tag("ALBUMWEBRATING") or "").strip()
             source = (str(af.get_tag("WEBRATING_SOURCE") or "").strip() if web
                       else str(af.get_tag("ALBUMWEBRATING_SOURCE") or "").strip())
-            rows.append({
+            entries.append((_row_numbers(name, af), {
                 "file": path,
                 "title": str(af.get_tag("TITLE") or "").strip(),
                 "value": web or album_web,
                 "level": "track" if web else ("album" if album_web else None),
                 "source": source,
-            })
+            }))
         except Exception:
             continue
-    return rows
+    entries.sort(key=lambda e: e[0])
+    return [row for _key, row in entries]
 
 
 @router.post("/api/import/ratings")

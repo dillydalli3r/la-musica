@@ -8098,8 +8098,106 @@ when the log itself says something is wrong.** Pinned in
   (and a selection whose albums all name a release no longer skips the dialog —
   the review is the point); an album whose files name nothing opens BLANK, and
   blank is allowed (matched by name): the dialog is a chance to be sure, never a
-  wall. The separate "Change release…" button and the two-mode split are gone —
+  the wall. The separate "Change release…" button and the two-mode split are gone —
   one menu, one press.
+
+- **R410 — "Add tracks…" takes every way a file can arrive.** The Match step's
+  control (R396) was a click-only picker whose `accept` named audio alone, and
+  a staged album had no such control at all. It is now a DROP ZONE beside the
+  button — pick or drag — taking step 0's whole vocabulary: audio (any type
+  the app reads), artwork, `.cue` / `.log` / `.accurip` sidecars, and archives
+  (`.zip`, `.7z`, `.rar`, `.tar` — `mlo.archives.ARCHIVE_FORMATS`). An archive
+  is unpacked server-side first (`POST /api/import/unpack`), and everything it
+  held that the importer accepts is moved into the album from there as
+  `staged` — the bytes are already on the server, never uploaded twice —
+  through the SAME `POST /api/import/upload?album=` the plain files use,
+  fill-only as before. Nothing is filtered to audio: a type the server does
+  not know still joins the folder as a sidecar, which is exactly what a rip
+  log is. The unpacked trees are handed back
+  (`/api/import/unpack/discard`) only once the files are IN the album, so a
+  failed upload keeps them for a retry. Pinned by
+  `tools/check_import_minimum.mjs` (the zone's `accept` is step 0's list, and
+  the archive path posts `staged` paths beside the plain files).
+
+- **R411 — every importing list reads in (disc, track) order.** One comparator
+  (`trackOrder` in `ImportWizard.tsx`: disc, then track, then title; no disc
+  number means disc 1, no track number sorts last) is what every track list of
+  the wizard is read through — the step rows, the Match rows, the release's
+  per-row `select` options and the missing-track chips (whose media the
+  payload may hand over in ANY order, disc 2 first included) — and
+  `server/api_imports._rating_rows` sorts its reply rows by the same key (tags
+  first, the `D-TT` file name second, the numbers compared as numbers). The
+  ratings rows also WEAR the number: `TrackNoBadge` on the row, like every
+  other step, where the step used to print a bare title. Before this, a
+  two-disc album read disc 2 first on some steps and disc 1 first on others
+  (the owner's report: *"the ratings menu should actually list files correctly
+  (disc and track numbers)"*), because each step kept whatever order its
+  source handed over. Pinned by `tools/test_import_corrections.py` (a file
+  whose NAME sorts first but whose TAGS say disc 2 still reads second; with no
+  tags, the `D-TT` names decide and 9 precedes 10).
+
+- **R412 — the wizard's fetches have their Force, and their Clear/Remove.**
+  The ratings family could only be FILLED — a wrong value the fill-only
+  writer would not replace had no way out short of editing tags by hand — and
+  the lyrics step rendered neither the shared Force nor any way to remove a
+  stored lyric. Now: the Ratings step has a **Clear** on every row that holds
+  a value or a source, plus **Clear all web ratings** in the header, both
+  through the library's own `POST /api/tags/bulk` delete over the four tags
+  (`WEBRATING`/`WEBRATING_SOURCE`, `ALBUMWEBRATING`/`ALBUMWEBRATING_SOURCE`);
+  the reply rows are dropped and the folder re-scanned, so the list reads "no
+  source stated a score" from the files themselves. The Lyrics step renders
+  the shared one-shot Force (its ticked box is the `lyrics` key, so a press
+  re-fetches a track that already carries words) and a **Remove** per row —
+  `POST /api/lyrics/remove` → `mlo.lyrics.remove_stored_lyrics`: the `LYRICS`
+  tag, the `.lrc` sidecars that belong to this track's OWN name
+  (`<stem>.lrc` / `<stem>.romaji.lrc` / `<stem>.<lang>.lrc` — a longer track's
+  name is never swept in) and the `TRANSLITERATION-*` / `TRANSLATION-*` tags;
+  a track holding none of the three answers `empty`, not a failure, and
+  INSTRUMENTAL is untouched (a re-fetch can refill). Pinned by
+  `tools/test_script_menus.py` (the controls exist and send their flags) and
+  `tools/check_lyrics_kind.mjs`.
+
+- **R413 — the lyrics fetch reports per track, and the no-lyrics answer is
+  settled ONCE per batch.** The owner's report: *"pressing the auto-import
+  lyrics button for an album of mine gets stuck on Fetching lyrics — 0/19…
+  0/19 · 13s"*. Two mechanisms, both fixed. (1) The wizard's counted bar
+  advanced only when a whole chunk of eight came back, so one slow lane — a
+  provider walk, or the no-lyrics pass below — held the readout at "0/19" for
+  minutes. `POST /api/lyrics/auto` now registers a `job_locks` job and
+  publishes one frame per completed track (bracketed by 0/N and N/N, ended
+  with the job), and the wizard's strip follows those frames (`beginRun`), so
+  the readout moves track by track. (2) The route called `fetch_one` with the
+  default `mark_absent=True`, which made every lyric-less track fan out
+  `lyrics_absent`'s own LRCLIB + Spotify + AI asks INSIDE the lanes — the
+  module's own comment names it "the single biggest waste of a lyrics step"
+  (10–20 s of an 8-track album's 41 s), and script 13 avoids it by deferring.
+  The route now defers too (`mark_absent=False`, the flag popped before the
+  reply) and runs ONE `lyrics_absent` pass for every track that needed it,
+  then `_apply_absent` per row — the same values land on the same files.
+  Pinned by `tools/test_lyrics_kind.py` (the deferral flag, ONE absent batch
+  naming every track, no `needs_absent` in the reply, the frames) and
+  `tools/test_import_corrections.py` (both paths defer through the one entry
+  point).
+
+- **R414 — a release pick is ONE request, and the matcher never crosses discs
+  on a multi-disc release.** "Fetch release & auto-match" cost two round trips
+  and two folder scans — the second request re-resolved the release the first
+  had just resolved and re-scanned the folder. `GET /api/mb/release` takes
+  `match=<album>&staged=` and returns `suggestions` beside the release, so the
+  wizard's pick is one call, one resolve, one scan; `POST /api/mb/match` stays
+  for the re-matches that follow "Add tracks…" and the save. In the matcher
+  (`server.integrations.match_tracks`), a file whose disc number the release
+  does not carry used to fall back to disc 1's same-numbered track at
+  confidence **1.0** — silently writing a wrong `MUSICBRAINZ_TRACKID` (and the
+  wrong recording's ratings and genres behind it) on any two-disc album whose
+  second disc's files state no disc number. The fallback now applies ONLY when
+  the release carries a single medium (there disc 1 is the only place its
+  track can be), at confidence **0.5** — a guess, not an exact hit — and a
+  multi-disc release falls through to the title pass instead. Pinned by
+  `tools/check_import_minimum.mjs` (the pick's request carries
+  `match=<the album>`) and `tools/test_import_pipeline.py` (the exact hit, the
+  refused cross-disc, the single-medium 0.5 fallback, and the match riding the
+  release payload).
 
 ---
 

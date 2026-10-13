@@ -83,7 +83,7 @@ curl -X POST http://127.0.0.1:8011/api/config -H 'Content-Type: application/json
 `python dev.py` stays for the two things a container cannot do: a machine with no
 container runtime, and **desktop-shell work**, which is host-only by nature (the
 Tauri/Windows shell is built and driven on the host — `npx tauri build --debug
---no-bundle`, a scratch `MLO_APP_DATA_DIR`, and `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`
+--no-bundle`, a scratch `MLO_MUSIC_FOLDER`, and `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`
 when a CDP port is wanted). A Linux container is not the Windows runtime either:
 anything about console windows, the title bar or the tray still has to be proved
 on the host.
@@ -405,18 +405,28 @@ When they do ask for one:
   leave the app go through the shell (`web/src/lib/externalLinks.ts` →
   `open_external`): a webview drops `window.open` and `target="_blank"` alike.
   And no window the app did not open may appear.
-- **A scratch run isolates its app data — `MLO_MUSIC_FOLDER` alone is not
-  isolation.** The app data dir stays the install's
-  (`%LOCALAPPDATA%\la musica`) unless `MLO_APP_DATA_DIR` names another, and
-  `mlo.config.save_config` stamps that dir's own `config.json` with whatever
-  music folder the save carried. So one `POST /api/config
-  {"music_folder": "<scratch>"}` from a scratch run repoints the REAL install:
-  the owner's next launch opens the scratch folder and lists no albums, while
-  their library sits untouched. Set **both** variables for every scratch server
-  (`MLO_MUSIC_FOLDER=<scratch> MLO_APP_DATA_DIR=<scratch>/appdata`), never start
-  the packaged `mlo-server.exe` or the desktop app for scratch work, and never
-  post a wizard flip to a port you have not just checked is both free and yours
-  (`netstat -ano | findstr LISTENING`).
+- **A scratch run isolates its app data ONLY through `MLO_MUSIC_FOLDER` — set
+  it, and never start the packaged `mlo-server.exe` or the desktop app for
+  scratch work.** With the variable set, BOTH the live config and all state
+  live in `<scratch>/.mlo/data` (`mlo.config.active_config_file` =
+  `<music folder>/.mlo/data/config.json`; `mlo.paths.app_data_dir` =
+  `<music>/.mlo/data`), so a `POST /api/config {"music_folder": …}` from that
+  run writes the SCRATCH config, and `mlo.config.save_config` refuses to stamp
+  the checkout's own file while the env is set (mlo/config.py: "A run that was
+  TOLD its folder never stamps the CHECKOUT's own file"). Verified 2026-10-13:
+  a flip on a scratch server wrote `F:/tmp/…/.mlo/data/config.json` and left
+  the checkout untouched. WITHOUT the variable a repo run falls back to the
+  remembered install (the repo-local/legacy config and
+  `mlo.paths.LEGACY_DATA_DIR` = `server/data`) — the REAL one — so a run that
+  FORGETS the env and posts the flip repoints the real install: the owner's
+  next launch opens the scratch folder and lists no albums, while their
+  library sits untouched. (There is no `MLO_APP_DATA_DIR` in this code — older
+  notes named one.) Never post a wizard flip to a port you have not just
+  checked is both free and yours (`netstat -ano | findstr LISTENING`), and
+  never kill a listener before its command line has NAMED it: on 2026-10-13 a
+  packaged `mlo-server.exe` the owner's desktop shell had started was found
+  squatting 8011 with the REAL config, because an agent had assumed 8011 was
+  always a scratch bed (`wmic process where processid=<pid> get commandline`).
 - **Sites whose terms forbid scraping are not scraped, and MusicBrainz is read
   through its documented API.** RateYourMusic and Album of the Year were
   REMOVED on 2026-10-12: their terms forbid being scraped, and the

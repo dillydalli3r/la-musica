@@ -39,6 +39,7 @@ import type {
   LogReportPayload,
   MBArtistBrowse,
   MBRecordingBrowse,
+  MBRelease,
   MBReleaseChoicePayload,
   MBSearchFieldHelp,
   MBSearchRows,
@@ -2533,7 +2534,17 @@ export const api = {
     }, 180000),
 
   // integrations
-  mbRelease: (id: string) => json<import("./types").MBRelease>(`${API}/mb/release?mbid=${encodeURIComponent(id)}`),
+  /** The release by id — with `match`, the album's local match in the SAME
+   *  request: the route resolves the release once and scans the folder once,
+   *  so a pick costs one round trip instead of two. `suggestions` rides on
+   *  the payload when it was asked for. */
+  mbRelease: (id: string, opts: { match?: string; staged?: boolean } = {}) =>
+    json<MBRelease>(
+      `${API}/mb/release?mbid=${encodeURIComponent(id)}` +
+        (opts.match
+          ? `&match=${encodeURIComponent(opts.match)}&staged=${opts.staged ? "true" : "false"}`
+          : "")
+    ),
   /** Credits / performers for one track (`path`) or a whole album (`album`):
    *  a role-grouped MusicBrainz answer, or the files' own credit tags
    *  (`source: "tags"`) when MB has nothing. At most one MB request (cached
@@ -3339,6 +3350,19 @@ export const api = {
   lyricsProviders: () => json<LyricsProviders>(`${API}/lyrics/providers`),
   /** Auto-import lyrics for one or more tracks through the provider chain.
    *  Set force to re-fetch a track that already has lyrics. */
+  /** Remove a track's stored lyrics — the LYRICS tag, the `.lrc` sidecars that
+   *  belong to its own name and the transliteration/translation tags. The
+   *  lyrics step's Remove; nothing is re-fetched. */
+  lyricsRemove: (paths: string[], staged = false) =>
+    json<{
+      results: { path: string; status: string; removed?: boolean; error?: string }[];
+      removed: number;
+      failed: number;
+    }>(`${API}/lyrics/remove`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ paths, staged }),
+    }),
   lyricsAuto: (paths: string[], force = false, staged = false) =>
     json<{ results: LyricsAutoResult[]; order: string[]; ok: number; skipped: number; failed: number }>(
       `${API}/lyrics/auto`,

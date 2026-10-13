@@ -592,6 +592,59 @@ def shift_stored_lyrics(audio_path, delta_ms, cfg=None):
     return (shifted, targets)
 
 
+def remove_stored_lyrics(audio_path, af=None):
+    """Remove the lyrics one track stores, wherever they live.
+
+    THREE places, and every one is cleaned: the ``LYRICS`` tag, the ``.lrc``
+    sidecars that belong to this track's OWN name (``<stem>.lrc`` plus the
+    ``<stem>.romaji.lrc`` / ``<stem>.<lang>.lrc`` the transliteration pass
+    writes), and the ``TRANSLITERATION-<lang>`` / ``TRANSLATION-<lang>`` tags —
+    with the words gone those describe a text nothing carries any more.
+    Returns ``{removed, tag, sidecars, tags}``: ``removed`` is whether anything
+    was there at all, so a file with none of the three is a no-op, never a
+    failure.
+
+    The ONE entry point for the wizard's Remove button. A re-fetch is NOT
+    this: `fetch_one` overwrites in place, and only the LYRICS tag and the
+    sidecar named after the file are its to write.
+    """
+    out = {"removed": False, "tag": False, "sidecars": [], "tags": []}
+    af = af or AudioFile(audio_path)
+    if getattr(af, "audio", None) is None:
+        raise RuntimeError(af.error or "unreadable")
+
+    present = {str(k).upper() for k in (af.all_tags() or {})}
+    if "LYRICS" in present and af.delete_tag("LYRICS"):
+        out["tag"] = True
+    for key in list((af.all_tags() or {}).keys()):
+        upper = str(key).upper()
+        if upper.startswith("TRANSLITERATION-") or upper.startswith("TRANSLATION-"):
+            if af.delete_tag(key):
+                out["tags"].append(str(key))
+
+    parent = os.path.dirname(os.path.abspath(audio_path))
+    stem = os.path.splitext(os.path.basename(audio_path))[0].lower()
+    try:
+        names = sorted(os.listdir(parent))
+    except OSError:
+        names = []
+    for name in names:
+        low = name.lower()
+        if not low.endswith(".lrc"):
+            continue
+        # The dot after the stem is what keeps a LONGER track's name out
+        # ("01 Song Two.lrc" is not "01 Song"'s sidecar).
+        if low != f"{stem}.lrc" and not low.startswith(stem + "."):
+            continue
+        try:
+            os.remove(os.path.join(parent, name))
+            out["sidecars"].append(name)
+        except OSError:
+            continue
+    out["removed"] = bool(out["tag"] or out["sidecars"] or out["tags"])
+    return out
+
+
 
 # Non-blank is not the same as "has lyrics". An aborted run leaves a 0-byte
 # sidecar, a metadata-only write leaves "[ar:…]" / "[offset:…]" headers, and
