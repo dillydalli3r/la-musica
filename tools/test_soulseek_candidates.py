@@ -2291,6 +2291,32 @@ try:
 finally:
     shutil.rmtree(_nolog_dir, ignore_errors=True)
 
+# ...and the user's OWN switch: with `audit_verify_cd_checksums` OFF the CRC
+# audit answers nothing at all (mlo.discs.verify_album_checksums returns
+# ({}, {})), which used to read as "no track's CRC was checked" and rejected
+# EVERY CD download for a check the user had asked not to run. It falls to the
+# clean decode now, and the CRC source is never even called.
+_cdoff_dir = tempfile.mkdtemp(prefix="mlo-cdoff-")
+try:
+    open(os.path.join(_cdoff_dir, "01 - A.flac"), "wb").close()
+    open(os.path.join(_cdoff_dir, "Album.log"), "w", encoding="utf-8").close()
+    _crc_calls = {"n": 0}
+
+    def _crc_boom(*a, **k):
+        _crc_calls["n"] += 1
+        return {}, {}
+
+    with Patch(mlo_tools, detect_all_tools=lambda: _flac_tools), \
+         Patch(mlo_subproc, run_tool=lambda *a, **k: _CleanDecode()), \
+         Patch(mlo_discs, verify_album_checksums=_crc_boom):
+        ok, problems = soulseek_auto._verify_album(
+            _cdoff_dir, {"audit_verify_cd_checksums": False}, True)
+    assert ok is True and problems == [], (ok, problems)
+    assert _crc_calls["n"] == 0, \
+        "the CD CRC audit must not run while the user has it switched off"
+finally:
+    shutil.rmtree(_cdoff_dir, ignore_errors=True)
+
 # The disc gate admits that no-log folder as a low-ranking CANDIDATE only with
 # the floor off: at any floor a CD folder with no .log is not a candidate (the
 # .log/.cue rule), and with the floor off a folder that DOES carry a log scores
@@ -2377,11 +2403,33 @@ assert mlo_discs.parse_log_accuraterip(
     "Track  1\n     Copy CRC 11111111\n"
     "     Track not present in AccurateRip database\n") == (None, "")
 
-# (b) a STATED AccurateRip failure rejects — EAC/XLD per-track line AND the
-#     aggregate footer, both caught, with the rip's own words as the detail.
+# (b) a STATED AccurateRip failure rejects — the EAC per-track line (which
+#     always carries "AccurateRip returned [...]") and XLD's "NG", caught, with
+#     the rip's own words as the detail.
 _state, _detail = mlo_discs.parse_log_accuraterip(_EAC_AR_FAIL_LOG)
 assert _state == "fail" and "AccurateRip returned" in _detail, (_state, _detail)
 assert soulseek_auto._log_passes(100, "ok", 100, "fail") is False
+# ...but the aggregate footer EAC prints on its own ("Some tracks could not be
+# verified as accurate") is NOT a verdict: EAC prints it for a track simply
+# ABSENT from AccurateRip's database exactly as for a real mismatch, and
+# rejecting a fully-verified album over a track AccurateRip has never seen is
+# the "good candidate rejected" the owner reported. The per-track lines decide.
+_MIXED_AR_LOG = """Exact Audio Copy V1.6 from 23. October 2018
+
+Track  1
+     Copy CRC 11111111
+     Accurately ripped (confidence 5)  [11111111]  (AR v2)
+Track  2
+     Copy CRC 22222222
+     Track not present in AccurateRip database
+Track  3
+     Copy CRC 33333333
+     Accurately ripped (confidence 3)  [33333333]  (AR v2)
+
+Some tracks could not be verified as accurate
+"""
+assert mlo_discs.parse_log_accuraterip(_MIXED_AR_LOG)[0] == "ok", \
+    "a track merely absent from AccurateRip is not a failure"
 # XLD's own summary spelling (: NG) is the same failure, even beside a blanket
 # "All tracks accurately ripped" footer — the per-track failure wins.
 assert mlo_discs.parse_log_accuraterip(_XLD_AR_NG_LOG)[0] == "fail"

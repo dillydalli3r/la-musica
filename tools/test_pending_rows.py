@@ -339,6 +339,31 @@ eq(pending_albums.folder_for_release(MULTI, CFG),
    "…so the folder preview does not move when a release gains countries")
 
 # --------------------------------------------------------------------------- #
+# 4b. the framework TILE states the pressing — medium and countries as VALUES
+# --------------------------------------------------------------------------- #
+# The owner's report (2026-10-13): an album mid-import showed its MEDIA tag as
+# "CD · {'code': 'JP'}". The medium was fine; the COUNTRY was the repr of the
+# event dict the marker stores (`_identity_block` keeps `countries` as
+# [{code, …}]) — `_pending_release_identity` read the events as strings, so the
+# tile's "CD · <country>" chip printed the dict. The row must carry the code.
+identity = pending_albums.create(
+    dict(RELEASE, id="ccccccc1-1111-1111-1111-111111111111",
+         release_group_id="ccccccc2-2222-2222-2222-222222222222",
+         title="Identity Album", medium="CD",
+         countries=[{"code": "JP", "date": "1997-05-06"},
+                    {"code": "US", "date": "1997-05-20"}]),
+    CFG, prefetch=False)
+identity_folder = identity["album_path"].replace("/", os.sep)
+_lib, irows = library_rows(CFG)
+irow = irows.get(norm(identity_folder)) or {}
+eq(irow.get("media"), "CD",
+   "framework row: the medium is its value, not a dict")
+eq((irow.get("meta") or {}).get("RELEASECOUNTRY"), "JP; US",
+   "framework row: RELEASECOUNTRY reads the event CODES, never the dict repr")
+ok("{" not in str((irow.get("meta") or {}).get("RELEASECOUNTRY") or ""),
+   "…so the album page's medium·country chip cannot show a Python dict")
+
+# --------------------------------------------------------------------------- #
 # 5. CANCELLING a framework album: the placeholder goes, its audio never does
 # --------------------------------------------------------------------------- #
 print("\na cancelled framework album")

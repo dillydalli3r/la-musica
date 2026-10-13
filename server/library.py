@@ -602,11 +602,30 @@ def _pending_release_identity(info):
     rel = info.get("release") if isinstance(info, dict) else None
     if not isinstance(rel, dict):
         rel = {}
-    codes = [str(c).strip() for c in (rel.get("countries") or []) if str(c).strip()]
+    # `countries` is a LIST OF EVENTS — {code, date, …} per release event
+    # (server.pending_albums._identity_block, and integrations.release_countries
+    # itself) — so the code is read off the dict, never `str()`d whole: that
+    # printed `{'code': 'JP'}` as the country and the tile read "CD ·
+    # {'code': 'JP'}" (the album page joins the medium and the countries — see
+    # web/src/components/Badges.mediaCountryLabel). A plain string entry (a
+    # payload that states codes directly) still answers, and a repeat is
+    # dropped.
+    codes = []
+    for event in rel.get("countries") or []:
+        code = str((event.get("code") if isinstance(event, dict) else event)
+                   or "").strip()
+        if code and code not in codes:
+            codes.append(code)
     if not codes:
         codes = [str(rel.get("country") or "").strip()]
     countries = "; ".join(c for c in codes if c)
-    media = [str(m).strip() for m in (rel.get("media") or []) if str(m).strip()]
+    # Same shape rule for the medium: a normalized release states format NAMES
+    # ("CD", "HDCD"), a raw one nests them in media[].format.
+    media = []
+    for m in rel.get("media") or []:
+        name = str((m.get("format") if isinstance(m, dict) else m) or "").strip()
+        if name and name not in media:
+            media.append(name)
     for tag, value in (("MEDIA", media[0] if media else ""),
                        ("RELEASECOUNTRY", countries),
                        ("CATALOGNUMBER", rel.get("catalog_number")),

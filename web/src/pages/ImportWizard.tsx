@@ -693,15 +693,21 @@ export default function ImportWizard() {
   // then runs each album through the AUTONOMOUS pipeline (the same
   // `POST /api/import/bulk` the Library's "Run importing" uses): the chain
   // decides everything a configured source can answer and only comes back for
-  // what nothing could supply. Albums whose files name no MusicBrainz release
-  // are still asked about first — the identify dialog, with its release
-  // URL/MBID field, AcoustID fingerprint and catalogue search. Several batches
-  // can be in flight: the server keeps one job per call (`jobs` in the bulk
-  // status) and the In-progress page shows them all.
+  // what nothing could supply. EVERY staged album is asked about first — the
+  // identify dialog, with its release URL/MBID field, AcoustID fingerprint and
+  // catalogue search — whether or not its files already name a release, so a
+  // wrong or stale tag-named id is visible at the one press that would
+  // re-point it. Several batches can be in flight: the server keeps one job per
+  // call (`jobs` in the bulk status) and the In-progress page shows them all.
   const [autoBusy, setAutoBusy] = useState(false);
   const [identify, setIdentify] = useState<{
     staged: { name: string; path: string }[];
     albums: IdentifyAlbum[];
+    /** Which starter the dialog's Import press runs: the autonomous
+     *  pipeline ("auto") or the plain bulk queue ("bulk"). Both ASK about
+     *  every album first — that is the rule — and differ only in what they
+     *  queue when the press lands. */
+    mode: "auto" | "bulk";
   } | null>(null);
 
   // ---- Bulk queue (several albums at once) ------------------------------
@@ -1897,17 +1903,21 @@ export default function ImportWizard() {
       // offered right here, while the album is fresh, instead of on a later
       // visit to its page.
       if (cfg?.metadata_review === true) setReviewPath(results[0].path);
-      // Several albums: hand the staged queue to the bulk job, which moves
-      // whatever is still outside the library and runs the import chain per
-      // album. The queue panel polls api.importBulkStatus for progress.
+      // Several albums: ASK which release each one is, then hand the staged
+      // queue to the bulk job, which moves whatever is still outside the
+      // library and runs the import chain per album. Every album gets a row
+      // (its own release prefilled), exactly as Auto-import does — a batch
+      // with all its ids already tagged still shows them, so a wrong or stale
+      // uploader tag is corrected at the one press that would re-point it. The
+      // queue panel polls api.importBulkStatus for progress.
       if (results.length > 1) {
-        try {
-          const job = await api.importBulk(results.map((r) => ({ path: r.path })));
-          if (job.ok && job.job) setBulkJob(job.job);
-          else toast(`Queue import: ${job.error ?? "could not start"}`);
-        } catch (e) {
-          toast(`Queue import: ${e}`);
-        }
+        await beginPlainBulk(results);
+        toast(
+          failed.length
+            ? `Staged ${results.length} album${results.length > 1 ? "s" : ""} — ${failed.length} could not be staged: ${failed.map((f) => f.name).join(", ")}`
+            : `Staged ${results.length} albums — choose each one's release, then it queues`
+        );
+        return;
       }
       toast(
         failed.length
@@ -1940,6 +1950,21 @@ export default function ImportWizard() {
    *  The dialog's own release-URL/MBID field, AcoustID fingerprint and
    *  catalogue search are the ways a person pins a release. */
   const beginAutoImport = async (staged: { name: string; path: string }[]) => {
+    setIdentify({ staged, albums: await identifyRows(staged), mode: "auto" });
+  };
+
+  /** The plain multi-album Import: the same ask, then the bulk queue. The rule
+   *  the Auto-import press follows — a row per album, opened on the release its
+   *  files name — belongs to EVERY press that queues more than one album, so a
+   *  batch whose ids are already tagged is shown too (that is exactly when a
+   *  stale id hides). */
+  const beginPlainBulk = async (staged: { name: string; path: string }[]) => {
+    setIdentify({ staged, albums: await identifyRows(staged), mode: "bulk" });
+  };
+
+  /** One row per staged album, read from the album's own payload: the release
+   *  its files name now (`current`), or blank when they name none. */
+  const identifyRows = async (staged: { name: string; path: string }[]): Promise<IdentifyAlbum[]> => {
     const rows: IdentifyAlbum[] = [];
     await Promise.all(staged.map(async (r) => {
       try {
@@ -1957,10 +1982,25 @@ export default function ImportWizard() {
         rows.push({ path: r.path, artist: "", album: r.name });
       }
     }));
-    setIdentify({
-      staged,
-      albums: rows.sort((a, b) => a.path.localeCompare(b.path)),
-    });
+    return rows.sort((a, b) => a.path.localeCompare(b.path));
+  };
+
+  /** The plain bulk queue the identify dialog's Import press runs: one
+   *  `importBulk` call, each re-pointed row sent as its pin. */
+  const startPlainBulk = async (
+    staged: { name: string; path: string }[],
+    pins: Record<string, string>,
+  ) => {
+    setIdentify(null);
+    try {
+      const job = await api.importBulk(
+        staged.map((r) => ({ path: r.path, mbid: pins[r.path] || undefined }))
+      );
+      if (job.ok && job.job) setBulkJob(job.job);
+      else toast(`Queue import: ${job.error ?? "could not start"}`);
+    } catch (e) {
+      toast(`Queue import: ${e}`);
+    }
   };
 
   /** Queue the staged batch through the autonomous pipeline. Several batches
@@ -6479,18 +6519,20 @@ const finish = async (closeByNavigation: boolean, runScripts = true) => {
           onClose={() => setReviewPath(null)}
         />
       )}
-    {/* The release-identification dialog for an auto-import of albums whose
-          files name no MusicBrainz release. Same dialog the Library's "Run
-          importing" opens: a release URL/MBID, an AcoustID fingerprint or a
-          catalogue search pins the release before the batch is queued. */}
+    {/* The release-identification dialog EVERY press that queues more than one
+          album opens — the wizard's Auto-import, its plain multi-album Import,
+          and (elsewhere) the Library's Import menu. A release URL/MBID, an
+          AcoustID fingerprint or a catalogue search pins the release before
+          the batch is queued; a row left alone keeps the release its files
+          name. */}
       {identify && (
         <ImportIdentifyDialog
           albums={identify.albums}
           onClose={() => setIdentify(null)}
           onStart={async (pins) => {
-            const staged = identify.staged;
-            setIdentify(null);
-            await startAutoImport(staged, pins);
+            const { staged, mode } = identify;
+            if (mode === "bulk") await startPlainBulk(staged, pins);
+            else await startAutoImport(staged, pins);
           }}
         />
       )}

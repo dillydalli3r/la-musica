@@ -15,6 +15,11 @@ export interface IdentifyAlbum {
   /** The release id the album's files already carry, when they carry one.
    *  Prefills the row and is what an untouched row keeps. */
   current?: string;
+  /** The album is NOT in the music folder yet — a finished download, a staged
+   *  batch. The AcoustID pass fingerprints the files, so the server must be
+   *  told the path is an opt-in staged one (`_allow_staged`), exactly as the
+   *  wizard's own calls do. */
+  staged?: boolean;
 }
 
 /** "Which release is this?" — the one question the import pipeline cannot
@@ -34,6 +39,11 @@ export interface IdentifyAlbum {
  *  * **catalog number** — type the CD's catalogue number and MusicBrainz's own
  *    `catno:` search comes back with the releases that carry it, each one click
  *    from being the pin.
+ *
+ *  A batch of rows also offers **Detect all** — ONE AcoustID call fingerprints
+ *  every album at once, so a multi-album import costs one request rather than a
+ *  press per row. Every row that has an edit is a PIN, the release it names;
+ *  each row's release-group match lands under it as a "use this" link.
  *
  *  The row IS the release change: a row opens on the release the album's files
  *  name now, and editing it re-points that album — the pipeline stamps a pin
@@ -64,7 +74,7 @@ export default function ImportIdentifyDialog({
   const detect = async (al: IdentifyAlbum) => {
     setBusy((b) => ({ ...b, [al.path]: "detect" }));
     try {
-      const res = await api.importAcoustid([al.path]);
+      const res = await api.importAcoustid([al.path], false, !!al.staged);
       const row = res.albums?.[0];
       if (!row) {
         toast("AcoustID: nothing came back for that album", "error");
@@ -76,6 +86,40 @@ export default function ImportIdentifyDialog({
       toast.error(String(e));
     } finally {
       setBusy(({ [al.path]: _gone, ...rest }) => rest);
+    }
+  };
+
+  /** Fingerprint EVERY row at once: one AcoustID call takes the whole album
+   *  list, so a batch costs one request and one fpcalc pass per album instead
+   *  of a press per row. Each row's own result lands under its path, so the
+   *  per-row "use this" links still work. */
+  const detectAll = async () => {
+    const paths = albums.map((a) => a.path);
+    if (!paths.length) return;
+    setBusy((b) => {
+      const next = { ...b };
+      for (const p of paths) next[p] = "detect";
+      return next;
+    });
+    try {
+      const res = await api.importAcoustid(paths, false, albums.some((a) => a.staged));
+      const rows = res.albums || [];
+      setDetected((cur) => {
+        const next = { ...cur };
+        for (const row of rows) next[row.path] = row;
+        return next;
+      });
+      const matched = rows.filter((r) => r.status === "matched").length;
+      if (!res.available) toast(res.note || "AcoustID is not configured", "error");
+      else toast(`AcoustID: ${matched}/${rows.length} album(s) matched`);
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setBusy((b) => {
+        const next = { ...b };
+        for (const p of paths) if (next[p] === "detect") delete next[p];
+        return next;
+      });
     }
   };
 
@@ -161,15 +205,40 @@ export default function ImportIdentifyDialog({
         </div>
       }
     >
+      {albums.length > 1 && (
+        <div className="flex items-center gap-2 flex-wrap">
+          <button
+            className="btn-ghost !py-1 text-xs tap"
+            onClick={() => void detectAll()}
+            disabled={pending}
+            title="Fingerprint every album with AcoustID in ONE request and let it say which release group each one is"
+          >
+            {busy[albums[0].path] === "detect" && albums.every((a) => busy[a.path] === "detect")
+              ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              : <Fingerprint className="h-3.5 w-3.5" />}
+            Detect all (AcoustID)
+          </button>
+          <span className="text-[11px] text-zinc-500">
+            One fingerprint pass for the whole batch — each row's own match and release-group link appears below it.
+          </span>
+        </div>
+      )}
       {albums.map((al) => {
         const det = detected[al.path];
         const rows = found[al.path];
+        const value = (pins[al.path] ?? al.current ?? "").trim();
+        const fromFiles = !!al.current && value.toLowerCase() === al.current.trim().toLowerCase();
         return (
           <div key={al.path} className="rounded-lg border border-border bg-panel/60 p-3 space-y-2">
             <div className="flex items-baseline gap-2 flex-wrap">
               <Disc3 className="h-3.5 w-3.5 text-zinc-500" />
               <span className="text-sm text-zinc-100">{al.album}</span>
               <span className="text-xs text-zinc-500">{al.artist}</span>
+              {fromFiles && (
+                <span className="chip text-[9px] text-emerald-300/90" title="This is the release id the album's own files already carry — a row left alone keeps it">
+                  in files
+                </span>
+              )}
               {al.path && (
                 <span className="text-[10px] text-zinc-600 font-mono truncate max-w-[18rem]" title={al.path}>
                   {al.path.split(/[\\/]/).slice(-2).join("/")}

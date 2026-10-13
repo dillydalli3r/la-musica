@@ -15,6 +15,7 @@ import { SOULSEEK_QUEUE_KEY as QUEUE_KEY, STAGE_LABEL } from "../lib/acquisition
 import { EmptyState, PageLoading } from "../components/Badges";
 import PageHeader from "../components/PageHeader";
 import Modal from "../components/Modal";
+import ImportIdentifyDialog, { type IdentifyAlbum } from "../components/ImportIdentifyDialog";
 import ConfirmButton from "../components/ConfirmButton";
 import Segmented from "../components/Segmented";
 import type { DownloadEntry, ImportBulkJob, SlskReleaseIdentity } from "../types";
@@ -5958,6 +5959,16 @@ function StagingImportPanel() {
   const [confirmDelete, setConfirmDelete] = useState(false);
   /** The bulk job an import of 2+ entries runs (null = none). */
   const [bulkJob, setBulkJob] = useState<ImportBulkJob | null>(null);
+  /** The release-identification dialog, open before the import is queued.
+   *  A finished download already carries whatever the uploader tagged — often
+   *  another pressing's MusicBrainz id, sometimes none — and the dialog opens
+   *  a row per entry, on the release its files name now, so the one press that
+   *  queues the import is also where a wrong id is seen and corrected. Same
+   *  component the Library's Import menu and the wizard's Auto-import use. */
+  const [identify, setIdentify] = useState<{
+    entries: { name: string; path: string }[];
+    albums: IdentifyAlbum[];
+  } | null>(null);
 
   const { data, isLoading, isFetching, refetch } = useQuery({
     queryKey: ["downloads"],
@@ -6012,23 +6023,73 @@ function StagingImportPanel() {
     toast(msg);
   };
 
-  const doImport = async () => {
-    if (!liveSelection.length || !data?.folder) return;
+  /** The entries the press will act on, as (name, path) rows — the same
+   *  selection the index uses, resolved against the CURRENT listing. */
+  const importRows = () =>
+    liveSelection.map((name) => ({ name, path: `${data?.folder ?? ""}/${name}` }));
+
+  /** Queue the entries through the import chain. `pins` maps an entry's path to
+   *  the release id the user named in the dialog; a row left alone sends none,
+   *  so the import is exactly the one the files already asked for. */
+  const startImport = async (pins: Record<string, string>) => {
+    const rows = identify?.entries ?? importRows();
+    setIdentify(null);
+    if (!rows.length) return;
     setBusy(true);
     try {
       // ONE entry or several: same route. The bulk queue moves each entry into
       // the library AND runs the configured import chain on it — a single
       // entry used to take the move-only route and silently skip the chain.
       const job = await api.importBulk(
-        liveSelection.map((name) => ({ path: `${data.folder}/${name}`, move: true }))
+        rows.map((r) => ({ path: r.path, move: true, mbid: pins[r.path] || undefined }))
       );
       if (job.ok && job.job) {
         setBulkJob(job.job);
         setSel(new Set());
-        toast(`Importing ${liveSelection.length} entr${liveSelection.length === 1 ? "y" : "ies"} — progress below`);
+        toast(`Importing ${rows.length} entr${rows.length === 1 ? "y" : "ies"} — progress below`);
       } else {
         toast(`Queue import: ${job.error ?? "could not start"}`);
       }
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /** The Import press: ASK which release first, then queue. Reading each
+   *  entry's own release id costs one `/api/album` per entry (the same payload
+   *  the album page shows), and EVERY entry gets a row — one that already
+   *  names a release opens on it, so a wrong or stale uploader tag is visible
+   *  and correctable before a single byte is moved. The rows are read here
+   *  (not at press time from cache) because the download folder is not in the
+   *  library tree. */
+  const doImport = async () => {
+    if (!liveSelection.length || !data?.folder) return;
+    const rows = importRows();
+    setBusy(true);
+    try {
+      const albums: IdentifyAlbum[] = await Promise.all(rows.map(async (r) => {
+        try {
+          const al = await api.album(r.path, true);
+          const pin = al?.meta?.MUSICBRAINZ_ALBUMID
+            ?? al?.album_values?.MUSICBRAINZ_ALBUMID ?? "";
+          return {
+            path: r.path,
+            artist: al?.album_artist ?? "",
+            album: al?.meta?.ALBUM || r.name,
+            current: pin,
+            staged: true,
+          };
+        } catch {
+          // Unreadable payload: ask rather than silently import a guess.
+          return { path: r.path, artist: "", album: r.name, staged: true };
+        }
+      }));
+      setIdentify({
+        entries: rows,
+        albums: albums.sort((a, b) => a.path.localeCompare(b.path)),
+      });
     } catch (e) {
       toast.error(String(e));
     } finally {
@@ -6154,8 +6215,8 @@ function StagingImportPanel() {
                 disabled={busy || !liveSelection.length}
                 title={
                   liveSelection.length > 1
-                    ? "Move the selected entries into the library and run the import chain on each"
-                    : "Move the selected entry into the library and run the import chain on it"
+                    ? "Ask which release each selected entry is (its row opens on the release its files name), then move them into the library and run the import chain on each"
+                    : "Ask which release this entry is (its row opens on the release its files name), then move it into the library and run the import chain on it"
                 }
               >
                 <FolderInput className="h-3.5 w-3.5" />{" "}
@@ -6232,12 +6293,21 @@ function StagingImportPanel() {
 
         {entries.length > 0 && (
           <div className="text-[10px] text-zinc-600">
-            Import moves an entry into the library as its own album named after the folder and runs the
-            configured import chain on it (Settings → Import); several entries are just a queue of that.
-            Delete removes it from disk for good — nothing here is copied to the trash bin first.
+            Import asks which release each entry is — its row opens on the release the files already name —
+            then moves it into the library as its own album named after the folder and runs the configured
+            import chain on it (Settings → Import); several entries are just a queue of that. Delete removes
+            it from disk for good — nothing here is copied to the trash bin first.
           </div>
         )}
       </div>
+
+      {identify && (
+        <ImportIdentifyDialog
+          albums={identify.albums}
+          onClose={() => setIdentify(null)}
+          onStart={(pins) => startImport(pins)}
+        />
+      )}
     </div>
   );
 }

@@ -601,10 +601,18 @@ def parse_log_checksums(text):
 # verified as accurate"). Only AccurateRip's OWN words count as a failure: a
 # bare "mismatch" would also match whipper's "Status: Error, CRC mismatch" on a
 # failed TEST run, which says nothing about AccurateRip.
+#
+# "could not be verified as accurate" is deliberately NOT here: EAC prints that
+# same aggregate footer for a track that is merely ABSENT from AccurateRip's
+# database ("Track not present in database" — an obscure pressing or a bonus
+# track, which is not a failure) as for one that really mismatched. A genuine
+# mismatch always carries the per-track "AccurateRip returned [...]" line, so
+# the aggregate's ambiguous wording is dropped and the per-track evidence
+# decides; "not accurately ripped" stays because that phrasing IS a verdict.
 _AR_FOOTER_OK_RE = re.compile(r"all tracks accurately ripped", re.IGNORECASE)
 _AR_FAIL_RE = re.compile(
-    r"cannot be verified as accurate|could not be verified as accurate|"
-    r"not accurately ripped|accuraterip returned", re.IGNORECASE)
+    r"cannot be verified as accurate|not accurately ripped|"
+    r"accuraterip returned", re.IGNORECASE)
 _AR_TRACK_LINE_RE = re.compile(r"^Track\s+(\d{1,3})\b(.*)$", re.IGNORECASE)
 
 
@@ -615,8 +623,13 @@ def parse_log_accuraterip(text):
 
       * ``"fail"`` — the log asserts AccurateRip results and at least one of
         them did not verify (a per-track "cannot be verified as accurate" /
-        XLD "NG", or an aggregate damage line). ``detail`` is the offending
-        line, so a rejection can quote the rip's own words.
+        XLD "NG", or an aggregate "not accurately ripped" line). ``detail`` is
+        the offending line, so a rejection can quote the rip's own words. EAC's
+        aggregate "Some tracks could not be verified as accurate" is NOT
+        enough on its own: it counts a track merely ABSENT from AccurateRip's
+        database exactly as it counts a real mismatch, so the failure needs the
+        per-track evidence (every genuine mismatch carries an "AccurateRip
+        returned [...]" line).
       * ``"ok"`` — the log states AccurateRip results and every one of them
         verified ("All tracks accurately ripped", a per-track "accurately
         ripped", or XLD's "Track N : OK").

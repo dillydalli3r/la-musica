@@ -8453,7 +8453,7 @@ when the log itself says something is wrong.** Pinned in
     first), so re-picking the same folder or file fires again — a selection the
     import refused could not be retried otherwise.
 
-  Pinned by `tools/check_import_minimum.mjs` (127 checks): the hint a second
+  Pinned by `tools/check_import_minimum.mjs` (129 checks): the hint a second
   pick relies on, two picks that keep both folders (the first banked, the
   commit button counting both), and — with the page driven as if it ran in the
   shell — one `pick_folders` answer of two folders becoming TWO albums in one
@@ -8462,6 +8462,61 @@ when the log itself says something is wrong.** Pinned in
   one whole. `tools/test_desktop_commands.py` pins the shell's three command
   lists (build.rs manifest, `generate_handler!`, the capability's `allow-*`
   grants) so a new command cannot land without its grant.
+
+- **R423 — a good Soulseek download is not rejected for evidence the user
+  switched off, and an AccurateRip track the database has never seen is not a
+  failure.** The owner's report, 2026-10-13: *"the app rejects a lot of
+  seemingly good candidates / downloads from soulseek."* Two of the rejections
+  were the app's own, not the rip's:
+
+  * `_verify_album` (CD) read `mlo.discs.verify_album_checksums` returning
+    `({}, {})` as "no track's CRC was checked (the MEDIA tag is missing?)" and
+    REFUSED the album. That empty answer is also what the function returns when
+    the user has turned the audit off (`audit_verify_cd_checksums`, a Settings
+    toggle) — so with the switch OFF **every** CD download was rejected, for a
+    check the user had asked not to run. A CD with the audit switched off now
+    falls to the same clean decode digital media gets, and the CRC source is
+    not even called.
+  * `mlo.discs.parse_log_accuraterip` treated EAC's aggregate footer *"Some
+    tracks could not be verified as accurate"* as a stated failure. EAC prints
+    that SAME footer for a track merely ABSENT from AccurateRip's database — an
+    obscure pressing or a bonus track — exactly as for a real mismatch, so a
+    fully-verified album was refused over a track AccurateRip has never seen.
+    The ambiguous aggregate wording is dropped; a genuine mismatch always
+    carries the per-track `AccurateRip returned […]` line (and XLD's `: NG`),
+    which is what decides. "not accurately ripped" stays — that phrasing IS a
+    verdict.
+
+  Pinned in `tools/test_soulseek_candidates.py` (a CD with
+  `audit_verify_cd_checksums` off verifies by decode and never calls the CRC
+  source; a log with one not-present track + the aggregate footer reads `ok`;
+  the per-track EAC mismatch and XLD `: NG` still read `fail`).
+
+- **R424 — the release-identification dialog belongs to EVERY press that
+  queues an import.** R397 gave it to the Library's Import menu and R418 to the
+  wizard's Auto-import; every OTHER surface that queued a batch still skipped
+  it, so a selection whose files already named a release could import with a
+  wrong or stale tag-named id and nothing to see it at. One rule now: a press
+  that imports more than one album raises the dialog — one row per album,
+  opened on the release its files name — before anything is queued:
+
+  * the wizard's plain **Import N albums into library** (multi-album) queues
+    through the dialog exactly as Auto-import does (`beginPlainBulk` →
+    `startPlainBulk`); a row left alone sends no pin.
+  * the Soulseek **Import to library** panel (`<music>/.mlo/downloads`)
+    reads each entry's own release id (`/api/album`, staged) and opens the
+    dialog before the bulk move, so a finished download's uploader tags are
+    seen and correctable at the press that imports it.
+  * a row whose value IS the files' own release wears an "in files" chip, and
+    a batch offers **Detect all** — ONE AcoustID call fingerprints every
+    album at once (`IdentifyAlbum.staged` carries the opt-in for a download
+    folder, which is outside the music folder).
+
+  Single-album imports (a queue row, a finished download's own Import) keep
+  their own release — the user chose it to start the download — and are not
+  asked again. Pinned by `tools/check_import_minimum.mjs` (the wizard's
+  multi-album and auto presses both reach the dialog) and the Soulseek page's
+  own render checks.
 
 ---
 

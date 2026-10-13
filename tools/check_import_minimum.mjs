@@ -857,6 +857,28 @@ try {
   check("…and never the batch that was removed",
         !JSON.stringify(bulkBodies).includes("Batch Two"), JSON.stringify(bulkBodies));
   await page.context().close();
+
+  // (c) The PLAIN multi-album Import asks too (R424): the same release dialog
+  // the Auto-import raises, before the bulk queue is started. A batch whose
+  // files already name a release is still asked about — that is the whole
+  // point: a wrong tag-named id is only visible at this press.
+  bulkBodies = [];
+  page = await openPage();
+  await page.setInputFiles("#import-files", wav(DISC_ONE));
+  await page.setInputFiles("#import-files", wav(DISC_TWO));
+  await page.waitForFunction(() => document.body.innerText.includes("Batches to import — 1"),
+                             null, { timeout: 20000 });
+  await page.getByRole("button", { name: /Import \d+ album\(s\) from 2 batches into library/ }).click();
+  const plainRow = page.locator('[role="dialog"] input[placeholder^="MusicBrainz release"]').first();
+  await plainRow.waitFor({ timeout: 20000 });
+  check("the plain multi-album Import ASKS which release before it queues (R424)",
+        (await plainRow.inputValue()).trim().length > 0, await plainRow.inputValue());
+  await page.locator('[role="dialog"] button', { hasText: /^Import \d+ album/ }).first().click();
+  await waitForBulk(page);
+  check("…and the batch reaches the queue only after the ask",
+        bulkBodies.length === 1 && bulkBodies[0].items.length === 2,
+        JSON.stringify(bulkBodies));
+  await page.context().close();
 } finally {
   await browser4.close();
   await app4.close();
@@ -1496,6 +1518,8 @@ console.log(`ok  the wizard's minimum entry mode shows the missing family's cont
   `afterwards; and the auto-import ASKS about every staged album — the ` +
   `dialog's row opens on the release its files name, a row left alone sends ` +
   `no pin, and a row the user re-points reaches the queue as that pin; and the ` +
+  `PLAIN multi-album Import asks too, queueing the batch only after the ask; ` +
+  `and the ` +
   `folder button takes several folders — a pick that follows another keeps the ` +
   `first as its own batch and the commit button counts them together, the ` +
   `shell's own multi-folder answer stages an album per folder in ONE selection ` +

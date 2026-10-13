@@ -12,7 +12,10 @@ whole pipeline a careful human would do by hand:
      folders (completeness vs the release track list, cue/log presence per
      disc, lossless, free slot),
   3. queue the whole folder in ONE pass but grade the .log file(s) first with
-     Logchecker; any disc below the configured score (default 100) drops the
+     Logchecker; a disc whose log is below the configured score
+     (`soulseek_auto_log_min_score`, 85 by default) — or whose own checksum
+     does not verify, or whose AccurateRip section reports a track that
+     mismatched — drops the
      transfers again and moves on to the next candidate without waiting for
      the album,
   4. wait for the album (a file counts as arrived only once slskd itself says
@@ -3661,6 +3664,11 @@ def _verify_album(album_dir, cfg, is_cd):
     said a log's absence is not a defect, and there is no log to check the CRCs
     against — failing the album for it would throw away a folder whose audio is
     perfectly verifiable, which is exactly what `find_candidates` now offers.
+
+    A SECOND exception is the user's own switch: with
+    `audit_verify_cd_checksums` OFF the CRC audit answers nothing at all, so a
+    CD falls to the same clean decode instead of being rejected for evidence
+    the user asked not to collect.
     """
     problems = []
     from mlo.tools import detect_all_tools
@@ -3680,8 +3688,20 @@ def _verify_album(album_dir, cfg, is_cd):
     if no_log:
         _log("  no rip log in the download and the log floor is off — "
              "verifying the audio by a clean decode")
+    # The user's own switch can turn the .log/CRC audit off too
+    # (`audit_verify_cd_checksums`, Settings → Auditing). With it OFF the CRC
+    # source answers nothing at all (mlo.discs.verify_album_checksums returns
+    # ({}, {}) before it reads a file), and reading that as "no track's CRC was
+    # checked" rejected EVERY CD download — the misleading "the MEDIA tag is
+    # missing?" — while the user had simply asked for the lighter check. A CD
+    # with the audit switched off falls to the same clean decode digital media
+    # gets, which is the evidence that remains.
+    crc_audit = bool((cfg or {}).get("audit_verify_cd_checksums", True))
+    if is_cd and not no_log and not crc_audit:
+        _log("  CD .log CRC verification is switched off (audit_verify_cd_"
+             "checksums) — verifying the audio by a clean decode instead")
 
-    if is_cd and not no_log and not _has_image_rip(album_dir, audio):
+    if is_cd and not no_log and crc_audit and not _has_image_rip(album_dir, audio):
         # verify_album_checksums keys off MEDIA=CD — the tags were just
         # written for exactly this reason.
         ffmpeg = (detect_all_tools().get("ffmpeg") or {}).get("ffmpeg_exe")
@@ -3700,7 +3720,7 @@ def _verify_album(album_dir, cfg, is_cd):
         for p, reason in unverified.items():
             problems.append(f"{os.path.basename(p)}: not verifiable ({reason})")
         return not problems, problems
-    if is_cd and not no_log:
+    if is_cd and not no_log and crc_audit:
         _log("  disc-image rip (one file per disc plus its cue) — verifying by "
              "decode; per-track .log CRCs do not apply")
 
