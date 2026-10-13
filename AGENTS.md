@@ -220,11 +220,15 @@ When they do ask for one:
   repeated name. `mlo.genre_vocab.parent_of`/`top_of`/`is_parent` survive for
   exactly two internal browse aids (the artist recommender's bucketing and the
   keyword fallback's family) — no tag, check or row reads them. The genre chain
-  is MusicBrainz ALONE since the same date — per recording, then the release
-  group/release, then the artist — because the two scraped hosts
+  is MusicBrainz ALONE since the same date, because the two scraped hosts
   (RateYourMusic, Album of the Year) and their cookie, solver and browser
-  machinery were removed; a track's genres a MusicBrainz answer never supplies
-  leave the album FAILING grading (`GENRE_MISSING`, `grade_check_genre`,
+  machinery were removed. A track's genres come from ONE TIER, never a blend:
+  the RECORDING's own genres first (its work only when the recording states
+  none), else the release GROUP's (never the release's own edition-level
+  ones), else the ARTIST's — the first tier that states anything IS the list,
+  and `mlo.web_ratings`' ladder plus the import report say which tier answered
+  (`levels` / `level_counts`). A track's genres a MusicBrainz answer never
+  supplies leave the album FAILING grading (`GENRE_MISSING`, `grade_check_genre`,
   default on). **The `RATEYOURMUSIC_*` tags left the app's vocabulary on the
   same date** — `RATEYOURMUSIC_ALBUM`/`_ARTIST`/`_TRACK` are in no registry
   (`mlo.audio.TAG_MAP`, `server/library.py`, `server/api_query.py`,
@@ -233,14 +237,21 @@ When they do ask for one:
   still carrying one fails `grade_check_excess_tags` until the strip pass
   (script 10 / Optimize) removes it through that same vocabulary. See spec
   R37/R38/R38a/R39/R40/R92/R93.
-- **A web rating is ONE SOURCE'S OWN number, never a blend.** `WEBRATING` /
-  `ALBUMWEBRATING` (0-100, Picard's scale) carry the FIRST source in the
-  configured chain that answered — the order IS the hierarchy, a TRACK-level
-  answer beats an album-level one, and the walk STOPS there
-  (`mlo.web_ratings.choose`), so the number is a score a reader can open the
-  source and check. Since 2026-10-12 that chain is MusicBrainz alone (the two
-  scraped hosts were removed), so it answers from the recording's rating with
-  the release group's behind it. The tag holds a WHOLE number, and the
+- **A web rating is ONE SOURCE'S OWN number, never a blend, and each source is
+  asked DOWN a LADDER.** `WEBRATING` / `ALBUMWEBRATING` (0-100, Picard's scale)
+  carry the FIRST source in the configured chain that answered AT THE BEST
+  LEVEL it could — the level RANK is the first hierarchy (a track's recording
+  beats the album, which beats the artist), the configured order the second,
+  and the walk STOPS there (`mlo.web_ratings.choose`), so the number is a score
+  a reader can open the source and check. Since 2026-10-12 that chain is
+  MusicBrainz alone (the two scraped hosts were removed), and its OWN ladder is
+  the owner's rule — track, then album, then artist: a track reads the
+  recording's rating (its work's when the recording has none), then its
+  release GROUP's (never the specific release's), then the artist's
+  (`mlo.web_ratings._ladder`); an album reads the group's, then the artist's.
+  A rung with no MBID to name costs no request, the run reports the rung each
+  value came from ("track values by rung"), and nothing blends two rungs. The
+  tag holds a WHOLE number, and the
   conversion TRUNCATES to the app's 0.05 grid (`scale_to_100`, MusicBrainz
   0-5 ×20) so the one-decimal readout equals the source's own reading. The
   SHAPE is graded and canonicalised through ONE rule

@@ -31,8 +31,9 @@ filled in by hand:
 
 4) GENRE is TRIMMED, never imported. This script asks no provider for a
    genre and derives no family of its own: genres come from the import
-   pipeline (`server/imports.py`, the genre chain — MusicBrainz and
-   RateYourMusic per track, with the configured sources behind them) or from
+   pipeline (`server/imports.py`, the genre chain — MusicBrainz alone since
+   2026-10-12, one tier per track: the recording's own genres, else its
+   release group's, else the artist's) or from
    a manual tag edit. What the script does enforce is the cap every writer and
    the grader share: a list already carrying more than ``mb_genre_count``
    genres is brought down to it (`trim_genres`), so a pre-existing over-long

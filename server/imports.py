@@ -4571,12 +4571,13 @@ def _stamp_release(album_dir, release, cfg, force_ids=False):
         # shows the wait (see `_finish_album`'s note).
         _phase("Fetching genres…")
         try:
-            # The FULL per-track chain (RateYourMusic → ListenBrainz →
-            # MusicBrainz → iTunes → Wikidata → Last.fm → Discogs → Deezer),
-            # merged per track and capped: an import therefore writes the same
-            # genres an Auto-tagging run would, from the release it has just
-            # identified, and a per-track source (recording tags, Apple's
-            # primaryGenreName) lands on the track it belongs to. With no
+            # The genre chain, per track: MusicBrainz alone (2026-10-12), and ONE
+            # TIER of its data answers each track — the recording's own genres
+            # first (its work's when the recording states none), else the
+            # release GROUP's, else the artist's (spec R92/R360). Capped per
+            # track, an import therefore writes the same genres an
+            # Auto-tagging run would, from the release it has just
+            # identified. With no
             # release identity in hand the chain still runs BY NAME (release
             # None) — one code path with the manual action, not a second rule.
             chain = intg.genre_chain(

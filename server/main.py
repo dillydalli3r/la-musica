@@ -5866,14 +5866,16 @@ def _run_genre_chain(paths, limit=None, progress=None, sources=None, staged=Fals
     It STOPS asking once every track is settled: its cap of specific names is
     filled, or a source answered that track's OWN page (`asked`,
     `stopped_after`). A source that cannot answer is skipped before any
-    request — known-blocked — and named in `skipped`. MusicBrainz
-    recording genres refine each track when the album names a release.
+    request — known-blocked — and named in `skipped`. A track's genres come
+    from ONE tier (MusicBrainz: the recording's own, else its release GROUP's,
+    else the artist's), and the album must name a release for its group to be
+    read.
 
     The report is what the wizard and the Settings panel render: `per_source`
     with `per_source_counts` (names and tracks per source), `sources`/`levels`
     (per track path, in the order that contributed and the tier that answered),
-    `level_counts` (how many tracks an ALBUM/artist-level answer covered), the
-    trims, and `notes`. Nothing is ever filled in from a guess.
+    `level_counts` (how many tracks were answered below their own recording),
+    the trims, and `notes`. Nothing is ever filled in from a guess.
     `progress(i, total, source)` is the chain's own per-source step, which is
     what the background job (and the websocket relay) reports while it runs.
     """
@@ -5948,15 +5950,22 @@ def _run_genre_chain(paths, limit=None, progress=None, sources=None, staged=Fals
         # genre step), so the trim is visible where genres are reported.
         notes["genres per track"] = (f"{extra} extra genre(s) trimmed — genres per "
                                      f"track is {cap} (Settings → Import)")
-    # An album- or artist-level answer is not a track's own fact, and with two
-    # slots it is often the whole answer — so the report says how many tracks
-    # it covered rather than leaving the caller to read every `levels` entry.
-    wide = int(level_counts.get("album") or 0) + int(level_counts.get("artist") or 0)
-    if wide:
+    # A track answered below its own recording is not a track's own fact — its
+    # recording stated nothing — so the report says how many, and WHICH tier
+    # answered: the release GROUP (the album's own classification) or, only
+    # when the group states nothing too, the ARTIST.
+    by_album = int(level_counts.get("album") or 0)
+    by_artist = int(level_counts.get("artist") or 0)
+    if by_album or by_artist:
+        parts = []
+        if by_album:
+            parts.append(f"{by_album} from the release group")
+        if by_artist:
+            parts.append(f"{by_artist} from the artist")
         notes["genre level"] = (
-            f"{wide} track(s) answered at ALBUM or ARTIST level (their own "
-            f"recording states no genre); with genres per track = {cap}, that "
-            "is often the whole answer")
+            f"{by_album + by_artist} track(s) answered below their own "
+            f"recording ({' and '.join(parts)}) — the recording states no "
+            "genre of its own")
     if chain.get("stopped_after"):
         notes["genre sources"] = (
             f"stopped after {chain['stopped_after']}: every track's genres were "

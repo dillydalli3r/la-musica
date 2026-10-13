@@ -14,9 +14,14 @@ What this pins, and what it refuses to guess:
     MusicBrainz's `{"value": null, "votes-count": 0}` — is a MISS and
     contributes nothing, never a zero.
   * the CHOICE: the configured order IS the hierarchy, so the value is the
-    FIRST source that answered, and a TRACK-level answer beats an album-level
-    one. Never a mean: the file carries a score a reader can open the site and
-    check.
+    FIRST source that answered — at the BEST LEVEL it could (a track's
+    recording beats the album, which beats the artist), never a mean: the file
+    carries a score a reader can open the site and check.
+  * the LADDER each source is asked down (the owner's rule, 2026-10-12):
+    track -> album -> artist, with the album being the release GROUP and the
+    artist's own MBID the last rung — a rung with no id is skipped without a
+    request, and the rung each value came from is reported (`levels`, and the
+    run's `track values by rung` line).
   * the WRITER: fill-only. A value already on the file survives a second run
     byte for byte unless the run is forced, and a switched-off family writes
     nothing. Proven on a REAL FLAC (tags read back off disk with mutagen) and
@@ -93,6 +98,9 @@ MB_TRACK_WORK_ONLY = {"recording": {"rating": {"value": None, "votes-count": 0}}
                       "work": {"rating": {"value": 5, "votes-count": 1}}}
 # What an entity nobody rated answers — a MISS, not a zero.
 MB_UNRATED = {"rating": {"value": None, "votes-count": 0}}
+# `artist/<mbid>?inc=ratings` — the ladder's LAST rung (Pink Floyd, live).
+MB_ARTIST = {"id": "83d91898-7763-47d7-b03b-b92132375c47",
+             "rating": {"value": 4.45, "votes-count": 81}}
 
 print("== scale conversion ==")
 # The one conversion. The conversion TRUNCATES to the app's grid (0.05 on the
@@ -197,6 +205,80 @@ none_row = wr.track_rating("Radiohead", "Unrated", "rec-mbid", {},
                                   "mbid": "rg-mbid"})
 eq(none_row, None, "no answer at all is None, never a zero")
 
+# …and an album that is unrated too falls to the ARTIST — the ladder's last
+# rung (the owner's rule, 2026-10-12: track, then album, then artist).
+print("== the ladder: recording, then the release group, then the artist ==")
+_ladder_asked = []
+
+
+def _mb_artist_only_fetch(source, kind, ident, cfg):
+    """Nothing is rated except the ARTIST (the track, its work and the group
+    only answer `{"value": null}`)."""
+    _ladder_asked.append((kind, dict(ident or {})))
+    if source != "musicbrainz":
+        return None
+    if kind == "track":
+        return {"recording": MB_UNRATED, "work": None}
+    if kind == "artist":
+        return MB_ARTIST
+    return MB_UNRATED
+
+
+art = wr.track_rating("Pink Floyd", "A Track Nobody Rated", "rec-mbid", {},
+                      _mb_artist_only_fetch,
+                      album={"artist": "Pink Floyd", "album": "The Dark Side "
+                             "of the Moon", "mbid": "rg-mbid",
+                             "artist_mbid": "art-mbid"})
+eq(art["levels"], {"musicbrainz": "artist"},
+   "recording and group unrated -> the ARTIST's rating stands, marked `artist`")
+eq(art["value"], 89, "…4.45/5 -> 89, on the app's scale like any other rung")
+eq(art["sources"], ["MusicBrainz"], "…attributed to the source that answered")
+eq([kind for kind, _ident in _ladder_asked], ["track", "album", "artist"],
+   "the rungs are asked in that order, once each")
+eq(_ladder_asked[-1][1].get("mbid"), "art-mbid",
+   "…and the artist rung names the ALBUM ARTIST's own MBID")
+
+# With no artist MBID to name, the last rung is SKIPPED — no request, no
+# answer, never a crash.
+_skipped_kinds = []
+
+
+def _no_artist_fetch(source, kind, ident, cfg):
+    _skipped_kinds.append(kind)
+    if kind == "track":
+        return {"recording": MB_UNRATED, "work": None}
+    return MB_UNRATED
+
+
+eq(wr.track_rating("Pink Floyd", "x", "rec-mbid", {}, _no_artist_fetch,
+                   album={"artist": "Pink Floyd", "album": "x",
+                          "mbid": "rg-mbid"}),
+   None, "no artist MBID -> no artist rung, and so no answer at all")
+ok("artist" not in _skipped_kinds, f"…and no request was made ({_skipped_kinds})")
+
+# An ALBUM's own ladder ends in the same rung.
+_album_asked = []
+
+
+def _album_artist_fetch(source, kind, ident, cfg):
+    _album_asked.append(kind)
+    return MB_ARTIST if kind == "artist" else MB_UNRATED
+
+
+alb = wr.album_rating("Pink Floyd", "The Dark Side of the Moon", "rg-mbid", {},
+                      _album_artist_fetch, artist_mbid="art-mbid")
+eq(alb["levels"], {"musicbrainz": "artist"},
+   "an album whose release group is unrated takes the artist's score")
+eq(alb["value"], 89, "…on the same scale")
+eq(_album_asked, ["album", "artist"], "…asked group first, artist last")
+
+# …and with no ids at all the ladder is a single rung with no requests.
+_calls = []
+eq(wr.track_rating("Pink Floyd", "x", "", {},
+                   lambda source, kind, ident, cfg: _calls.append(kind)),
+   None, "no MBIDs at all -> no answer")
+eq(_calls, ["track"], "…and no rung below the recording to ask")
+
 print("== the choice function ==")
 eq(wr.choose([((84, 31, "MusicBrainz"), "track")]),
    {"value": 84, "sources": ["MusicBrainz"]},
@@ -209,6 +291,13 @@ eq(wr.choose([((90, 10, "Other"), "album"),
               ((95, 105, "MusicBrainz"), "album")]),
    {"value": 90, "sources": ["Other"]},
    "two album-level answers: the FIRST in the configured order wins")
+eq(wr.choose([((89, 81, "MusicBrainz"), "artist"),
+              ((95, 105, "MusicBrainz"), "album")]),
+   {"value": 95, "sources": ["MusicBrainz"]},
+   "an ALBUM-level answer beats an artist-level one stated above it")
+eq(wr.choose([((89, 81, "MusicBrainz"), "artist")]),
+   {"value": 89, "sources": ["MusicBrainz"]},
+   "the artist rung is the last resort, not a miss")
 eq(wr.choose([((4, 1, "A"), "album")]), {"value": 4, "sources": ["A"]},
    "a low count is not a weaker answer — the order decides, never the votes")
 eq(wr.choose([]), None, "no answers at all chooses None")
@@ -359,6 +448,13 @@ else:
     # reads as "three tracks carry a MusicBrainz-sourced score".
     eq(stats["by_source"], {"musicbrainz": 3},
        "the per-source count is the tracks it answered for")
+    # The RUNG each value came from is reported, not hidden: two tracks were
+    # answered by their own recording and one by its album (that track names no
+    # recording id, so its ladder walked down to the group) — and no album had
+    # to fall to the artist rung.
+    eq(stats["levels"], {"track": 2, "album": 1},
+       "the run reports the rung every track's value came from")
+    eq(stats["album_level_artist"], 0, "…and no album fell to the artist")
 
     f = FLAC(os.path.join(album_dir, "01 Speak to Me.flac"))
     eq(f["ALBUMWEBRATING"], ["95"], "the album's own score lands on the track")

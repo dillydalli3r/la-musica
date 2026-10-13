@@ -95,8 +95,8 @@ _GENRE_LABELS = {
 # the rows (and so of these lines) is that registry's priority list, and the
 # rows carry `rank` — the 1-based position — for the same reason.
 _GENRE_PROVIDES = {
-    "musicbrainz": "recording genres, then release, release group and artist — "
-                   "curated, and the app's identity anchor",
+    "musicbrainz": "each recording's own genres, else the release group's, "
+                   "else the artist's — curated, and the app's identity anchor",
 }
 
 # What each credential row asks — one line, the check's own purpose, so the

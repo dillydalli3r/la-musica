@@ -23,12 +23,19 @@ is what makes the two comparable at a glance. MusicBrainz publishes on 0-5
 (``{"value": 4.35, "votes-count": 31}``, VERIFIED live), converted in ONE
 place (``SOURCE_PARSERS``).
 
+THE LADDER is what MusicBrainz's own data supports, rung by rung (the
+owner's rule: track, then album, then artist): a TRACK reads its RECORDING's
+rating first (the WORK's when the recording states none — see
+``parse_musicbrainz_track``), then its release GROUP's, then the ARTIST's; an
+ALBUM reads the release GROUP's, then the ARTIST's. Every rung is a number a
+reader can open on MusicBrainz and check, the level each value came from is
+reported by the run, and a rung with no id to name is skipped without a
+request.
+
 THE ALBUM VALUE is written to EVERY track of the album, exactly the way
 ``ALBUMITUNESADVISORY`` carries an album-wide answer; the TRACK value is the
-track's own. Nothing invents a track value from an album one: a track whose
-own sources said nothing keeps ALBUMWEBRATING and no WEBRATING, and a reader
-that wants "what people think of this song" reads WEBRATING exactly as a
-reader that means the release reads ALBUMWEBRATING.
+track's own — at whatever rung of the ladder it answered (the run's `levels`
+counts say which: recording, release group or artist).
 
 provenance rides beside each value (``WEBRATING_SOURCE``,
 ``ALBUMWEBRATING_SOURCE``) as the "; "-joined names of the sources that
@@ -91,7 +98,8 @@ FORCE_KEY = "force_web_ratings"
 #
 #   musicbrainz        the release group's rating for the album, the
 #                      recording's own for the track (a WORK's rating is the
-#                      fallback — see `parse_musicbrainz_track`).
+#                      fallback — see `parse_musicbrainz_track`), and the
+#                      ARTIST's as the last rung when neither is rated.
 # MusicBrainz is the ONLY source (2026-10-12, the owner's decision — no scraped
 # site; see `mlo.config`). Its rating is read through the same cached, throttled
 # client as every other MusicBrainz call.
@@ -112,9 +120,9 @@ TRACK_SOURCES = ("musicbrainz",)
 # One honest line per source for a settings list, exactly like the lyrics and
 # genre chains carry: the coverage it is good at, and the caveat it comes with.
 SOURCE_NOTES = {
-    "musicbrainz": "Open data: the release group's community rating for the "
-                   "album, the recording's own for the track. Free, no key, "
-                   "MBID-native.",
+    "musicbrainz": "Open data: the recording's own rating for the track, the "
+                   "release group's for the album, and the artist's when "
+                   "neither is rated. Free, no key, MBID-native.",
 }
 
 
@@ -291,20 +299,30 @@ def parse_source(source, payload, kind="album"):
 # --------------------------------------------------------------------------- #
 # The choice
 # --------------------------------------------------------------------------- #
+# The ladder's order, best first: a track's RECORDING beats the ALBUM (the
+# release group), which beats the ARTIST — `choose` ranks by this and `_rate`
+# asks down it.
+_LEVEL_RANK = {"track": 0, "album": 1, "artist": 2}
+# What each rung is called in a report line: the ENTITY, not the level word,
+# so "recording: 9" reads as the thing MusicBrainz was asked.
+_LEVEL_WORDS = {"track": "recording", "album": "release group", "artist": "artist"}
+
+
 def choose(answers):
-    """The FIRST source's own answer — the order IS the hierarchy, or None.
+    """The BEST LEVEL's first source's own answer — or None.
 
     ``answers`` are ``((value_0_100, count, label), level)`` pairs in the
-    order the sources were asked, each ``level`` "track" or "album".
+    order the sources were asked, each ``level`` "track", "album" or "artist".
 
     Two rules, in this order:
 
-    * a TRACK-level answer beats an album-level one, whoever stated it — the
-      value on a track is the track's own score, and an album's score standing
-      in for it is a fallback, not a verdict;
+    * the LEVEL decides first: a TRACK-level answer beats an album-level one,
+      and an album-level one beats an artist-level one, whoever stated it — a
+      value on the track is the track's own score, the album's is the fallback,
+      and the artist's is the last resort (`_rate` walks each source that way);
     * within one level the ORDER decides, so the configured chain
       (``web_ratings_sources``) is a true hierarchy: the first source that
-      answers is the value on the file.
+      answers at that level is the value on the file.
 
     NOT a mean. A score a person can open and verify beats a blend no site
     publishes.
@@ -314,18 +332,18 @@ def choose(answers):
     is the provenance of THIS value, and a source that answered for nothing is
     never named.
     """
-    first_album = None
+    best = None
     for got, level in answers or ():
         if not got or got[0] is None:
             continue
-        if level == "track":
-            return {"value": got[0], "sources": [str(got[2] or "").strip()] if got[2] else []}
-        if first_album is None:
-            first_album = got
-    if first_album is None:
+        rank = _LEVEL_RANK.get(level, 9)
+        if best is None or rank < best[0]:
+            best = (rank, got)
+    if best is None:
         return None
-    return {"value": first_album[0],
-            "sources": [str(first_album[2] or "").strip()] if first_album[2] else []}
+    got = best[1]
+    return {"value": got[0],
+            "sources": [str(got[2] or "").strip()] if got[2] else []}
 
 
 def provider_order(cfg=None):
@@ -349,51 +367,80 @@ def provider_order(cfg=None):
 # --------------------------------------------------------------------------- #
 # One entity's rating — the sources, asked in the configured order
 # --------------------------------------------------------------------------- #
+def _ladder(kind, ident, album=None):
+    """The rungs ONE source is asked on, best first: ``(level, ident)`` pairs.
+
+    The owner's rule — track, then album, then artist — with the album being
+    the release GROUP (never the specific release) and the artist carrying the
+    artist's own MBID. A rung whose identity holds no MBID to name is left
+    OUT, so it costs no request (`web_rating_fetchers` would answer None
+    anyway); a track's album rung is the album identity the caller passed,
+    and both kinds take the artist rung from that identity's `artist_mbid`.
+    """
+    ident = ident or {}
+    steps = [(kind, ident)]
+    if kind == "track":
+        # The track's fallbacks are the album identity the CALLER passed (the
+        # release group + the album artist) — with no identity in hand there is
+        # no rung below the recording to name.
+        album = album or {}
+        if str(album.get("mbid") or "").strip():
+            steps.append(("album", album))
+        artist_mbid = str(album.get("artist_mbid") or "").strip()
+        if artist_mbid:
+            steps.append(("artist", {"artist": str(album.get("artist") or "").strip(),
+                                     "mbid": artist_mbid}))
+        return steps
+    artist_mbid = str(ident.get("artist_mbid") or "").strip()
+    if artist_mbid:
+        steps.append(("artist", {"artist": str(ident.get("artist") or "").strip(),
+                                 "mbid": artist_mbid}))
+    return steps
+
+
 def _rate(kind, ident, cfg, fetch, album=None):
-    """``{"value", "sources"}`` for one entity, or None when nobody answered.
+    """``{"value", "sources", ...}`` for one entity, or None when nobody answered.
 
     *fetch* is the injected callable (see the module docstring). The sources
     are asked in the configured order (the hierarchy) and the walk STOPS at
-    the first answer that can decide the value — `choose`'s two rules: a
-    TRACK-level answer settles a track, and the first answer settles an album
+    the first answer at the level the caller asked for — `choose`'s two rules:
+    a TRACK-level answer settles a track, and the first answer settles an album
     — so a source below the one that answered is never asked at all. That is
     both the rule and the speed: an album whose MusicBrainz node answers costs
     one request.
+
+    EVERY SOURCE IS ASKED DOWN ITS OWN LADDER (`_ladder`): the recording (the
+    WORK behind it) for a track, the ALBUM — the release GROUP — then the
+    ARTIST. The rungs are the owner's rule (track, then album, then artist),
+    and they are also how MusicBrainz's own data runs thin: a track whose
+    recording nobody rated still gets its group's score, and a record whose
+    group nobody rated falls to the artist's.
 
     The callable is allowed to raise — this is where a caller's fetcher meets
     a stranger's network — and a raise is that source's miss, not the
     caller's.
 
-    For a TRACK, a source that states nothing for the track itself falls back
-    to its ALBUM answer (`album` is that entity's identity, when the caller
-    has it) — the owner's rule: track, then album, then artist, per platform.
-    An album-level answer does NOT end the walk (a later source may state the
-    track's own score), and the level each source actually answered at is
-    reported in ``levels``, so a track whose value came from the album says
-    so.
+    An album- or artist-level answer does NOT end the walk (a later source may
+    state the track's own score), and the level each source actually answered
+    at is reported in ``levels`` — plus the winning rung on ``level`` — so a
+    track whose value came from the album, or the artist, says so.
     """
     allowed = TRACK_SOURCES if kind == "track" else ALBUM_SOURCES
     order = [s for s in provider_order(cfg) if s in allowed]
     answers, asked, answered, levels = [], [], [], {}
     for source in order:
         asked.append(source)
+        got = None
         level = kind
-        try:
-            payload = fetch(source, kind, ident, cfg)
-        except Exception:
-            payload = None
-        got = parse_source(source, payload, kind)
-        if got is None and kind == "track" and album is not None:
-            # This source states nothing for the TRACK: its ALBUM answer is
-            # fetched and only an album-wide value can stand in, marked album
-            # level. MusicBrainz's album payload carries no per-track rows.
+        for step, step_ident in _ladder(kind, ident, album):
             try:
-                payload = fetch(source, "album", album, cfg)
+                payload = fetch(source, step, step_ident, cfg)
             except Exception:
                 payload = None
-            got = parse_source(source, payload, "album")
+            got = parse_source(source, payload, step)
             if got is not None:
-                level = "album"
+                level = step
+                break
         if got is None:
             continue
         answers.append((got, level))
@@ -409,27 +456,39 @@ def _rate(kind, ident, cfg, fetch, album=None):
     result["asked"] = asked
     result["answered"] = answered
     result["levels"] = levels
+    result["level"] = min((lv for _got, lv in answers),
+                          key=lambda lv: _LEVEL_RANK.get(lv, 9), default=None)
     return result
 
 
-def album_rating(artist, album, rg_mbid, cfg, fetch):
-    """The ALBUM's web rating — the first source in the chain that answers."""
+def album_rating(artist, album, rg_mbid, cfg, fetch, artist_mbid=""):
+    """The ALBUM's web rating — the release GROUP's when it is rated, else the
+    ARTIST's (the ladder's last rung).
+
+    `rg_mbid` is the release GROUP's id — never a release's: the album IS the
+    group, and one pressing's node states nothing. `artist_mbid` is the album
+    artist's own id, used only when the group has no rating.
+    """
     return _rate("album", {"artist": str(artist or "").strip(),
                            "album": str(album or "").strip(),
-                           "mbid": str(rg_mbid or "").strip()},
+                           "mbid": str(rg_mbid or "").strip(),
+                           "artist_mbid": str(artist_mbid or "").strip()},
                  cfg, fetch)
 
 
 def track_rating(artist, title, recording_mbid, cfg, fetch, album=None):
-    """The TRACK's web rating — the track's own score when any source states
-    one, else the first source's ALBUM score for it.
+    """The TRACK's web rating — its RECORDING's own score when any source
+    states one, else the source's ALBUM score, else the ARTIST's.
 
-    Every source is asked for the TRACK first (MusicBrainz's recording), and a
-    source that states nothing for the track falls back to its ALBUM answer —
-    `album` is the album's identity (``{"artist", "album", "mbid"}``) when the
-    caller has it. The walk stops at the first TRACK-level answer; an
-    album-level one is kept only while nothing better arrives. The level each
-    source answered at is on the result's ``levels`` map.
+    Every source is asked down the ladder (`_ladder`): the track first
+    (MusicBrainz's recording, with the WORK behind it), then the ALBUM — the
+    release GROUP, never the specific release — then the ARTIST. `album` is
+    the album's identity (``{"artist", "album", "mbid", "artist_mbid"}``)
+    when the caller has it; a rung with no id is skipped without a request.
+    The walk stops at the first TRACK-level answer; an album- or artist-level
+    one is kept only while nothing better arrives. The level each source
+    answered at is on the result's ``levels`` map, and the winning rung on
+    ``level``.
     """
     return _rate("track", {"artist": str(artist or "").strip(),
                            "title": str(title or "").strip(),
@@ -540,21 +599,26 @@ def write_ratings(path, album=None, track=None, cfg=None, force=False):
 # Script 24 — the album-scoped runner
 # --------------------------------------------------------------------------- #
 def _album_identity(rows):
-    """``(artist, album, release-group mbid)`` from an album's read tracks.
+    """``(artist, album, release-group mbid, artist mbid)`` from an album's
+    read tracks.
 
     Album-level identity is uniform across the files, so the first readable
     track that states each field settles it — the same probe
     ``server.script_runners._album_release_id`` uses, and the same reason: one
-    unreadable file must not cost the album its answer.
+    unreadable file must not cost the album its answer. The artist MBID is the
+    ALBUM artist's (`MUSICBRAINZ_ALBUMARTISTID`, else the track artist's) —
+    it is the ladder's last rung, so an album whose release group is unrated
+    can still fall back to the artist the files name.
     """
-    artist = album = rg = ""
+    artist = album = rg = artist_mbid = ""
     for row in rows:
         artist = artist or row["artist"] or row["albumartist"]
         album = album or row["album"]
         rg = rg or row["rg_mbid"]
-        if artist and album and rg:
+        artist_mbid = artist_mbid or row["artist_mbid"]
+        if artist and album and rg and artist_mbid:
             break
-    return artist, album, rg
+    return artist, album, rg, artist_mbid
 
 
 def run_web_ratings(config, fetch=None):
@@ -589,6 +653,8 @@ def run_web_ratings(config, fetch=None):
     stats["track_count"] = 0
     stats["by_source"] = {}
     stats["skipped"] = {}
+    stats["levels"] = {}
+    stats["album_level_artist"] = 0
 
     print_header("Web ratings")
     if not bool(config.get(ENABLED_KEY, True)):
@@ -650,7 +716,7 @@ def run_web_ratings(config, fetch=None):
         """
         out = {"album": album_dir, "album_rating": None, "tracks": 0,
                "wrote": 0, "skipped": 0, "by_source": {}, "errors": [],
-               "gated": False}
+               "levels": {}, "album_level": None, "gated": False}
         try:
             names = sorted(f for f in os.listdir(album_dir)
                            if is_audio_file(f))
@@ -672,6 +738,13 @@ def run_web_ratings(config, fetch=None):
                     "album": str(af.get_tag("ALBUM") or "").strip(),
                     "rg_mbid": str(af.get_tag("MUSICBRAINZ_RELEASEGROUPID") or "").strip(),
                     "rec_mbid": str(af.get_tag("MUSICBRAINZ_TRACKID") or "").strip(),
+                    # The album artist's own MBID — the ladder's last rung.
+                    # `MUSICBRAINZ_ALBUMARTISTID` is the album's credit (the
+                    # one the release group belongs to); a file that names
+                    # only a track artist still gives the rung an id.
+                    "artist_mbid": str(af.get_tag("MUSICBRAINZ_ALBUMARTISTID")
+                                       or af.get_tag("MUSICBRAINZ_ARTISTID")
+                                       or "").strip(),
                     # What the file ALREADY holds for the two VALUE tags,
                     # read with `write_ratings`' own `_existing` so the fetch
                     # skips below and the writer can never disagree about what
@@ -689,7 +762,7 @@ def run_web_ratings(config, fetch=None):
                 out["errors"].append(f"{os.path.basename(path)}: {e}")
         if not rows:
             return out
-        artist, album, rg = _album_identity(rows)
+        artist, album, rg, artist_mbid = _album_identity(rows)
 
         # THE FETCHES FOLLOW THE WRITES' OWN FILL-ONLY RULE. A request is
         # worth making only while its answer could still be written:
@@ -716,7 +789,8 @@ def run_web_ratings(config, fetch=None):
             if not force and row["web_rating"]:
                 return None
             artist_row = row["artist"] or row["albumartist"]
-            around = {"artist": artist, "album": album, "mbid": rg}
+            around = {"artist": artist, "album": album, "mbid": rg,
+                      "artist_mbid": artist_mbid or row["artist_mbid"]}
             got = track_rating(artist_row, row["title"], row["rec_mbid"],
                                config, fetch, album=around)
             if got is not None:
@@ -738,7 +812,8 @@ def run_web_ratings(config, fetch=None):
             when every row already carries ALBUMWEBRATING (unless forced)."""
             if not need_album:
                 return None
-            return album_rating(artist, album, rg, config, fetch)
+            return album_rating(artist, album, rg, config, fetch,
+                                artist_mbid=artist_mbid)
 
         if track_width == 1:
             album_answer = _album_answer()
@@ -754,11 +829,21 @@ def run_web_ratings(config, fetch=None):
                 album_answer = album_fut.result()
                 answers = [fut.result() for fut in track_futs]
         out["album_rating"] = album_answer
+        # The rung each value came from, for the run's readout: the album's own
+        # answer has one `level`, and every track answer carries the winning
+        # rung of its ladder ("track" — the recording or its work, "album" —
+        # the release GROUP, "artist" — the last resort). Counting it here is
+        # what lets the summary say "3 tracks answered at album level" instead
+        # of presenting a group's score as the track's own fact.
+        out["album_level"] = (album_answer or {}).get("level")
         # The writes happen on THIS thread, once the pool has joined, in the
         # sorted-`rows` order — each track writes only its own file, and the
         # counters below are the album's own dict.
         for row, track_answer in zip(rows, answers):
             out["tracks"] += 1
+            level = (track_answer or {}).get("level")
+            if level:
+                out["levels"][level] = out["levels"].get(level, 0) + 1
             res = write_ratings(row["af"], album=album_answer,
                                 track=track_answer, cfg=config, force=force)
             if res.get("error"):
@@ -806,6 +891,10 @@ def run_web_ratings(config, fetch=None):
         stats["total_scanned"] += 1
         for source, count in (out.get("by_source") or {}).items():
             stats["by_source"][source] = stats["by_source"].get(source, 0) + count
+        for level, count in (out.get("levels") or {}).items():
+            stats["levels"][level] = stats["levels"].get(level, 0) + count
+        if out.get("album_level") == "artist":
+            stats["album_level_artist"] += 1
         for message in out.get("errors") or []:
             stats["error_count"] += 1
             if len(stats["errors"]) < 25:
@@ -833,6 +922,17 @@ def run_web_ratings(config, fetch=None):
         log("sources (tracks carrying their answer): " + " · ".join(
             f"{SOURCE_LABELS.get(s, s)}: {n}"
             for s, n in sorted(stats["by_source"].items(), key=lambda kv: -kv[1])))
+    if stats["levels"]:
+        # WHICH RUNG each track's value came from — the ladder is the owner's
+        # rule, and a reader is owed the level rather than a group's (or an
+        # artist's) score presented as the track's own fact.
+        log("track values by rung: " + " · ".join(
+            f"{_LEVEL_WORDS.get(k, k)}: {n}" for k, n in
+            sorted(stats["levels"].items(),
+                   key=lambda kv: _LEVEL_RANK.get(kv[0], 9))))
+    if stats["album_level_artist"]:
+        log(f"album value from the artist rung: {stats['album_level_artist']} "
+            "album(s) — their release group states no rating")
     if stats["skipped"]:
         log("skipped: " + " · ".join(f"{k}: {v}" for k, v in sorted(stats["skipped"].items())))
     if not stats["by_source"]:

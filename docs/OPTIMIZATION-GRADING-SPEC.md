@@ -992,8 +992,10 @@ rating.
   every order the app ever shipped — existed to RANK the sites it scraped.
   MusicBrainz is now the only genre source (`genre_sources` ships
   `["musicbrainz"]`, `_GENRE_SOURCE_IDS` is that one id), so there is nothing
-  to order: R39's vocabulary rule and R92's recording → release group → release
-  → artist cascade are the whole policy, the source tray ticks the one source
+  to order: R39's vocabulary rule and R92's tiering (the recording's own
+  genres, its work's only when the recording is silent, else the release
+  group's, else the artist's) are the whole policy, the source tray ticks the
+  one source
   it knows and carries the reset back to that default, and an import still
   fills the genres its source can supply (`server.imports.finish_album`'s
   genres step — no script is needed for it, and script 8 only trims what it
@@ -1006,8 +1008,9 @@ rating.
   three-level view above each name and never stored it; with the parent idea
   gone, `mlo.genres.normalize_genres` only canonicalizes, de-duplicates, caps
   and capitalizes — it ADDS nothing, reorders nothing and removes nothing for
-  being someone's parent. The names come from MusicBrainz alone — its
-  recording → release group → release → artist cascade (R92) — and a track
+  being someone's parent. The names come from MusicBrainz alone — its tiering
+  (R92: the recording's own, its work only when the recording is silent, else
+  the release group, else the artist) — and a track
   whose genres a MusicBrainz answer never supplies leaves the album FAILING
   grading (`GENRE_MISSING`, `grade_check_genre`, default on).
 - **R41** — the stored value IS the display form, and it is title-cased with
@@ -1040,19 +1043,26 @@ rating.
   the `basis` chip that says what a shelf was seeded from follows the same rule
   (`Library genres: Shoegaze, Dream Pop · Top artists: …`).
 
-- **R92 — genres fall back LEVEL BY LEVEL, and the level that answered is never
-  hidden.** MusicBrainz states a genre at four levels — the recording (per
-  track), the release, the release group and the artist — and the app asks all
-  four, merging them in exactly that order (`integrations.genre_cascade`): a
-  track whose own recording carries genres keeps them first, and everything it
-  does not state is filled from the release, then the release GROUP, then the
-  ARTIST. So a MusicBrainz genre is usable even when the specific track has
-  none, which is the case that matters on a young catalogue. `genre_cascade`
-  reports the four levels' availability (`levels`) and, per track, which level
-  answered (`source`) and which were used (`levels_used`), and the genre chain's
-  MusicBrainz source resolves the same way (recording → release → release group
-  → artist, `_genre_source_answers`). Nothing is invented: an empty cascade is
-  an empty answer, not a guessed genre.
+- **R92 — genres fall back TIER BY TIER, ONE tier answers a track, and the tier
+  that answered is never hidden.** (Rewritten 2026-10-12, the owner's call.)
+  MusicBrainz states a genre on the recording, its work, the release, the
+  release group and the artist, and the app reads exactly three tiers: the
+  track's RECORDING first — the entity the track IS — its WORK only when the
+  recording states none, else the release GROUP (never the release itself: the
+  album IS the group, not one pressing), else the ARTIST as the last resort.
+  The FIRST tier that states anything supplies the track's whole list
+  (deduped, capped at `mb_genre_count`, MusicBrainz's own vote order kept): a
+  tier below one that answered is a FALLBACK, never a top-up, so a stored list
+  never blends tiers — the release's own (edition) genres are not read at all,
+  and the artist's names never sit beside the group's. `genre_cascade` (the
+  preview route) and the chain's MusicBrainz source (`_genre_source_answers`,
+  merged by `_genre_chain_names.merge`) resolve the same way, and both report
+  the tiers' availability and, per track, the tier that answered (`source` /
+  `levels`, `level_counts`). The AI tier is asked only when the sources did
+  not SETTLE the track (`_genre_needs_ai`): a recording's own one-name answer
+  is complete by itself (R37) and is never handed to the model, while a track
+  left below its own recording with fewer names than the cap may be. Nothing
+  is invented: an empty cascade is an empty answer, not a guessed genre.
 - **R93 — every source answers at the finest level it has.** RETIRED
   2026-10-12, with the two scraped hosts: this rule fixed what each of the
   chain's sources could answer — RateYourMusic per track through its `/song/…`
@@ -6863,7 +6873,9 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   `ALBUMWEBRATING_SOURCE` for the album carrier, on the same 0–100 Picard scale
   as `RATING` (which stays yours), FILL-ONLY and gated by `web_ratings_enabled`,
   with the one value being a source's own number — `mlo.web_ratings.choose`
-  still means "the first source that answered", which is now MusicBrainz alone,
+  still means "the first source that answered AT THE BEST LEVEL it could"
+  (a track's recording beats the album, which beats the artist — `_LEVEL_RANK`),
+  which is now MusicBrainz alone,
   normalised ×20 by `scale_to_100` and TRUNCATED to the app's grid so the tag
   never holds a number above what the source published. The whole-number shape
   and its grading live in R358e, and the per-track presence check in R358d.
@@ -6902,12 +6914,19 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   `["musicbrainz"]`, `_WEB_RATING_IDS` that one id), so there is nothing to
   rank; MusicBrainz needs no credential, its track answer costs a single
   throttled request, and `WEBRATING_SOURCE` names it alone.
-- **R358b — every source is asked at the level it actually rates.** Verified
-  against the sources themselves, not assumed:
+- **R358b — every source is asked at the level it actually rates, and DOWN its
+  own ladder.** Verified against the sources themselves, not assumed:
   - **MusicBrainz** — a RELEASE GROUP for the album and a RECORDING for each
     track, with the recording's WORK behind it (`inc=ratings`; confirmed live:
     OK Computer's group 4.55 from 89 votes, Airbag 3.85 from 25, Paranoid
-    Android 4.35 from 31, and the works behind them rated or empty).
+    Android 4.35 from 31, and the works behind them rated or empty). The
+    ARTIST's own rating closes BOTH ladders as the last resort (the owner's
+    rule, 2026-10-12: track, then album, then artist): a track reads recording
+    → its work → release group → artist (`mlo.web_ratings._ladder`), an album
+    reads release group → artist, and a rung whose identity holds no MBID is
+    skipped without a request. `choose` ranks the levels (recording beats
+    album beats artist), the run reports the rung each value came from
+    ("track values by rung"), and nothing blends two rungs.
   - The two entries this rule also covered — RateYourMusic's release page and
     per-track `/song/` pages, and Album of the Year's album page and per-row
     track score with its `track_row` fallback, both scraped live through
@@ -7009,13 +7028,17 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   width as the control case).
 - **R360 — MusicBrainz genres are read at the level the entity is entitled
   to.** Album-level genres come from the RELEASE GROUP (the album is the group,
-  not the pressing), and a track's come from its recording, with the WORK's
-  genres merged behind it — the work is the "release group" a track does not
-  have, and it is the same tiering that once applied to the rating chain.
-  The recording is never dropped in the work's favour: measured, works carry no
-  genres at all for a mainstream album, so a work-first-without-fallback
-  reading would have LOST data the app already had. Album of the Year was a
-  shipped genre source beside RateYourMusic until 2026-10-12; both scraped
+  not the pressing — the release's own edition-level genres are not read at
+  all), and a track's come from its RECORDING — the entity the track IS — with
+  the WORK read only when the recording states none (the composition is
+  classified once for every recording of it, but it is a fallback, never the
+  lead: measured, works carry no genres at all for a mainstream album, so a
+  work-first reading both lost the recording's own precedence and paid two
+  rate-limited requests per track for a tier that never spoke). The ARTIST's
+  genres answer only when the release group states nothing (R92, rewritten
+  2026-10-12: one tier supplies a track's list, never a blend). Album of the
+  Year was a shipped genre source beside RateYourMusic until 2026-10-12; both
+  scraped
   hosts are gone, so MusicBrainz is the only one (`GENRE_SOURCES` and
   `genre_sources` ship it alone).
 

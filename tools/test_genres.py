@@ -13,10 +13,16 @@ What this pins, with every HTTP seam stubbed (no network at all):
     TRACK-level answer (the merge's `level == "track"`) settles a track by
     itself, so MusicBrainz's per-recording genres end the search; an
     album-level answer does not, and a source below it is still asked;
-  * MusicBrainz answers at its best tier: recording genres, then the work's,
-    then album-wide (release group → release → artist), labelled
-    `level: album`/`level: artist` where that is what answered, never promoted
-    to a track (`level_counts` totals those tiers);
+  * MusicBrainz answers ONE TIER per track (2026-10-12, the owner's rule):
+    the RECORDING's own genres first — the entity the track IS — else the
+    release GROUP's, else the ARTIST's, and the first tier that states anything
+    IS the list. The release's own (edition) genres are never read: the album
+    is its group, not one pressing. The record is labelled with the tier that
+    answered (`level: album` for the group, `level: artist` only when the group
+    stated nothing), never promoted to a track (`level_counts` totals those);
+  * a track's own RECORDING genres settle it by themselves (a one-name answer
+    is complete, R37), so the work is read only when the recording is silent
+    and the release-wide tiers are never asked for it;
   * the cap (`mb_genre_count`) is enforced PER TRACK, and a track's own
     recording genres stay ahead of the release-wide ones;
   * a source that raises inside the module (an adapter that blew up) is
@@ -146,9 +152,12 @@ def clear():
 
 
 def full_stack(**overrides):
-    """MusicBrainz answering, with `overrides` replacing its payloads."""
+    """MusicBrainz answering, with `overrides` replacing its payloads.
+
+    Returns the transport's call log, so a test can assert what was NOT asked
+    (a tier that answered is never walked past)."""
     stub_json(lambda url, params: None)
-    stub_mb(overrides.get("mb") or MB_DEFAULT)
+    return stub_mb(overrides.get("mb") or MB_DEFAULT)
 
 
 def chain(limit=None, release=None, **kwargs):
@@ -161,18 +170,26 @@ def chain(limit=None, release=None, **kwargs):
 # 1) The track-level answer settles the release; provenance and the cap
 # --------------------------------------------------------------------------- #
 clear()
-full_stack()
+mb_calls = full_stack()
 # MusicBrainz answers every track at TRACK level (its own recording genres),
 # so the ONE source settles both tracks and the search stops there.
 got = chain()
 assert got["asked"] == ["musicbrainz"], got["asked"]
 assert got["stopped_after"] == "musicbrainz", got["stopped_after"]
-assert got["per_track"][(1, 1)] == ["Alternative Metal", "Progressive Rock",
-                                    "Rock"], got["per_track"]
-assert got["per_track"][(1, 2)] == ["Nu Metal", "Progressive Rock", "Rock"], \
-    got["per_track"]
-# The release-wide summary is the album-wide merge, capped at `limit`.
-assert got["genres"] == ["Progressive Rock", "Rock", "Art Rock"], got["genres"]
+# ONE TIER ANSWERS A TRACK: the recording's own genres ARE the list — the
+# release group's and the artist's names are fallbacks for a track the
+# recording says nothing about, never a top-up beside its own.
+assert got["per_track"][(1, 1)] == ["Alternative Metal"], got["per_track"]
+assert got["per_track"][(1, 2)] == ["Nu Metal"], got["per_track"]
+# The recording stated genres, so neither its WORK nor the release-wide tiers
+# were asked at all: the answered track cost the release-group read and
+# nothing else.
+assert "recording/rec-1" not in mb_calls, mb_calls
+assert "artist/art-1" not in mb_calls, mb_calls
+# The release-wide summary is the union (the release group's row first, then
+# every track's), capped at `limit`.
+assert got["genres"] == ["Progressive Rock", "Alternative Metal", "Nu Metal"], \
+    got["genres"]
 
 # Provenance: the contributing sources, in ask order, per PATH — and the
 # per-track map is keyed the same way the ONE writer (`_write_album_genres`)
@@ -190,10 +207,11 @@ assert got["level_counts"] == {"track": 2, "album": 0, "artist": 0}, \
     got["level_counts"]
 # …and the report says how much the source said (its release-wide row answers
 # both tracks, its two per-track rows once each) plus what the cap left out.
-assert got["per_source_counts"]["musicbrainz"] == {"names": 5, "tracks": 4}, \
+assert got["per_source_counts"]["musicbrainz"] == {"names": 3, "tracks": 4}, \
     got["per_source_counts"]
-assert got["per_track_trimmed"] == {(1, 1): ["Art Rock"], (1, 2): ["Art Rock"]}, \
-    got["per_track_trimmed"]
+# Nothing was trimmed: each track's tier answered alone, and the summary's
+# three names are exactly the cap.
+assert got["per_track_trimmed"] == {}, got["per_track_trimmed"]
 
 # The cap is enforced PER TRACK: with one slot, each track keeps its OWN
 # recording genre, never the release-wide names.
@@ -204,25 +222,50 @@ assert chain(limit=1)["per_track"] == {
 }, chain(limit=1)["per_track"]
 
 # --------------------------------------------------------------------------- #
-# 2) An ALBUM-level answer does not settle a track
+# 2) An ALBUM-level answer does not settle a track — and it IS the release
+#    GROUP's answer: the release's own (edition) genres are never read, and the
+#    artist's rung is not asked while the group states anything.
 # --------------------------------------------------------------------------- #
 # With the per-recording genres removed, MusicBrainz answers album-wide only:
 # every track carries those names, the tier is reported as `album`, and the
 # search continues (it just runs out of sources here).
 clear()
-full_stack()
+mb_calls = full_stack()
 got = chain(limit=6, release=MB_ALBUM_RELEASE)
-assert got["per_track"][(1, 1)] == ["Progressive Rock", "Rock", "Art Rock"], \
-    got["per_track"]
-assert got["per_track"][(1, 2)] == ["Progressive Rock", "Rock", "Art Rock"], \
-    got["per_track"]
+# The release group's names, and ONLY them: RELEASE["genres"] = ["Rock"] (the
+# edition's own vote) is not part of the answer, and neither is the artist's.
+assert got["per_track"][(1, 1)] == ["Progressive Rock"], got["per_track"]
+assert got["per_track"][(1, 2)] == ["Progressive Rock"], got["per_track"]
 assert got["levels"] == {FILE_ONE: "album", FILE_TWO: "album"}, got["levels"]
 assert got["level_counts"] == {"track": 0, "album": 2, "artist": 0}, \
     got["level_counts"]
+assert "artist/art-1" not in mb_calls, mb_calls
+assert got["genres"] == ["Progressive Rock"], got["genres"]
 # No source answered at TRACK level, so nothing set `stopped_after`: the run
 # ended because it ran out of sources.
 assert got["stopped_after"] is None, got["stopped_after"]
 assert got["sources"][FILE_ONE] == ["musicbrainz"], got["sources"]
+
+# The group states NOTHING: the ARTIST answers, and the release's own genres
+# still do not.
+clear()
+mb_calls = full_stack(mb={"release-group/rg-1": {},
+                          "artist/art-1": {"genres": [{"name": "Art Rock"}]}})
+got = chain(limit=6, release=MB_ALBUM_RELEASE)
+assert got["per_track"][(1, 1)] == ["Art Rock"], got["per_track"]
+assert got["per_track"][(1, 2)] == ["Art Rock"], got["per_track"]
+assert got["levels"] == {FILE_ONE: "artist", FILE_TWO: "artist"}, got["levels"]
+assert got["level_counts"] == {"track": 0, "album": 0, "artist": 2}, \
+    got["level_counts"]
+
+# Nothing above states anything: the EDITION's own genre is not a fallback at
+# all — "Rock" sits on the release entity, and the answer stays empty.
+clear()
+mb_calls = full_stack(mb={"release-group/rg-1": {}, "artist/art-1": {}})
+got = chain(limit=6, release=MB_ALBUM_RELEASE)
+assert got["per_track"] == {}, got["per_track"]
+assert got["genres"] == [], got["genres"]
+assert got["notes"] == {"musicbrainz": "no data"}, got["notes"]
 
 # --------------------------------------------------------------------------- #
 # 3) Reliability — a raising source removes only itself
@@ -350,7 +393,7 @@ intg._data_cache_dir = lambda name: os.path.join(folder, name) if name else None
 try:
     mb_calls = stub_mb(MB_DEFAULT)
     first = chain(limit=12, release=MB_ALBUM_RELEASE)
-    assert first["per_track"][(1, 1)] == ["Progressive Rock", "Rock", "Art Rock"], \
+    assert first["per_track"][(1, 1)] == ["Progressive Rock"], \
         first["per_track"]
     asked_first = len(mb_calls)
     assert asked_first, mb_calls
@@ -494,7 +537,7 @@ try:
     assert body["skipped"] == {}, body
     assert body["level_counts"] == {"track": 1, "album": 1, "artist": 0}, body
     assert body["notes"]["musicbrainz"] == JOB_NOTES["musicbrainz"], body
-    assert "ALBUM or ARTIST" in body["notes"]["genre level"], body
+    assert "from the release group" in body["notes"]["genre level"], body
     assert "stopped after musicbrainz" in body["notes"]["genre sources"], body
     assert set(body) >= {"updated", "genres", "per_source", "notes", "per_track",
                          "sources", "levels", "per_source_counts", "asked",
@@ -573,6 +616,19 @@ def _silent_sources():
 _ai_mod.ai_configured = _ai_configured
 _genre_ai.infer_genres = _infer
 try:
+    # A SOURCE THAT ANSWERED AT TRACK LEVEL IS NEVER HANDED OVER (2026-10-12):
+    # the recording's own answer is complete by itself (R37), so the model is
+    # not asked to "fill" it — the earlier gate asked whenever the cap was not
+    # full, and its answer REPLACED the recording's own one-name list.
+    full_stack()
+    _ai_calls.clear()
+    settled = intg.genre_chain(artist="Test Artist", album="Test Album",
+                               release=RELEASE, cfg=dict(CFG, ai_genre_inference=True),
+                               limit=3, files=[FILE_ONE, FILE_TWO],
+                               sources=["musicbrainz"])
+    assert _ai_calls == [], _ai_calls
+    assert settled["per_track"][(1, 1)] == ["Alternative Metal"], settled["per_track"]
+
     _silent_sources()
     _ai_calls.clear()
     got = intg.genre_chain(artist="Test Artist", album="Test Album",

@@ -1080,12 +1080,15 @@ DEFAULT_CONFIG = {
     # (server.ai.ai_chat drops to HIGH if the endpoint refuses the word).
     "ai_effort": "high",
     # AI genre inference — the one AI feature that runs during importing and
-    # tagging. The model is given the genres the configured sources (RateYourMusic
-    # and MusicBrainz first, then the rest) already answered with (plus whatever the other configured sources know)
-    # and returns at most `mb_genre_count - 1` SPECIFIC genres. The app stores
-    # the specific names a source stated, rendered in the canonical order
-    # (mlo.genres.normalize_genres); the level above a name is derived as a
-    # view (mlo.genre_vocab.parent_of, see mlo.genres), never stored. On by
+    # tagging. The model is handed the genres MusicBrainz already answered with
+    # (its tiers: the recording's own, its work's, then the release group's and
+    # the artist's) and returns at most `mb_genre_count` SPECIFIC genres. It is
+    # the LAST RESORT: asked only when the sources did not settle the track —
+    # a recording's own answer is complete by itself and is never handed over
+    # (`server.integrations._genre_needs_ai`). The app stores the specific
+    # names a source stated, rendered in the canonical order
+    # (mlo.genres.normalize_genres); the level above a name is not stored or
+    # derived any more (2026-10-12). On by
     # default *when an AI endpoint is configured* — with no base URL/model the
     # import simply uses the source list as-is.
     "ai_genre_inference": True,
@@ -1661,25 +1664,22 @@ DEFAULT_CONFIG = {
     # adds genres rather than levels — a track's GENRE tag is what it sounds
     # like, and "where a name sits" is a view the app draws from that.
     "mb_genre_count": 2,
-    # Genre sources, in priority order. The owner's order, and the reason for
-    # it: RateYourMusic first (the release page's own curated genres, and the
-    # only one of the three that states a genre PER TRACK — its rows link each
-    # track's own page), MusicBrainz second (open data, keyless, the identity
-    # anchor: recording → work → release group → release → artist), Album of
-    # the Year last (its genre row is the RELEASE's — the site publishes no
-    # per-track genre at all — so it is the album-level floor under the other
-    # two). These are the ONLY sources the app asks for genres — the registry
+    # Genre sources, in priority order — ONE source: MusicBrainz (the registry
     # `server.integrations.GENRE_SOURCES` is exactly this list, and
-    # `tools/test_genres.py` asserts the two are equal. ONE source: MusicBrainz
-    # (per recording, then its release group, then the release, then the
-    # artist — `mlo.genres` still caps the list and keeps the source's order).
-    # The owner removed the two SCRAPED hosts on 2026-10-12 — RateYourMusic and
-    # Album of the Year forbid it in their terms, and the cookies, challenges
-    # and borrowed browser sessions that made them work were the least
-    # maintainable part of the app. A MusicBrainz answer that never comes
-    # leaves the album failing grading (GENRE_MISSING) until genres are written
-    # by hand or by the configured AI tier; nothing is ever invented to fill
-    # the gap, and a genre the files already carry is never rewritten.
+    # `tools/test_genres.py` asserts the two are equal). The owner removed the
+    # two SCRAPED hosts on 2026-10-12 — RateYourMusic and Album of the Year
+    # forbid it in their terms, and the cookies, challenges and borrowed
+    # browser sessions that made them work were the least maintainable part of
+    # the app.
+    # A track's genres come from ONE TIER of its MusicBrainz data — the
+    # RECORDING's own genres first (its work's only when the recording states
+    # none), else the release GROUP's (never the release's own edition-level
+    # ones), else the ARTIST's — and the first tier that states anything is the
+    # list (`mlo.genres` still caps it and keeps MusicBrainz's own vote order).
+    # A MusicBrainz answer that never comes leaves the album failing grading
+    # (GENRE_MISSING) until genres are written by hand or by the configured AI
+    # tier; nothing is ever invented to fill the gap, and a genre the files
+    # already carry is never rewritten.
     "genre_sources": [
         "musicbrainz",
     ],

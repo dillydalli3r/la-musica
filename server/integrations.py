@@ -2255,6 +2255,23 @@ def release_group_rating(rg_mbid):
     return mb_get_cached(f"release-group/{rg_mbid}", {"inc": "ratings", "fmt": "json"})
 
 
+def artist_rating(artist_mbid):
+    """The ARTIST's own rating node, or None — the rating ladder's last rung.
+
+    The owner's rule: a track reads the RECORDING, then the ALBUM (the release
+    group, this time when the recording states none), and the ARTIST only when
+    neither is rated (`mlo.web_ratings._rate`). The artist entity is the one
+    MusicBrainz puts the artist's own votes on (`inc=ratings`; the node shape
+    is the same `{"rating": {...}}` the other two answer with, so the parser is
+    the one `parse_musicbrainz`). Through `mb_get_cached`, like every other
+    read: one request per artist, ever, and none at all when its album or
+    recording already answered.
+    """
+    if not artist_mbid:
+        return None
+    return mb_get_cached(f"artist/{artist_mbid}", {"inc": "ratings", "fmt": "json"})
+
+
 def _recording_with_work(recording_mbid):
     """``{"recording": node, "work": node|None}`` for one recording.
 
@@ -2296,9 +2313,10 @@ def _recording_with_work(recording_mbid):
 def recording_work_genres(recording_mbid):
     """The genres MusicBrainz states on the WORK a recording performs.
 
-    The owner asked the track tier to read the WORK's genres (the composition
-    is classified once for every recording of it), with the recording's own as
-    the fallback. The work is reached in the one request shape this module
+    The WORK is the TRACK tier's fallback behind the recording — asked only
+    when the recording itself states no genre: the composition is classified
+    once for every recording of it, but the recording is the entity the track
+    IS (R360). The work is reached in the one request shape this module
     already uses for a recording's identity (`_mb_recording_ids`,
     `inc=url-rels+work-rels`), and its genres are a second cached request —
     ``inc=genres`` — because MusicBrainz has no inline "work genres" include
@@ -2306,12 +2324,11 @@ def recording_work_genres(recording_mbid):
 
     MEASURED, live, on The Dark Side of the Moon (2026-10-01): 0 of 4 works
     stated any genre, while all 4 recordings stated 5-9 of their own. The work
-    tier is therefore usually empty and the recording's own answer is what a
-    caller almost always gets — which is why the chain reads the work first but
-    MERGES the recording's names behind it rather than choosing between them,
-    and why the cost this adds (two rate-limited MusicBrainz requests per
-    track) is reported rather than hidden. Returns [] for a recording with no
-    work, no genres, or no answer at all.
+    tier is therefore usually empty, and leading with it (as the chain used to)
+    both lost the recording's own answer's precedence and paid two
+    rate-limited MusicBrainz requests per track for a tier that never spoke —
+    which is why the caller asks for it only when the recording is silent.
+    Returns [] for a recording with no work, no genres, or no answer at all.
 
     The caller caches the RESULT (`_genre_cached`, keyed by recording), so the
     two lookups below run once per recording per 30 days; this helper does not
@@ -2331,14 +2348,26 @@ def recording_work_genres(recording_mbid):
 
 
 def genre_cascade(release, limit=None):
-    """Cascading genre import: track -> release -> release-group -> artist.
+    """Cascading genre import: track -> release-group -> artist, ONE tier each.
 
-    Genres are merged across levels (deduped, in popularity order, in
-    MusicBrainz's own spelling) and capped at `limit` per track. limit=None
-    imports everything. Returns per-track genres plus the fallback chain used
-    for each track. The caller that writes these to a file canonicalizes them
+    A track's own RECORDING answers first (`trk["genres"]`, the recording's
+    entity genres from the release payload), then the release GROUP's, then the
+    ARTIST's — and the first tier that states anything supplies the whole list,
+    deduped, in MusicBrainz's own (vote-count) order and capped at `limit`
+    (limit=None imports everything). The release's own (edition) genres are
+    never read: the album IS its group, not one pressing (the owner's rule,
+    2026-10-12). Returns per-track genres plus the tier that answered each
+    track (`source`) and the tiers that had anything at all (`levels`). The
+    caller that writes these to a file canonicalizes them
     (`_write_album_genres` in server.main), so the cap and the hierarchy are
-    applied once: the tag keeps the names, the levels are derived."""
+    applied once: the tag keeps the names, the levels are derived.
+
+    This is the PREVIEW half of the policy — it reads only the payload in hand.
+    The import chain (`_genre_source_answers`) applies the same tiers and
+    additionally reads the WORK when the recording states no genres (which
+    costs a request per silent recording); a cascade answer can therefore be
+    one tier narrower than an import's on such a track.
+    """
     rg = release.get("release_group_id")
     rg_genres = release_group_genres(rg) if rg else []
     artist_genres_all = []
@@ -2346,37 +2375,32 @@ def genre_cascade(release, limit=None):
         if a.get("mbid"):
             artist_genres_all.extend(artist_genres(a["mbid"]))
     artist_genres_all = list(dict.fromkeys(artist_genres_all))
-    release_genres = release.get("genres", [])
 
     per_track = []
     for trk in release.get("media", []):
-        ordered = []
-        sources = []
+        used = None
+        names = []
         for level, lst in (
             ("track", trk.get("genres") or []),
-            ("release", release_genres),
             ("release-group", rg_genres),
             ("artist", artist_genres_all),
         ):
-            if lst and not sources:
-                sources.append(level)
-            for g in lst:
-                if g not in ordered:
-                    ordered.append(g)
-        merged = ordered[:limit] if limit else ordered
+            if lst:
+                used, names = level, list(lst)
+                break
+        merged = names[:limit] if limit else names
         per_track.append({
             "position": trk["position"],
             "disc": trk["disc"],
             "title": trk["title"],
             "genres": merged,
-            "source": sources[0] if sources else None,
-            "levels_used": sources,
+            "source": used if merged else None,
+            "levels_used": [used] if merged else [],
         })
     return {
         "per_track": per_track,
         "levels": {
             "track": any(t.get("genres") for t in release.get("media", [])),
-            "release": bool(release_genres),
             "release_group": bool(rg_genres),
             "artist": bool(artist_genres_all),
         },
@@ -2396,11 +2420,14 @@ def web_rating_fetchers():
     """The ONE callable `mlo.web_ratings` drives: ``fetch(source, kind,
     ident, cfg)``.
 
-    `ident` is the entity the source is asked about — ``{"artist", "album",
-    "mbid"}`` for an album, ``{"artist", "title", "mbid"}`` for a track — and
-    the answer is that source's raw payload or None. MusicBrainz is the only
-    source: it is a documented API that needs no credential, so an identity
-    with no MBID answers None WITHOUT a request.
+    `ident` is the entity the source is asked about, and `mbid` inside it is
+    THAT level's own MusicBrainz id: ``{"artist", "title", "mbid"}`` for a
+    track (the recording), ``{"artist", "album", "mbid"}`` for an album (the
+    release GROUP), ``{"artist", "mbid"}`` for the artist. The answer is that
+    source's RAW payload or None. MusicBrainz is the only source: it is a
+    documented API that needs no credential, so an identity with no MBID (the
+    artist rung of a folder whose files name no artist id, say) answers None
+    WITHOUT a request.
     """
     def fetch(source, kind=None, ident=None, cfg=None):
         source = str(source or "").strip().lower()
@@ -2412,6 +2439,8 @@ def web_rating_fetchers():
                 return None
             if level == "track":
                 return _recording_with_work(mbid)
+            if level == "artist":
+                return artist_rating(mbid)
             return release_group_rating(mbid)
         return None
 
@@ -2675,8 +2704,10 @@ def bandcamp_album(artist="", album="", titles=None):
 # other sites for genres — their terms forbid it and the cookie/challenge
 # machinery that served them was the least maintainable part of the app.
 # MusicBrainz is a documented API that needs no credential and is never
-# challenged, and it answers at the FINEST level it has, falling back
-# recording → work → release → release group → artist. The list stays a list
+# challenged, and it answers at the level the entity is entitled to, falling
+# back recording (its work only when the recording states none) → release
+# GROUP → artist — one tier supplies a track's list, never a blend. The list
+# stays a list
 # because `genre_sources` (the user's own list) is read against it, and
 # `mlo.config._GENRE_SOURCE_IDS` is exactly this set (the migration drops any
 # other id a saved config carries).
@@ -2766,18 +2797,21 @@ def _genre_complete(names, limit):
     return len(got) >= max(1, int(limit))
 
 
-def _genre_needs_ai(genres, limit, picks):
+def _genre_needs_ai(genres, limit, level=None):
     """Whether the model is the LAST RESORT for a track — the owner's rule.
 
     "AI should only be used as fallback when no provider responded with info."
-    The model is therefore asked exactly when the sources did not settle the
-    track at all (`_genre_complete` false): the sources came up short of a
-    usable list. A DISAGREEMENT between sources that already fill
-    the slots is not a reason to call it — the top-tier provider's answer is
-    what the owner asked for, and a second opinion would replace it. `picks` is
-    kept in the signature because the caller passes it, but it no longer
-    triggers a call.
+    The model is therefore asked exactly when the sources did not SETTLE the
+    track — the same predicate the chain's early stop applies (`settled`): the
+    list fills the writer's cap, OR the tier that answered is the track's own
+    (a track-level answer is complete by itself, R37). A track the recording
+    itself classified is therefore never handed to the model; one the sources
+    left at ALBUM/ARTIST level with fewer names than the cap is, because that
+    answer cannot fill the slots the writer would write. For the release-wide
+    summary (`level=None`) the cap alone is the test.
     """
+    if level == "track":
+        return False
     return not _genre_complete(genres, limit)
 
 
@@ -3215,11 +3249,14 @@ def _genre_source_answers(source, artist, album, release, cfg, tracks):
     """One source's answers: {key: {"level", "genres"[, "title"]}}.
 
     `key` is a track key for a per-track answer, `_ALL_TRACKS` for an
-    album/artist-wide one; both may be present and `genre_chain` merges the
-    track's own answer first. Every source is asked at its best available
-    level — a per-track source that cannot answer per track answers nothing
-    rather than promoting an album guess to a track. Never raises: the chain
-    wraps the call, and every network path inside returns "no answer".
+    album/artist-wide one; both may be present and one TIER supplies a track —
+    its own row (level `track`) when the source stated anything for that track,
+    else the release-wide row, which itself is labelled with the tier it came
+    from (`album` for the release GROUP, `artist` only when the group stated
+    nothing — see `merge`). Every source is asked at its best available level —
+    a per-track source that cannot answer per track answers nothing rather
+    than promoting an album guess to a track. Never raises: the chain wraps
+    the call, and every network path inside returns "no answer".
 
     MusicBrainz is the only id handled — the only genre source this build
     knows (`GENRE_SOURCES`). Any other id returns {} (a stale saved list
@@ -3230,45 +3267,39 @@ def _genre_source_answers(source, artist, album, release, cfg, tracks):
     if source == "musicbrainz":
         answers = {}
         for track in tracks:
-            # The TRACK tier reads the WORK's genres first and the recording's
-            # own second — the owner's rule: the composition is what a genre
-            # vote is usually cast on, so it is the more general answer, and the
-            # recording's own classification is the fallback. The recording's
-            # names were already in hand (the release payload carries them), so
-            # only the work costs a request, and it is cached 30 days with the
-            # rest of this source's answers.
-            #
-            # MEASURED, live, on The Dark Side of the Moon (2026-10-01): the
-            # work stated genres for 0 of 4 tracks while the recording stated
-            # 5-9 for all 4, so on a mainstream album this tier changes nothing
-            # and costs one extra MusicBrainz request per track (rate-limited
-            # to 1 req/s). The fallback order is what keeps that cost from ever
-            # READING as a loss: the recording's genres are merged, not replaced.
+            # The TRACK tier reads the RECORDING's own genres — the entity the
+            # track IS (R360) — and the WORK's only when the recording states
+            # none. The work is the composition, classified once for every
+            # recording of it, which is why it is a fallback and not the lead:
+            # MEASURED, live, on The Dark Side of the Moon (2026-10-01), the
+            # work stated genres for 0 of 4 tracks while the recordings stated
+            # 5-9 each, so leading with the work both lost the recording's own
+            # answer and paid two rate-limited requests per track for a tier
+            # that never spoke. Asking it only when the recording is silent
+            # costs nothing on an answered track and still catches the
+            # composition's classification when the recording has none.
             recording = str(track.get("recording_mbid") or "").strip()
-            names = []
-            if recording:
-                names += _genre_cached(
+            names = list(track.get("genres") or [])
+            if not names and recording:
+                names = _genre_cached(
                     "recording", f"musicbrainz|work_genres|{recording}",
                     lambda r=recording: recording_work_genres(r)) or []
-            names += list(track.get("genres") or [])
             row = _genre_row("track", names)
             if row:
                 answers[_genre_track_key(track.get("disc"), track.get("position"))] = row
-        # The ALBUM tier: the release GROUP's genres first, then the release's
-        # own. A release group is what "the album" means to MusicBrainz and its
-        # genre votes are cast against the record, not one pressing — MEASURED
-        # live on The Dark Side of the Moon: the release group states 12 genres
-        # (ambient, art rock, classic rock, …) while the release states 1
-        # ("classic rock"). The release's names are still merged behind them
-        # rather than dropped, because a source's answer is never thrown away
-        # here — it only stops leading.
+        # The ALBUM tier is the release GROUP's own genres, and only the
+        # group's. The album IS the group, not one pressing (the owner's rule,
+        # 2026-10-12), and the numbers say the same: MEASURED live on The Dark
+        # Side of the Moon, the release group states 12 genres (ambient, art
+        # rock, classic rock, …) while the release states 1 ("classic rock").
+        # The release's own names are therefore NOT read — an edition's
+        # straggler vote is not the album's classification.
         wide, level = [], "album"
         if release:
             rg = release.get("release_group_id")
             if rg:
                 wide += _genre_cached("album", f"musicbrainz|release_group|{rg}",
                                       lambda r=rg: release_group_genres(r)) or []
-            wide += list(release.get("genres") or [])
         else:
             # No release in hand: the release group is resolved from the names.
             rg = None
@@ -3279,20 +3310,19 @@ def _genre_source_answers(source, artist, album, release, cfg, tracks):
             if rg and rg.get("mbid"):
                 wide += _genre_cached("album", f"musicbrainz|release_group|{rg['mbid']}",
                                       lambda m=rg["mbid"]: release_group_genres(m)) or []
-        # …then the ARTIST tier, which is what answers when both of those state
-        # nothing. Which one the row IS has to be said by where its names came
-        # from rather than assumed: an artist's genre labelled `album` would be
-        # reported as something it is not AND would outrank the album tier of
-        # the next source in the chain (`merge` ranks by this label).
-        artist_names = []
-        for mbid in _release_artist_mbids(artist, album, release, cfg):
-            artist_names = _genre_cached(
-                "album", f"musicbrainz|artist|{mbid}",
-                lambda m=mbid: artist_genres(m)) or []
-            break
+        # …and the ARTIST tier answers only when the group stated nothing: the
+        # artist's classification is the last resort, never a top-up beside the
+        # album's own. Which tier the row IS has to be said by where its names
+        # came from rather than assumed: an artist's genre labelled `album`
+        # would be reported as something it is not AND would outrank the album
+        # tier of a later source in the chain (`merge` ranks by this label).
         if not wide:
             level = "artist"
-        wide += artist_names
+            for mbid in _release_artist_mbids(artist, album, release, cfg):
+                wide = _genre_cached(
+                    "album", f"musicbrainz|artist|{mbid}",
+                    lambda m=mbid: artist_genres(m)) or []
+                break
         row = _genre_row(level, wide)
         if row:
             answers[_ALL_TRACKS] = row
@@ -3421,19 +3451,23 @@ def _genre_chain_names(artist="", album="", release=None, limit=None,
 
     The sources are asked IN ORDER until every track is full, and no further:
     the default order (`GENRE_SOURCES`, and the shipped
-    `mlo.config.DEFAULT_CONFIG["genre_sources"]`) is MusicBrainz alone
-    (recording → work → release → release group → artist). With
-    `ai_genre_inference` on and an endpoint configured, the model is the LAST
-    RESORT once the sources have not settled a track — see `_genre_ai_rank`,
-    whose answer is restricted to published genre names. `mlo.config` migrates
+    `mlo.config.DEFAULT_CONFIG["genre_sources"]`) is MusicBrainz alone.
+    A track's genres come from ONE TIER — the recording's own (its WORK only
+    when the recording states none), else the release GROUP's, else the
+    ARTIST's (see `merge`) — and the release's own (edition) genres are never
+    read: the album IS its group, not one pressing. With `ai_genre_inference`
+    on and an endpoint configured, the model is the LAST RESORT once the
+    sources have not settled a track — see `_genre_ai_rank`, whose answer is
+    restricted to published genre names, and `_genre_needs_ai`, which never
+    hands over a track the recording itself classified. `mlo.config` migrates
     every previously shipped default list onto this one, so an install that
     never chose an order gets it; a customised list is honoured as written.
 
     "Full" is the WRITER's own policy applied to the merged list
     (`_genre_complete`): at `mb_genre_count = 2` the track's answer is two
     specific names (or one, from a source that answered at TRACK level — see
-    `tracks_full`), and the level above a name is a derived view, never stored,
-    so the sources below the one that supplied it are never asked —
+    `tracks_full`), so the sources below the one that supplied it are never
+    asked —
     `stopped_after` names the source that
     filled the release, and `asked` lists what was actually consulted. A
     source that cannot answer (an id this build does not know) is skipped
@@ -3451,14 +3485,15 @@ def _genre_chain_names(artist="", album="", release=None, limit=None,
     name to MusicBrainz's own and keeps the source's own rank order
     order).
 
-    Each track's own answer is merged first, then the release-wide one, so a
-    track that states its own genre keeps it ahead of the album's fallback.
-    A source that only knows album- or artist-wide answers (Bandcamp, Discogs,
-    Deezer, Spotify and the like when their per-track tier is silent) is
-    marked `level: "album"`/`"artist"` in the provenance, never
-    `track` — nothing pretends to be per-track. `level_counts` totals those
-    tiers over the release's files, and a track whose `levels` entry is not
-    `track` was answered by its ALBUM (or artist) — which, with two slots, is
+    Each track's own row is tried first, then the release-wide one — and the
+    higher tier's answer IS the list: a level below one that answered is a
+    fallback, never a top-up, so no stored list blends a recording's names
+    with the album's or the artist's. A source that only knows album- or
+    artist-wide answers is marked `level: "album"`/`"artist"` in the
+    provenance, never `track` — nothing pretends to be per-track.
+    `level_counts` totals those tiers over the release's files, and a track
+    whose `levels` entry is not `track` was answered by its RELEASE GROUP (or,
+    when the group stated nothing, its ARTIST) — which, with two slots, is
     often the whole answer.
 
     `files` (optional) are the album's audio files; they key the provenance
@@ -3471,12 +3506,12 @@ def _genre_chain_names(artist="", album="", release=None, limit=None,
     waiting on; a hook that raises is ignored.
 
     With `ai_genre_inference` on AND an AI endpoint configured, the model is a
-    TIE-BREAKER rather than the first move: it is handed the merged list only
-    when the sources did not settle the track themselves — their answer cannot
-    fill the slots (`_genre_needs_ai`) — and a usable answer REPLACES the
-    merged list. The merged list is the SPECIFIC names the sources stated, in
-    the order they were asked, capped at `limit`; the level above a name is a
-    derived view (`mlo.genre_vocab.parent_of`), never stored. The answer is
+    LAST RESORT rather than the first move: it is handed the merged list only
+    when the sources did not settle the track themselves (`_genre_needs_ai` —
+    the list does not fill the cap, or it was answered below the track's own
+    tier) — and a usable answer REPLACES the merged list. The merged list is
+    the SPECIFIC names the tier that answered stated, capped at `limit`. The
+    answer is
     canonicalized through `mlo.genres.normalize_genres`, the disk cache/gates
     are unchanged, and its path gains "ai" in `sources`. With the setting off,
     no endpoint, or an unusable answer, every field is exactly what the
@@ -3519,13 +3554,18 @@ def _genre_chain_names(artist="", album="", release=None, limit=None,
     # when the sources can stop being asked (`tracks_full` below), and it is
     # the same function the answer is built with afterwards.
     def merge(track):
-        """(genres, sources, level, picks, dropped) in ask order.
+        """(genres, sources, level, dropped) in ask order.
 
         `track=None` is the release-wide answer (every row every source has,
-        the release-wide ones first); for a track it is that track's own
-        answer, then the release-wide one. `picks` is the first genre of each
-        contributing source — the tie-break signal `_genre_needs_ai` reads —
-        and `dropped` is what the cap left out, for the report.
+        the release-wide ones first — a union, for the files an album carries
+        no track identity for). For a track it is that track's own answer, then
+        the release-wide one — and ONE TIER SUPPLIES IT: of the levels that
+        stated anything (`track` — the recording, or its work when the
+        recording is silent — else `album` — the release GROUP — else
+        `artist`), the first one's names are the whole list, capped. A level
+        below one that answered is a fallback, never a top-up, so a stored list
+        never blends tiers (the owner's rule, 2026-10-12). `dropped` is what
+        the cap left out, for the report.
         """
         pairs = []
         for source in order:
@@ -3553,26 +3593,25 @@ def _genre_chain_names(artist="", album="", release=None, limit=None,
                 continue
             seen.add(low)
             kept.append((name, source, level))
+        if track is not None:
+            best = min((_LEVEL_RANK.get(lv, 9) for _n, _s, lv in kept), default=9)
+            kept = [p for p in kept if _LEVEL_RANK.get(p[2], 9) == best]
         dropped = [n for n, _s, _l in kept[limit:]]
         kept = kept[:limit]
         level = None
         for _name, _source, got in kept:
             if level is None or _LEVEL_RANK.get(got, 9) < _LEVEL_RANK.get(level, 9):
                 level = got
-        picks = {}
-        for name, source, _level in kept:
-            picks.setdefault(source, name)
         return ([n for n, _s, _l in kept],
-                list(dict.fromkeys(s for _n, s, _l in kept)), level,
-                list(picks.values()), dropped)
+                list(dict.fromkeys(s for _n, s, _l in kept)), level, dropped)
 
     def tracks_full():
         """Whether every track already holds what the writer would write.
 
         This is the early stop. At `mb_genre_count = 2` the track's answer is
         two specific names (or one, from a source that answered at TRACK level
-        — `settled` below), and the level above a name is a derived view, never
-        stored, so the sources below the one that supplied it are never asked —
+        — `settled` below), so the sources below the one that supplied it are
+        never asked —
         a source that would only repeat the answer must not be paid a request
         for it. Every track
         has to be full: a release whose tracks are answered unevenly keeps
@@ -3593,7 +3632,7 @@ def _genre_chain_names(artist="", album="", release=None, limit=None,
             release's classification, and stopping on one is what kept the
             per-track tiers below from ever being asked.
             """
-            genres, _sources, level, _picks, _dropped = merge(track)
+            genres, _sources, level, _dropped = merge(track)
             return _genre_complete(genres, limit) or level == "track"
 
         return all(settled(t) for t in tracks)
@@ -3653,7 +3692,7 @@ def _genre_chain_names(artist="", album="", release=None, limit=None,
              "country": (release or {}).get("country") or ""}
 
     for track in tracks:
-        genres, contributors, level, picks, dropped = merge(track)
+        genres, contributors, level, dropped = merge(track)
         # The sources are the candidates (best first) and the model ranks
         # them into the hierarchy; a track the model has nothing to say about
         # keeps the merged order untouched. It is only ASKED when the sources
@@ -3668,7 +3707,7 @@ def _genre_chain_names(artist="", album="", release=None, limit=None,
         # configured to look one up.
         ranked = (_genre_ai_rank(cfg, artist, album, track.get("title"),
                                  genres, limit, extra)
-                  if _genre_needs_ai(genres, limit, picks) else None)
+                  if _genre_needs_ai(genres, limit, level) else None)
         if ranked:
             genres = ranked
             contributors = list(dict.fromkeys(contributors + ["ai"]))
@@ -3681,9 +3720,9 @@ def _genre_chain_names(artist="", album="", release=None, limit=None,
         if dropped:
             per_track_trimmed[key] = dropped
 
-    merged, album_contributors, album_level, album_picks, album_dropped = merge(None)
+    merged, album_contributors, album_level, album_dropped = merge(None)
     ranked = (_genre_ai_rank(cfg, artist, album, "", merged, limit, extra)
-              if _genre_needs_ai(merged, limit, album_picks) else None)
+              if _genre_needs_ai(merged, limit) else None)
     if ranked:
         merged = ranked
         album_contributors = list(dict.fromkeys(album_contributors + ["ai"]))
