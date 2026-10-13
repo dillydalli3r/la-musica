@@ -201,6 +201,35 @@ ok(imports.sweep_leftovers(os.path.join(ALBUM, "x.flac"),
                            cfg={"music_folder": MF, "grade_check_leftovers": False}) == [],
    "the sweep obeys the same switch the grade reads")
 
+print("the library lists a shell ONCE")
+# A two-disc AUTO-import's shell: the chain moved the disc folders' audio into
+# the album folder and left the rip's sheets in the staging folder it renamed.
+# That folder is BOTH "no audio anywhere beneath it" (EMPTY_FOLDER) and "holds
+# an album's leftovers" (LEFT_OVER_FILES), and the library payload appended one
+# row per finding — so the artist grid showed the same folder TWICE, as two
+# identical failing tiles captioned with its name (the owner's screenshot,
+# 2026-10-13: two "Disc 1" tiles on a two-disc auto-import).
+from server import library as library_mod  # noqa: E402
+
+SHELL = os.path.join(MF, "Artists", "Gorillaz [e21857d5]", "Disc 1")
+write(os.path.join(SHELL, "cover.jpg"))
+write(os.path.join(SHELL, "CD-1.cue"), 'FILE "x.flac" WAVE\n')
+picked = {"music_folder": MF, "grade_check_empty_folders": True,
+          "grade_check_leftovers": True}
+_scan_shell = {}
+_albums_shell = grader._find_albums(MF, _scan_shell)
+ok(SHELL in grader._find_empty_folders(MF, _scan_shell)
+   and SHELL in [p for p, _n in grader._find_leftover_folders(MF, _scan_shell, _albums_shell)],
+   "the two finders BOTH name it (which is why the rows must be deduped)")
+tree = library_mod._library_builder(MF, picked)()
+shell_rows = [a for ar in tree["artists"] for a in ar["albums"]
+              if os.path.normcase(a.get("path") or "") == os.path.normcase(SHELL)]
+ok(len(shell_rows) == 1,
+   f"one row for one folder: {[sorted((r.get('issues') or {})) for r in shell_rows]}")
+ok(bool(shell_rows) and "LEFT_OVER_FILES" in (shell_rows[0].get("issues") or {}),
+   "...and it is the LEFT_OVER_FILES row, which names the files that are there: "
+   f"{shell_rows[0].get('issues') if shell_rows else None}")
+
 shutil.rmtree(MF, ignore_errors=True)
 shutil.rmtree(REDIRECT, ignore_errors=True)
 print(f"\nPASS — {passed} checks")

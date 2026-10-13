@@ -2787,7 +2787,7 @@ export const api = {
     const fd = new FormData();
     for (const { file, relPath } of files) fd.append("files", file, relPath);
     if (staged?.length) fd.append("staged", JSON.stringify(staged));
-    return json<{ ok: boolean; saved: string[]; album_path: string; album_name?: string; merged?: boolean; collided?: boolean; kept?: string[] }>(
+    return json<{ ok: boolean; saved: string[]; album_path: string; album_name?: string; merged?: boolean; collided?: boolean; kept?: string[]; created?: boolean }>(
       `${API}/import/upload?target_dir=${encodeURIComponent(targetDir)}` +
         (album ? `&album=${encodeURIComponent(album)}` : ""),
       { method: "POST", body: fd },
@@ -2842,7 +2842,7 @@ export const api = {
    *  copied into the library and stays where it was, while one the APP staged
    *  (`<music>/.mlo/…`) is moved and drained. */
   importIngest: (source: string, target: string) =>
-    json<{ ok: boolean; path: string; album_name?: string; merged?: boolean; copied?: boolean }>(
+    json<{ ok: boolean; path: string; album_name?: string; merged?: boolean; copied?: boolean; created?: boolean }>(
       `${API}/import/ingest?source=${encodeURIComponent(source)}&target=${encodeURIComponent(target)}`,
       { method: "POST" }
     ),

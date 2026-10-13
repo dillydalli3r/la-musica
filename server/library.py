@@ -1045,8 +1045,16 @@ def _library_builder(folder, cfg):
             albums_data = [built[a] for a in sorted(alb_list)] if alb_list else []
             albums_data.extend(_pending_album_row(d, folder)
                                for d in pending_rows.get(artist_dir, []))
+            # ONE row per folder: the two finders overlap — a folder holding an
+            # album's leftovers is ALSO a folder with no audio track — so a
+            # staging shell left by a two-disc import was listed twice, as two
+            # identical failing tiles with the same caption (the owner's report,
+            # 2026-10-13). The leftover row wins: it names the files that are
+            # actually there, which is what the reader needs to clean it up.
+            leftover_dirs = {d for d, _names in leftover_rows.get(artist_dir, [])}
             albums_data.extend(_empty_album_row(d, folder)
-                               for d in empty_rows.get(artist_dir, []))
+                               for d in empty_rows.get(artist_dir, [])
+                               if d not in leftover_dirs)
             albums_data.extend(_leftover_album_row(d, folder, names)
                                for d, names in leftover_rows.get(artist_dir, []))
             albums_data.sort(key=lambda a: str(a.get("path", "")).lower())

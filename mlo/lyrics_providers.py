@@ -284,6 +284,50 @@ _MIN_SCORE = 0.6
 _MIN_ARTIST = 0.4
 
 
+class Deadline:
+    """A wall-clock budget for ONE track's walk of the provider chain.
+
+    The owner's report, 2026-10-13: *"i feel like the app can get 'stuck'
+    importing lyrics"* — the Fetch lyrics strip sat at `1/3` for as long as a
+    lane kept working, because nothing bounded a track's walk: measured, one
+    track's worst case is the whole chain with retries (6 providers, up to 51 s
+    of retries each) plus a 240 s YouTube caption pass plus the alias pass
+    repeating all of it, and the reply (and the bar) waits for every lane.
+
+    So a walk that serves a PERSON carries one of these: `spent()` is checked
+    BETWEEN providers, an answered provider keeps its hit, and `cut` names the
+    providers the walk never reached, so the caller's row can say which source
+    was left (`"timed out after 45s — not tried: YouTube captions"`) rather
+    than a bare failure. Script 13's library run passes none and stays
+    unlimited — nobody is waiting on it, and its own log narrates progress.
+    """
+
+    def __init__(self, seconds):
+        self.seconds = float(seconds)
+        self.at = time.monotonic() + self.seconds
+        self.cut: list = []
+
+    def spent(self):
+        return time.monotonic() > self.at
+
+    def remaining(self):
+        return max(0.0, self.at - time.monotonic())
+
+    def why(self):
+        """The sentence a caller's failed row carries, or "" when nothing was
+        cut (the walk finished inside its budget)."""
+        if not self.cut:
+            return ""
+        labels = []
+        for pid in self.cut:
+            name = SOURCE_LABELS.get(pid) or ({"aliases": "the alias pass"}
+                                              .get(pid) or str(pid))
+            if name not in labels:
+                labels.append(name)
+        return (f"stopped after {int(self.seconds)}s — the sources left were "
+                f"{', '.join(labels)}")
+
+
 def _norm(text):
     """Comparison key: casefolded, accent-folded, punctuation-free."""
     s = unicodedata.normalize("NFKD", str(text or "")).casefold()
@@ -998,7 +1042,8 @@ def _alias_queries(artist, title, album, aliases):
     return tuple(out[:_MAX_ALIAS_QUERIES])
 
 
-def _search_chain(cfg, order, artist, title, album, duration, youtube_id, floor):
+def _search_chain(cfg, order, artist, title, album, duration, youtube_id, floor,
+                  deadline=None):
     """ONE walk of the provider chain, under the names it is given.
 
     Returns ``(synced_hit, plain_hit)``: the FIRST synced answer — the walk
@@ -1011,9 +1056,18 @@ def _search_chain(cfg, order, artist, title, album, duration, youtube_id, floor)
     and applies to both kinds, and the variant guard runs before it, so a
     karaoke/instrumental/cover hit is another recording for a plain answer
     exactly as it is for a synced one.
+
+    *deadline* (a :class:`Deadline`) stops the walk BETWEEN providers and
+    records the ones it never reached: a provider that already answered keeps
+    its hit, and the rest are named in ``deadline.cut`` so the caller's row can
+    say which source was left instead of a bare "timed out". Without one the
+    walk is the unlimited one it always was.
     """
     synced = plain = None
-    for pid in order:
+    for i, pid in enumerate(order):
+        if deadline is not None and deadline.spent():
+            deadline.cut.extend(order[i:])
+            break
         try:
             hit = _PROVIDERS[pid](artist, title, album, duration, cfg,
                                   youtube_id)
@@ -1042,7 +1096,7 @@ def _search_chain(cfg, order, artist, title, album, duration, youtube_id, floor)
 
 
 def fetch_lyrics(cfg, artist, title, album=None, duration=None,
-                 youtube_id=None, min_score=None, aliases=None):
+                 youtube_id=None, min_score=None, aliases=None, deadline=None):
     """The chain's answer for a track, or None when none of them has it.
 
     SYNCED first, PLAIN as the fallback — the app's own rule: a track whose
@@ -1073,19 +1127,28 @@ def fetch_lyrics(cfg, artist, title, album=None, duration=None,
 
     ``youtube_id`` (optional) is the video the file came from — the only thing
     that lets the YouTube provider answer, since it never searches. Providers
-    never raise — a failure, a timeout or a parse error is just a miss."""
+    never raise — a failure, a timeout or a parse error is just a miss.
+
+    ``deadline`` (a :class:`Deadline`, optional) bounds the WHOLE walk —
+    providers and the alias pass alike: a caller serving a person (the import
+    wizard's Fetch lyrics) must be able to answer, so a track whose sources are
+    slow stops at the deadline and its :class:`Deadline` records what was never
+    asked instead of the batch hanging on it (see `_search_chain`)."""
     cfg = cfg or {}
     if not (artist and title):
         return None
     floor = _MIN_SCORE if min_score is None else max(_MIN_SCORE, float(min_score))
     order = provider_order(cfg)
     synced, plain = _search_chain(cfg, order, artist, title, album, duration,
-                                  youtube_id, floor)
+                                  youtube_id, floor, deadline)
     if synced is not None:
         return synced
     if plain is not None:
         return plain
     if aliases is None or not cfg.get("lyrics_search_aliases", True):
+        return None
+    if deadline is not None and deadline.spent():
+        deadline.cut.append("aliases")
         return None
     try:
         aliases = aliases() if callable(aliases) else aliases
@@ -1096,8 +1159,11 @@ def fetch_lyrics(cfg, artist, title, album=None, duration=None,
     plain = None
     for a_name, t_name, al_name, entity, query in _alias_queries(
             artist, title, album, aliases):
+        if deadline is not None and deadline.spent():
+            deadline.cut.append("aliases")
+            break
         synced, found = _search_chain(cfg, order, a_name, t_name, al_name,
-                                      duration, youtube_id, floor)
+                                      duration, youtube_id, floor, deadline)
         if synced is not None:
             synced["alias_pass"] = {"used": True, "entity": entity,
                                     "query": query}

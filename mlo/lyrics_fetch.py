@@ -205,7 +205,7 @@ def _absent_answer(path, config, result, batched):
     _mark_lyrics_absent(path, config, result)
 
 
-def fetch_one(path, config, replace=False, mark_absent=True):
+def fetch_one(path, config, replace=False, mark_absent=True, deadline=None):
     """Fetch + write lyrics for ONE track; the shared core of script 13 and
     the API's "auto-import lyrics" button.
 
@@ -319,9 +319,20 @@ def fetch_one(path, config, replace=False, mark_absent=True):
         album = af.get_tag("ALBUM")
         hit = fetch_lyrics(
             config, artist, title, album, duration, youtube_id=youtube_id,
-            min_score=_AUTO_MIN_SCORE,
+            min_score=_AUTO_MIN_SCORE, deadline=deadline,
             aliases=lambda: _search_aliases(af.get_tag, config, artist, title,
                                             album, af.all_tags()))
+        if hit is None and deadline is not None and deadline.cut:
+            # The budget ran out MID-WALK: this is not "no provider had it" but
+            # "the sources ran out of time", and the row names the ones that
+            # never got their turn (`Deadline.why`). Nothing is written, and
+            # nothing is settled as ABSENT either — a source the walk never
+            # reached may still have the words, so marking the track
+            # instrumental here would be the app answering for them.
+            result["status"] = "failed"
+            result["reason"] = "timed out"
+            result["error"] = deadline.why()
+            return result
         if hit is None:
             # Either no provider had it, or every answer was a weak match —
             # both mean "nothing safe to write", and both are retried by the

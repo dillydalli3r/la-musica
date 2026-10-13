@@ -6,14 +6,17 @@ click and a script run produce byte-identical files. Provider order and the
 plain-vs-synced policy come from the config the settings page edits.
 """
 import os
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
+from concurrent.futures import (ThreadPoolExecutor, as_completed,
+                                TimeoutError as FuturesTimeoutError)
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from mlo import load_config
 from mlo.lyrics_fetch import fetch_one
-from mlo.lyrics_providers import SOURCES, SOURCE_LABELS, SOURCE_NOTES, available_sources, provider_order
+from mlo.lyrics_providers import (SOURCES, SOURCE_LABELS, SOURCE_NOTES,
+                                 Deadline, available_sources, provider_order)
 from mlo.stats import worker_count
 from server import tagcache
 from server import job_locks
@@ -35,6 +38,25 @@ class LyricsPathsRequest(BaseModel):
 # thread. Cap the batch: a whole-album or whole-library fetch belongs to
 # script 13 (`POST /api/run`), which reports progress and can be cancelled.
 MAX_PATHS = 100
+
+# The budget ONE PRESS is allowed to spend, in seconds. Measured, a single
+# track's unlimited walk is the whole chain with retries (six providers, up to
+# 51 s of retries each) plus a 240 s YouTube caption pass, and the alias pass
+# repeats all of it — while the reply, and the strip the user is watching, wait
+# for EVERY lane. The owner's report, 2026-10-13: "i feel like the app can get
+# 'stuck' importing lyrics" — the strip sat at "Fetching lyrics — 1/3…"
+# indefinitely, and because the job is only released in this route's `finally`,
+# a walk that never returned left the bar on screen through a page reload.
+# The wizard's client gives up at 120 s (`api.lyricsAuto`), so the server must
+# answer before that: a track stops walking at `PER_TRACK_BUDGET` (its row then
+# names the sources left, `mlo.lyrics_providers.Deadline`), and the batch stops
+# WAITING at `BATCH_BUDGET` whatever a lane is still doing — the lanes left are
+# reported as timed out and keep their own provider timeouts, so nothing hangs.
+# honey: fixed budgets, not a setting — a knob here would only move the stall.
+# Revisit if the client's own timeout changes or a provider is added whose
+# normal answer takes tens of seconds.
+PER_TRACK_BUDGET = 45.0
+BATCH_BUDGET = 75.0
 
 
 def _batch_paths(paths, cfg, staged):
@@ -99,6 +121,7 @@ def lyrics_provider_probe(source: str = Query(...)):
 
 
 @router.post("/api/lyrics/auto")
+@job_locks.holds(lambda req: req.paths, kind="lyrics", label="Fetch lyrics")
 def lyrics_auto(req: LyricsPathsRequest):
     """Auto-import lyrics for one or more tracks through the provider chain.
 
@@ -143,21 +166,35 @@ def lyrics_auto(req: LyricsPathsRequest):
     # The wizard's counted bar used to advance only when a whole chunk of
     # eight came back, so one slow lane held the readout at "0/19" for minutes
     # (the report this fixes).
+    #
+    # The press HOLDS the tracks it was given (the decorator above): a second
+    # press — or the import chain's own script 13 on the same album — is
+    # refused with the holder's name instead of running two fetches over the
+    # same files. The job id is that hold's OWN row, so the frames below land
+    # on the row the In-progress page already shows.
     workers = worker_count(cfg, maximum=8, items=total)
-    job = job_locks.new_job()
-    job_locks.register(job, kind="lyrics", label="Fetch lyrics")
+    job = job_locks.current() or job_locks.new_job()
     fetched: list = [None] * total
+    ex = None
     try:
         if total:
             job_locks.publish(0, total, f"Fetching lyrics — 0/{total}…", job=job)
-            with ThreadPoolExecutor(max_workers=workers) as ex:
-                futures = {
-                    ex.submit(fetch_one, full, cfg, replace=bool(req.force),
-                              mark_absent=False): i
-                    for i, (_as_sent, full) in enumerate(resolved)
-                }
-                done = 0
-                for fut in as_completed(futures):
+            ex = ThreadPoolExecutor(max_workers=workers)
+            # One budget per LANE, from the moment it starts: the walk stops
+            # between providers and names the ones it never reached, so a slow
+            # track answers "stopped after 45s — the sources left were …"
+            # instead of holding the batch (and its bar) open.
+            futures = {
+                ex.submit(fetch_one, full, cfg, replace=bool(req.force),
+                          mark_absent=False,
+                          deadline=Deadline(PER_TRACK_BUDGET)): i
+                for i, (_as_sent, full) in enumerate(resolved)
+            }
+            done = 0
+            finished = set()
+            try:
+                for fut in as_completed(futures, timeout=BATCH_BUDGET):
+                    finished.add(fut)
                     i = futures[fut]
                     try:
                         fetched[i] = fut.result()
@@ -169,6 +206,25 @@ def lyrics_auto(req: LyricsPathsRequest):
                     done += 1
                     job_locks.publish(done, total,
                                       f"Fetching lyrics — {done}/{total}…", job=job)
+            except FuturesTimeoutError:
+                # The BACKSTOP — a lane inside a write (a video lyric remux has
+                # an hour-long ffmpeg timeout) is not the walk the per-track
+                # budget bounds, so the batch stops WAITING here and says so.
+                # Those lanes keep their own provider/timeout bounds; nothing is
+                # written twice (each track is one file, one handle).
+                late = [i for fut, i in futures.items() if fut not in finished]
+                for i in late:
+                    fetched[i] = {
+                        "path": resolved[i][1], "status": "failed",
+                        "error": (f"did not finish within {int(BATCH_BUDGET)}s "
+                                  f"— the fetch is still running in the "
+                                  f"background; press Fetch lyrics again for "
+                                  f"what is left"),
+                    }
+                done = total
+                job_locks.publish(total, total,
+                                  f"Fetching lyrics — {total}/{total} "
+                                  f"({len(late)} still running)…", job=job)
             # The no-lyrics answer runs ONCE for the whole batch, never once
             # per track: `lyrics_absent` cross-references LRCLIB, Spotify and
             # the AI per track, and the per-track fan-out inside the lanes was
@@ -194,7 +250,15 @@ def lyrics_auto(req: LyricsPathsRequest):
                     fetched[i].pop("needs_absent", None)
                     _apply_absent(fetched[i], resolved[i][1], marked or {})
     finally:
-        job_locks.release(job)
+        if ex is not None:
+            # `wait=False`: the reply must not wait for a lane whose own bound
+            # is longer than the batch's (the video-write case the backstop
+            # above reports). Those threads keep running — each is bounded by
+            # its provider's own timeouts and every write it makes is atomic —
+            # and the JOB is not released here: the decorator's own hold owns
+            # that row (releasing it twice would drop the row while the claim
+            # is still standing).
+            ex.shutdown(wait=False)
     for (path, _full), res in zip(resolved, fetched):
         res["path"] = path
         results.append(res)

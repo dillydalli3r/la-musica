@@ -1600,29 +1600,50 @@ def _prune_empty_target_dirs(cfg):
 
 
 def _audio_basenames(folder):
-    """Lower-cased audio file names directly inside *folder* (a set)."""
+    """Lower-cased audio file names of *folder* — its own files AND its disc
+    subfolders'.
+
+    A release whose audio sits in ``CD1``/``Disc 2`` is ONE album (spec R336,
+    ``mlo.discs.album_audio``), and this set is what the chain uses to recognise
+    that album again after a script moved it: read direct-only, a disc-parent
+    album answered the EMPTY set, so the album a script had just moved could not
+    be found at its new home at all."""
+    from mlo.discs import album_audio
     try:
-        return {f.name.lower() for f in os.scandir(folder)
-                if f.is_file() and mlo_stats.is_audio_file(f.name)}
-    except OSError:
+        return {os.path.basename(p).lower()
+                for p in album_audio(folder, mlo_stats.LIB_AUDIO_EXTS)}
+    except Exception:
         return set()
 
 
 def _has_audio(folder):
-    """True when *folder* holds at least one audio file directly inside it.
+    """True when *folder* holds at least one audio file it can call its own —
+    directly, or in one of its disc subfolders.
 
     The chain only ever asks this as a yes/no (a target counts as "vanished"
     once no audio is left in it), and it asks it for every target after every
-    script — so this stops at the first hit instead of listing the whole
-    directory: an album folder holds more covers, .cue and .log than tracks,
-    and the audio files are usually the first entries scandir hands over.
+    script — so the DIRECT hit is answered straight from the scandir (an album
+    folder holds more covers, .cue and .log than tracks, and the audio files are
+    usually the first entries), and only a folder with none falls through to its
+    disc subfolders, whose vocabulary is `mlo.discs`' (spec R336). Reading the
+    folder alone called every disc-parent album vanished.
     """
+    from mlo.discs import disc_subdirs
     try:
-        for f in os.scandir(folder):
-            if f.is_file() and mlo_stats.is_audio_file(f.name):
-                return True
+        entries = list(os.scandir(folder))
     except OSError:
-        pass                # gone, unreadable, or not a directory at all
+        return False            # gone, unreadable, or not a directory at all
+    for f in entries:
+        if f.is_file() and mlo_stats.is_audio_file(f.name):
+            return True
+    subs = disc_subdirs([e.name for e in entries if e.is_dir()])
+    for name in subs:
+        try:
+            for f in os.scandir(os.path.join(folder, name)):
+                if f.is_file() and mlo_stats.is_audio_file(f.name):
+                    return True
+        except OSError:
+            continue
     return False
 
 

@@ -557,6 +557,10 @@ eq(res_a.status_code, 200, "the first batch's album imports", res_a.text[:200])
 album_a = res_a.json()["album_path"]
 eq(os.path.basename(album_a), "Colliding Album", "…under the name it was given")
 eq(res_a.json().get("collided"), False, "…and it collided with nothing")
+# R428: the reply says whether THIS call created the album folder — the
+# wizard's Cancel discards exactly what its own staging made, so "the
+# folder is yours to remove" has to be the server's fact, not a guess.
+eq(res_a.json().get("created"), True, "…and it says this call CREATED the album")
 
 res_b = upload_batch(batch_two)
 eq(res_b.status_code, 200, "the second batch's album imports too", res_b.text[:200])
@@ -602,6 +606,8 @@ eq(res_retry.status_code, 200, "a retried batch imports", res_retry.text[:200])
 eq(os.path.basename(res_retry.json()["album_path"]), "Colliding Album (2)",
    "…into the folder it already made, not a third one")
 eq(res_retry.json().get("collided"), False, "…and that is not a collision")
+eq(res_retry.json().get("created"), False,
+   "…and a folder its own earlier attempt made is not 'created' by this one")
 eq(sorted(n for n in os.listdir(library_root(MF)) if n.startswith("Colliding")),
    ["Colliding Album", "Colliding Album (2)"],
    "still exactly two albums for the two batches")

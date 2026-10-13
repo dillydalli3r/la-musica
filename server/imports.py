@@ -486,17 +486,26 @@ def _album_states_identity(path):
     Read through ``server.tagcache`` — the SAME reader ``server.main``'s
     organizer uses for the script's variables, so the guard and the organizer
     can never disagree about what a file says.
+
+    The tracks are read through ``mlo.discs.album_audio``, the ONE rule for
+    what an album holds: a multi-disc release keeps its audio in ``Disc 1/`` +
+    ``Disc 2/`` subfolders (spec R336), and reading only the folder's own
+    files called such a folder NAMELESS — so the organizer was skipped for
+    every two-disc drop, the staging folder kept its own name with those
+    subfolders inside it, and the library listed them as two failing
+    "Disc 1"/"Disc 2" albums (the owner's report, 2026-10-13: blank tiles on a
+    two-disc auto-import, and only during auto-importing — the manual wizard's
+    Finish runs the organizer client-side, whose own scan is recursive).
     """
+    from mlo.discs import album_audio
     from server import tagcache
     try:
-        names = sorted(os.listdir(path))
-    except OSError:
+        tracks = album_audio(path, LIB_AUDIO_EXTS)
+    except Exception:
         return False
-    for name in names:
-        if os.path.splitext(name)[1].lower() not in LIB_AUDIO_EXTS:
-            continue
+    for full in tracks:
         try:
-            tags, _tech = tagcache.read_track(os.path.join(path, name), None)
+            tags, _tech = tagcache.read_track(full, None)
             artist = str(tags.get("ARTIST") or tags.get("ALBUMARTIST") or "").strip()
             album = str(tags.get("ALBUM") or "").strip()
         except Exception:

@@ -3118,3 +3118,63 @@ assert _rel_out.get("suggestions") and _rel_out["suggestions"][0]["matched"] \
 shutil.rmtree(_MATCH_DIR, ignore_errors=True)
 print("the match policy: exact hits keep 1.0, a missing disc never claims disc "
       "1's, a single-medium fallback is 0.5, and ?match= rides the release")
+
+# --------------------------------------------------------------------------- #
+# A DISC-PARENT album is one album (the two-disc auto-import)
+# --------------------------------------------------------------------------- #
+# The owner's report, 2026-10-13: auto-importing a two-disc release left blank,
+# failing "Disc 1" tiles in the library, and ONLY on the auto path. Mechanism,
+# measured: the wizard stages ONE album folder whose audio sits in Disc 1/ +
+# Disc 2/ subfolders, and the bulk path's only naming step (`_organize_import`)
+# is gated by `_album_states_identity`, which read the folder's OWN files only —
+# so a disc-parent folder "stated no identity", the organizer was skipped, the
+# staging folder kept its name with the disc folders inside it, and the library
+# listed those shells as albums (the manual wizard's Finish organizes
+# client-side with a RECURSIVE scan, which is why only auto-import showed it).
+_dp_root = os.path.join(ROOT, "disc_parent")
+_dp_mf = os.path.join(_dp_root, "music")
+# The real shape: the upload route PLACES the staging album under the library
+# root first (Artists/<name>), and the disc parent with no audio of its own is
+# what the organizer then has to name.
+_dp_stage = os.path.join(_dp_mf, "Artists", "Two Disc Release")
+os.makedirs(os.path.join(_dp_mf, "Artists"), exist_ok=True)
+
+
+def _disc_track(disc, track):
+    """A real (tagged) FLAC inside a disc SUBFOLDER of the staging album."""
+    folder = os.path.join(_dp_stage, f"Disc {disc}")
+    path = peer_flac(folder)
+    named = os.path.join(folder, f"{disc}-{track:02d} - Song {track}.flac")
+    os.replace(path, named)
+    from mutagen.flac import FLAC as _MF
+    f = _MF(named)
+    for k, v in (("ALBUM", "Two Disc Release"), ("ALBUMARTIST", "Disc Artist"),
+                 ("ARTIST", "Disc Artist"), ("DISCNUMBER", str(disc)),
+                 ("TRACKNUMBER", str(track)), ("TITLE", f"Song {track}")):
+        f[k] = v
+    f.save()
+    return named
+
+
+_dp_files = [_disc_track(1, 1), _disc_track(1, 2),
+             _disc_track(2, 1), _disc_track(2, 2)]
+_dp_cfg = {"music_folder": _dp_mf}
+assert imports._album_states_identity(_dp_stage), \
+    "a two-disc staging folder states its identity THROUGH its disc subfolders"
+assert script_runners._has_audio(_dp_stage), \
+    "the chain sees the audio in a disc subfolder (a moved disc-parent album is not 'vanished')"
+assert script_runners._audio_basenames(_dp_stage) == {
+    os.path.basename(p).lower() for p in _dp_files}, \
+    script_runners._audio_basenames(_dp_stage)
+_named = imports._organize_import(_dp_stage, dict(_dp_cfg))
+assert os.path.normcase(_named) != os.path.normcase(_dp_stage), \
+    f"the organizer NAMED the album instead of leaving the staging folder: {_named}"
+_artists = os.path.join(_dp_mf, "Artists")
+assert os.path.normcase(_named).startswith(os.path.normcase(_artists)), _named
+from mlo.discs import album_audio                      # noqa: E402
+_moved = album_audio(_named)
+assert len(_moved) == 4 and all(os.path.isfile(p) for p in _moved), _moved
+assert not os.path.isdir(os.path.join(_named, "Disc 1")), \
+    f"the emptied disc subfolder is pruned by the same pass: {os.listdir(_named)}"
+shutil.rmtree(_dp_root, ignore_errors=True)
+print("a disc-parent album is one album: named, seen, and every disc's audio found")

@@ -7190,7 +7190,14 @@ async def import_upload(
                     os.path.join(root, re_safe_filename(album_name) or safe))
         if not _in_music_folder(album_path, folder):
             raise HTTPException(400, "target outside music folder")
-        merged = bool(how == "library" and os.path.isdir(album_path))
+        # Whether this call CREATED the album folder — read before anything
+        # is placed in it. The wizard's Cancel discards exactly what its own
+        # staging made, so "the folder is yours to remove" has to be a fact
+        # the server states, not one the client guesses (an album the library
+        # already held, or one this call merely FILLED, must survive a
+        # cancel).
+        existed_before = os.path.isdir(album_path)
+        merged = bool(how == "library" and existed_before)
         kept: List[str] = []
         collided = False
         if merged:
@@ -7246,7 +7253,8 @@ async def import_upload(
             # given a folder of its own because the name was already taken by a
             # different album, and `kept` names the files an album the library
             # already holds was NOT asked to give up.
-            "collided": collided, "kept": kept}
+            "collided": collided, "kept": kept,
+            "created": not merged and not existed_before}
 
 
 def _write_upload_bytes(dest: str, data: bytes) -> None:
@@ -7460,7 +7468,9 @@ def import_ingest(source: str = Query(...), target: str = Query(...)):
     if not _in_music_folder(dest, folder):
         raise HTTPException(400, "target outside music folder")
     if os.path.normcase(os.path.abspath(dest)) == os.path.normcase(os.path.abspath(src)):
-        return {"ok": True, "path": dest.replace("\\", "/"), "album_name": name}
+        # Nothing was copied (the folder IS the album already): not created.
+        return {"ok": True, "path": dest.replace("\\", "/"),
+                "album_name": name, "created": False}
     only = _only_audio(src)
     if len(only) == 1:
         got, album_path, how = imports_svc.import_album_target(only, raw, cfg)
@@ -7530,6 +7540,9 @@ def import_ingest(source: str = Query(...), target: str = Query(...)):
     imports_svc.record_sidecar_tracklist(dest, cfg)
     return {"ok": True, "path": dest.replace("\\", "/"),
             "album_name": os.path.basename(dest), "merged": False,
+            # find_free-style dedup above: this destination did not exist,
+            # so this call created it (see the upload route's own `created`).
+            "created": True,
             "copied": not staged}
 
 

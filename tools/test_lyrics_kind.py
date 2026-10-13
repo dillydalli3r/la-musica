@@ -241,8 +241,13 @@ _real_load_config = api_lyrics.load_config
 _real_fetch_one = api_lyrics.fetch_one
 
 
-def _stub_fetch_one(path, cfg, replace=False, mark_absent=True):
+def _stub_fetch_one(path, cfg, replace=False, mark_absent=True, deadline=None):
+    # Every lane the route starts carries its own budget (spec R78c): the
+    # probe records them so a lane without one is a failed check, not a
+    # silent endless walk.
     with _probe_lock:
+        _probe.setdefault("budgets", []).append(
+            None if deadline is None else round(deadline.seconds, 3))
         _probe["inside"] += 1
         _probe["peak"] = max(_probe["peak"], _probe["inside"])
     try:
@@ -257,7 +262,7 @@ def _stub_fetch_one(path, cfg, replace=False, mark_absent=True):
 
 
 def _auto(paths, lanes):
-    _probe.update(inside=0, peak=0)
+    _probe.update(inside=0, peak=0, budgets=[])
     api_lyrics.load_config = lambda *a, **k: dict(CFG)
     api_lyrics.fetch_one = _stub_fetch_one
     real_wc = api_lyrics.worker_count
@@ -277,6 +282,9 @@ try:
 
     serial = _auto(sent, 1)
     check("one lane never overlaps", _probe["peak"] == 1, repr(_probe))
+    check("every lane the route starts carries its own budget",
+          _probe["budgets"] == [api_lyrics.PER_TRACK_BUDGET] * len(LANE_PATHS),
+          repr(_probe.get("budgets")))
     laned = _auto(sent, 8)
     check("the lanes really overlap", _probe["peak"] > 1, repr(_probe))
     check("…never more than worker_count", _probe["peak"] <= 8, repr(_probe))
@@ -312,7 +320,7 @@ from server import job_locks as _jl  # noqa: E402
 _mark_flags, _absent_batches, _frames, _real_wc2 = [], [], [], api_lyrics.worker_count
 
 
-def _deferred_fetch(path, cfg, replace=False, mark_absent=True):
+def _deferred_fetch(path, cfg, replace=False, mark_absent=True, deadline=None):
     _mark_flags.append(mark_absent)
     return {"path": path, "status": "skipped", "provider": None,
             "provider_label": None, "kind": None, "synced": False,
@@ -356,6 +364,83 @@ check("the strip hears a frame per track, bracketed by 0/N and N/N",
       and _frames[-1] == (len(LANE_PATHS), len(LANE_PATHS))
       and {d for d, _t in _frames} == set(range(len(LANE_PATHS) + 1)),
       str(_frames))
+
+# --------------------------------------------------------------------------- #
+# 4b) the BUDGET: a press answers, and a slow source is named not waited for
+# --------------------------------------------------------------------------- #
+# The owner's report, 2026-10-13: "i feel like the app can get 'stuck'
+# importing lyrics" — the strip sat at "Fetching lyrics — 1/3…" while nothing
+# bounded a track's walk (measured: six providers with retries plus a 240 s
+# YouTube caption pass, and the alias pass repeating all of it), and the job is
+# only released when the route returns, so the bar survived a reload and only a
+# server restart cleared it. Two budgets now: the per-track one stops the WALK
+# between providers (the row names the sources left), the batch one stops the
+# route WAITING whatever a lane is doing.
+from mlo.lyrics_providers import Deadline, _search_chain, fetch_lyrics  # noqa: E402
+
+_spent = Deadline(0.0)
+_spent.at -= 1.0                       # spent before the walk starts
+_called = []
+
+
+def _never_called(*a, **k):
+    _called.append(a)
+    return None
+
+
+_real_providers = dict(__import__("mlo.lyrics_providers", fromlist=["_PROVIDERS"])._PROVIDERS)
+try:
+    _mod = __import__("mlo.lyrics_providers", fromlist=["_PROVIDERS"])
+    for _pid in list(_mod._PROVIDERS):
+        _mod._PROVIDERS[_pid] = _never_called
+    _synced, _plain = _search_chain({}, ["lrclib", "youtube", "kuwo"], "A", "T",
+                                    None, None, None, 0.6, _spent)
+    check("a spent budget walks no provider at all",
+          (_synced, _plain, _called) == (None, None, []), repr(_called))
+    check("…and NAMES every source it never reached",
+          _spent.cut == ["lrclib", "youtube", "kuwo"], str(_spent.cut))
+    check("the sentence a row carries names them",
+          "the sources left were" in _spent.why()
+          and "YouTube captions" in _spent.why() and "Kuwo" in _spent.why(),
+          _spent.why())
+    from mlo.lyrics_providers import provider_order as _order
+    _fresh = Deadline(30.0)          # nothing can spend this
+    _called.clear()
+    _hit = fetch_lyrics({"lyrics_search_aliases": True}, "A", "T", None, None,
+                        deadline=_fresh)
+    check("a budget nobody spends changes nothing",
+          _hit is None and _fresh.cut == []
+          and len(_called) == len(_order({"lyrics_search_aliases": True})),
+          f"{_hit} {_fresh.cut} {len(_called)}")
+finally:
+    _mod._PROVIDERS.update(_real_providers)
+
+
+def _slow_fetch(path, cfg, replace=False, mark_absent=True, deadline=None):
+    time.sleep(1.2)
+    return {"path": path, "status": "ok", "provider": "stub",
+            "provider_label": "Stub", "kind": "synced", "synced": True,
+            "wrote": {"embedded": True, "lrc": None}, "reason": "", "error": ""}
+
+
+_real_batch = api_lyrics.BATCH_BUDGET
+_real_fetch3 = api_lyrics.fetch_one
+try:
+    api_lyrics.load_config = lambda *a, **k: dict(CFG)
+    api_lyrics.BATCH_BUDGET = 0.3
+    api_lyrics.fetch_one = _slow_fetch
+    _started = time.monotonic()
+    _bounded = api_lyrics.lyrics_auto(api_lyrics.LyricsPathsRequest(paths=LANE_PATHS))
+    _took = time.monotonic() - _started
+finally:
+    api_lyrics.BATCH_BUDGET = _real_batch
+    api_lyrics.fetch_one = _real_fetch3
+    api_lyrics.load_config = _real_load_config
+check("the batch backstop answers instead of waiting for a slow lane",
+      _took < 1.0 and _bounded["failed"] == len(LANE_PATHS), f"{_took:.2f}s {_bounded}")
+check("…and every row left behind says what is still running",
+      all(r["status"] == "failed" and "still running" in (r.get("error") or "")
+          for r in _bounded["results"]), str(_bounded["results"][0]))
 
 shutil.rmtree(TMP, ignore_errors=True)
 

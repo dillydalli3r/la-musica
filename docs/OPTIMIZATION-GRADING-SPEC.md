@@ -8621,6 +8621,101 @@ when the log itself says something is wrong.** Pinned in
   `tools/test_soulseek_candidates.py` (a dBpoweramp candidate passes the floor,
   and the message names the program).
 
+- **R426 — an album's audio is read through the disc vocabulary, in the
+  importer too.** The owner's report, 2026-10-13: *"for some weird fucking
+  reason, importing albums creates blank ones like [two identical "Disc 1"
+  tiles, no cover, a failing "Artists" check]. This was on a two disc release.
+  This only happens during auto-importing."* Measured mechanism: the wizard
+  stages ONE album folder whose audio sits in `Disc 1/` + `Disc 2/` subfolders
+  — legitimate layout (R336) — and the bulk path's only naming step,
+  `server.imports._organize_import`, is gated by `_album_states_identity`,
+  which read the folder's OWN files only. A disc parent "stated no identity",
+  so the organizer was SKIPPED: the staging folder kept its name with the disc
+  folders inside it, the library listed them as albums (a disc folder whose
+  parent is a direct child of `Artists/` is deliberately not folded, R336), and
+  the chain's beets moved the audio out to the real album folder, leaving two
+  audio-less shells — graded `EMPTY_FOLDER`/`LEFT_OVER_FILES`, which the
+  library payload then appended TWICE for one folder (both finders name it), so
+  the artist grid drew the same tile twice under one caption. The manual
+  wizard's Finish organizes client-side from a RECURSIVE scan, which is exactly
+  why only auto-import showed it.
+
+  One rule: `mlo.discs.album_audio` is what an album's own audio is, for the
+  importer as much as for the grader. `_album_states_identity` reads it (so a
+  disc parent IS named), the chain's own "has this album moved / vanished"
+  questions (`server.script_runners._has_audio` / `_audio_basenames`) read it
+  too (a disc-parent album used to answer "no audio at all", so an album a
+  script had moved could not be recognised at its new home), and the library
+  emits ONE row per folder — the `LEFT_OVER_FILES` row when both name it,
+  because that one names the files that are there to clean up. Pinned in
+  `tools/test_import_pipeline.py` (a real two-disc staging album under
+  `Artists/`: identity stated, audio seen, organized into the named folder with
+  every disc's tracks found there afterwards) and `tools/test_leftovers.py`
+  (both finders name the shell; the payload lists it once).
+
+- **R427 — a press that answers a person has a budget.** The owner's report,
+  2026-10-13: *"i feel like the app can get 'stuck' importing lyrics"* — the
+  header bar sat on `Fetch lyrics · Fetching lyrics — 1/3…` with the clock
+  running. Measured: nothing bounded a track's walk (`mlo.lyrics_providers`:
+  six providers with retries, up to 51 s each, plus a 240 s YouTube caption
+  pass, and the alias pass repeating the whole walk), the route's reply waits
+  for EVERY lane, and the job row is only released in its `finally` — so a walk
+  that never returned left the bar on screen through a reload, clearable only
+  by a server restart. The client gives up at 120 s while the server did not,
+  and because the route held no lock a second press started a duplicate fetch
+  over the same files.
+
+  One rule now: `POST /api/lyrics/auto` answers. A per-track `Deadline`
+  (`PER_TRACK_BUDGET`, 45 s) stops the WALK between providers — a provider that
+  answered keeps its hit, and the ones never reached are named in
+  `Deadline.cut`, so the row reads `failed · stopped after 45s — the sources
+  left were YouTube captions` instead of a bare failure (and NOTHING is settled
+  as absent: a source the walk never reached may still have the words). A batch
+  `BATCH_BUDGET` (75 s) stops the route WAITING whatever a lane is doing — a
+  lane inside a write (a video lyric remux carries a 3600 s ffmpeg timeout) is
+  reported as `did not finish within 75s — the fetch is still running in the
+  background`, the pool is shut down without waiting, and the job still ends.
+  The press also HOLDS the paths it was given (`job_locks.holds`), so a second
+  press — or the chain's own script 13 on the same album — is refused with the
+  holder's name rather than running twice. Script 13's library run passes no
+  deadline and stays unlimited: nobody is waiting on it. Pinned in
+  `tools/test_lyrics_kind.py` (a spent budget walks no provider and names every
+  source it skipped; every lane carries a budget; a slow lane cannot hold the
+  reply past the batch budget, and its row says so).
+
+- **R428 — the wizard's steps read ONE layout, and the release dialog is
+  pre-filled from the files.** Three reports from the same screen,
+  2026-10-13:
+
+  * *"the little menu that shows up when auto-importing … should auto-fill if
+    any MBIDs are present in track tags. Otherwise it should stay blank."* It
+    came up blank because the read behind each row (`api.album(path)`) was made
+    WITHOUT the wizard's `staged=true` opt-in — every album this dialog sees is
+    outside the library tree, so `/api/album` refused it and the row fell to its
+    "unreadable" branch. `identifyRows` now asks with the flag (and carries it
+    on the row, which the row's AcoustID Detect needs for the same reason). A
+    row whose files name a release opens on that id (`in files`); a row whose
+    files name none stays blank.
+  * *"Fix importing to use the same disc / track layout for the ratings tab as
+    it does in the genres tab."* The Genres step groups its list by disc
+    (`groupByDisc` + `DiscSection`, collapsible, with the disc's track count)
+    while the Ratings step drew one flat list — the same album read as two
+    different layouts in one wizard. Ratings now uses the same sections and the
+    same collapse state.
+  * *"auto-import … should be streamlined and work properly."* Staging places
+    the album in the library BEFORE the dialog opens, so a Cancel that only
+    closed the dialog left a fresh, un-chained album behind. The footer's
+    Cancel now DISCARDS what this press's own staging created — the server
+    states it (`created` on the `/api/import/upload` and `/api/import/ingest`
+    replies), only those rows are removed, and only into the TRASH — while an
+    album the library already held, and one a merge FILLED, are left exactly as
+    they are (the user may cancel the pinning, not the import of something that
+    was already theirs). The dialog's Cancel says what it does
+    (`cancelNote`), and the wizard's poll says how the batch ended (imported /
+    failed / skipped counts in a toast) instead of the strip simply
+    disappearing. Pinned in `tools/check_import_minimum.mjs` and
+    `tools/test_script_menus.py`.
+
 ---
 
 ## 10. Honest limits of this spec

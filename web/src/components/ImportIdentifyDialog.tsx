@@ -57,10 +57,16 @@ export default function ImportIdentifyDialog({
   albums,
   onClose,
   onStart,
+  cancelNote,
 }: {
   albums: IdentifyAlbum[];
   onClose: () => void;
   onStart: (pins: Record<string, string>) => void | Promise<void>;
+  /** What Cancel DOES, for the caller whose staging placed these albums in
+   *  the library before this dialog opened (the import wizard removes them
+   *  again). The Library and Soulseek callers own nothing, so they pass
+   *  nothing and Cancel is the plain close it always was. */
+  cancelNote?: string;
 }) {
   const [pins, setPins] = useState<Record<string, string>>({});
   const [catno, setCatno] = useState<Record<string, string>>({});
@@ -193,7 +199,8 @@ export default function ImportIdentifyDialog({
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-[11px] text-zinc-500">{keptNote}</span>
           <span className="ml-auto inline-flex items-center gap-2">
-            <button className="btn-ghost !py-1.5 text-xs tap" onClick={onClose} disabled={pending}>
+            <button className="btn-ghost !py-1.5 text-xs tap" onClick={onClose}
+              disabled={pending} title={cancelNote}>
               Cancel
             </button>
             <button className="btn-primary !py-1.5 text-xs tap" onClick={() => void start()} disabled={pending}>

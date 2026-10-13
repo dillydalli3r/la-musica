@@ -485,9 +485,10 @@ auto_flac = make_flac("01 - auto.flac")
 # manual-only override (a run never replaces stored words — R#): the chain must
 # not pass it, the route passes its own `force` through it.
 def record_fetch(calls):
-    def fetch_one(path, config, replace=False, mark_absent=True):
+    def fetch_one(path, config, replace=False, mark_absent=True, deadline=None):
         calls.append({"path": os.path.basename(path), "replace": replace,
-                      "mark_absent": mark_absent})
+                      "mark_absent": mark_absent,
+                      "budget": None if deadline is None else deadline.seconds})
         return {"path": path, "status": "skipped", "provider": None,
                 "provider_label": None, "synced": False,
                 "wrote": {"embedded": False, "lrc": None},
@@ -517,7 +518,8 @@ with patched(lyrics_fetch, fetch_one=fetch_recorder), patched(api_lyrics, fetch_
     route = call(lambda: CLIENT.post("/api/lyrics/auto", json={"paths": [manual_flac]}))
     ok(route.status_code == 200, "POST /api/lyrics/auto answers", str(route.status_code))
     eq(fetch_calls, [{"path": os.path.basename(manual_flac), "replace": False,
-                      "mark_absent": False}],
+                      "mark_absent": False,
+                      "budget": api_lyrics.PER_TRACK_BUDGET}],
        "the route hands fetch_one the track the caller named, with the "
        "no-lyrics answer DEFERRED to the batch's one pass")
     eq([c["replace"] for c in fetch_calls], [c["replace"] for c in chain],

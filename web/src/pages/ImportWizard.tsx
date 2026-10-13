@@ -673,7 +673,7 @@ export default function ImportWizard() {
   // call (`jobs` in the bulk status) and the In-progress page shows them all.
   const [autoBusy, setAutoBusy] = useState(false);
   const [identify, setIdentify] = useState<{
-    staged: { name: string; path: string }[];
+    staged: { name: string; path: string; owned?: boolean }[];
     albums: IdentifyAlbum[];
     /** Which starter the dialog's Import press runs: the autonomous
      *  pipeline ("auto") or the plain bulk queue ("bulk"). Both ASK about
@@ -791,7 +791,26 @@ export default function ImportWizard() {
       api.importBulkStatus(jobId)
         .then((job) => {
           setBulkJob(job);
-          if (job.status !== "running") qc.invalidateQueries({ queryKey: ["library"] });
+          if (job.status === "running") return;
+          qc.invalidateQueries({ queryKey: ["library"] });
+          // The batch's own finish, said where the press was made. The strip
+          // and the queue panel are COUNTED by the job and simply disappear
+          // when it ends, so without this an auto-import finished in silence
+          // (the rows and any failure were only on the In-progress page).
+          const rows = job.items ?? [];
+          const failed = rows.filter((r) => r.status === "failed").length;
+          const skipped = rows.filter((r) => r.status === "skipped").length;
+          const ok = rows.filter((r) => r.status === "imported").length;
+          toast(
+            [
+              `Import ${job.status === "done" ? "finished" : "stopped"}`,
+              `${ok} imported`,
+              failed ? `${failed} failed` : null,
+              skipped ? `${skipped} skipped` : null,
+            ].filter(Boolean).join(" — ") + (failed || skipped
+              ? " (In-progress has the reasons)" : ""),
+            failed ? "error" : "success",
+          );
         })
         .catch(() => setBulkJob(null)); // server restarted: nothing to poll
     }, 1500);
@@ -1778,7 +1797,11 @@ export default function ImportWizard() {
     // worklist; it is the one cleared from the drop zone once it stages.
     const active = activeHasContent() ? pending[pending.length - 1] : null;
     try {
-      const results: { name: string; path: string }[] = [];
+      // `owned` = THIS press created the album folder in the library, so a
+      // Cancel may remove it again. The server states it (`created` on the
+      // upload/ingest replies); an album the library already held, or one a
+      // merge FILLED, is never ours to remove.
+      const results: { name: string; path: string; owned?: boolean }[] = [];
       const failed: { name: string; error: unknown }[] = [];
       for (const batch of pending) {
         // Excluded files are dropped here, before anything is uploaded or
@@ -1842,7 +1865,8 @@ export default function ImportWizard() {
                     `already in “${landed}” ${res.kept.length === 1 ? "was" : "were"} kept, not replaced`
                 );
               }
-              results.push({ name: landed, path: res.album_path });
+              results.push({ name: landed, path: res.album_path,
+                             owned: !!res.created });
             } else if (asIs(g) && folder) {
               // A WHOLE, untouched folder on this server's disk is copied as
               // it is — one ingest call for the album, the way the folder
@@ -1859,7 +1883,8 @@ export default function ImportWizard() {
               );
               const src = onDiskDirs.size === 1 ? [...onDiskDirs][0] : folder;
               const res = await api.importIngest(src, name);
-              results.push({ name: res.album_name || name, path: res.path });
+              results.push({ name: res.album_name || name, path: res.path,
+                             owned: !!res.created });
             } else if (onDisk.length && onDisk.length === keep.length) {
               // A folder the user SPLIT or excluded from — every kept file is
               // a path on this server's disk (an OS drop of single files is
@@ -1868,9 +1893,18 @@ export default function ImportWizard() {
               // The whole-folder call above would copy what was excluded and
               // quietly undo the split, which is why it comes first and only
               // for a group that is whole.
-              let last: { album_name?: string; path: string } | null = null;
-              for (const p of onDisk) last = await api.importIngest(p, name);
-              if (last) results.push({ name: last.album_name || name, path: last.path });
+              let last: { album_name?: string; path: string; created?: boolean } | null = null;
+              let createdHere = false;
+              for (const p of onDisk) {
+                last = await api.importIngest(p, name);
+                createdHere = createdHere || !!last.created;
+              }
+              if (last) {
+                // One file at a time: the FIRST placement is the one that can
+                // have created the album folder this press may discard.
+                results.push({ name: last.album_name || name, path: last.path,
+                               owned: createdHere });
+              }
             } else {
               // A subset of a folder with no per-file paths to stage: nothing
               // can be committed without copying the WHOLE folder (which would
@@ -1963,10 +1997,53 @@ export default function ImportWizard() {
    *  alone sends no pin, so pressing through imports exactly what the files say.
    *  This used to ask only about albums that named NO release, which is how a
    *  wrong tag-named id was never seen by the one press that would re-point it.
-   *  The dialog's own release-URL/MBID field, AcoustID fingerprint and
+/** The dialog's own release-URL/MBID field, AcoustID fingerprint and
    *  catalogue search are the ways a person pins a release. */
-  const beginAutoImport = async (staged: { name: string; path: string }[]) => {
+  const beginAutoImport = async (staged: { name: string; path: string; owned?: boolean }[]) => {
     setIdentify({ staged, albums: await identifyRows(staged), mode: "auto" });
+  };
+
+  /** Back out of the release dialog: REMOVE what this press's staging placed.
+   *
+   *  Staging does not ask first — it copies (an upload, a folder the user
+   *  dropped) or moves (the app's own `.mlo` staging) the album into the
+   *  library so the dialog can READ its tags — so a Cancel that only closed the
+   *  dialog left a fresh, un-chained album behind: wrong folder name, no
+   *  chain, graded as failing. That is the owner's report that auto-import
+   *  from the sidebar "doesn't really work that well".
+   *
+   *  Only what this press CREATED is removed (`owned`, the server's own
+   *  `created` flag on the reply) and only into the TRASH — recoverable, never
+   *  a delete. An album the library already held, and one a merge FILLED, are
+   *  left exactly as they are: the reader may cancel the pinning, not the
+   *  import of something that was already theirs. */
+  const discardStaged = async () => {
+    const rows = (identify?.staged ?? []).filter((r) => r.owned);
+    const held = (identify?.staged ?? []).filter((r) => !r.owned);
+    if (rows.length) {
+      let gone = 0;
+      for (const r of rows) {
+        try {
+          await api.removeAlbum(r.path);
+          gone += 1;
+        } catch {
+          /* counted below; the library refresh shows what stayed */
+        }
+      }
+      toast(
+        `Cancelled — ${gone} staged album${gone === 1 ? "" : "s"} removed ` +
+          `(they are in the trash)`,
+      );
+      qc.invalidateQueries({ queryKey: ["library"] });
+    }
+    if (held.length) {
+      toast(
+        `${held.length} album${held.length === 1 ? "" : "s"} the library already ` +
+          `held ${held.length === 1 ? "was" : "were"} left alone — nothing else ` +
+          `was imported`,
+      );
+    }
+    setIdentify(null);
   };
 
   /** The plain multi-album Import: the same ask, then the bulk queue. The rule
@@ -1974,17 +2051,30 @@ export default function ImportWizard() {
    *  files name — belongs to EVERY press that queues more than one album, so a
    *  batch whose ids are already tagged is shown too (that is exactly when a
    *  stale id hides). */
-  const beginPlainBulk = async (staged: { name: string; path: string }[]) => {
+  const beginPlainBulk = async (staged: { name: string; path: string; owned?: boolean }[]) => {
     setIdentify({ staged, albums: await identifyRows(staged), mode: "bulk" });
   };
 
   /** One row per staged album, read from the album's own payload: the release
-   *  its files name now (`current`), or blank when they name none. */
+   *  its files name now (`current`), or blank when they name none.
+   *
+   *  The read opts in with `staged=true` for an album the library tree does not
+   *  hold yet — which is every album this dialog sees: staging placed it
+   *  OUTSIDE the music folder (or the app's own tree), and `/api/album` refuses
+   *  such a path unless the caller asks for it. Without that opt-in the read
+   *  failed and the row fell to its "unreadable" branch, so the field opened
+   *  BLANK for a release whose files name one — the owner's report,
+   *  2026-10-13: "should auto-fill if any MBIDs are present in track tags.
+   *  Otherwise it should stay blank." The same flag is what the row's AcoustID
+   *  Detect needs (it fingerprints the files), so the row carries it. */
   const identifyRows = async (staged: { name: string; path: string }[]): Promise<IdentifyAlbum[]> => {
     const rows: IdentifyAlbum[] = [];
     await Promise.all(staged.map(async (r) => {
+      // An album the library tree does not hold yet: the dialog's own read and
+      // its AcoustID Detect both need the `staged=true` opt-in for those.
+      const outside = !inMusicFolder(r.path, cfg?.music_folder);
       try {
-        const al = await api.album(r.path);
+        const al = await api.album(r.path, outside);
         const pin = al?.meta?.MUSICBRAINZ_ALBUMID
           ?? al?.album_values?.MUSICBRAINZ_ALBUMID ?? "";
         rows.push({
@@ -1992,10 +2082,11 @@ export default function ImportWizard() {
           artist: al?.album_artist ?? "",
           album: al?.meta?.ALBUM || r.name,
           current: pin,
+          staged: outside,
         });
       } catch {
         // Unreadable payload: ask rather than silently import a guess.
-        rows.push({ path: r.path, artist: "", album: r.name });
+        rows.push({ path: r.path, artist: "", album: r.name, staged: outside });
       }
     }));
     return rows.sort((a, b) => a.path.localeCompare(b.path));
@@ -5889,39 +5980,54 @@ const finish = async (closeByNavigation: boolean, runScripts = true) => {
             )}
             {/* One row per track — the value the file holds, whether it is the
                 track's OWN score or the album's, and the source the writer left
-                beside it — the same row recipe every other step's list uses. */}
-            {orderedRatingRows.map((r) => (
-              <div key={r.file} className={ROW_WRAP}>
-                <TrackNoBadge disc={discNoOf(r.file)} track={trackNoOf(r.file)} />
-                <span className="flex-1 truncate text-sm">{r.title || defaultTrackName(r.file)}</span>
-                <div className="flex items-center gap-1.5 flex-wrap justify-end">
-                  {r.value ? (
-                    <span
-                      className="chip bg-accent/10 text-accent-soft border border-accent/25"
-                      title={r.level === "album"
-                        ? "The album's own score (ALBUMWEBRATING), written to every track"
-                        : "This track's own score (WEBRATING)"}
-                    >
-                      {webReadoutOf(r.value)}
-                      <span className="text-zinc-500">{r.level === "album" ? " · album" : " · track"}</span>
-                    </span>
-                  ) : (
-                    <span className="text-[11px] text-zinc-500">no source stated a score</span>
-                  )}
-                  {r.source && (
-                    <span className="chip bg-raise border border-border text-zinc-400">{r.source}</span>
-                  )}
-                  <button
-                    className="btn-ghost !py-0.5 !px-2 text-[11px] shrink-0 tap"
-                    data-rating-clear={r.file}
-                    disabled={busy || (!r.value && !r.source)}
-                    onClick={() => clearRatings([r.file])}
-                    title="Remove the web-rating tags from this track (WEBRATING / ALBUMWEBRATING and their sources)"
-                  >
-                    <Trash2 className="h-3 w-3" /> Clear
-                  </button>
-                </div>
-              </div>
+                beside it — the same row recipe every other step's list uses.
+                The list is grouped by disc exactly as the Genres step's is
+                (one collapsible section per disc with its own track count):
+                a 2-disc release read as one flat list here and two sections
+                there, so the same album looked like two different layouts in
+                one wizard (the owner's report, 2026-10-13). */}
+            {groupByDisc(orderedRatingRows, (r) => discNoOf(r.file)).map((g) => (
+              <DiscSection
+                key={g.disc ?? "unmatched"}
+                disc={g.disc}
+                count={g.rows.length}
+                collapsed={collapsedDiscs.has(g.disc ?? null)}
+                onToggle={() => toggleDisc(g.disc ?? null)}
+              >
+                {g.rows.map((r) => (
+                  <div key={r.file} className={ROW_WRAP}>
+                    <TrackNoBadge disc={discNoOf(r.file)} track={trackNoOf(r.file)} />
+                    <span className="flex-1 truncate text-sm">{r.title || defaultTrackName(r.file)}</span>
+                    <div className="flex items-center gap-1.5 flex-wrap justify-end">
+                      {r.value ? (
+                        <span
+                          className="chip bg-accent/10 text-accent-soft border border-accent/25"
+                          title={r.level === "album"
+                            ? "The album's own score (ALBUMWEBRATING), written to every track"
+                            : "This track's own score (WEBRATING)"}
+                        >
+                          {webReadoutOf(r.value)}
+                          <span className="text-zinc-500">{r.level === "album" ? " · album" : " · track"}</span>
+                        </span>
+                      ) : (
+                        <span className="text-[11px] text-zinc-500">no source stated a score</span>
+                      )}
+                      {r.source && (
+                        <span className="chip bg-raise border border-border text-zinc-400">{r.source}</span>
+                      )}
+                      <button
+                        className="btn-ghost !py-0.5 !px-2 text-[11px] shrink-0 tap"
+                        data-rating-clear={r.file}
+                        disabled={busy || (!r.value && !r.source)}
+                        onClick={() => clearRatings([r.file])}
+                        title="Remove the web-rating tags from this track (WEBRATING / ALBUMWEBRATING and their sources)"
+                      >
+                        <Trash2 className="h-3 w-3" /> Clear
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </DiscSection>
             ))}
             <span className="text-xs text-zinc-500 -mt-1 block">
               Import web ratings asks the configured sources (Settings → Import, MusicBrainz by
@@ -6553,7 +6659,9 @@ const finish = async (closeByNavigation: boolean, runScripts = true) => {
       {identify && (
         <ImportIdentifyDialog
           albums={identify.albums}
-          onClose={() => setIdentify(null)}
+          cancelNote={`Cancel removes the ${identify.staged.filter((r) => r.owned).length} ` +
+            `album(s) this press staged (they go to the trash)`}
+          onClose={() => void discardStaged()}
           onStart={async (pins) => {
             const { staged, mode } = identify;
             if (mode === "bulk") await startPlainBulk(staged, pins);

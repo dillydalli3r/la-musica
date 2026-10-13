@@ -788,6 +788,20 @@ def check_wizard_import_prompts(check):
           and "current: pin," in rows_fn.group(0)
           and "unknown.push" not in rows_fn.group(0),
           rows_fn.group(0)[:200] if rows_fn else "no identifyRows")
+    # R428: every album this dialog sees is staged (outside the library),
+    # and /api/album REFUSES such a path unless the caller opts in — so the
+    # row read must ask with the flag (without it the read failed and every
+    # row opened BLANK, which is the owner's report of 2026-10-13), and the
+    # row carries it on for its own AcoustID Detect.
+    check("its rows read with the wizard's `staged` opt-in",
+          bool(rows_fn) and "api.album(r.path, outside)" in rows_fn.group(0)
+          and "inMusicFolder(r.path, cfg?.music_folder)" in rows_fn.group(0)
+          and "staged: outside," in rows_fn.group(0),
+          rows_fn.group(0)[:200] if rows_fn else "no identifyRows")
+    check("Cancel discards what this press staged — into the trash, and "
+          "only what the server said IT created",
+          "discardStaged" in src and "r.owned" in src
+          and "api.removeAlbum(r.path)" in src)
     check("…and always raises the dialog (no early import without it)",
           bool(begin) and "setIdentify({" in begin.group(1)
           and "startAutoImport(staged, {})" not in begin.group(1))

@@ -449,7 +449,8 @@ try:
     # here too (`aliases` is the alias second pass), or every caller that
     # passes it dies inside this fake with a TypeError instead of testing.
     def empty_chain(config, artist, title, album, duration,
-                    youtube_id=None, min_score=None, aliases=None):
+                    youtube_id=None, min_score=None, aliases=None,
+                    deadline=None):
         return None
 
     real_fetch_lyrics = lyrics_fetch.fetch_lyrics
