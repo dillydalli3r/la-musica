@@ -29,7 +29,8 @@
  * Exit codes: 0 pass, 1 a check failed (the failing ones are printed), 2 the
  * environment cannot run it (no web/node_modules).
  */
-import { existsSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import os from "node:os";
 import { createRequire } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import path from "node:path";
@@ -1254,6 +1255,214 @@ try {
   await app7.close();
 }
 
+// ---- 8. the folder button takes several folders ----------------------------
+// A web folder input answers with exactly ONE folder (the OS dialog has no
+// multi-select there), so the way to hand over three rips is to pick them one
+// after another — and each pick must KEEP the one before it. That is what this
+// section drives: two picks, two albums, both still in the wizard.
+const pickRoot = mkdtempSync(path.join(os.tmpdir(), "mlo-picks-"));
+const ripA = path.join(pickRoot, "Rip One");
+const ripB = path.join(pickRoot, "Rip Two");
+for (const [dir, track] of [[ripA, "01 - Alpha.flac"], [ripB, "01 - Beta.flac"]]) {
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(path.join(dir, track), Buffer.alloc(64));
+}
+const app8 = await createServer({
+  configFile: path.join(webDir, "vite.config.ts"),
+  root: webDir,
+  logLevel: "error",
+  server: { host: "127.0.0.1", port: 8011, strictPort: false },
+});
+await app8.listen();
+const port8 = app8.httpServer.address().port;
+const browser8 = await chromium.launch();
+try {
+  const page = await (await browser8.newContext({ serviceWorkers: "block" })).newPage();
+  await page.route("**/sw.js", (route) => route.abort());
+  await page.route("**/api/**", (route) => {
+    const url = route.request().url();
+    const send = (status, body) => route.fulfill({
+      status, contentType: "application/json", body: JSON.stringify(body) });
+    if (url.includes("/api/auth/status"))
+      return send(200, { required: false, gate: false, local: true, has_password: false,
+                         authenticated: true, username: "", public_url: "", session_days: 30,
+                         setup_hint: "" });
+    if (url.includes("/api/auth/users"))
+      return send(200, { users: ["owner"], current: "owner", required: false });
+    if (url.includes("/api/config")) return send(200, { ...CONFIG, first_run_done: true });
+    if (url.includes("/api/library")) return send(200, LIBRARY);
+    if (url.includes("/api/import/sessions")) return send(200, { sessions: [] });
+    if (url.includes("/api/import/prompts")) return send(200, { prompts: [] });
+    return send(200, {});
+  });
+  await page.goto(`http://127.0.0.1:${port8}/import`);
+  await page.waitForSelector("#import-folder", { state: "attached", timeout: 20000 });
+  const body = () => page.evaluate("document.body.innerText");
+  const groupNames = () =>
+    page.locator('input[placeholder="Album name"]').evaluateAll((els) => els.map((e) => e.value));
+
+  check("the folder picker says a second pick ADDS another folder",
+        (await body()).includes("pick again to add another folder"),
+        (await body()).slice(0, 200));
+  await page.setInputFiles("#import-folder", ripA);
+  await page.waitForTimeout(700);
+  check("a picked folder becomes an album of its own",
+        JSON.stringify(await groupNames()) === '["Rip One"]', JSON.stringify(await groupNames()));
+  await page.setInputFiles("#import-folder", ripB);
+  await page.waitForTimeout(700);
+  const staged = await body();
+  check("a SECOND pick keeps the first folder — it is banked, not thrown away",
+        staged.includes("Batches to import — 1") && JSON.stringify(await groupNames()) === '["Rip Two"]',
+        JSON.stringify(await groupNames()));
+  check("…and the commit button already counts both albums, from both batches",
+        staged.includes("Import 2 album(s) from 2 batches"),
+        (staged.match(/Import \d+ album\(s\)[^\n]*/) || ["(no button)"])[0]);
+  await page.setInputFiles("#import-folder", ripA);
+  await page.waitForTimeout(700);
+  check("a third pick queues another batch — pick as many folders as you like",
+        (await body()).includes("Batches to import — 2"), (await body()).slice(0, 200));
+  await page.context().close();
+} finally {
+  await browser8.close();
+  await app8.close();
+  rmSync(pickRoot, { recursive: true, force: true });
+}
+
+// ---- 9. the shell's multi-folder picker ---------------------------------
+// The one dialog that CAN ask for several folders at once is the shell's own
+// (`pick_folders`); this drives the page as if it ran inside it. What matters
+// is what the wizard does with the answer: each folder its own album, all of
+// them ONE selection, and each album INGESTED FROM ITS OWN FOLDER on disk —
+// never from a path built by gluing the folder's name on twice.
+const SHELL_RIPS = ["F:/Rips/Rip One", "F:/Rips/Rip Two"];
+const scanOf = (dir) => ({
+  root: dir,
+  files: [{ relPath: `01 - ${dir.split("/").pop().replace(" ", "")}.flac`, size: 64 },
+          { relPath: "cover.jpg", size: 8 }],
+});
+const ingests = [];
+const app9 = await createServer({
+  configFile: path.join(webDir, "vite.config.ts"),
+  root: webDir,
+  logLevel: "error",
+  server: { host: "127.0.0.1", port: 8011, strictPort: false },
+});
+await app9.listen();
+const port9 = app9.httpServer.address().port;
+const browser9 = await chromium.launch();
+try {
+  const ctx = await browser9.newContext({ serviceWorkers: "block" });
+  // The shell's bridge, before any page script runs: `pick_folders` answers
+  // the two folders, and the window/event commands answer benignly so the
+  // title bar's own calls settle instead of rejecting.
+  await ctx.addInitScript((rips) => {
+    // The shell's two globals the page touches at load: the event plugin's
+    // internals (the title bar's listeners) and the IPC bridge itself.
+    window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener: () => {}, emit: () => {} };
+    window.__TAURI_INTERNALS__ = {
+      metadata: { currentWindow: { label: "main" }, currentWebview: { label: "main", windowLabel: "main" } },
+      transformCallback: (cb) => { const id = Math.floor(Math.random() * 1e9); window[`_${id}`] = cb; return id; },
+      invoke: (cmd) => {
+        if (cmd === "pick_folders") return Promise.resolve(rips);
+        if (cmd === "pick_folder") return Promise.resolve(rips[0]);
+        if (typeof cmd === "string" && cmd.includes("is_maximized")) return Promise.resolve(false);
+        if (typeof cmd === "string" && cmd.includes("is_fullscreen")) return Promise.resolve(false);
+        if (typeof cmd === "string" && cmd.includes("listen")) return Promise.resolve(1);
+        return Promise.resolve(null);
+      },
+    };
+  }, SHELL_RIPS);
+  const page = await ctx.newPage();
+  await page.route("**/sw.js", (route) => route.abort());
+  await page.route("**/api/**", (route) => {
+    const url = route.request().url();
+    const send = (status, body) => route.fulfill({
+      status, contentType: "application/json", body: JSON.stringify(body) });
+    if (url.includes("/api/auth/status"))
+      return send(200, { required: false, gate: false, local: true, has_password: false,
+                         authenticated: true, username: "", public_url: "", session_days: 30,
+                         setup_hint: "" });
+    if (url.includes("/api/auth/users"))
+      return send(200, { users: ["owner"], current: "owner", required: false });
+    if (url.includes("/api/config")) return send(200, { ...CONFIG, first_run_done: true });
+    if (url.includes("/api/library")) return send(200, LIBRARY);
+    if (url.includes("/api/import/sessions")) return send(200, { sessions: [] });
+    if (url.includes("/api/import/prompts")) return send(200, { prompts: [] });
+    if (url.includes("/api/import/scan")) {
+      const p = new URL(url).searchParams.get("path");
+      return send(200, scanOf(p));
+    }
+    if (url.includes("/api/import/ingest")) {
+      const u = new URL(url);
+      ingests.push(u.searchParams.get("source"));
+      return send(200, { ok: true, path: "F:/Music/" + u.searchParams.get("target"),
+                         album_name: u.searchParams.get("target"), copied: true });
+    }
+    return send(200, {});
+  });
+  await page.goto(`http://127.0.0.1:${port9}/import`);
+  await page.waitForSelector("text=Choose folder", { timeout: 20000 });
+  await page.locator("button", { hasText: "Choose folder" }).click();
+  await page.waitForTimeout(900);
+  const shellNames = await page.locator('input[placeholder="Album name"]')
+    .evaluateAll((els) => els.map((e) => e.value));
+  check("the shell's multi-folder pick: ONE selection, an album per folder",
+        shellNames.sort().join("|") === "Rip One|Rip Two", JSON.stringify(shellNames));
+  await page.locator("[data-import-commit]").click();
+  await page.waitForTimeout(1200);
+  check("…and each album is ingested from its OWN folder, never a doubled path",
+        ingests.slice().sort().join("|") === SHELL_RIPS.join("|"), JSON.stringify(ingests));
+
+  // The boundary: the moment a file of a folder is LEFT OUT, that folder is no
+  // longer copied as a whole (that would bring the excluded file back) — it is
+  // staged by its files instead, while the untouched folder beside it still
+  // goes as one call.
+  ingests.length = 0;
+  const page3 = await ctx.newPage();
+  await page3.route("**/sw.js", (route) => route.abort());
+  await page3.route("**/api/**", (route) => {
+    const url = route.request().url();
+    const send = (status, body) => route.fulfill({
+      status, contentType: "application/json", body: JSON.stringify(body) });
+    if (url.includes("/api/auth/status"))
+      return send(200, { required: false, gate: false, local: true, has_password: false,
+                         authenticated: true, username: "", public_url: "", session_days: 30,
+                         setup_hint: "" });
+    if (url.includes("/api/auth/users"))
+      return send(200, { users: ["owner"], current: "owner", required: false });
+    if (url.includes("/api/config")) return send(200, { ...CONFIG, first_run_done: true });
+    if (url.includes("/api/library")) return send(200, LIBRARY);
+    if (url.includes("/api/import/sessions")) return send(200, { sessions: [] });
+    if (url.includes("/api/import/prompts")) return send(200, { prompts: [] });
+    if (url.includes("/api/import/scan")) {
+      const p = new URL(url).searchParams.get("path");
+      return send(200, scanOf(p));
+    }
+    if (url.includes("/api/import/ingest")) {
+      const u = new URL(url);
+      ingests.push(u.searchParams.get("source"));
+      return send(200, { ok: true, path: "F:/Music/" + u.searchParams.get("target"),
+                         album_name: u.searchParams.get("target"), copied: true });
+    }
+    return send(200, {});
+  });
+  await page3.goto(`http://127.0.0.1:${port9}/import`);
+  await page3.waitForSelector("text=Choose folder", { timeout: 20000 });
+  await page3.locator("button", { hasText: "Choose folder" }).click();
+  await page3.waitForTimeout(900);
+  await page3.locator('[aria-label="Include Rip One/cover.jpg"]').uncheck();
+  await page3.locator("[data-import-commit]").click();
+  await page3.waitForTimeout(1200);
+  check("leaving a file out stages that folder by its FILES, the untouched one as a whole",
+        ingests.slice().sort().join("|") ===
+          ["F:/Rips/Rip One/01 - RipOne.flac", "F:/Rips/Rip Two"].sort().join("|"),
+        JSON.stringify(ingests));
+  await ctx.close();
+} finally {
+  await browser9.close();
+  await app9.close();
+}
+
 if (failures.length) {
   console.error(`[minimum] FAILED (${failures.length} of ${checks}):`);
   for (const f of failures) console.error("  - " + f);
@@ -1286,5 +1495,10 @@ console.log(`ok  the wizard's minimum entry mode shows the missing family's cont
   `writes nothing, an edited one writes exactly its own edit and is clean ` +
   `afterwards; and the auto-import ASKS about every staged album — the ` +
   `dialog's row opens on the release its files name, a row left alone sends ` +
-  `no pin, and a row the user re-points reaches the queue as that pin ` +
-  `(${checks} checks)`);
+  `no pin, and a row the user re-points reaches the queue as that pin; and the ` +
+  `folder button takes several folders — a pick that follows another keeps the ` +
+  `first as its own batch and the commit button counts them together, the ` +
+  `shell's own multi-folder answer stages an album per folder in ONE selection ` +
+  `and ingests each from its own folder (while unticking one file switches that ` +
+  `album to per-file staging), and the picker says a second pick adds another ` +
+  `folder (${checks} checks)`);

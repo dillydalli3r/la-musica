@@ -1519,12 +1519,19 @@ export default function ImportWizard() {
       // can then be staged as a WHOLE (one ingest call) or, when the user
       // excludes / moves some of its files, as exactly the kept FILES — the
       // same per-file path an OS drop of single files takes.
+      //
+      // The relPath is PREFIXED with the folder's own name, the way a web
+      // folder input's `webkitRelativePath` already is: the path is what the
+      // album detection groups on, so without the prefix every file of every
+      // dropped folder landed in ONE flat namespace and several folders merged
+      // into a single album ("they are separated into albums below" — this is
+      // where that promise is kept).
       const root = scan.root.replace(/\\/g, "/");
       for (const f of scan.files) {
         if (ALLOWED.test(f.relPath)) {
           out.push({
             file: null,
-            relPath: f.relPath,
+            relPath: `${name}/${f.relPath}`,
             nativeRoot: scan.root,
             native: scan.file ? root : `${root.replace(/\/+$/, "")}/${f.relPath}`,
           });
@@ -1590,24 +1597,28 @@ export default function ImportWizard() {
       return;
     }
     try {
+      // On demand, not a static import: `@tauri-apps/api` is the shell's own
+      // module and this page also runs in a plain browser (and in the web
+      // build), where reaching it at load time would be wrong.
       const { invoke } = await import("@tauri-apps/api/core");
-      const picked = await invoke<string | null>("pick_folder");
-      if (!picked) return;
-      const scan = await api.importScan(picked);
-      bankActiveSelection();
-      setSource("native");
-      setNativeRoot(picked);
-      setUnpacked([]);
-      const root = scan.root.replace(/\\/g, "/");
-      const list: ImportFile[] = scan.files
-        .filter((f) => ALLOWED.test(f.relPath))
-        .map((f) => ({
-          file: null,
-          relPath: f.relPath,
-          nativeRoot: scan.root,
-          native: scan.file ? root : `${root.replace(/\/+$/, "")}/${f.relPath}`,
-        }));
-      adoptImports(list, picked.split(/[\\/]/).pop() ?? "");
+      // SEVERAL folders, one dialog: the shell's picker is the only one that
+      // can offer it — a web folder input (`webkitdirectory`, and the File
+      // System Access API) answers with exactly one folder on Windows — and a
+      // rip split over "CD 1"/"CD 2", or three albums of one artist, is ONE
+      // selection here. A shell built before `pick_folders` knows only the
+      // single-folder command, so the fallback keeps that one working.
+      let picked: string[];
+      try {
+        picked = (await invoke<string[]>("pick_folders")) ?? [];
+      } catch {
+        const one = await invoke<string | null>("pick_folder");
+        picked = one ? [one] : [];
+      }
+      if (!picked.length) return;
+      // The same route an OS drop of several folders takes: every folder is
+      // scanned, each file staged by its OWN path, and the whole set is one
+      // selection (the album detection separates them).
+      await handleDropPaths(picked);
     } catch (e) {
       toast.error(String(e));
     }
@@ -1810,18 +1821,34 @@ export default function ImportWizard() {
                 );
               }
               results.push({ name: landed, path: res.album_path });
+            } else if (asIs(g) && folder) {
+              // A WHOLE, untouched folder on this server's disk is copied as
+              // it is — one ingest call for the album, the way the folder
+              // picker has always committed one (sidecars and artwork the
+              // scan does not list included).
+              //
+              // The group's own folder ON DISK is the folder every one of its
+              // files came from: the group's `nativeRoot`, or a folder inside
+              // it when the whole group lives in one subfolder — and never
+              // `folder + g.root`, which would count the folder's own name
+              // twice now that a native file's relPath carries it.
+              const onDiskDirs = new Set(
+                keep.map((f) => (f.native ?? "").replace(/[\\/][^\\/]*$/, "")).filter(Boolean)
+              );
+              const src = onDiskDirs.size === 1 ? [...onDiskDirs][0] : folder;
+              const res = await api.importIngest(src, name);
+              results.push({ name: res.album_name || name, path: res.path });
             } else if (onDisk.length && onDisk.length === keep.length) {
-              // Every kept file is a path on this server's disk — an OS drop
-              // of single files, or the KEPT files of a folder the user split
-              // or excluded from: the one-file case of the ingest, once per
+              // A folder the user SPLIT or excluded from — every kept file is
+              // a path on this server's disk (an OS drop of single files is
+              // the same shape): the one-file case of the ingest, once per
               // file, landing them together in the album this group names.
+              // The whole-folder call above would copy what was excluded and
+              // quietly undo the split, which is why it comes first and only
+              // for a group that is whole.
               let last: { album_name?: string; path: string } | null = null;
               for (const p of onDisk) last = await api.importIngest(p, name);
               if (last) results.push({ name: last.album_name || name, path: last.path });
-            } else if (asIs(g) && folder) {
-              const src = g.root ? `${folder}/${g.root}` : folder;
-              const res = await api.importIngest(src, name);
-              results.push({ name: res.album_name || name, path: res.path });
             } else {
               // A subset of a folder with no per-file paths to stage: nothing
               // can be committed without copying the WHOLE folder (which would
@@ -4463,7 +4490,7 @@ const finish = async (closeByNavigation: boolean, runScripts = true) => {
               e.preventDefault();
               handleDrop(e.dataTransfer.items, e.dataTransfer.files);
             }}
-            onClick={() => pickFolderBrowser()}
+            onClick={() => (IN_TAURI ? pickFolderNative() : pickFolderBrowser())}
           >
             <UploadCloud className="h-10 w-10 text-zinc-600 mx-auto mb-3" />
             <div className="font-medium text-zinc-300">Drop albums, files or archives here</div>
@@ -4482,7 +4509,8 @@ const finish = async (closeByNavigation: boolean, runScripts = true) => {
               · archives (.zip .tar .tar.gz/.tgz .tar.bz2 .tar.xz .7z .rar) — unpacked here, then imported as the folder inside
             </div>
             <div className="text-xs text-zinc-600 mt-2">
-              click to <b className="text-zinc-400">pick a folder</b> · or{" "}
+              click to <b className="text-zinc-400">pick {IN_TAURI ? "folders" : "a folder"}</b>
+              {IN_TAURI && " (one or several at once)"} · or{" "}
               <span
                 className="text-accent-soft underline underline-offset-2 cursor-pointer"
                 onClick={(e) => {
@@ -4493,6 +4521,7 @@ const finish = async (closeByNavigation: boolean, runScripts = true) => {
                 browse individual files
               </span>{" "}
               (one file, several, or an archive)
+              {!IN_TAURI && " · pick again to add another folder"}
             </div>
             <input
               id="import-files"
@@ -4500,7 +4529,15 @@ const finish = async (closeByNavigation: boolean, runScripts = true) => {
               multiple
               accept={ACCEPT}
               className="hidden"
-              onChange={(e) => e.target.files && handleFiles(e.target.files)}
+              onChange={(e) => {
+                // The files are COPIED out first: clearing the input (which is
+                // what lets a re-pick of the SAME file fire at all — the
+                // browser sends no change event when the value is unchanged)
+                // ALSO empties the live FileList the handler would read.
+                const list = Array.from(e.target.files || []);
+                e.target.value = "";
+                if (list.length) handleFiles(list);
+              }}
             />
             <input
               id="import-folder"
@@ -4513,7 +4550,11 @@ const finish = async (closeByNavigation: boolean, runScripts = true) => {
                   el.setAttribute("directory", "");
                 }
               }}
-              onChange={(e) => e.target.files && handleFiles(e.target.files)}
+              onChange={(e) => {
+                const list = Array.from(e.target.files || []); // copy first, see #import-files
+                e.target.value = "";
+                if (list.length) handleFiles(list);
+              }}
             />
           </div>
 

@@ -20,6 +20,7 @@
     "dialog:allow-save",
     "notification:default",
     "allow-pick-folder",
+    "allow-pick-folders",
     "allow-set-music-folder",
     "allow-open-external",
     "allow-update-check",

@@ -792,9 +792,15 @@ def check_wizard_import_prompts(check):
           "row?.note" in src and "Imported — no chain" in src)
     check("…and only a row whose chain RAN reads as a plain success",
           "state === \"imported\" && row?.chained === false" in src)
-    # R421: a native folder's files are selectable and carry their own paths.
-    check("a picked folder's files carry their own server paths",
-          src.count("native: scan.file ? root :") == 2)
+    # R421/R422: a native folder's files are selectable and carry their own
+    # paths — through the ONE route an OS drop of several folders takes, which
+    # the picker now hands its answer to (the relPath is prefixed with the
+    # folder's own name there, so several folders stay separated).
+    check("a native folder's files carry their OWN server paths",
+          src.count("native: scan.file ? root :") == 1
+          and "await handleDropPaths(picked);" in src)
+    check("…and the folder's name leads the path, so folders never merge",
+          "relPath: `${name}/${f.relPath}`," in src)
     check("…and are selectable like an upload's",
           "selectable={!!(f.file || f.staged || f.native || f.nativeRoot)}" in src)
     check("a native group is committed as-is only while it is WHOLE",

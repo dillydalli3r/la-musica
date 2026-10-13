@@ -8399,6 +8399,55 @@ when the log itself says something is wrong.** Pinned in
   extra, the payload fields, and that a manifest-less album carries neither
   key) and by the album page's own render.
 
+- **R422 — the import picker asks for SEVERAL folders in one dialog.** The
+  owner's report, 2026-10-13: *"The import file picker doesn't let me upload
+  multiple folders when choosing files."* Every folder picker asked the OS for
+  exactly ONE folder — the shell's `pick_folder` (`blocking_pick_folder`) and a
+  web folder input alike (`webkitdirectory`, and the File System Access API's
+  `showDirectoryPicker`, answer with one folder on Windows) — so several rips
+  could only arrive by drag-and-drop.
+
+  * the desktop shell gains `pick_folders` (`blocking_pick_folders` — the
+    standard shell multi-select, `FOS_PICKFOLDERS | FOS_ALLOWMULTISELECT`); a
+    cancelled dialog comes back as an EMPTY LIST, not an error, so the page
+    stages nothing. The wizard hands the whole set to the same route an OS drop
+    of several folders takes, and falls back to `pick_folder` on a shell built
+    before it.
+  * that route now keeps the promise the drop zone has always made ("drop one
+    or more folders … they are separated into albums below"): each scanned
+    folder's files are staged under a relPath PREFIXED with the folder's own
+    name, the way a web folder input's `webkitRelativePath` already is. Without
+    the prefix every file of every dropped/picked folder landed in ONE flat
+    namespace, so several folders merged into a single album (and same-named
+    files of two rips shared one exclusion key).
+  * in the shell, the drop zone's click opens that native picker — the same
+    thing an OS drop ON it does (files named by path and moved into the library
+    by the server), where the browser picker would upload their bytes instead;
+    a plain browser keeps its folder input, where a SECOND pick adds another
+    folder (the first is banked as its own batch, never dropped).
+  * a whole, untouched native folder is again copied AS-IS in ONE ingest call:
+    the branch order in `doImport` had made the per-file path (added for
+    splits) shadow the whole-folder one, so a picked folder was being placed
+    file by file and its unlisted sidecars left behind. The whole-folder source
+    is the group's own folder ON DISK (its `nativeRoot`, or the one subfolder
+    the whole group sits in) — never a path glued from `folder + g.root`, which
+    would now count the folder's name twice. A folder a file was excluded from
+    or moved out of still goes by its FILES, and that is the boundary the check
+    drives.
+  * both inputs clear their own value after a pick (copying the files out
+    first), so re-picking the same folder or file fires again — a selection the
+    import refused could not be retried otherwise.
+
+  Pinned by `tools/check_import_minimum.mjs` (127 checks): the hint a second
+  pick relies on, two picks that keep both folders (the first banked, the
+  commit button counting both), and — with the page driven as if it ran in the
+  shell — one `pick_folders` answer of two folders becoming TWO albums in one
+  selection, each ingested from its OWN folder path, while unticking one file
+  of a folder switches that album to per-file staging and leaves the untouched
+  one whole. `tools/test_desktop_commands.py` pins the shell's three command
+  lists (build.rs manifest, `generate_handler!`, the capability's `allow-*`
+  grants) so a new command cannot land without its grant.
+
 ---
 
 ## 10. Honest limits of this spec

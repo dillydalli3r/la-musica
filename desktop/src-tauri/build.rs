@@ -28,6 +28,7 @@ fn main() {
         tauri_build::Attributes::new().app_manifest(
             tauri_build::AppManifest::new().commands(&[
                 "pick_folder",
+                "pick_folders",
                 "set_music_folder",
                 "open_external",
                 "update_check",

@@ -100,6 +100,29 @@ fn pick_folder(app: tauri::AppHandle) -> Option<String> {
         .and_then(|p| p.into_path().ok())
         .map(|p| p.to_string_lossy().to_string())
 }
+
+/// Native folder picker for SEVERAL folders in one dialog — a rip split over
+/// "CD 1"/"CD 2", or three albums of one artist handed over together.
+///
+/// The shell's own dialog is the only picker that can offer this: a web folder
+/// input (`webkitdirectory`, and the File System Access API's
+/// `showDirectoryPicker`) answers with exactly one folder on Windows, so the
+/// page's own folder button cannot ask the OS for more. The dialog's
+/// multi-select is the standard shell one (`FOS_PICKFOLDERS |
+/// FOS_ALLOWMULTISELECT`), and a cancelled dialog comes back as an empty list —
+/// not an error — so the page just stages nothing.
+#[cfg(desktop)]
+#[tauri::command]
+fn pick_folders(app: tauri::AppHandle) -> Vec<String> {
+    app.dialog()
+        .file()
+        .blocking_pick_folders()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|p| p.into_path().ok())
+        .map(|p| p.to_string_lossy().to_string())
+        .collect()
+}
 /// The webview tells the shell which music folder the local backend runs with
 /// (Settings → the first-run wizard's folder step), so the next launch can
 /// spawn the backend already knowing it. The server's own config remains the
@@ -922,6 +945,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             pick_folder,
+            pick_folders,
             set_music_folder,
             open_external,
             update_check,
