@@ -356,6 +356,36 @@ try {
   check("the Run-all line is the section's own head entry",
     /i === 0 && generated\.runAll \? \[scriptItem\(generated\.runAll\)\]/.test(code));
 
+  console.log("\n== the mounts ==");
+  // WHERE a menu hangs decides WHAT a press may run on, and the module can
+  // only hand a script the targets it is told the menu is on (entityKind).
+  // The artist page mounts two: the artist's own (every track of it — a
+  // folder-scoped script IS the artist) and the batch bar over SELECTED
+  // albums, which is a path list and must not fan a press out over the whole
+  // artist (5 · Process images on two picked albums used to re-process the
+  // artist's every release). The selection mount therefore says so.
+  const artistSrc = readFileSync(path.join(webDir, "src", "pages", "ArtistPage.tsx"), "utf8");
+  // Every `<TagActionsMenu …/>` block, so a marker that also appears on a
+  // neighbouring button (the artist page has a "Download all" over the same
+  // tracks) cannot select the wrong one.
+  const mounts = [...artistSrc.matchAll(/<TagActionsMenu[\s\S]*?\/>/g)].map((m) => m[0]);
+  const selected = mounts.find((m) => m.includes("paths={selectedTrackPaths}")) || "";
+  const onArtist = mounts.find((m) => m.includes("paths={allTracks")) || "";
+  check("the artist page's album-selection menu is a PATH LIST, not the artist",
+    selected.includes("kind=\"library\"") && !selected.includes("kind=\"artist\""),
+    selected.slice(0, 160).replace(/\s+/g, " "));
+  check("...while the artist's own menu stays artist-scoped",
+    onArtist !== "" && !/kind=/.test(onArtist) && onArtist.includes("artistPath={data.path}"),
+    onArtist.slice(0, 160).replace(/\s+/g, " "));
+  const picked = menu.scriptSections(payload, "library", {
+    paths: ["F:/Music/Artist/A/1.flac", "F:/Music/Artist/B/2.flac"],
+  });
+  const pickedFolders = entriesOf(picked).filter((e) => FOLDER.includes(e.id));
+  check("...so its folder-scoped scripts run on the PICKED albums, never the artist folder",
+    pickedFolders.length > 0
+    && pickedFolders.every((e) => JSON.stringify(e.targets)
+      === JSON.stringify(["F:/Music/Artist/A", "F:/Music/Artist/B"])),
+    JSON.stringify(pickedFolders.map((e) => [e.id, e.targets])));
   if (failures.length) {
     console.error(`\n${failures.length} failure(s):`);
     for (const f of failures) console.error(`  - ${f}`);

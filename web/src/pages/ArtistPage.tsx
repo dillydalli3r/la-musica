@@ -583,6 +583,14 @@ export default function ArtistPage() {
                 paths={selectedTrackPaths}
                 artist={decoded}
                 artistPath={data.path}
+                // A selection of ALBUMS is a path list, not the artist: the
+                // folder-scoped scripts must run over the albums the user
+                // picked, and `artist` + `artistPath` alone would resolve to
+                // kind "artist" and fan a press (5 · Process images, 4 ·
+                // Grade, 20 · Scan layout, a forced 3 · Optimize FLACs) out
+                // over EVERY album this artist has — the selection's own
+                // folders are what `targetsFor` hands a "library" menu.
+                kind="library"
                 onDone={refresh}
                 buttonClass="btn-ghost !py-1 text-xs"
                 buttonTitle="Tag actions on the selected albums"

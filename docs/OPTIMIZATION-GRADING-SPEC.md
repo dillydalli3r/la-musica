@@ -4103,7 +4103,28 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   twin where the script owns one flag — and every entry runs `POST /api/run`
   over the entity's own paths (the selection's files for a file-scoped script,
   the album/artist folder for a folder-scoped one, `web/src/lib/scriptMenu.ts`).
+  **What a menu IS ON decides what a press may touch, so the mount says it**
+  (`kind`, `scriptMenu.entityKind`): an artist page holds two of these menus —
+  the artist's own (its folder is the entity, and a folder-scoped script on it
+  means the artist) and the batch bar over SELECTED albums, which is a path
+  list. The second one carried `artist` + `artistPath` and nothing else, so it
+  resolved to `artist` and a press fanned out over EVERY album that artist has
+  — measured in a browser, 2026-10-13: pressing `5 · Process images` on two
+  picked albums posted `targets: [<artist folder>]`. It passes `kind="library"`
+  now, and its targets are the picked folders (never the artist's) — pinned by
+  `tools/check_menus.cjs --only=artistmenu`, which drives the real page and
+  reads the POSTED body, and fails on the old wiring.
 
+  **Every entry the menu offers is PRESSED by `tools/test_script_menu.py`**,
+  through the app's own `/api/run` with the payload's ids, the scope rule's
+  targets and each forced twin's key — 62 presses over the album and track
+  menus, with the socket shut and the clock skipped so no suite ever calls
+  MusicBrainz, Wikipedia or a lyric host (a fetching script reports its own
+  failure inside its stats, which is its own suite's business). Each press must
+  answer a run's own shape — stats, a named skip, or 22's own `no API key`
+  line, which is why a test never gives it a key — and the passes that write
+  (1, 3, 12, 21) must prove they wrote on the album. A listing that cannot run
+  is the drift this half exists for.
 ### 7.17 The first-run setup wizard asks only what is required
 
 - **R107 — the wizard's steps are the ones that need an answer.** Five:

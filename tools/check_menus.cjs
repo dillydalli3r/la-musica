@@ -19,6 +19,8 @@
  *              page" lands on that track's own page, "Download music video"
  *              makes the request the album row's removed film button made, and
  *              a menu that is NOT on one track offers neither
+ *   artistmenu — the details menu on a SELECTION of albums in the artist page:
+ *              the press sends the picked albums' folders, never the artist's
  *   credits  — the Credits popout's identity header: its heading is the
  *              release's (or recording's) NAME and the facts the files state
  *              ride BELOW it, never a raw path in the title slot */
@@ -816,6 +818,91 @@ function albumRoute(al) {
   return id ? `/album/mb:${id}` : `/album/${encodeURIComponent(al.path)}`;
 }
 
+/* ---- the artist page's menu on a SELECTION of albums -------------------
+ * Two mounts of the same details menu live on that page: the artist's own
+ * (every track of it, so a folder-scoped script IS the artist) and the batch
+ * bar's over SELECTED albums. The second is a path list — a mount carrying
+ * `artist` + `artistPath` alone resolves to the ARTIST kind, so pressing
+ * "5 · Process images" on two picked albums re-processed every release that
+ * artist has, and the picked ones were never the target. What a press SENDS is
+ * the claim: /api/run's body is intercepted and read, and its targets must be
+ * the two picked folders — never the artist folder.
+ *
+ * Needs a library with an artist that has TWO albums of tracks; without one it
+ * says so and skips (the fixture is the caller's business, like the cover
+ * menu's album-with-art). */
+async function artistMenuChecks(page, check) {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const lib = await (await fetch(`${BASE}/api/library`)).json();
+  let pick = null;
+  for (const ar of lib.artists ?? []) {
+    const albums = (ar.albums ?? []).filter((al) => (al.tracks ?? []).length);
+    if (albums.length < 2) continue;
+    const mb = albums[0].meta?.MUSICBRAINZ_ALBUMARTISTID;
+    pick = {
+      artist: ar,
+      albums: albums.slice(0, 2),
+      route: mb ? `/artist/mb:${mb}` : `/artist/${encodeURIComponent(ar.path)}`,
+    };
+    break;
+  }
+  if (!pick) {
+    console.log("  --   artist menu: skipped, no artist here has two albums with tracks");
+    return;
+  }
+
+  const sent = [];
+  await page.route("**/api/run", (route) => {
+    sent.push(JSON.parse(route.request().postData() || "{}"));
+    return route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ results: [] }),
+    });
+  });
+
+  await page.goto(BASE + pick.route, { waitUntil: "networkidle", timeout: 60000 });
+  await page.waitForTimeout(1200);
+  const cards = page.locator('input[type="checkbox"][title="Select album"]');
+  const select = page.locator('button:has-text("Select")').first();
+  check("the artist page offers album select mode", (await select.count()) >= 1);
+  await select.click();
+  await page.waitForTimeout(300);
+  const n = await cards.count();
+  check(`select mode puts a checkbox on every album (${n})`, n >= 2, `${n} checkboxes`);
+  if (n < 2) return;
+  await cards.nth(0).check();
+  await cards.nth(1).check();
+  await page.waitForTimeout(300);
+
+  const trigger = page.locator('button[title="Tag actions on the selected albums"]').first();
+  check("the batch bar carries the selection's own details menu", (await trigger.count()) === 1);
+  if ((await trigger.count()) !== 1) return;
+  await trigger.click();
+  await page.waitForTimeout(400);
+  const labels = (await page.locator('[role="menu"] [role="menuitem"]').allInnerTexts())
+    .map((s) => s.trim());
+  const item = page.locator('[role="menu"] [role="menuitem"]')
+    .filter({ hasText: /5 · Process images/ }).first();
+  check("the menu offers 5 · Process images", (await item.count()) === 1,
+    JSON.stringify(labels.slice(0, 12)));
+  if ((await item.count()) !== 1) return;
+  await item.click();
+  await page.waitForTimeout(600);
+
+  const body = sent[0] ?? {};
+  const want = pick.albums.map((al) => al.path).sort();
+  check("the press reached /api/run", sent.length === 1, `${sent.length} request(s)`);
+  check("...with script 5 and the PICKED albums as its targets",
+    JSON.stringify(body.ids) === JSON.stringify([5])
+    && JSON.stringify((body.targets ?? []).slice().sort()) === JSON.stringify(want),
+    JSON.stringify({ ids: body.ids, targets: body.targets, want }));
+  check("...and never the artist folder (the whole-artist fan-out this pins)",
+    !(body.targets ?? []).some((t) => t === pick.artist.path),
+    JSON.stringify(body.targets));
+  await page.unroute("**/api/run");
+}
+
 async function trackMenuChecks(page, check) {
   await page.setViewportSize({ width: 1440, height: 900 });
   const lib = await (await fetch(`${BASE}/api/library`)).json();
@@ -1169,6 +1256,7 @@ async function creditsChecks(page, check) {
   if (want("pagemenu")) await pageMenuChecks(page, check);
   if (want("credits")) await creditsChecks(page, check);
   if (want("trackmenu")) { await trackMenuChecks(page, check); return finish(); }
+  if (want("artistmenu")) { await artistMenuChecks(page, check); return finish(); }
   if (!want("nav")) return finish();
 
   await page.goto(BASE + "/", { waitUntil: "networkidle" });

@@ -423,6 +423,233 @@ check("server/main.py mounts the router",
       "script_menu" in read("server/main.py") and
       "script_menu.router" in read("server/main.py"))
 
+# --------------------------------------------------------------------------- #
+# Every entry RUNS — the press, through the app's own route
+# --------------------------------------------------------------------------- #
+# The payload above is a LIST. This half presses it: for every entry the album
+# menu and the track menu offer — and every forced twin — it posts /api/run
+# with the payload's ids, the targets the CLIENT's own scope rule picks
+# (`web/src/lib/scriptMenu.targetsFor`: the entity's folder for a
+# folder-scoped script, the selection's files otherwise) and the entry's force
+# key, then reads the answer. A listing that cannot run is the drift this menu
+# keeps being rescued from: a runner that is gone, a scope handing a script the
+# wrong shape, a force key /api/run does not accept, or a crash on a real
+# album (the owner's ask, 2026-10-13: "make sure that when the details / ...
+# menu on items is clicked, the scripts listed are up to date and actually
+# work when used properly").
+#
+# The network is SHUT for this half (the socket, so urllib, requests, beets and
+# every provider are covered at once): suites do not call MusicBrainz,
+# Wikipedia or a lyric host. What the fetching scripts do with a dead network —
+# report their own failure inside their stats — is their own suites' business;
+# what this pins is that the PRESS reaches the right runner and comes back with
+# a run's own shape. 22 is included: its runner answers "no API key" BEFORE it
+# posts anything anywhere, which is also why a test never gives it a key.
+print("== every entry runs ==")
+
+
+def _flac_exe():
+    deps = os.path.join(ROOT, ".dependencies")
+    if not os.path.isdir(deps):
+        return None
+    for entry in sorted(os.listdir(deps)):
+        cand = os.path.join(deps, entry, "flac.exe")
+        if os.path.isfile(cand):
+            return cand
+    return None
+
+
+FLAC_EXE = _flac_exe()
+if not FLAC_EXE:
+    print("  (no flac.exe under .dependencies: the press half is not exercised)")
+else:
+    import socket
+    import subprocess
+    import wave
+
+    from fastapi.testclient import TestClient as _TestClient
+    from server import main as server_main
+
+    # Retry backoff is REAL time, and a shut network makes every fetch spend
+    # its whole budget on it — measured with the socket patch alone: 24 · Web
+    # ratings 142 s, 25/26 70 s each, 8 · Auto tagging 36 s, and the sweep took
+    # 7.7 minutes. The sweep is about the PRESS, so the clock is skipped too:
+    # every attempt still runs, every failure is still its own, and the suite
+    # is seconds.
+    import time
+
+    _sleep = time.sleep
+    time.sleep = lambda *a, **kw: None
+
+    _connect = socket.socket.connect
+
+    def _no_network(self, address, *a, **kw):
+        host = address[0] if isinstance(address, tuple) else str(address)
+        if str(host) not in ("127.0.0.1", "::1", "localhost"):
+            raise OSError("network is shut for this suite")
+        return _connect(self, address, *a, **kw)
+
+    socket.socket.connect = _no_network
+
+    ALBUMID = "7d192da4-1427-4ca9-baa4-38c78ce25db0"
+    RGID = "066f840f-e357-436f-bb0a-47ad7cfcd84a"
+    ARTISTID = "e21857d5-3256-4547-afb3-4b6ded592596"
+    RECS = ["b8175f9f-340b-403f-97c7-c193a212cd39",
+            "81aa9d02-af86-47cd-8969-95e4750e0e88"]
+    ART = os.path.join(REDIRECT, "Artists", f"Tester [{ARTISTID}]")
+    ALBUM = os.path.join(ART, f"Menu Probe [{ALBUMID}] [{RGID}]")
+    BASE = {
+        "ALBUM": "Menu Probe", "ALBUMARTIST": "Tester", "ARTIST": "Tester",
+        "DATE": "2026-01-02", "ORIGINALDATE": "2026-01-02",
+        "ORIGINALYEAR": "2026", "TRACKTOTAL": str(len(RECS)),
+        "DISCTOTAL": "1", "MEDIA": "CD", "RELEASETYPE": "Album",
+        "RELEASESTATUS": "Official", "RELEASECOUNTRY": "US", "LABEL": "Label",
+        "CATALOGNUMBER": "CAT-1", "BARCODE": "0123456789012",
+        "MUSICBRAINZ_ALBUMID": ALBUMID, "MUSICBRAINZ_RELEASEGROUPID": RGID,
+        "MUSICBRAINZ_ALBUMARTISTID": ARTISTID, "MUSICBRAINZ_ARTISTID": ARTISTID,
+        "GENRE": "Trip Hop", "SCRIPT": "Latn", "LANGUAGE": "eng",
+    }
+
+    from mlo.subproc import tool_path
+
+    def _flac(path, seconds=14):
+        """A silent FLAC at *path*, through the app's own long-path bridge.
+
+        These fixtures live under a temp folder whose name (plus the album's
+        own) can pass Windows' 260-character MAX_PATH, which is where
+        flac.exe stops — `mlo.subproc.tool_path` is the bridge every runner
+        already runs its tools through, so the suite uses it too."""
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        wav = path + ".wav"
+        with wave.open(wav, "w") as w:
+            w.setnchannels(2)
+            w.setsampwidth(2)
+            w.setframerate(44100)
+            w.writeframes(b"\x00\x00\x00\x00" * int(44100 * seconds))
+        subprocess.run([tool_path(FLAC_EXE), "-s", "-f", "-8",
+                        "-o", tool_path(path), tool_path(wav)],
+                       check=True, capture_output=True)
+        os.remove(wav)
+
+    from mlo.audio import AudioFile
+
+    def _tag(path, **kw):
+        af = AudioFile(path)
+        af.defer_save(True)
+        for k, v in kw.items():
+            af.set_tag(k, str(v))
+        af.defer_save(False)
+
+    for n, rec in enumerate(RECS, 1):
+        p = os.path.join(ALBUM, f"1-0{n} Song {n} [{rec}] [{RGID}].flac")
+        _flac(p)
+        _tag(p, **dict(BASE, TITLE=f"Song {n}", TRACKNUMBER=str(n),
+                       DISCNUMBER="1", MUSICBRAINZ_TRACKID=rec,
+                       LYRICS=f"[00:01.00]la la {n}\n[00:05.00]la la la\n"))
+    # A cue and a description: the album-shaped files 2 / 10 / 26 work on.
+    with open(os.path.join(ALBUM, "CD-1.cue"), "w", encoding="utf-8") as fh:
+        fh.write("PERFORMER \"Tester\"\nTITLE \"Menu Probe\"\n" + "".join(
+            f'FILE "1-0{n} Song {n} [{r}] [{RGID}].wav" WAVE\n'
+            f'  TRACK 0{n} AUDIO\n    TITLE "Song {n}"\n'
+            f'    PERFORMER "Tester"\n    INDEX 01 00:00:00\n'
+            for n, r in enumerate(RECS, 1)))
+    with open(os.path.join(ALBUM, "description.txt"), "w", encoding="utf-8") as fh:
+        fh.write("A probe album, for the details menu.\n")
+
+    CLIENT = _TestClient(server_main.app)
+
+    def _album_now():
+        """The album folder, wherever the press before this one left it.
+
+        The chain's own steps (14 beets, 20 layout) rename and move albums — a
+        pass doing its job, and a stale path would make the NEXT press look
+        broken."""
+        for root, dirs, _files in os.walk(os.path.join(REDIRECT, "Artists")):
+            for d in dirs:
+                if RGID in d or ALBUMID in d:
+                    return os.path.join(root, d)
+        return ALBUM
+
+    def _tracks_now():
+        d = _album_now()
+        if not os.path.isdir(d):
+            return []
+        return sorted(os.path.join(d, f) for f in os.listdir(d)
+                      if f.lower().endswith(".flac"))
+
+    def _targets(scope, kind, paths, album):
+        if scope != "folder":
+            return list(paths)
+        if kind == "album":
+            return [album]
+        return sorted({os.path.dirname(p) for p in paths})
+
+    pressed = 0
+    problems = []
+    outcomes = {}
+    slow = []
+    for kind in ("album", "track"):
+        for script in [s for s in data["scripts"] if kind in s["applies_to"]]:
+            presses = [(None, None)] + [
+                (o["key"], o.get("owner_label") or o["key"])
+                for o in (script.get("force", {}).get("options") or [])
+                if o.get("key")]
+            for key, _owner in presses:
+                targets = _targets(script["scope"], kind, _tracks_now(), _album_now())
+                body = {"ids": [script["id"]], "targets": targets}
+                if key:
+                    body["force"] = {key: True}
+                where = f"{kind} {script['id']}" + (f" (force {key})" if key else "")
+                t0 = time.monotonic()
+                try:
+                    r = CLIENT.post("/api/run", json=body)
+                except Exception as e:  # a raise here is the app's, not ours
+                    problems.append(f"{where}: raised {e!r}")
+                    continue
+                pressed += 1
+                seconds = time.monotonic() - t0
+                if seconds > 5.0:
+                    slow.append((round(seconds, 1), where))
+                if r.status_code != 200:
+                    problems.append(f"{where}: HTTP {r.status_code} {r.text[:120]}")
+                    continue
+                res = (r.json().get("results") or [{}])[0]
+                outcomes[(kind, script["id"], key)] = res
+                error = str(res.get("error") or "")
+                if error and not (script["id"] == 22 and "no API key" in error):
+                    problems.append(f"{where}: {error[:160]}")
+                elif not error and res.get("stats") is None and not res.get("skipped"):
+                    problems.append(f"{where}: answered neither stats nor a skip")
+
+    check(f"every menu entry presses through /api/run — album and track, forced "
+          f"twins included ({pressed} presses)",
+          not problems and pressed >= 2 * len(RUNNERS),
+          " · ".join(problems[:5]) or f"only {pressed} presses")
+    check("22 (Submit fingerprints) answers the runner's own sentence, never a "
+          "silent skip",
+          "no API key" in str((outcomes.get(("album", 22, None)) or {}).get("error")),
+          str(outcomes.get(("album", 22, None)))[:160])
+    # What the presses PROVED, not just that they answered: the passes that
+    # write a tag wrote it, on a real album, through the menu's own request.
+    def wrote(sid, key="modified_count"):
+        """What one album press reported for *key*, or 0."""
+        res = outcomes.get(("album", sid, None)) or {}
+        return int(((res.get("stats") or {}).get(key)) or 0)
+    for sid, what in ((12, "Key & BPM"), (21, "the AcoustID pair"),
+                      (3, "the FLAC re-encode"), (1, "the lyrics format")):
+        check(f"{sid} ({what}) really wrote something ({wrote(sid)})",
+              wrote(sid) >= 1,
+              str((outcomes.get(("album", sid, None)) or {}).get("stats"))[:160])
+    graded = (outcomes.get(("album", 4, None)) or {}).get("stats") or {}
+    check("4 (Grade) really graded the album",
+          int(graded.get("total_scanned") or 0) >= 1
+          and int(graded.get("albums_passed") or 0) + int(graded.get("albums_failed") or 0) >= 1,
+          str(graded)[:200])
+    if slow:
+        print("  slowest presses: "
+              + " · ".join(f"{w} {s}s" for s, w in sorted(slow, reverse=True)[:5]))
+    socket.socket.connect = _connect
+    time.sleep = _sleep
 print(f"\n{'PASS' if not FAILED else 'FAIL'} — {len(FAILED)} problem(s)")
 for name in FAILED:
     print(f"  - {name}")
