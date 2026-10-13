@@ -74,6 +74,44 @@ def skip(label):
 
 
 # --------------------------------------------------------------------------- #
+# What an ANSWER means (no engine needed)
+# --------------------------------------------------------------------------- #
+def check_helper_answer():
+    """`_helper_key_bpm` reads the helper's JSON, and not every number in it is
+    a measurement (R429).
+
+    The engine prints `"bpm": 0.0` for audio with no measurable pulse, and the
+    tag used to be written as "0" — a tempo this pass never measured, stored as
+    if it had. The answer is None instead, so the tag is left ABSENT (and the
+    grader, on a track long enough to measure, reports a real missing BPM).
+    The same function is where the length floor lives: a track shorter than
+    `min_seconds` is not measured at all.
+    """
+    real = audiometa._analyze_with_rust
+
+    def stub(bpm, duration, idx=None, minor=False):
+        return lambda *a, **k: {
+            "bpm": bpm, "key_index": idx, "key_minor": minor,
+            "features": {"duration": duration}, "failed": False, "reason": ""}
+
+    try:
+        audiometa._analyze_with_rust = stub(0.0, 200.0)
+        ok(audiometa._helper_key_bpm("x.flac", 10) == (None, None),
+           "a 0 BPM answer is no measurement — nothing is written")
+        audiometa._analyze_with_rust = stub(float("nan"), 200.0)
+        ok(audiometa._helper_key_bpm("x.flac", 10) == (None, None),
+           "a NaN tempo is no measurement either")
+        audiometa._analyze_with_rust = stub(128.4, 200.0, idx=9, minor=True)
+        ok(audiometa._helper_key_bpm("x.flac", 10) == (128, (9, True)),
+           "a real answer still passes through (rounded to a whole number)")
+        audiometa._analyze_with_rust = stub(128.0, 4.0, idx=9, minor=True)
+        ok(audiometa._helper_key_bpm("x.flac", 10) == (None, None),
+           "a track shorter than min_seconds is not measured at all")
+    finally:
+        audiometa._analyze_with_rust = real
+
+
+# --------------------------------------------------------------------------- #
 # The engine
 # --------------------------------------------------------------------------- #
 def resolve_engine():
@@ -265,6 +303,15 @@ def _delta(a, b):
 # --------------------------------------------------------------------------- #
 def main():
     print("Rust analysis engine (mlo-audio analyze) — tempo, key, mood features")
+
+    # Meaning first, engine second: what the helper's JSON is TAKEN to say is
+    # checked against a stub, so it holds on a host with no binary at all.
+    print("\nwhat an answer means")
+    try:
+        check_helper_answer()
+    except AssertionError as e:
+        print(f"  FAIL {e}")
+        return 1
 
     exe = ffmpeg_exe()
     if not exe:

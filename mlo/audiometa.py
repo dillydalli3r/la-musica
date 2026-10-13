@@ -237,7 +237,15 @@ def _helper_key_bpm(path, min_seconds):
     idx = data.get("key_index")
     if idx is not None:
         key = (int(idx), bool(data.get("key_minor")))
-    return (int(round(float(bpm))) if bpm is not None else None), key
+    # A tempo of 0 (or a NaN) is NOT a measurement: the helper answers 0.0 for
+    # audio with no measurable pulse — silence, a spoken skit — and writing it
+    # would store "0" as if this pass had measured it. The tag is left absent
+    # instead, which is the truth.
+    try:
+        bpm = float(bpm)
+    except (TypeError, ValueError):
+        bpm = 0.0
+    return (int(round(bpm)) if math.isfinite(bpm) and bpm > 0 else None), key
 
 
 def _key_notation(tonic_idx, minor, notation):

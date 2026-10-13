@@ -1734,6 +1734,38 @@ def _audio_format_info(af):
     return (bits, getattr(info, "sample_rate", None))
 
 
+def _audio_seconds(af):
+    """The track's own LENGTH in seconds, read off the already-parsed
+    container (no decode), or 0.0 when the format states none. The analysis
+    checks below compare it against the floors their writers stand down at."""
+    info = getattr(getattr(af, "audio", None), "info", None)
+    try:
+        return float(getattr(info, "length", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _writing_floors(cfg):
+    """(key_bpm_seconds, fingerprint_seconds) — the track LENGTH below which
+    the passes that write those tags REFUSE to, read from the same sources
+    they read:
+
+      * Key & BPM's `audiometa_min_seconds` (mlo.audiometa.detect_key_bpm
+        answers "(None, None) ... too short for stable estimates"),
+      * `mlo.acoustid.MIN_DURATION`, under which the fingerprint pass refuses
+        the pair ("the fingerprint is noise", so nothing is written at all).
+
+    A check that demands a tag no pass could write is a permanent FAIL, not a
+    grade — the owner's 4.8 s interlude was reported for BOTH (2026-10-13).
+    """
+    try:
+        key = max(1, int(cfg.get("audiometa_min_seconds", 10) or 10))
+    except (TypeError, ValueError):
+        key = 10
+    from .acoustid import MIN_DURATION
+    return key, MIN_DURATION
+
+
 # The stream-MD5 answer, memoised for THIS process: one album grade asks once
 # per file, and the same album can be graded twice in a run (the album page and
 # the artist page). Keyed on the path AND the file's stamp AND the digest the
@@ -1967,6 +1999,10 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
     # parsed in the loop below — the CD format pass reads it from here
     # instead of re-opening every file.
     format_by_path = {}
+    # The length floors the analysis passes stand down at (see
+    # _writing_floors): once per album, from the settings and the passes' own
+    # constants.
+    key_bpm_floor, fingerprint_floor = _writing_floors(cfg)
 
     def add_issue(field, where="album"):
         issues.setdefault(field, set()).add(where)
@@ -2106,6 +2142,9 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
         # Required per-track tags (skip if per-filetype disabled).
         is_video_track = os.path.splitext(ap)[1].lower() in LIB_VIDEO_EXTS
         format_by_path[ap] = _audio_format_info(af)
+        # This track's own length, from the container the loop just parsed —
+        # the two analysis checks below compare it against their pass's floor.
+        track_seconds = _audio_seconds(af)
         # The app's rating store vs the file: a track the app holds a rating
         # for must carry it in RATING (0-100). Only a STORE ROW is a
         # requirement — a bare tag the app never adopted is not checked (see
@@ -2414,13 +2453,41 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                 track["issues"].append("COMMENT")
 
         if cfg.get("grade_check_key_bpm", True) and not is_video_track:
+            # A track SHORTER than the Key & BPM pass's own floor is not
+            # failed for a key the pass refuses to measure: script 12 stands
+            # down (mlo.audiometa.detect_key_bpm: "too short for stable
+            # estimates"), so the check stands down with it and says so in
+            # `notes` — the owner's 4.8 s interlude read "Missing INITIALKEY"
+            # for a tag nothing in the app would write (2026-10-13).
+            _short = 0.0 < track_seconds < key_bpm_floor
+            _unmeasured = []
             for t in ("INITIALKEY", "BPM"):
                 if not should_write_audio_tag(cfg, t, filepath=ap):
                     continue
-                total_checks += 1
                 val = af.get_tag(t)
                 track["values"][t] = val
-                if val is None or str(val).strip() == "":
+                v = str(val).strip() if val is not None else ""
+                missing = not v
+                # A tempo that is not a positive number is not a tempo — the
+                # pass folds into 70-180 and never writes 0 (the engine's
+                # "0.0" means "no pulse measured", see `_helper_key_bpm`), so
+                # a stored 0 or negative is a foreign or stale write the
+                # owner's interlude arrived carrying. It counts as
+                # UNMEASURED, so the length rule below exempts a track this
+                # short from it exactly as it exempts an absent tag (nothing
+                # could overwrite a 0 the pass will not measure either). A
+                # non-number is left to the existence rule.
+                bad_tempo = False
+                if t == "BPM" and v:
+                    try:
+                        bad_tempo = float(v) <= 0
+                    except ValueError:
+                        bad_tempo = False
+                if (missing or bad_tempo) and _short:
+                    _unmeasured.append(t)
+                    continue
+                total_checks += 1
+                if missing:
                     failed_checks += 1
                     add_issue(f"Missing {t}", basename)
                     track["issues"].append(t)
@@ -2431,7 +2498,6 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                 # output and fails so stale tags surface.
                 if t == "INITIALKEY":
                     notation = str(cfg.get("audiometa_key_notation", "musical")).lower()
-                    v = str(val).strip()
                     if notation == "camelot":
                         ok = re.fullmatch(r"\d{1,2}[AB]", v) is not None
                     elif notation == "openkey":
@@ -2446,6 +2512,20 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                         else:
                             add_issue(f"INITIALKEY '{v}' not {notation} notation", basename)
                         track["issues"].append(t)
+                if bad_tempo:
+                    failed_checks += 1
+                    add_issue(f"BPM '{v}' is not a tempo (run Key & BPM)",
+                              basename)
+                    track["issues"].append(t)
+            if _unmeasured:
+                # One line per track, naming the tags the pass will not write
+                # here and the number it stands down under, so an absent key
+                # on a skit reads as the rule it is instead of a defect.
+                notes.append(
+                    f"{basename}: no usable {'/'.join(_unmeasured)} — the track is "
+                    f"{track_seconds:.1f}s and Key & BPM (script 12) measures "
+                    f"only from {key_bpm_floor}s (audiometa_min_seconds), so "
+                    f"the check stands down with the pass")
 
         # Locale ALIASES (grade_check_alias_needed): a name written in a script
         # the configured locale does not read is one a reader there cannot
@@ -2524,25 +2604,38 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                     _a_id = str(_v or "").strip()
                 elif _name == "ACOUSTIDFINGERPRINT":
                     _a_fp = str(_v or "").strip()
-            total_checks += 1
-            if not (_a_id and _a_fp):
-                # The missing half is the one thing here no other check can
-                # fix, and the pass that writes it is a step of the chain —
-                # named the way the neighbours name their actions ("run Audit
-                # Library", "run organize"). The tag that is missing is still
-                # named, which is what a reader searches the tags for: a file
-                # carrying NEITHER half is missing both, and script 21 creates
-                # the pair from the file's own fingerprint.
-                if _a_id:
-                    _missing = ["ACOUSTID_FINGERPRINT"]
-                elif _a_fp:
-                    _missing = ["ACOUSTID_ID"]
-                else:
-                    _missing = ["ACOUSTID_ID", "ACOUSTID_FINGERPRINT"]
-                failed_checks += 1
-                add_issue("Missing " + " and ".join(_missing)
-                          + " (run Fix AcoustID pairs)", basename)
-                track["issues"].extend(_missing)
+            if not (_a_id and _a_fp) and 0.0 < track_seconds < fingerprint_floor:
+                # Below `mlo.acoustid.MIN_DURATION` a fingerprint is noise and
+                # script 21 refuses the pair outright ("too short to
+                # identify"), so the check stands down with the pass — said
+                # in `notes`, the way the AUDIT leg says what it could not
+                # check. Nothing is hidden and nothing is claimed.
+                notes.append(
+                    f"{basename}: no AcoustID pair — the track is "
+                    f"{track_seconds:.1f}s and a Chromaprint fingerprint needs "
+                    f"{fingerprint_floor:.0f}s, so Fix AcoustID pairs (script 21) "
+                    f"stands down on it")
+            else:
+                total_checks += 1
+                if not (_a_id and _a_fp):
+                    # The missing half is the one thing here no other check
+                    # can fix, and the pass that writes it is a step of the
+                    # chain — named the way the neighbours name their actions
+                    # ("run Audit Library", "run organize"). The tag that is
+                    # missing is still named, which is what a reader searches
+                    # the tags for: a file carrying NEITHER half is missing
+                    # both, and script 21 creates the pair from the file's
+                    # own fingerprint.
+                    if _a_id:
+                        _missing = ["ACOUSTID_FINGERPRINT"]
+                    elif _a_fp:
+                        _missing = ["ACOUSTID_ID"]
+                    else:
+                        _missing = ["ACOUSTID_ID", "ACOUSTID_FINGERPRINT"]
+                    failed_checks += 1
+                    add_issue("Missing " + " and ".join(_missing)
+                              + " (run Fix AcoustID pairs)", basename)
+                    track["issues"].extend(_missing)
 
         # File/folder names must match the naming script (the same script the
         # organizer applies), relative to the music folder — exact match for

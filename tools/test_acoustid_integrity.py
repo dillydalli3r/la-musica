@@ -435,15 +435,21 @@ if os.path.isdir(_DEPS):  # noqa: F821 (module-level _DEPS above)
                 break
 
 
-def make_mp3(path):
+def make_mp3(path, seconds=6):
     """A minimal valid MPEG-1 Layer III stream (test_mb_metadata's recipe —
-    no bundled mp3 encoder), with an ID3 tag block to write into."""
+    no bundled mp3 encoder), with an ID3 tag block to write into.
+
+    ``seconds`` long by default (6 s, the same as the FLAC fixture above):
+    the grader stands down with the analysis passes below their own floors
+    (R429), so a track a case GRADES has to be one the passes would measure.
+    Every frame is 1152 samples of MPEG-1 Layer III at 44.1 kHz."""
     import mutagen.mp3
 
     frame = bytes.fromhex("ff fb 10 00") + b"\x00" * 100
+    frames = max(1, int(round(float(seconds) / (1152.0 / 44100.0))))
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "wb") as fh:
-        fh.write(frame * 60)
+        fh.write(frame * frames)
     audio = mutagen.mp3.MP3(path)
     if audio.tags is None:
         audio.add_tags()

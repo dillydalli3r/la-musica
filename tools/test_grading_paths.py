@@ -47,14 +47,23 @@ def ok(cond, label):
     print(f"  ok: {label}")
 
 
-def make_flac(path):
+def make_flac(path, seconds=12.0):
+    """A silent FLAC ``seconds`` long (12 s by default).
+
+    It used to be a TENTH of a second, which was fine until the grader learned
+    to stand down where the analysis passes do (R429): a 0.1 s track is below
+    BOTH floors (10 s for Key & BPM, 5 s for a Chromaprint fingerprint), so
+    every case here that grades those tags needs a file the passes would
+    actually measure. The cases ABOUT the stand-down ask for a short one.
+    """
     assert FLAC_EXE, "flac.exe not found under .dependencies"
+    frames = int(44100 * max(0.1, float(seconds)))
     wav = path + ".wav"
     with wave.open(wav, "w") as w:
         w.setnchannels(2)
         w.setsampwidth(2)
         w.setframerate(44100)
-        w.writeframes(b"\x00\x00\x00\x00" * 4410)
+        w.writeframes(b"\x00\x00\x00\x00" * frames)
     subprocess.run([FLAC_EXE, "-s", "-f", "-8", "-o", path, wav],
                    check=True, capture_output=True)
     os.remove(wav)
@@ -372,6 +381,61 @@ res = _grade_album(album, "EMBEDDED", cfg)
 tr = res["tracks"][0]
 ok("INITIALKEY" in tr["issues"], "missing INITIALKEY fails")
 ok("PATH" not in tr["issues"], "naming still passes")
+
+# ... but ONLY on a track the pass would measure. Below the passes' own
+# floors the two analysis checks stand down with them and say so in `notes`
+# instead of failing the album for a tag nothing in the app would write — the
+# owner's 4.85 s interlude read "Missing INITIALKEY" AND "Missing ACOUSTID_ID
+# and ACOUSTID_FINGERPRINT" for exactly this reason (2026-10-13, R429). Its
+# own album, so the 12 s fixtures the rest of this file grades stay 12 s.
+short_flac = album_path(os.path.join(music, "Artists"),
+                        dict(BASE_TAGS, ALBUM="Short Album", RELEASETYPE="Album"))
+short_album = os.path.dirname(short_flac)
+os.makedirs(short_album, exist_ok=True)
+make_flac(short_flac, seconds=3.0)
+set_tags(short_flac, dict(BASE_TAGS, ALBUM="Short Album"))
+a_cfg = dict(cfg, grade_check_acoustid=True, acoustid_enabled=True)
+res = _grade_album(short_album, "EMBEDDED", a_cfg)
+tr = res["tracks"][0]
+ok("PATH" not in tr["issues"], "the short album is where the script says it is")
+ok("INITIALKEY" not in tr["issues"] and "BPM" not in tr["issues"],
+   "a 3 s track is not failed for a key or a tempo nothing measured")
+ok(not [i for i in res["issues"] if "INITIALKEY" in i or "Missing BPM" in i],
+   f"…and the album fails nothing for them ({res['issues']})")
+ok(any("no usable INITIALKEY/BPM" in n and "Key & BPM" in n for n in res["notes"]),
+   f"the stand-down is SAID, with the floor ({res['notes']})")
+ok("ACOUSTID_ID" not in tr["issues"] and "ACOUSTID_FINGERPRINT" not in tr["issues"],
+   "and a 3 s track is not failed for a pair fpcalc refuses")
+ok(not [i for i in res["issues"] if "AcoustID" in i],
+   f"…nor does the album ({res['issues']})")
+ok(any("no AcoustID pair" in n and "needs 5s" in n for n in res["notes"]),
+   f"the fingerprint floor is SAID too ({res['notes']})")
+# The floors are the PASSES' own numbers: lower Key & BPM's under the file's
+# length and the very same track is graded again — the stand-down is a length
+# rule, not a blanket exemption (the 12 s cases above are the other control).
+res_hi = _grade_album(short_album, "EMBEDDED",
+                      dict(a_cfg, audiometa_min_seconds=1))
+
+# A 0 tempo is not a tempo, and the existence test used to bless it: the
+# pass never writes one (the engine answers 0.0 for "no pulse measured"), so
+# a stored 0 is a foreign or stale write script 12 overwrites — and on a
+# track the pass CAN measure, the check names it rather than passing it.
+set_tags(short_flac, dict(BASE_TAGS, ALBUM="Short Album", BPM="0"))
+_same = _grade_album(short_album, "EMBEDDED", a_cfg)
+ok(not [i for i in _same["issues"] if "BPM" in i],
+   f"…and on a track this short a stored 0 is a stand-down too, not a FAIL "
+   f"({_same['issues']})")
+_zero = _grade_album(short_album, "EMBEDDED", dict(a_cfg, audiometa_min_seconds=1))
+ok("BPM '0' is not a tempo (run Key & BPM)" in _zero["issues"]
+   and "BPM" in _zero["tracks"][0]["issues"],
+   f"BPM=0 fails as not-a-tempo ({_zero['issues']})")
+set_tags(short_flac, dict(BASE_TAGS, ALBUM="Short Album", BPM="161"))
+_pos = _grade_album(short_album, "EMBEDDED", dict(a_cfg, audiometa_min_seconds=1))
+ok(not [i for i in _pos["issues"] if "BPM" in i],
+   "a positive BPM passes however it was measured")
+
+ok("INITIALKEY" in res_hi["tracks"][0]["issues"],
+   "a 1 s floor measures this track, and the missing tag fails again")
 
 # wrong folder -> PATH issue with expected path
 wrong_dir = os.path.join(music, "Wrong Place", "Album (2020)")

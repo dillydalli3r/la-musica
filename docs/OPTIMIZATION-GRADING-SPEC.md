@@ -550,14 +550,14 @@ group still renders (section *Other checks*).
 | `grade_check_genre_vocab` | Genre vocabulary | ON | every name is one MusicBrainz publishes (`GENRE_VOCAB`); grading never rewrites the tag |
 | `grade_check_web_rating` | Web rating present + in shape | ON | `WEBRATING` exists on every audio track (`WEBRATING_MISSING`) **and is a whole number 0-100** in its one spelling (`WEBRATING_FORMAT`; `ALBUMWEBRATING_FORMAT` when a file carries the album twin, judged only while it is there) — the public verdict script 24 gathers, required per track like the genre beside it. A source's own scale pasted in raw ("4.54") fails and names script 24; a stray decimal point ("91.0") is the same rating spelled differently and script 10/23 rewrite it (R358e). The check **stands down** with `web_ratings_enabled` off (nothing gathers a rating, so nothing is failed for its absence) and never applies to a music-video container, which carries no `WEBRATING` tag |
 | `grade_check_replaygain` | ReplayGain tags present | ON | opt-in per file: any `REPLAYGAIN_*` tag means all four must exist |
-| `grade_check_acoustid` | AcoustID tags required | ON | every audio track carries the `ACOUSTID_ID` + `ACOUSTID_FINGERPRINT` pair — neither half stored fails naming both, a half pair fails naming the missing one (`ACOUSTID_ID` / `ACOUSTID_FINGERPRINT`). `acoustid_api_key` is NOT needed (script 21 takes the fingerprint locally with fpcalc and reads the recording id off the file); the check stands down while `acoustid_enabled` is off, since then script 21 does nothing |
+| `grade_check_acoustid` | AcoustID tags required | ON | every audio track carries the `ACOUSTID_ID` + `ACOUSTID_FINGERPRINT` pair — neither half stored fails naming both, a half pair fails naming the missing one (`ACOUSTID_ID` / `ACOUSTID_FINGERPRINT`). `acoustid_api_key` is NOT needed (script 21 takes the fingerprint locally with fpcalc and reads the recording id off the file); the check stands down while `acoustid_enabled` is off, since then script 21 does nothing — and on a track shorter than `mlo.acoustid.MIN_DURATION` (5 s), where no fingerprint can be taken, so the album's `notes` carry the reason instead of a failure (R429) |
 | `grade_check_alias_needed` | Locale alias for names the locale cannot read | ON | a `TITLE` / `ARTIST` / `ALBUM` written in a script the configured `locale` does not read needs its alias tag — `TITLEALIAS` / `ARTISTALIAS` / `ALBUMALIAS`, in a spelling the app writes (`mlo.audio.alias_spelling_ok`: the bare tag, or the configured locale's own suffix). The rule is `server.integrations.alias_required` (the SAME answer the writers, the import's stamp and script 8's prescan ask), built on `mlo.lyrics_xlit`'s script reading (`non_latin_ratio` ≥ `_LATIN_THRESHOLD` and `dominant_script` ≠ latin) plus the locale's own script, so a Latin name — and a name in the locale's own script — is never graded or counted |
 | `grade_check_alias_excess` | Locale alias only where needed | ON | an alias tag NOTHING needs fails: a name the configured locale already reads carrying one (`Radiohead` with an `ARTISTALIAS`), a spelling for a locale the app does not write (`TITLEALIAS-JA` in an `en` library), a second spelling of the same alias, or a value that is the name itself (`X (X)`). Predicate `mlo.grader.alias_keys_excess` — the same one Format all (10) and Optimize tags (23) delete by |
 | `grade_check_encoder` | Encoder identity | ON | the `ENCODER_*` markers switched on in `encoder_tags` are present (covers included while `reencode_images` is on) |
 | `grade_check_naming` | Naming script match | ON | the full relative path equals the evaluated `naming_script`; full and 8-char MBIDs both accepted (`PATH`) |
 | `grade_check_filename_case` | Path capitalization | ON | letter case matches the script exactly (`PATH_CASE`) |
 | `grade_check_ext_case` | Lowercase extensions | ON | no `.FLAC`-style extension in the folder |
-| `grade_check_key_bpm` | Key & BPM | ON | `INITIALKEY` (in `audiometa_key_notation`) and `BPM` exist |
+| `grade_check_key_bpm` | Key & BPM | ON | `INITIALKEY` (in `audiometa_key_notation`) and `BPM` exist **as a positive number** (a stored `0` is not a tempo, `BPM`), and a track shorter than `audiometa_min_seconds` is NOT graded for them — script 12 stands down there, and the check says so in the album's `notes` (R429) |
 | `grade_check_excess_tags` | Excess tags | ON | no tag outside `mlo.grader.TAG_ALLOWLIST` (`TAGS`), and no VALUE in the one allow-listed name nothing here ever writes — a non-empty `COMMENT` fails with its own code (`COMMENT`, value rule `mlo.grader.tag_value_excess`); gated as well on `strip_unknown_tags`, which the strip passes (3, 10, 23) follow |
 | `grade_check_media` | Media type | ON | `MEDIA` exists, is in `KNOWN_MEDIA`, and is uniform across the album (`MEDIA`) |
 | `grade_check_source` | Source tag | ON | `MEDIA=digital media` requires a non-empty, uniform `SOURCE`; any other medium must NOT carry one (`SOURCE`) |
@@ -648,6 +648,9 @@ ad-hoc key; the writer reports what it could not place.
 set always is. **AcoustID is required**, key or no key: every audio track carries the
 `ACOUSTID_ID` + `ACOUSTID_FINGERPRINT` pair (`grade_check_acoustid`), neither half stored
 fails naming both, and script 21 creates the pair locally — the API key gates lookups only.
+On a track shorter than `mlo.acoustid.MIN_DURATION` (5 s) no fingerprint can be taken at
+all, so the check stands down there and the album carries the reason in its `notes`
+(R429).
 **R16a — an alias tag exists only where the locale cannot read the name**
 (`grade_check_alias_needed`). One rule, asked by everything: `server.integrations.alias_required`
 — a name needs its alias when it is written in a script the configured `locale` (`locale`,
@@ -8715,6 +8718,55 @@ when the log itself says something is wrong.** Pinned in
     failed / skipped counts in a toast) instead of the strip simply
     disappearing. Pinned in `tools/check_import_minimum.mjs` and
     `tools/test_script_menus.py`.
+
+---
+
+- **R429 — a check never demands a tag its writer stands down on.** Two
+  analysis passes refuse work on a track that is too short, and grading used
+  to fail the album for the tags they left absent. MEASURED on the owner's
+  *Humanz* import, 2026-10-13: `1-09 Interlude: Elevator Going Up` is 4.85 s
+  and was reported as "Missing INITIALKEY" **and** "Missing ACOUSTID_ID and
+  ACOUSTID_FINGERPRINT" — the two lines the owner read as the app failing on
+  "really specific / weird stuff" after an otherwise fine import. Both
+  floors are real and correct: `mlo.acoustid.fingerprint` refuses under
+  `MIN_DURATION` (5 s — "the fingerprint is noise"), and script 12 answers
+  `(None, None)` under `audiometa_min_seconds` (10 s by default — "too short
+  for stable estimates"). So the CHECKS stood down instead, on the writers'
+  own numbers, read from the same sources (`mlo.grader._writing_floors`):
+
+  * a track shorter than `audiometa_min_seconds` is not counted or failed for
+    a missing `INITIALKEY` / `BPM`, and a track shorter than 5 s is not
+    counted or failed for a missing pair — each says so in the album's
+    `notes` ("the track is 4.9s and Key & BPM measures only from 10s
+    (audiometa_min_seconds), so the check stands down with the pass"), the
+    channel that already exists for "what was NOT checked";
+  * the length is the container's own header (`_audio_seconds`, no decode),
+    so a shortened `audiometa_min_seconds` immediately puts such a track back
+    under grading — the exemption is a length rule, never a blanket one;
+  * `BPM` is graded as a NUMBER: a stored `0` (or a negative) is not a tempo
+    and fails with `BPM` naming it — the owner's interlude arrived carrying
+    `BPM=0`, which the bare existence test blessed as a measured tempo. An
+    unmeasured tempo is subject to the same length rule as an absent tag, so
+    on a track the pass will not measure a stored 0 stands down too (nothing
+    could overwrite it). The pass can no longer write one either
+    (`_helper_key_bpm` takes only a finite, positive answer: the engine
+    prints `0.0` for "no pulse measured"), so a 0 is always a foreign or
+    stale write, and on a track long enough to measure, script 12 overwrites
+    it.
+
+  The residual is stated: the grader measures the CONTAINER's length while
+  the passes measure the DECODED audio (trimmed, for Key & BPM), so a file
+  whose header is just over a floor while its audio is just under is still
+  reported — the pass's own log names that reason ("too short to identify
+  (4.8s, the fingerprint needs 5s)"), and the fix is the pass's, not a
+  grading exemption a decode would be needed to decide.
+
+  Pinned in `tools/test_grading_paths.py` (a 3 s album stands down with both
+  notes, the same track fails again under `audiometa_min_seconds=1`, `BPM=0`
+  fails and a positive one passes, and the 12 s fixtures keep failing as
+  before) and `tools/test_audio_analysis.py` (`_helper_key_bpm` on stubbed
+  engine answers: 0.0 and NaN are no measurement, a real answer passes, a
+  track under the floor is not measured).
 
 ---
 
