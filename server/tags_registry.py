@@ -606,6 +606,7 @@ CHECK_LABELS = {
     "grade_check_disallowed": "Disallowed file types",
     "grade_check_extra_images": "Stray images",
     "grade_check_empty_folders": "Empty folders",
+    "grade_check_leftovers": "Album leftovers",
     "grade_check_expected_tracks": "Whole release present",
     "grade_check_album_description": "Album description stored",
     "grade_check_raw_video": "Raw videos",

@@ -30,6 +30,10 @@ const CODE_WORDS: Record<string, string> = {
   // or the album holds only part of it.
   EXPECTED_TRACKS_MISSING: "no recorded release tracklist",
   EXPECTED_TRACKS_INCOMPLETE: "missing tracks of the release",
+  // A folder that is not an album but holds an album's files: the rip sheets,
+  // cover, manifest or import marker of an album that moved or was removed.
+  // Script 20 moves them to the Trash.
+  LEFT_OVER_FILES: "album leftovers (script 20 moves them to the Trash)",
   // The one code whose bare form says what is missing and not what to do about
   // it ("acoustid id"). A half pair is completed by a step this app already
   // has, named the way the grader's own messages name their actions ("run

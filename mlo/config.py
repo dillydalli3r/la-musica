@@ -713,6 +713,14 @@ DEFAULT_CONFIG = {
     # invisible to grading (the "no audio files" skip) — a half-finished
     # import or a stale folder would never show up as a problem.
     "grade_check_empty_folders": True,
+    # A folder that is NOT an album (an artist folder, a container) holding an
+    # album's own files — the rip's .cue/.log/.accurip, a cover, a
+    # .mb_expected, a stranded .mlo_importing.json, a numbered copy of a
+    # description — counts against grading as a LEFT_OVER_FILES failure, and
+    # script 20 moves each of those files to the Trash (mlo.leftovers is the
+    # one predicate both ask). They describe an album that is not there: it
+    # moved, was renamed or was removed and its sidecars stayed behind.
+    "grade_check_leftovers": True,
     # Every album must carry the MusicBrainz release's own tracklist
     # (.mb_expected, written by the import and by script 15). Files on
     # disk only describe themselves, so without the manifest a partially

@@ -57,6 +57,20 @@ Grade script (4) over an album and reading the report.
   anywhere beneath it (including one that holds only a `cover.*`, `.cue`, `.log`,
   `.lrc` or `.accurip`) is reported as `EMPTY_FOLDER` with one failed check, so
   an album whose audio is gone cannot hide from the counts.
+- **R6a — album leftovers outside any album are graded, and swept.** A folder
+  that is NOT an album — an artist folder, a container — holding an album's own
+  files (the rip's `.cue`/`.log`/`.accurip`/`.lrc`, a `cover.*`, a
+  `.mb_expected`, a stranded `.mlo_importing.json`, a numbered copy of a
+  description) reports `LEFT_OVER_FILES` with one failed check and a note naming
+  the files, so it cannot read as a tidy artist folder. The files belong to an
+  album that moved, was renamed or was removed; the one predicate is
+  `mlo.leftovers`, and script 20 moves every one of them to the Trash (the same
+  bin and origin manifest the removal routes use, so each can be put back). The
+  same predicate runs at the end of an import — an import is where such a
+  stranded set comes from — and it refuses a folder carrying a LIVE import
+  marker (another album of that artist may be mid-import there) as well as an
+  album folder holding its own sidecars (a multi-disc album's sheets beside
+  `CD1`/`CD2` are exactly that). Switch: `grade_check_leftovers`.
 - **R7 — artist folders have their own grade.** `grade_artist()` evaluates
   `grade_check_artist_image` and `grade_check_artist_description`, and fails an
   artist folder that holds NO album folder at all (`ARTIST_EMPTY`): a folder
@@ -167,7 +181,7 @@ An issue is `{code, label, where, reason}` for album-level and artist problems
 | `CD_FORMAT` | a CD track is not 16-bit/44.1 kHz FLAC |
 | `LOG_CHECKSUM` | the rip log's EAC SHA256 does not verify |
 | `AUDIT` | the audit tag is missing or not REAL (with `grade_check_audit` on) |
-| `EMPTY_FOLDER`, `EXPECTED_TRACKS_MISSING`, `EXPECTED_TRACKS_INCOMPLETE` | folder/release-level failures (`INCOMPLETE`: the album holds part of its recorded tracklist) |
+| `EMPTY_FOLDER`, `LEFT_OVER_FILES`, `EXPECTED_TRACKS_MISSING`, `EXPECTED_TRACKS_INCOMPLETE` | folder/release-level failures (`INCOMPLETE`: the album holds part of its recorded tracklist; `LEFT_OVER_FILES`: a folder that is not an album holds an album's files — script 20 moves them to the Trash) |
 | `ARTIST_IMAGE_MISSING`, `ARTIST_IMAGE_CORRUPT`, `ARTIST_IMAGE_FORMAT`, `ARTIST_IMAGE_OVERSIZED`, `ARTIST_IMAGE_ASPECT`, `ARTIST_IMAGE_UPSCALED`, `ARTIST_DESCRIPTION_MISSING`, `ARTIST_FOLDER_MISSING`, `ARTIST_EMPTY` | artist-folder failures (script 19 clears the image ones). `ARTIST_EMPTY` is an artist folder holding NO album folder — only the artist's own image/description: the artist is not in the library, so the folder is not a graded artist. Script 20 reports it and the Optimization page can remove it to the Trash |
 | `ARTIST_IMAGE_UNDERSIZED` | informational note on an artist image below `artist_image_target_size` — reported, never failing |
 
@@ -515,6 +529,7 @@ group still renders (section *Other checks*).
 | `grade_check_disallowed` | Disallowed file types | ON | no file whose category is switched off in `grade_include_*` |
 | `grade_check_extra_images` | Stray images | ON | no image that is neither `cover.*` nor a per-track sidecar |
 | `grade_check_empty_folders` | Empty folders | ON | no audio-less folder (`EMPTY_FOLDER`) |
+| `grade_check_leftovers` | Album leftovers | ON | no album's file stranded in a folder that is not an album (`LEFT_OVER_FILES`; script 20 and every finished import sweep them to the Trash) |
 | `grade_check_expected_tracks` | Whole release present | ON | an album carrying a MusicBrainz release id has a non-empty `.mb_expected` (`EXPECTED_TRACKS_MISSING`), **and** every row of a manifest the album does carry is on disk (`EXPECTED_TRACKS_INCOMPLETE` — 14 of a CD's 15 tracks fails) |
 | `grade_check_album_description` | Album description stored | ON | `<album>/description.txt` exists and is non-blank |
 | `grade_check_raw_video` | Raw videos | ON | no un-remuxed video container (`.vob`/`.avi`/`.wmv`/`.ts`…) |
@@ -7747,7 +7762,7 @@ checks see or how they judge it.
 
 | Key | Default | Effect on grading |
 | --- | --- | --- |
-| `grade_check_*` (59 keys) | all ON | switch one check on/off — every one ships on, including `grade_check_audit` (`mlo/config.py::STRICT_DEFAULT_KEYS`) |
+| `grade_check_*` (64 keys) | all ON | switch one check on/off — every one ships on, including `grade_check_audit` (`mlo/config.py::STRICT_DEFAULT_KEYS`) |
 | `grade_include_music`, `grade_include_cover`, `grade_include_description`, `grade_include_cue`, `grade_include_log`, `grade_include_lrc`, `grade_include_accurip`, `grade_include_video` | ON | a file category participates; off means its files are also "disallowed" for `grade_check_disallowed` |
 | `grade_include_other` | ON | unclassified files participate |
 | `grade_log_score_threshold` | 100 | minimum `LOG_GRADE` for `grade_check_log_grade` (0 disables the threshold) |

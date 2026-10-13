@@ -646,6 +646,14 @@ def get_sidecar_cover_path(album_dir, track_filename):
     return None
 
 
+# The album's own cover slot: the ONE list of names that IS the cover (the
+# grader, script 10's embed pass and the leftovers predicate all read it here,
+# so "which file is the cover" cannot drift between them). The front/folder
+# aliases script 2 also accepts (mlo.images) are deliberately not in it: they
+# are renamed TO a name below, not treated as one.
+ALBUM_COVER_NAMES = {"cover.jpg", "cover.jpeg", "cover.png", "cover.jxl"}
+
+
 def is_sidecar_cover_file(album_dir, filename, all_track_basenames=None):
     """Whether *filename* in *album_dir* is a sidecar track cover.
 
@@ -655,7 +663,7 @@ def is_sidecar_cover_file(album_dir, filename, all_track_basenames=None):
     standard cover.* files are *not* considered sidecars.
     """
     low = filename.lower()
-    if low in ("cover.jpg", "cover.jpeg", "cover.png", "cover.jxl"):
+    if low in ALBUM_COVER_NAMES:
         return False
     base, ext = os.path.splitext(filename)
     if ext.lower() not in SIDECAR_COVER_EXTS:

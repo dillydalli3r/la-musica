@@ -44,6 +44,7 @@ import tempfile
 import time
 
 from . import stats as mlo_stats
+from .leftovers import leftover_names
 from .discs import is_disc_dir
 from .paths import (IMAGE_EXTS, SKIP_DIRS, album_sidecar_of, app_data_dir,
                     library_root, mlo_root, move_path, trash_path)
@@ -86,6 +87,8 @@ _UNFIXABLE = {
     "stray_in_artists": "no longer a stray — it is audio, artwork or a sidecar "
                         "now",
     "legacy_state_file": "no longer the app's own leftover — left where it is",
+    "leftover_file": "no longer an album leftover — an album is there now, or "
+                     "the file was renamed away",
 }
 
 
@@ -683,7 +686,15 @@ def scan_library(cfg=None, stats=None):
         # one set per artist is the same dedupe a whole-library set did.
         case_seen = set()
         # ---- 3. <music>/Artists/<Artist> ----------------------------------
-        for an in entries(p, sink):
+        # The artist folder is listed ONCE: its loose files are judged by the
+        # leftover predicate below, which has to know whether the folder holds
+        # audio of its own (an album, not an artist folder).
+        artist_entries = entries(p, sink)
+        # The leftovers of THIS artist folder, by the one predicate (which
+        # answers nothing while an import is running in it, and nothing at all
+        # when the folder is an album of its own).
+        artist_leftovers = set(leftover_names(p, artist_entries))
+        for an in artist_entries:
             ap = os.path.join(p, an)
             if not os.path.isdir(ap):
                 opened(sink)
@@ -697,7 +708,22 @@ def scan_library(cfg=None, stats=None):
                     closed(sink, reported=True)
                 # Any other file in an artist folder is the artist's own
                 # content (artist.jpg / artist.png / description.txt written
-                # by mlo.artistdata) — expected, so nothing to report.
+                # by mlo.artistdata) — expected, so nothing to report. What is
+                # NOT the artist's own is an album's file stranded one level
+                # above the album: the rip's sheets, its cover, the release
+                # manifest, the import marker, a numbered copy of a
+                # description — the leftovers of an album that moved, was
+                # renamed or was removed (mlo.leftovers is the one predicate,
+                # and the grade's LEFT_OVER_FILES names the same files).
+                elif an in artist_leftovers:
+                    rows.append(_issue(
+                        "leftover_file", ap, folder,
+                        "album leftover in artist folder \u201c%s\u201d: \u201c%s\u201d "
+                        "belongs inside an album folder" % (name, an),
+                        "script 20 moves it to the Trash, which can put it back "
+                        "\u2014 its album is not here any more",
+                        fix={"action": "trash"}))
+                    closed(sink, reported=True)
                 else:
                     closed(sink, skipped=True)
                 continue
@@ -1190,6 +1216,7 @@ _TRASH_WORDS = {
     "stray_file": "the stray file",
     "stray_in_artists": "the stray file",
     "legacy_state_file": "the leftover state file",
+    "leftover_file": "the album leftover",
 }
 
 
@@ -1214,7 +1241,7 @@ def _may_trash(src, kind, lib, folder):
     if base in _ROOT_ALLOWED or _within(src, mlo_root(folder)):
         return False, "it is the app's own state folder"
     under_lib = {"stray_file", "stray_in_artists", "empty_album",
-                 "unexpected_subfolder", "empty_artist"}
+                 "unexpected_subfolder", "empty_artist", "leftover_file"}
     if kind in under_lib and not (lib and _within(src, lib)):
         return False, "it is outside the library"
     if kind in ("unexpected_folder", "legacy_state_file"):
@@ -1244,6 +1271,23 @@ def _may_trash(src, kind, lib, folder):
             return False, ("it is no longer an artist folder without albums "
                            "\u2014 it holds an album or audio now")
         return _removable_folder(src)
+    if kind == "leftover_file":
+        # An album's file stranded in a folder that is not an album. Asked
+        # again of the folder itself: an album may have been put there since
+        # the scan (then the file is THAT album's), the name may have been
+        # renamed away from the leftovers, and a live import marker is nobody's
+        # debris — the ONE predicate the scan used answers all three
+        # (mlo.leftovers owns the grace for an import marker).
+        if os.path.isdir(src):
+            return False, "it is a folder now"
+        parent = os.path.dirname(os.path.normpath(src))
+        try:
+            entries = os.listdir(parent)
+        except OSError:
+            return False, "its folder cannot be read"
+        if base not in leftover_names(parent, entries):
+            return False, "it is no longer an album leftover"
+        return True, ""
     # A stray: the file the scan reported as neither audio, artwork nor a
     # known sidecar — the row's own detail line, checked again.
     if os.path.isdir(src):

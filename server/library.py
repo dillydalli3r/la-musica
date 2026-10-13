@@ -10,7 +10,8 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 
 from mlo.stats import _find_albums, worker_count, WALK_FILES
-from mlo.grader import (_empty_folder_result, _find_empty_folders, _grade_album,
+from mlo.grader import (_empty_folder_result, _find_empty_folders,
+                        _find_leftover_folders, _grade_album, _leftover_folder_result,
                         grade_artist, printed_pct)
 from mlo.audio import AudioFile
 from mlo.artistdata import has_image, strip_mbid_suffix
@@ -534,6 +535,21 @@ def _empty_album_row(folder, root):
     return row
 
 
+def _leftover_album_row(folder, root, names):
+    """Library row for a folder holding an album's leftovers (LEFT_OVER_FILES).
+
+    The Grade script's row (mlo.grader._leftover_folder_result) in the shape
+    this payload uses — see :func:`_empty_album_row`, which this shares its
+    shape with. *names* are the leftover files the grade's own note lists.
+    """
+    row = _leftover_folder_result(folder, root, names)
+    row["path"] = row["path"].replace("\\", "/")
+    row["grade_pct"] = 0.0
+    row["pass"] = False
+    row["audit_summary"] = None
+    return row
+
+
 def framework_dirs(dir_scan):
     """The FRAMEWORK folders in a library walk's own directory scan.
 
@@ -976,6 +992,15 @@ def _library_builder(folder, cfg):
             for d in _find_empty_folders(folder, dir_scan):
                 artists.setdefault(os.path.dirname(d), [])
                 empty_rows.setdefault(os.path.dirname(d), []).append(d)
+        # Folders that are not albums but hold an album's own files: the same
+        # walk's album list answers which folders ARE albums (a multi-disc
+        # folder's sheets beside CD1/CD2 belong to it), and the grade's own
+        # predicate (mlo.leftovers) names the files.
+        leftover_rows = {}
+        if cfg.get("grade_check_leftovers", True):
+            for d, names in _find_leftover_folders(folder, dir_scan, albums):
+                artists.setdefault(os.path.dirname(d), [])
+                leftover_rows.setdefault(os.path.dirname(d), []).append((d, names))
 
         # Framework albums: folders holding the release manifest, the
         # placeholder cover and a pending marker but no audio at all, so the
@@ -1003,6 +1028,8 @@ def _library_builder(folder, cfg):
                                for d in pending_rows.get(artist_dir, []))
             albums_data.extend(_empty_album_row(d, folder)
                                for d in empty_rows.get(artist_dir, []))
+            albums_data.extend(_leftover_album_row(d, folder, names)
+                               for d, names in leftover_rows.get(artist_dir, []))
             albums_data.sort(key=lambda a: str(a.get("path", "")).lower())
             agg = _aggregate_albums(albums_data)
             try:

@@ -28,6 +28,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .accurip import _canonical_accurip_text
+from .paths import ALBUM_COVER_NAMES
 from .atomic import replace_locked
 from .audio import AudioFile
 from .autotag import genre_count, trim_genres
@@ -45,7 +46,7 @@ from .ui import print_header, log, c, Color
 # front/folder aliases script 2 treats as the album cover (mlo.images):
 # with rename_to_cover off the art is called "folder.jpg", and the embed
 # pass found nothing while the album was graded with a cover.
-_COVER_NAMES = {"cover.jpg", "cover.jpeg", "cover.png", "cover.jxl"}
+_COVER_NAMES = ALBUM_COVER_NAMES
 _COVER_STEMS = ("cover", "front", "folder")
 
 

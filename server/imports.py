@@ -695,6 +695,50 @@ def _mark_importing(path):
     _invalidate_caches(path)
 
 
+def sweep_leftovers(album_path, cfg=None, log=None):
+    """Move the album folder's PARENT's album leftovers to the Trash.
+
+    An import is where a stranded album's files come from: a rip lands in the
+    artist folder (an album rooted one level too high), the album then moves to
+    its own folder — or is removed — and its sheets, cover, manifest and import
+    marker stay behind, describing an album that is no longer there (the
+    owner's report, 2026-10-13).
+
+    The PARENT is swept, never the album's own folder: a rip's own
+    .cue/.log/.accarip/cover are exactly what belongs in an album folder, and a
+    disc-structure album whose sheets sit beside CD1/CD2 holds no audio
+    DIRECTLY — sweeping the album itself would move its own files. The one
+    predicate is ``mlo.leftovers``, which also refuses a folder carrying a LIVE
+    import marker (another album of the same artist may be mid-import there) and
+    a file whose album is the folder's own audio. Gated by
+    ``grade_check_leftovers``, the same key the grade and script 20 read.
+    """
+    if not album_path:
+        return []
+    try:
+        cfg = cfg or load_config()
+        if not cfg.get("grade_check_leftovers", True):
+            return []
+        parent = os.path.dirname(os.path.normpath(album_path))
+        if not parent or not os.path.isdir(parent):
+            return []
+        from mlo import leftovers
+        if leftovers.import_running(parent):
+            # An import is working IN that folder right now (this very album
+            # may be rooted there): its files are not debris.
+            return []
+        moved = leftovers.sweep(parent, music_folder=cfg.get("music_folder") or "",
+                                log=log)
+        if moved and log is not None:
+            log("  moved %d album leftover(s) out of %s to the Trash: %s"
+                % (len(moved), parent, ", ".join(moved)))
+        return moved
+    except Exception:
+        # Tidy-up is never a reason for an import to report a failure.
+        traceback.print_exc()
+        return []
+
+
 def _clear_importing(path):
     """Drop the disk mid-import marker — never fatal.
 
@@ -909,6 +953,12 @@ def finish_album(album_dir, cfg=None, progress=None, force=None, release=None,
             # the next start's sweep, which clears a marker no session backs.
             _clear_importing(path)
             _clear_importing((out or {}).get("path") if isinstance(out, dict) else None)
+            # ...and tidy the folder the album lives in: a previous import's
+            # leftovers in the artist folder are nobody's once this one has
+            # finished the album under it (`mlo.leftovers` decides which files
+            # those are, and script 20 is the same predicate when it runs).
+            landed = (out or {}).get("path") if isinstance(out, dict) else None
+            sweep_leftovers(landed or path, cfg=cfg)
         return out
 
 

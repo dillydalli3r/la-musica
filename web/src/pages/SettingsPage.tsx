@@ -1375,6 +1375,7 @@ export default function SettingsPage() {
     { k: "grade_check_disallowed", label: "Disallowed files", type: "bool" },
     { k: "grade_check_extra_images", label: "Extra artwork (images not tied to a track)", type: "bool" },
     { k: "grade_check_empty_folders", label: "Empty folders (no files anywhere beneath them)", type: "bool" },
+    { k: "grade_check_leftovers", label: "Album leftovers outside any album (script 20 moves them to the Trash)", type: "bool" },
     { k: "grade_check_naming", label: "Naming script paths", type: "bool" },
     { k: "grade_check_filename_case", label: "Filename capitalization (exact case)", type: "bool" },
     { k: "grade_check_ext_case", label: "Lowercase file extensions", type: "bool" },

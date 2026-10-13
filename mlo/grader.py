@@ -51,7 +51,7 @@ from .cue import canonical_cue_text
 from .naming import (DEFAULT_NAMING_SCRIPT, UNKNOWN_RELEASE_TYPE,
                      cue_ref_names, lookup_style_release_type,
                      mb_style_release_type, name_key)
-from .paths import (ALBUM_SIDECAR_NAMES, AUDIO_EXTS, IMAGE_EXTS,
+from .paths import (ALBUM_COVER_NAMES, ALBUM_SIDECAR_NAMES, AUDIO_EXTS, IMAGE_EXTS,
                     LIB_AUDIO_EXTS, LIB_VIDEO_EXTS, get_track_cover,
                     library_root, load_expected_tracks, load_importing,
                     load_pending, load_track_covers)
@@ -638,7 +638,7 @@ def _tag_value(af, name):
     return val
 
 
-COVER_NAMES = {"cover.jpg", "cover.jpeg", "cover.png", "cover.jxl"}
+COVER_NAMES = ALBUM_COVER_NAMES  # mlo.paths: the one cover-slot list
 
 # Enhanced LRC word-level timestamps: <mm:ss.xx> or <mm:ss.xxx>
 # Mirrors WORD_TS_RE in lyrics.py
@@ -5358,6 +5358,16 @@ EXPECTED_TRACKS_MISSING = "EXPECTED_TRACKS_MISSING"
 # charges for it.
 EXPECTED_TRACKS_INCOMPLETE = "EXPECTED_TRACKS_INCOMPLETE"
 
+# Issue code for a folder that is NOT an album but holds an album's files —
+# the rip's sheets, its cover, a release manifest, an import marker: the
+# leftovers of an album that moved, was renamed or was removed (the owner's
+# report, 2026-10-13: an artist folder holding a gone album's CD-1.cue/.log/
+# .accurip, cover.jpg, description (2).txt, .mb_expected and
+# .mlo_importing.json, with nothing in the app saying a word about any of it).
+# The predicate is mlo.leftovers'; script 20 moves each of them to the Trash
+# and this row is what makes the folder count against grading.
+LEFT_OVER_FILES = "LEFT_OVER_FILES"
+
 
 def _find_empty_folders(root, dirs_out):
     """Directories under *root* that hold no audio track anywhere beneath them.
@@ -5476,6 +5486,56 @@ def _empty_folder_result(folder, folder_root):
     }
 
 
+def _find_leftover_folders(root, dirs_out, album_dirs=None):
+    """``[(folder, [names])]`` — folders that hold an album's files but are not
+    an album.
+
+    Albums are derived from audio (_find_albums), so an artist folder holding a
+    gone album's ``.cue``/``.log``/``.accarip``/cover/manifest is not one and
+    would otherwise be invisible to grading — the empty-folder sweep exempts a
+    folder whose CHILDREN hold audio, and the layout scan read an artist
+    folder's loose files as "the artist's own content" (both are fixed now).
+
+    *album_dirs* is the run's own album list (with disc folders folded): a
+    folder on it IS an album, and everything a rip left in it is its own — the
+    multi-disc album whose sheets sit beside ``CD1``/``CD2`` is exactly that
+    case, and it must never be reported here. A folder an import is writing
+    right now is skipped the same way (its marker's own grace decides, see
+    ``mlo.leftovers``), as is a framework album (``.mlo_pending.json``).
+    """
+    from . import leftovers
+    albums = {os.path.normcase(os.path.normpath(p)) for p in (album_dirs or [])}
+    root_norm = os.path.normcase(os.path.normpath(root))
+    out = []
+    for d in dirs_out:
+        key = os.path.normcase(os.path.normpath(d))
+        if key == root_norm or key in albums:
+            continue
+        if any(part.startswith(".")
+               for part in os.path.relpath(d, root).split(os.sep)):
+            continue
+        if load_pending(d) or leftovers.import_running(d):
+            continue
+        names = leftovers.leftover_names(d)
+        if names:
+            out.append((d, names))
+    return sorted(out)
+
+
+def _leftover_folder_result(folder, folder_root, names):
+    """Grade-style row for a folder holding an album's leftovers: one failed
+    check, zero tracks — the same shape :func:`_empty_folder_result` returns."""
+    rel = _relpath_guard(folder, folder_root)
+    row = _empty_folder_result(folder, folder_root)
+    row["issues"] = {LEFT_OVER_FILES: [rel]}
+    row["notes"] = [
+        "files belonging to an album that is not here: " + ", ".join(names[:8])
+        + (f" (+{len(names) - 8} more)" if len(names) > 8 else "")
+        + " — script 20 moves them to the Trash",
+    ]
+    return row
+
+
 def _unreadable_folder_result(folder, reason):
     """Grade-style row for a folder whose own LISTING was denied.
 
@@ -5569,6 +5629,9 @@ def run_grade_library(config):
         # No library-wide walk on a targeted run, so no empty-folder sweep
         # either: the user graded a selection, not the tree.
         empty_folders = []
+        # A targeted run is the import's OWN Grade step: it was asked to grade
+        # exactly these albums, so no folder-level row of any kind is invented.
+        leftover_folders = []
     else:
         # One walk feeds both: _find_albums fills the directory scan that the
         # empty-folder sweep reads, so a grade no longer walks the library
@@ -5584,6 +5647,12 @@ def run_grade_library(config):
         albums = merge_disc_albums(albums, library_root(folder) or "")
         empty_folders = (_find_empty_folders(folder, dir_scan)
                          if config.get("grade_check_empty_folders", True) else [])
+        # Folders that are NOT albums but hold an album's files — the rip's
+        # sheets, its cover, a manifest, an import marker left behind by an
+        # album that moved or was removed (LEFT_OVER_FILES). Same walk, same
+        # list of albums that already says which folders ARE albums.
+        leftover_folders = (_find_leftover_folders(folder, dir_scan, albums)
+                            if config.get("grade_check_leftovers", True) else [])
         # An album an import is writing RIGHT NOW is left out of the sweep:
         # grading a half-written folder reports the process, not the library —
         # the very tag the chain is about to add reads as missing until it
@@ -5600,7 +5669,7 @@ def run_grade_library(config):
         except Exception:
             pass
 
-    if not albums and not empty_folders:
+    if not albums and not empty_folders and not leftover_folders:
         log("No albums found.")
         return stats
 
@@ -5608,6 +5677,9 @@ def run_grade_library(config):
     # Each empty folder is one graded row: keep "graded N" in step with
     # grade_dist, otherwise the failure rate can exceed 100%.
     stats["total_scanned"] += len(empty_folders)
+    results.extend(_leftover_folder_result(d, folder, names)
+                   for d, names in leftover_folders)
+    stats["total_scanned"] += len(leftover_folders)
     counts = {"ok": 0, "skip": 0, "fail": 0}
     workers = worker_count(config, maximum=16, items=len(albums))
     # A caller's own sink for what this run graded (spec R155). It is a PRIVATE
