@@ -32,7 +32,19 @@ import { DEFAULT_RUN_ALL, SCRIPT_LABEL } from "../lib/scripts";
 import { forceDict } from "../lib/force";
 import { fmtCounts, fmtSteps } from "../lib/fmt";
 import { GENRE_COUNT_MAX, GENRE_FAMILIES, canonicalGenre, splitGenres } from "../lib/genres";
+import { webRatingOf, webText } from "../lib/ratings";
 import { dismiss as dismissNotification, importSessionNotificationId } from "../lib/notifications";
+
+/** One WEBRATING tag's own text as a reader sees it: the app's ONE rating
+ *  spelling — one decimal on the 0-5 scale (`webRatingOf` converts Picard's
+ *  0-100 tag, `webText` writes it) — never the raw "100" / "90" the file
+ *  holds. A tag that is not a rating on that scale (another tool pasted its
+ *  own 0-5 score in) is shown exactly as it is: a malformed value must not
+ *  vanish, and the grade is what names it. */
+const webReadoutOf = (raw: string) => {
+  const v = webRatingOf(raw);
+  return v === undefined ? raw : webText(v);
+};
 
 const STEPS = ["Select & separate", "Links", "Match", "Covers", "Genres", "Ratings", "Lyrics", "Advisory", "Finish"];
 
@@ -3684,13 +3696,18 @@ const runTickedHere = async () => {
  *  the importing tab". Only the plain button (an import with no album to open)
  *  closes by clearing the params here.
  *
- *  `runScripts` (default ON — what both Done controls do) is the whole chain
- *  decision. The Close control beside Done passes it false: it runs the SAME
- *  settle + organize + session/notification dismiss and closes exactly as Done
- *  does, but NEVER calls `/api/run`, and its toast says the scripts were
- *  skipped instead of reporting a graded album. It exists for the import a
- *  user means to finish by hand — the steps already wrote what they were meant
- *  to, and re-running the chain over the album is a separate decision.
+ *  `runScripts` (default ON — what both Done controls do) is the whole
+ *  decision: ON settles the release, organizes it with the naming script and
+ *  runs the ticked chain. The Close control beside Done passes false and means
+ *  "stop here": it settles the release, discards the session bookmark and
+ *  lands on the album exactly as Done does, and runs NOTHING else — no chain,
+ *  and no naming step either, because the organizer IS a script and its own
+ *  status line said so ("Organizing the album (naming script)…" — the owner's
+ *  report: "pressing close at the end of importing shouldn't run any
+ *  scripts"). The album keeps the folder the import staged it under;
+ *  organizing it is a separate decision (Done, or the album page's own
+ *  Organize). Its toast says the naming step and the scripts were skipped
+ *  instead of reporting a graded album.
  *
  *  A claim refusal is NOT a failure: another job (an import, a bulk run, the
  *  organizer) is already finishing this album, so there is nothing for this
@@ -3718,7 +3735,12 @@ const finish = async (closeByNavigation: boolean, runScripts = true) => {
       setFinishMsg("Settling the release (source, lyrics, description)…");
       try {
         const settled = await api.importSettle(albumPath, {
-          scripts: runAfterImportIds,
+          // The chain this finish is about to run; the settle's lyrics half
+          // reads it as "a fetch is coming". Close (runScripts false) hands
+          // over NOTHING rather than the ticked ids: the untimed lyric it
+          // would remove to make room would have nothing to replace it (see
+          // `no-fetch` in server.imports.settle_digital_lyrics).
+          scripts: runScripts ? runAfterImportIds : [],
           source: sourceDraft.trim(),
           staged,
         });
@@ -3740,6 +3762,8 @@ const finish = async (closeByNavigation: boolean, runScripts = true) => {
     // PATH mismatch. It renames the album, so the scripts below run on the
     // folder organize reports. Best effort: a busy or failed organize must
     // not stop the import (the album is already in the library).
+    // CLOSE skips it with the chain (`runScripts` false): it is the naming
+    // SCRIPT, and the press that means "stop here" runs none of them.
     //
     // Only an album whose tracks NAME it (artist + album) is organized: the
     // naming script is evaluated from those tags, so a tagless folder would be
@@ -3750,7 +3774,7 @@ const finish = async (closeByNavigation: boolean, runScripts = true) => {
       const tg = t.tags;
       return !!tg && !!(tg.ARTIST && tg.ALBUM);
     });
-    if (targets.length && nameable) {
+    if (runScripts && targets.length && nameable) {
       setFinishMsg("Organizing the album (naming script)…");
       try {
         const org = await api.organize(targets);
@@ -3817,7 +3841,7 @@ const finish = async (closeByNavigation: boolean, runScripts = true) => {
       : runScripts
         ? (uploaded.length > 1 ? `Imported ${uploaded.length} albums — enrich each from its album page` : "Import complete — album graded") +
           (forced ? " (scripts forced)" : "")
-        : "Import closed — the scripts were skipped"
+        : "Import closed — the naming step and the scripts were skipped"
   );
 };
 
@@ -5601,7 +5625,7 @@ const finish = async (closeByNavigation: boolean, runScripts = true) => {
                         ? "The album's own score (ALBUMWEBRATING), written to every track"
                         : "This track's own score (WEBRATING)"}
                     >
-                      {r.value}
+                      {webReadoutOf(r.value)}
                       <span className="text-zinc-500">{r.level === "album" ? " · album" : " · track"}</span>
                     </span>
                   ) : (
@@ -6155,20 +6179,22 @@ const finish = async (closeByNavigation: boolean, runScripts = true) => {
             ) : (
               <button className="btn-primary tap" onClick={() => finish(false)}>Done</button>
             )}
-            {/* Close: the SAME settle + organize + dismiss as Done and the
-                same LANDING — it opens the album the run just finished, the
-                one thing it does not do is run the tacked-on script chain
-                (the steps have already written what they were meant to, and
-                editing the album from its page is what comes next). Its own
-                toast says the scripts were skipped rather than reporting a
-                graded album. A run with no album path keeps the plain
-                button, which just closes the wizard. */}
+            {/* Close: the same settle + dismiss as Done and the same LANDING
+                — it opens the album the run just finished. What it does NOT
+                do is run anything: no script chain, and no naming step either
+                (the naming script IS a script, and its status line was the
+                owner's report). The album keeps the folder the import staged
+                it under, and editing/finishing it from its own page is what
+                comes next. Its own toast says the naming step and the scripts
+                were skipped rather than reporting a graded album. A run with
+                no album path keeps the plain button, which just closes the
+                wizard. */}
             {albumPath ? (
               <Link
                 to={releaseId ? `/album/mb:${encodeURIComponent(releaseId)}` : `/album/${encodeURIComponent(albumPath)}`}
                 className="btn-ghost tap"
                 onClick={() => finish(true, false)}
-                title="Close the wizard and open the album — the release is settled and organized, the ticked scripts are skipped"
+                title="Close the wizard and open the album — the release is settled; the naming step and the script chain are skipped"
               >
                 Close
               </Link>
@@ -6176,7 +6202,7 @@ const finish = async (closeByNavigation: boolean, runScripts = true) => {
               <button
                 className="btn-ghost tap"
                 onClick={() => finish(false, false)}
-                title="Close the wizard without running the script chain — the release is settled and organized, the ticked scripts are skipped"
+                title="Close the wizard without running anything — the release is settled; the naming step and the script chain are skipped"
               >
                 Close
               </button>

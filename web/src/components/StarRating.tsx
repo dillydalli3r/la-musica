@@ -353,7 +353,7 @@ export default function StarRating({
                   tabIndex={-1}
                   disabled={pending}
                   className={`absolute right-0 top-1/2 -translate-y-1/2 w-1/2 ${HALF_BOX[size]} cursor-pointer disabled:cursor-default`}
-                  aria-label={`Rate ${star} of ${stars}`}
+                  aria-label={`Rate ${half(star)} of ${stars}`}
                   onPointerEnter={() => setHover(star)}
                   onClick={(e) => {
                     e.preventDefault();

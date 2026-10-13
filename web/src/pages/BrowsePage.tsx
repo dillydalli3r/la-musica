@@ -28,7 +28,7 @@ import QueryBuilder, {
   NO_VALUE_OPS, fieldIndex, filterSpec, runnableConditions, useDebounced, useLibraryFields,
 } from "../components/QueryBuilder";
 import FacetRail from "../components/FacetRail";
-import { ratingOf, useRatings } from "../lib/ratings";
+import { half, ratingOf, useRatings } from "../lib/ratings";
 import Segmented from "../components/Segmented";
 import Modal from "../components/Modal";
 import { AdvisoryMark, CachedMark, EmptyState, GradeBadge, MediaChip, PageLoading, PendingMark, pendingSummary } from "../components/Badges";
@@ -184,10 +184,12 @@ function queueEntry(meta: TrackMeta | undefined, path: string): QueueTrack {
 }
 
 /** Rating in the UI's own 0-5 scale: the engine stamps half-star steps on the
- *  row (falling back to the RATING tag). 0 is "unrated", never "no stars". */
+ *  row (falling back to the RATING tag). 0 is "unrated", never "no stars".
+ *  The number is written in the app's ONE rating spelling — one decimal, always
+ *  (lib/ratings' `half`), so a whole star reads "4.0" beside a "4.5". */
 function ratingText(v: unknown): string {
   const n = typeof v === "number" ? v : Number(v);
-  return Number.isFinite(n) && n > 0 ? (Math.round(n * 2) / 2).toFixed(1).replace(/\.0$/, "") : "—";
+  return Number.isFinite(n) && n > 0 ? half(Math.round(n * 2) / 2) : "—";
 }
 
 export default function BrowsePage() {

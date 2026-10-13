@@ -681,13 +681,22 @@ def check_wizard_close_and_expected(check):
     check("FAMILY_STEP and FAMILY_LABEL name the ratings family's step",
           src.count('ratings: "Ratings"') == 2)
     # Close is the SECONDARY control beside Done (Done is the primary press),
-    # and its own toast says the scripts were skipped.
+    # and its own toast says BOTH halves were skipped — the chain and the
+    # naming/organize step (R416: the status line's "naming script" was the
+    # owner's evidence that Close still ran a script).
     done_at = src.index("onClick={() => finish(true)}")
     close_at = src.index("onClick={() => finish(false, false)}")
     check("Close sits after Done and is the secondary (ghost) button",
           close_at > done_at and "btn-ghost" in src[max(0, close_at - 300):close_at])
-    check("Close's toast says the scripts were skipped",
-          "Import closed — the scripts were skipped" in src)
+    check("Close's toast says the naming step and the scripts were skipped",
+          "Import closed — the naming step and the scripts were skipped" in src)
+    # …and the press itself runs neither: the organizer's call is gated on the
+    # same flag the chain is (it IS a script), and the settle Close sends
+    # carries an EMPTY chain (the "no fetch is coming" signal).
+    check("Close skips the organizer with the chain",
+          "if (runScripts && targets.length && nameable)" in src)
+    check("Close's settle carries an empty chain",
+          "scripts: runScripts ? runAfterImportIds : []" in src)
     # The Ratings step runs the chain's entry point with the shared one-shot
     # Force, so a re-fetch can replace where the default fills only.
     check("the Ratings step sends the shared Force to /api/import/ratings",

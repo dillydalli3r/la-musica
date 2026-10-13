@@ -79,8 +79,14 @@ export const snap = (v: number) => {
   const n = Number.isFinite(v) ? Math.max(0, Math.min(MAX_RATING, v)) : 0;
   return Math.round(n * 2) / 2;
 };
-/** The one way a grid value is written out: "4", "4.5". */
-export const half = (v: number) => (Number.isInteger(v) ? String(v) : v.toFixed(1));
+/** The one way a rating is written out for a reader: ALWAYS one decimal —
+ *  "4.0", "4.5", "5.0" (the owner's rule, 2026-10-13: "all ratings in the app
+ *  should show in the format x.x (always)"). A whole star no longer prints
+ *  narrower than a half one, so a column of numbers lines up and "5" can never
+ *  read as a different kind of thing from "4.5". The grid value handed in is
+ *  already snapped (see `snap`), so a half never carries float noise and
+ *  `toFixed` is exact. */
+export const half = (v: number) => v.toFixed(1);
 
 /** What a typed readout means: the value to write, or `undefined` when the
  *  text is not a rating at all.

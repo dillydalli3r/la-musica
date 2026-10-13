@@ -29,7 +29,7 @@ import { useLockWhy } from "../lib/locks";
 import OverflowMenu from "../components/OverflowMenu";
 import PageHeader from "../components/PageHeader";
 import StarRating from "../components/StarRating";
-import { ratingOf, useRatings, useSetRating, FOLDER_RATING_NOTE, albumWebRating, trackWebRating, webStarProps } from "../lib/ratings";
+import { ratingOf, useRatings, useSetRating, FOLDER_RATING_NOTE, albumWebRating, trackWebRating, webStarProps, half } from "../lib/ratings";
 import TagActionsMenu, { TrackActionsMenu } from "../components/TagActionsMenu";
 import StatsPanel from "../components/StatsPanel";
 import TrackDetails, { CreditsPanel, creditTagsFrom } from "../components/TrackDetails";
@@ -858,7 +858,7 @@ export default function AlbumPage() {
                     >
                       <StarRating readOnly size="sm" value={trackAverage} />
                       <span className="text-[11px] text-zinc-500">
-                        avg {trackAverage} from {ratedTracks.length} rated track{ratedTracks.length === 1 ? "" : "s"}
+                        avg {half(trackAverage)} from {ratedTracks.length} rated track{ratedTracks.length === 1 ? "" : "s"}
                       </span>
                     </span>
                   )}

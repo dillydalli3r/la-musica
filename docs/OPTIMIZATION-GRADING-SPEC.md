@@ -8199,6 +8199,50 @@ when the log itself says something is wrong.** Pinned in
   refused cross-disc, the single-medium 0.5 fallback, and the match riding the
   release payload).
 
+- **R415 — every rating the app prints is ONE decimal, always ("x.x").** The
+  owner's rule, 2026-10-13: *"all ratings in the app should show in the format
+  x.x (always)"*. A rating is the user's 0-5 half-star verdict, and two
+  spellings of it are the whole surface area: `lib/ratings.half` writes a grid
+  value ("4.0", "4.5", "5.0" — a whole star no longer prints narrower than a
+  half one) and `lib/ratings.webText` writes a WEB value (Picard's 0-100 tag
+  read as 0-5, rounded to its own tenth first — R358e). Every surface reads
+  through one of them, and none composes its own: the `StarRating` readout and
+  its aria names (`Rate 4.0 of 5`), the album/artist/track page headers and
+  the cards (`showValue`), the player bar and fullscreen player, the album
+  page's track average (`avg 4.0 from 3 rated tracks` — it used to print the
+  raw computed number), the query sheet's Rating column (half stars, "—" for
+  unrated), the **facet rail**'s rating values in all three scopes
+  (`rating`, `album.rating`, `artist.rating` — every other numeric facet keeps
+  its own spelling, so a year still reads "1993"), and the **wizard's Ratings
+  step**, whose chip used to print the file's raw 0-100 tag text ("100 ·
+  track" was the owner's report) and now prints the reading itself ("5.0 ·
+  track"); a tag that is not a rating on the 0-100 scale is shown exactly as
+  it came (a malformed value must not vanish — the grade names it). Pinned by
+  `tools/check_rating_alignment.mjs` (the user's own number prints "5.0" in
+  the reserved readout beside "4.5 Web") and
+  `tools/check_np_metadata_contrast.cjs` (the fullscreen player's readout,
+  per cover).
+
+- **R416 — the Finish step's Close closes; it runs nothing.** The owner's
+  report, 2026-10-13: *"pressing 'close' at the end of importing shouldn't run
+  any scripts"* — after an earlier round that had only taken the ticked CHAIN
+  off the press, whose status line still read "Organizing the album (naming
+  script)…": the naming step is a script of its own, and the press means "stop
+  here". So the two controls are now exactly: **Done** = settle the release +
+  organize it with the naming script + run the ticked chain + land on the
+  album; **Close** = settle the release + dismiss the session/bookmark + land
+  on the album, and NEVER `/api/run` nor `/api/organize` (the album keeps the
+  folder the import staged it under; organizing it is a separate decision —
+  Done, or the album page's own Organize). The settle it sends carries an
+  EMPTY `scripts` list rather than the ticked ids, which is the settle's own
+  "no fetch is coming" signal (`server.imports.settle_digital_lyrics`'s
+  `no-fetch` state): the untimed lyric it would otherwise remove has nothing
+  to replace it. Its toast says both halves were skipped ("Import closed — the
+  naming step and the scripts were skipped") instead of reporting a graded
+  album. Pinned by `tools/check_import_minimum.mjs`, which drives the real
+  Close press over stubbed APIs and counts: zero `/api/run`, zero
+  `/api/organize`, one settle whose body carries `scripts: []`.
+
 ---
 
 ## 10. Honest limits of this spec

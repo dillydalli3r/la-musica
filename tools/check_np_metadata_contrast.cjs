@@ -609,11 +609,13 @@ const readRatingReadout = (page) => page.evaluate(() => {
 
 /** …asserted per cover: the number is the reader's own (non-vacuous), its
  *  painted ink clears the small-text floor on that row's field, and it answers
- *  the cover the way every other glyph here must. */
+ *  the cover the way every other glyph here must. The number's OWN spelling is
+ *  the app's one rating format — one decimal, always ("5.0", lib/ratings'
+ *  `half`, spec R415). */
 async function measureRatingReadout(page, label, tiers, coverLum) {
   const r = await readRatingReadout(page);
   check(`${label}: the rating row prints the reader's own number`,
-    !!r && r.text === "5", r ? `readout "${r.text}"` : "no rating readout in the DOM");
+    !!r && r.text === "5.0", r ? `readout "${r.text}"` : "no rating readout in the DOM");
   if (!r) return null;
   const field = await clipAvg(page, { x: tiers.field.left + 6, y: r.y, width: 36, height: 12 });
   const ink = painted(r.color, r.opacity, field);

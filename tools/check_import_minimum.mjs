@@ -347,7 +347,8 @@ try {
 }
 
 // --------------------------------------------------------------------------- #
-// 6. Done while the album is held by another job: the press completes
+// 6. Done while the album is held by another job: the press completes — and
+//    Close beside it runs NOTHING
 // --------------------------------------------------------------------------- #
 // The behaviour here is client-only — the wizard's own `finish` — so it is
 // pinned the way the repo pins a page's behaviour: the REAL app (vite, the
@@ -360,6 +361,9 @@ try {
 // a failure — and must still CLOSE (the Link to the album page is what closes
 // the wizard; clearing the params afterwards would carry the wizard's route
 // back over it). A genuine 500 is the second half: it must still be an error.
+//
+// The THIRD press is Close, whose whole point is that nothing runs (R416):
+// no `/api/run`, no `/api/organize`, and a settle carrying an EMPTY chain.
 const REFUSAL = "Homework is in use by Organize (job-2) — wait for it to finish, then retry";
 
 const app = await createServer({
@@ -379,6 +383,11 @@ try {
   /** The one reply the second half changes: /api/run answers the claim's 409
    *  refusal, then a genuine 500. */
   let runReply = { status: 409, body: { detail: REFUSAL } };
+  /** How many times the two SCRIPT routes were called, and what each settle
+   *  carried — the Close press below must move neither counter (the chain and
+   *  the naming/organize step are Done's alone). */
+  let runCalls = 0, organizeCalls = 0;
+  const settleBodies = [];
   await page.route("**/api/**", (route) => {
     const url = route.request().url();
     const send = (status, body) => route.fulfill({
@@ -387,9 +396,12 @@ try {
     if (url.includes("/api/config")) return send(200, { ...CONFIG, first_run_done: true });
     if (url.includes("/api/library")) return send(200, LIBRARY);
     if (url.includes("/api/import/scripts/preview")) return send(200, PREVIEW);
-    if (url.includes("/api/import/settle")) return send(200, {});
-    if (url.includes("/api/organize")) return send(200, { results: [{ path: ALBUM }] });
-    if (url.includes("/api/run")) return send(runReply.status, runReply.body);
+    if (url.includes("/api/import/settle")) {
+      settleBodies.push(route.request().postData() || "");
+      return send(200, {});
+    }
+    if (url.includes("/api/organize")) { organizeCalls += 1; return send(200, { results: [{ path: ALBUM }] }); }
+    if (url.includes("/api/run")) { runCalls += 1; return send(runReply.status, runReply.body); }
     if (url.includes("/api/album?")) return send(200, { ...LIBRARY.artists[0].albums[0], artist: "Daft Punk" });
     if (url.includes("/api/artist/artwork")) return send(200, {});
     return undefined;                 // anything else: left unanswered (pending)
@@ -423,6 +435,38 @@ try {
   await pressDone();
   check("a real failure still surfaces as an error",
         (await pageText()).includes("the runner exploded"), (await pageText()).slice(0, 400));
+
+  // ---- Close: the same landing, and NOTHING runs --------------------------
+  // The owner's report: "pressing close at the end of importing shouldn't run
+  // any scripts". Done settles + organizes + runs the chain; Close settles the
+  // release, closes, and must move neither script counter. The settle it sends
+  // carries an EMPTY chain, which is what tells the settle's lyrics half no
+  // fetch is coming (it keeps an arrived untimed lyric instead of removing it
+  // for a replacement that never lands).
+  const pressClose = async () => {
+    await page.goto(`http://127.0.0.1:${appPort}/import?album=${encodeURIComponent(ALBUM)}&step=Finish`);
+    await page.waitForSelector("text=Ticked by default", { timeout: 20000 });
+    await page.locator("a", { hasText: "Close" }).first().click();
+    await page.waitForFunction(() => location.pathname.startsWith("/album/"),
+                               null, { timeout: 20000 }).catch(() => {});
+    await page.waitForTimeout(600);
+  };
+  const beforeClose = { run: runCalls, organize: organizeCalls, settle: settleBodies.length };
+  await pressClose();
+  check("Close lands on the album exactly like Done",
+        page.url().includes("/album/"), page.url());
+  check("…and runs NO script chain (`/api/run` is never called)",
+        runCalls === beforeClose.run, `run calls ${beforeClose.run} -> ${runCalls}`);
+  check("…and does not run the naming/organize step either",
+        organizeCalls === beforeClose.organize,
+        `organize calls ${beforeClose.organize} -> ${organizeCalls}`);
+  check("…while the release is still settled, with an EMPTY chain (no fetch is coming)",
+        settleBodies.length === beforeClose.settle + 1
+        && JSON.parse(settleBodies[settleBodies.length - 1] || "{}").scripts?.length === 0,
+        JSON.stringify(settleBodies.slice(beforeClose.settle)));
+  check("…and the closing status says what it skipped",
+        (await pageText()).includes("the naming step and the scripts were skipped"),
+        (await pageText()).slice(0, 400));
 } finally {
   await appBrowser.close();
   await app.close();
@@ -1085,7 +1129,9 @@ console.log(`ok  the wizard's minimum entry mode shows the missing family's cont
   `collapses the rest behind one affordance that reveals it, leaves the ordinary ` +
   `wizard untouched, and runs the import chain — not the Run All order — from ` +
   `its Finish step; Done under a held claim completes on the album page with ` +
-  `an "already being finished" status (a 500 still shows an error); a newly ` +
+  `an "already being finished" status (a 500 still shows an error) while Close ` +
+  `beside it runs NO script chain and NO naming step (its settle carries an ` +
+  `empty chain and says what it skipped); a newly ` +
   `staged album opens the Links step on an EMPTY release-id field, never the ` +
   `previous album's, while its own tags still fill it; and the Genres step's ` +
   `per-track row shows the genre NAMES themselves, one chip each, with no ` +

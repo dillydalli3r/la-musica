@@ -15,6 +15,7 @@ import { Check, Filter, Search, X } from "lucide-react";
 import { api } from "../api";
 import type { LibraryCondition, LibraryField } from "../api";
 import { NO_VALUE_OPS, useDebounced, useLibraryFields } from "./QueryBuilder";
+import { half } from "../lib/ratings";
 
 /** Values shown at once; `total_values` still reports the whole field. */
 const VALUE_LIMIT = 100;
@@ -27,8 +28,14 @@ const VALUE_LIMIT = 100;
 const NO_VALUE_OP_ORDER = ["is_unrated", "missing", "is_empty"];
 
 /** A facet value as a reader should see it: the engine answers numeric facets
- *  with numbers, and a JSON float would print a year as "1993.0". */
-function displayValue(v: string | number): string {
+ *  with numbers, and a JSON float would print a year as "1993.0". A RATING is
+ *  the one exception — it is a rating, so it is written in the app's ONE
+ *  rating spelling, one decimal ALWAYS (lib/ratings' `half`: "5.0" beside
+ *  "4.5"), whichever scope's field it belongs to (`rating`, `album.rating`,
+ *  `artist.rating`). */
+function displayValue(v: string | number, field?: string): string {
+  const isRating = !!field && (field === "rating" || field.endsWith(".rating"));
+  if (isRating && typeof v === "number" && Number.isFinite(v)) return half(v);
   const s = String(v);
   return typeof v === "number" && Number.isInteger(v) ? s.replace(/\.0$/, "") : s || "(empty)";
 }
@@ -200,12 +207,12 @@ export default function FacetRail({
               }`}
               onClick={() => toggle(v.value)}
               aria-pressed={on}
-              title={on ? `Selected — click to remove "${displayValue(v.value)}"` : `Select "${displayValue(v.value)}"`}
+              title={on ? `Selected — click to remove "${displayValue(v.value, def?.field)}"` : `Select "${displayValue(v.value, def?.field)}"`}
             >
               <span className={`h-3.5 w-3.5 rounded border shrink-0 inline-flex items-center justify-center ${on ? "bg-accent border-accent on-accent" : "border-border"}`}>
                 {on && <Check className="h-2.5 w-2.5" />}
               </span>
-              <span className="flex-1 truncate">{displayValue(v.value)}</span>
+              <span className="flex-1 truncate">{displayValue(v.value, def?.field)}</span>
               <span className="text-zinc-500 tabular-nums shrink-0">{v.count.toLocaleString()}</span>
             </button>
           );
