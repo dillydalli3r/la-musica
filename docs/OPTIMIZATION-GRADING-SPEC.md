@@ -8836,6 +8836,27 @@ when the log itself says something is wrong.** Pinned in
     state, and pointing a user at a leftover copy is how one release grew a
     second folder.
 
+- **R431 — a lyric search is asked under the track's PRIMARY credit, after
+  the stored name.** The owner's report, 2026-10-13: *"the track Noah's
+  Descendants by Gorillaz doesn't have lyrics, nor does auto-importing find
+  them. However just searching 'Noah's Descendants' on LRCLIB finds the track
+  … with SYNCED lyrics"*. The file's `ARTIST` is a whole CREDIT —
+  `Gorillaz feat. Anoushka Shankar & Pamela Jain` — and LRCLIB's
+  `artist_name` filter is exact-ish, so the full credit matched NOTHING while
+  the primary name `Gorillaz` matched it, synced.
+  `mlo.lyrics_providers.primary_credit` / `primary_title` extract the primary
+  performer (the text before `feat.`/`ft.`/`featuring`) and drop a trailing
+  `(feat. …)` a TITLE carries instead, and `fetch_lyrics` re-walks the WHOLE
+  chain under those names BETWEEN the ordinary pass and MusicBrainz's alias
+  pass — local, network-free, and NOT gated by `lyrics_search_aliases` (that
+  switch guards the MusicBrainz lookups alone). A name that states no guest is
+  returned UNCHANGED, so a guestless track still costs exactly one round, and a
+  collaboration with no guest marker (`Simon & Garfunkel`) is left whole —
+  only the featured markers split, because a duet is not a guest. The hit it
+  finds says which pass found it (`alias_pass` with `"credit": True`), and
+  `Deadline.why` names the pass when a budget cuts it. Pinned by
+  `tools/test_lyrics_aliases.py` §3b.
+
 ---
 
 ## 10. Honest limits of this spec

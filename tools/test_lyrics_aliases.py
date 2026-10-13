@@ -474,6 +474,65 @@ check("alias pass hit" not in out, f"no alias pass ran here: {out!r}")
 
 
 # --------------------------------------------------------------------------- #
+# 3b. The PRIMARY-CREDIT pass — a stored credit re-asked as its primary name
+# --------------------------------------------------------------------------- #
+# The owner's report (2026-10-13): the ARTIST tag held the whole credit
+# ("Gorillaz feat. Anoushka Shankar & Pamela Jain") and LRCLIB — whose
+# `artist_name` filter is exact-ish — answered NOTHING for it, while the
+# primary name "Gorillaz" answered with SYNCED lyrics. The chain re-asks every
+# provider under the primary credit before MusicBrainz's aliases, and the hit
+# it finds says so (`alias_pass.credit`).
+FEAT_ARTIST = "Gorillaz feat. Anoushka Shankar & Pamela Jain"
+CREDIT_HIT = lp._hit(SYNCED_LRC, lp._lrc_to_plain(SYNCED_LRC),
+                     "Gorillaz", "Noah's Descendants", "The Mountain", 132.0)
+calls = []
+with Patch(lp, _PROVIDERS={"lrclib": stub(
+        {(FEAT_ARTIST, "Noah's Descendants"): None,
+         ("Gorillaz", "Noah's Descendants"): CREDIT_HIT}, calls)}):
+    hit = lp.fetch_lyrics({"lyrics_sources": ["lrclib"]}, FEAT_ARTIST,
+                          "Noah's Descendants", "The Mountain", 132.0)
+check(hit is not None, f"the primary-credit pass must answer: {hit}")
+check(hit and hit.get("kind") == "synced" and hit["provider"] == "lrclib", hit)
+check(hit and hit.get("alias_pass", {}).get("credit") is True,
+      f"the hit says the credit pass found it: {hit.get('alias_pass')}")
+check(hit and hit["alias_pass"].get("entity") == "artist", hit.get("alias_pass"))
+check([c[1] for c in calls] == [FEAT_ARTIST, "Gorillaz"],
+      f"the stored credit first, the primary name after: {calls}")
+
+# a name that states no guest is NOT re-asked — one query, exactly as before
+calls = []
+with Patch(lp, _PROVIDERS={"lrclib": stub({("Slowdive", "Alison"): SYNCED_HIT},
+                                          calls)}):
+    lp.fetch_lyrics({"lyrics_sources": ["lrclib"]}, "Slowdive", "Alison",
+                    "Souvlaki", 230.0)
+check(len(calls) == 1, f"a guestless name costs no second pass: {calls}")
+
+# a TITLE's own trailing feat parenthetical is dropped the same way
+TITLE_ARTIST = "Gorillaz"
+TITLE_HIT = lp._hit(SYNCED_LRC, lp._lrc_to_plain(SYNCED_LRC),
+                    "Gorillaz", "Song", "The Mountain", 230.0)
+calls = []
+with Patch(lp, _PROVIDERS={"lrclib": stub(
+        {(TITLE_ARTIST, "Song (feat. X)"): None,
+         (TITLE_ARTIST, "Song"): TITLE_HIT}, calls)}):
+    hit = lp.fetch_lyrics({"lyrics_sources": ["lrclib"]}, TITLE_ARTIST,
+                          "Song (feat. X)", "The Mountain", 230.0)
+check(hit is not None and hit.get("alias_pass", {}).get("entity") == "title",
+      f"a title's feat parenthetical is dropped too: {hit}")
+
+# the extraction itself, and — the never-cut rule — a collaboration with no
+# guest marker is left WHOLE ("Simon & Garfunkel" is one act, not a guest)
+check(lp.primary_credit(FEAT_ARTIST) == "Gorillaz", lp.primary_credit(FEAT_ARTIST))
+check(lp.primary_credit("Gorillaz, feat. X") == "Gorillaz",
+      lp.primary_credit("Gorillaz, feat. X"))
+check(lp.primary_credit("Simon & Garfunkel") == "Simon & Garfunkel",
+      lp.primary_credit("Simon & Garfunkel"))
+check(lp.primary_title("Song (feat. X)") == "Song", lp.primary_title("Song (feat. X)"))
+check(lp.primary_title("Just a Song") == "Just a Song",
+      lp.primary_title("Just a Song"))
+
+
+# --------------------------------------------------------------------------- #
 # 4. `server.integrations.search_aliases`: the ordered name list
 # --------------------------------------------------------------------------- #
 ROWS = {"artist/art-1": {"aliases": [

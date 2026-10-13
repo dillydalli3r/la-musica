@@ -320,8 +320,9 @@ class Deadline:
             return ""
         labels = []
         for pid in self.cut:
-            name = SOURCE_LABELS.get(pid) or ({"aliases": "the alias pass"}
-                                              .get(pid) or str(pid))
+            name = SOURCE_LABELS.get(pid) or (
+                {"aliases": "the alias pass",
+                 "credit": "the primary-credit pass"}.get(pid) or str(pid))
             if name not in labels:
                 labels.append(name)
         return (f"stopped after {int(self.seconds)}s — the sources left were "
@@ -347,6 +348,46 @@ def _name_score(hit, want):
         return 0.8
     ta, tb = set(a.split()), set(b.split())
     return len(ta & tb) / len(ta | tb)
+
+
+# The featured-artist markers that separate a track's PRIMARY performer from
+# the guests a credit lists after it. ARTIST is often a whole CREDIT
+# ("Gorillaz feat. Anoushka Shankar & Pamela Jain"), and a source keys its
+# catalogue by the primary name ALONE — LRCLIB's `artist_name` is an
+# exact-ish filter, so the full credit matched NOTHING for the owner's
+# "Noah's Descendants" while "Gorillaz" matched it, synced (measured
+# 2026-10-13). MusicBrainz's own alias list does not state the primary name
+# either (it holds the artist's CJK/Latin spellings), so this is its own pass.
+_FEAT_SPLIT_RE = re.compile(r"\s+(?:feat\.?|ft\.?|featuring)\s+", re.IGNORECASE)
+# The same credit written into the TITLE instead: "Song (feat. X)" matched no
+# source until the parenthetical is dropped (the match score still accepts the
+# source's own "(feat. …)" spelling — see `_name_score`).
+_TITLE_FEAT_RE = re.compile(
+    r"\s*[\(\[](?:feat\.?|ft\.?|featuring)\b[^)\]]*[\)\]]\s*$", re.IGNORECASE)
+
+
+def primary_credit(name):
+    """The primary performer of a credit string, or "".
+
+    ``"Gorillaz feat. Anoushka Shankar & Pamela Jain"`` → ``"Gorillaz"``. A
+    name that states no guest is returned UNCHANGED, so the caller can compare
+    it against the stored name and skip a second walk when there is nothing new
+    to ask. A trailing collaborator separator (",", "&") left by the split is
+    trimmed too. Never raises.
+    """
+    text = str(name or "").strip()
+    if not text:
+        return ""
+    return _FEAT_SPLIT_RE.split(text, maxsplit=1)[0].strip().rstrip(" ,&").strip()
+
+
+def primary_title(title):
+    """A TITLE's trailing featured-artist parenthetical removed, else unchanged."""
+    text = str(title or "").strip()
+    if not text:
+        return ""
+    stripped = _TITLE_FEAT_RE.sub("", text).strip()
+    return stripped or text
 
 
 def _match_score(hit_artists, hit_title, hit_duration, artist, title, duration):
@@ -1125,6 +1166,14 @@ def fetch_lyrics(cfg, artist, title, album=None, duration=None,
     entity and the name that found it; acceptance is unchanged — the same
     variant guard, the same score floor, the same synced-before-plain rule.
 
+    BETWEEN the ordinary pass and that alias pass runs the PRIMARY-CREDIT pass
+    (``primary_credit`` / ``primary_title``), local and network-free: a stored
+    name that is a credit ("Gorillaz feat. …") is re-asked as its primary
+    performer ("Gorillaz"), which is the name a source keys the track by. Its
+    hits report ``alias_pass`` with ``"credit": True`` so a reader can tell the
+    two substitutions apart. It is not gated by ``lyrics_search_aliases``:
+    nothing is looked up, the same providers are only re-asked.
+
     ``youtube_id`` (optional) is the video the file came from — the only thing
     that lets the YouTube provider answer, since it never searches. Providers
     never raise — a failure, a timeout or a parse error is just a miss.
@@ -1143,6 +1192,35 @@ def fetch_lyrics(cfg, artist, title, album=None, duration=None,
                                   youtube_id, floor, deadline)
     if synced is not None:
         return synced
+    # The stored names are often a CREDIT rather than a name — the file records
+    # "Gorillaz feat. Anoushka Shankar & Pamela Jain", while a source keys the
+    # track by "Gorillaz" and matches nothing for the whole credit. The chain
+    # is re-walked under the PRIMARY credit (local, no network) before
+    # MusicBrainz's aliases, which do not state it. This runs regardless of
+    # `lyrics_search_aliases`: nothing is looked up here, only re-asked.
+    alt_artist, alt_title = primary_credit(artist), primary_title(title)
+    changed_artist = alt_artist and alt_artist != artist.strip()
+    changed_title = alt_title and alt_title != title.strip()
+    entity = ("artist+title" if changed_artist and changed_title
+              else "artist" if changed_artist
+              else "title" if changed_title else None)
+    if entity is not None:
+        if deadline is not None and deadline.spent():
+            deadline.cut.append("credit")
+        else:
+            query = f"{alt_artist or artist} · {alt_title or title}"
+            synced, found = _search_chain(cfg, order, alt_artist or artist,
+                                          alt_title or title, album, duration,
+                                          youtube_id, floor, deadline)
+            if synced is not None:
+                synced["alias_pass"] = {"used": True, "entity": entity,
+                                        "query": query, "credit": True}
+                return synced
+            if found is not None and (plain is None
+                                      or found["score"] > plain["score"]):
+                found["alias_pass"] = {"used": True, "entity": entity,
+                                       "query": query, "credit": True}
+                plain = found
     if plain is not None:
         return plain
     if aliases is None or not cfg.get("lyrics_search_aliases", True):
