@@ -1759,9 +1759,10 @@ export interface SlskQueueItem {
    *  the download folder, reported rather than left for someone to find. */
   leftovers?: string[];
   /** True when the import moved the album but the naming script could not
-   *  place EVERY file: the album is in the library and the files that stayed
-   *  behind are still in the download folder (import that folder again to
-   *  finish it). `organize_error` is the import's own sentence about them. */
+   *  place EVERY file: the album is in the library and what stayed behind is
+   *  inside it (a locked or read-only file the organizer left where it was —
+   *  script 10 · Organize completes it). `organize_error` is the import's own
+   *  sentence about them. */
   partial?: boolean;
   organize_error?: string;
   /** The format a completed album arrived in when it was taken as a LOSSY copy

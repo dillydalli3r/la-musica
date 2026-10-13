@@ -8788,6 +8788,53 @@ when the log itself says something is wrong.** Pinned in
   before) and `tools/test_audio_analysis.py` (`_helper_key_bpm` on stubbed
   engine answers: 0.0 and NaN are no measurement, a real answer passes, a
   track under the floor is not measured).
+- **R430 — an album the app ADDED keeps the folder the add created, and the
+  identity stamp says which files it could not reach.** The owner's report,
+  2026-10-13: *"Cracker Island by Gorillaz imported weirdly. It made two
+  folders … the latter of which was tagged correctly, but only has one track
+  in it. The former has all the tracks, but isn't imported right."* The
+  wish's framework album is named from the RELEASE (`pending_albums.
+  folder_for_release` → the naming script over `release_tags`), and
+  `soulseek_auto._import` adopts the finished download into it. The identity
+  the import writes into those files (`_stamp_mb_tags`) is PER FILE and was
+  SILENT: `_stamp_one` swallows its own exception (a locked or read-only
+  track must not fail the album) and the caller threw the count away. The
+  organizer then named the album from the FILES' tags alone — nothing tied
+  it to the marker — so an unstamped file spelled the album as
+  `"<artist>/<year> - <album> {<medium>}"`: the folder the add created was
+  RENAMED to that (`rename_placeholder`), the artist lost its id folder, and
+  the file the stamp had reached was left in the old path. Reproduced here
+  (`tools/test_naming_album_tags.py`: a framework album of thin-tagged files
+  organized for real), and the CONTROL shows the same album without a marker
+  is still named from its thin tags.
+
+  Two rules, one per half:
+
+  * **The marker is the album's own record.** A framework album's
+    `.mlo_pending.json` carries the release it stands for (`release_id`,
+    `release_group_id`, title, artist AND the artist's own id, date,
+    release type, and the release block's country/countries/medium/label/
+    catalogue number/status/date/`originaldate` — the fields the naming
+    script reads, written by `pending_albums.create`). Where the files state
+    NOTHING of it, the marker FILLS the album-level names
+    (`pending_albums.marker_album_tags` → `organize_albums`), and when the
+    files name no release at all the marker's facts ARE the album's own: an
+    uploader's year-only `DATE=2023` beside the release's `2023-02-24` is the
+    same album spelled worse, never a second folder. A file that states a
+    release id wins outright — that is a re-point through
+    `POST /api/mb/assign`, and the marker is the stale record then. A folder
+    without a marker is untouched by any of this.
+  * **The stamp's verdict is per file and it is spoken.** `_stamp_mb_tags`
+    answers `{stamped, total, failed}` and `_import` writes the names into
+    the job log ("N of M file(s) did not take the release identity (a locked
+    or read-only file?) — the album keeps the folder the add created, and
+    script 1 fills them"). The download's own copy is still what
+    `soulseek_clear_downloads` clears, and the notification and the queue row
+    now say what `partial` really means — what could not be PLACED is INSIDE
+    the album (script 10 · Organize completes it), never "import that folder
+    again": a download the import could not move at all is the job's error
+    state, and pointing a user at a leftover copy is how one release grew a
+    second folder.
 
 ---
 

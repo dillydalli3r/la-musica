@@ -597,6 +597,11 @@ def _identity_block(release):
         "label": release.get("label") or "",
         "status": release.get("status") or "",
         "date": release.get("date") or "",
+        # the SECOND date the naming script reads (%originaldate%, the release
+        # group's first release date): the folder this marker's release names
+        # carries both, so a marker that could not restate it would name a
+        # different folder than the one the add created.
+        "originaldate": release.get("originaldate") or "",
     }
 
 
@@ -731,6 +736,11 @@ def create(release, cfg=None, *, source=SOURCE, queries=None, title="",
         "release_group_id": rgid,
         "title": title,
         "artist": artist,
+        # the album artist's MusicBrainz id: the naming script's
+        # "%albumartist% [%musicbrainz_albumartistid%]" segment, so a folder
+        # whose files lost the identity still names the artist's own folder
+        # (mlo.naming.marker_album_tags reads it).
+        "artist_id": str((release.get("artists") or [{}])[0].get("mbid") or ""),
         "year": year,
         "date": str(release.get("date") or ""),
         "release_type": release_tags(release).get("RELEASETYPE") or "",

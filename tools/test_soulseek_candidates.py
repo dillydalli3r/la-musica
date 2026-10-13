@@ -3217,7 +3217,7 @@ try:
         {"code": "US", "country": "United States", "date": "2026-07-29"}])
     with Patch(mlo_audio, AudioFile=RecorderAudio):
         _n = soulseek_auto._stamp_mb_tags(_stamp_dir, _wb_release)
-    assert _n == 2, _n
+    assert _n.get("stamped") == 2 and not _n.get("failed"), _n
     _tags = RecorderAudio.written["01 - Alpha.flac"]
     assert _tags["RELEASECOUNTRY"] == "US; JP", _tags["RELEASECOUNTRY"]
     # the rest of the identity still lands, so the whole set replaced the

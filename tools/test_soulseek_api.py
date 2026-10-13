@@ -379,7 +379,7 @@ RELEASE_2D = {
               {"disc": 2, "position": 2, "title": "Four"}],
 }
 stamped = soulseek_auto._stamp_mb_tags(md_album, RELEASE_2D)
-assert stamped >= 4, stamped
+assert stamped.get("stamped", 0) >= 4 and not stamped.get("failed"), stamped
 _expect = {os.path.join("CD1", "01 - One.wav"): ("1", "1", "One"),
            os.path.join("CD1", "02 - Two.wav"): ("1", "2", "Two"),
            os.path.join("CD2", "01 - Three.wav"): ("2", "1", "Three"),

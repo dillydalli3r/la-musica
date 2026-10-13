@@ -1105,9 +1105,16 @@ def _notify_finish(state, result, release):
             # only one who can clear the lock that held it. Saying so here is
             # the difference between "done" and "done except".
             if result.get("partial"):
-                body += (" Some files could not be moved into the library and are "
-                         "still in the download folder — import that folder again "
-                         "to finish the album.")
+                # What could not be placed is INSIDE the album (a locked or
+                # read-only file the organizer left where it was) — the import
+                # moved the whole download in, and a download that could not be
+                # moved AT ALL is the error branch above, never this one. Saying
+                # "import that folder again" sent the user to a folder that no
+                # longer holds anything of the album, and importing a leftover
+                # copy is how one release grew a second folder.
+                body += (" Some files could not be placed (a locked or read-only "
+                         "file?) — the album is in your library; run script 10 · "
+                         "Organize from its page once the file is free.")
             # A LOSSLESS rule was overruled to get this album at all
             # (`soulseek_auto_lossy_policy` "best"): the notification is the one
             # surface a user who is not looking at the page cannot miss, so the
@@ -3843,7 +3850,13 @@ def _stamp_mb_tags(album_dir, release):
     chosen release, so a matching uploader's spelling survives.
 
     Every track is ONE container rewrite, and the tracks are stamped side by
-    side — see `_stamp_one`."""
+    side — see `_stamp_one`.
+
+    Answers ``{"stamped": n, "total": n, "failed": [file names]}``: the
+    verdict is PER FILE (a locked or read-only track is the album's to keep,
+    never its failure), and the names are what the caller says out loud — a
+    file that did not take the identity is named by its thin tags by every
+    later namer (see `_import`)."""
     from concurrent.futures import ThreadPoolExecutor
     from mlo.audio import AudioFile
 
@@ -4012,10 +4025,21 @@ def _stamp_mb_tags(album_dir, release):
     # tracks stamp side by side instead of one after another; nothing here is
     # shared but the read-only identity above. Inside one file the writes stay
     # strictly ordered.
+    # The VERDICT is a per-file one, and the caller is told WHICH files
+    # refused: `_stamp_one` swallows its own exception (a locked track must
+    # not fail the album), and the count alone let an album the stamp never
+    # reached be named from its thin tags — the download keeps the
+    # uploader's "<year> - <album> {<medium>}" identity-less spelling, and
+    # the naming script then filed it as a DIFFERENT album beside the one
+    # the user added (measured 2026-10-13, the owner's Cracker Island).
     workers = worker_count(load_config(), maximum=8,
                            items=len(audio))
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        return sum(1 for ok in ex.map(_stamp_one, audio) if ok)
+        verdicts = list(ex.map(_stamp_one, audio))
+    failed = [os.path.basename(p) for p, ok in zip(audio, verdicts)
+              if not ok]
+    return {"stamped": len(audio) - len(failed), "total": len(audio),
+            "failed": failed}
 
 
 # --------------------------------------------------------------------------- #
@@ -7157,7 +7181,19 @@ def _import(local_root, release, cfg, media, source="", sources=None):
     # from the detected medium before verification (the CRC step needs it) and
     # only gets re-stamped if the conversion above rewrote files
     try:
-        _stamp_mb_tags(dest, release)
+        _stamp = _stamp_mb_tags(dest, release)
+        if _stamp.get("failed"):
+            # Loud on purpose: every later namer (the naming script below,
+            # beets, the grade) reads these tags, and the album keeps the
+            # folder the add created because the marker says which release
+            # it is — but a file that did not take the identity is a fact
+            # the user (and script 1) has to be able to see.
+            _names = _stamp["failed"]
+            _log(f"  ! {len(_names)} of {_stamp['total']} file(s) did not "
+                 f"take the release identity (a locked or read-only file?)"
+                 f" — the album keeps the folder the add created, and "
+                 f"script 1 fills them: " + ", ".join(_names[:3])
+                 + (" …" if len(_names) > 3 else ""))
     except Exception:
         traceback.print_exc()
     _stamped, tag_problems = _stamp_media(dest, media, cfg)
@@ -7204,9 +7240,9 @@ def _import(local_root, release, cfg, media, source="", sources=None):
             if len(_move_errors) > 5:
                 _log(f"  ! organize: +{len(_move_errors) - 5} more")
             organize_error = (
-                f"{len(_move_errors)} file(s) could not be moved into the "
-                f"library — they are still in the download folder, and the "
-                f"file-level organizer completes them")
+                f"{len(_move_errors)} file(s) could not be placed (a locked "
+                f"or read-only file?) — the album is in the library and "
+                f"script 10 · Organize completes it")
             _log("  ! the album is in the library and the import chain still "
                  "runs over it — the namer can be re-run from the album page")
         elif isinstance(res, dict) and res.get("error"):

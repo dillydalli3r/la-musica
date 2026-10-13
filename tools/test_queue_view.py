@@ -519,8 +519,8 @@ with Patch(auto, load_config=lambda: dict(CFG),
     # a client can act on the note it renders.
     PIPE.imports["Partial"] = {
         "imported": True, "organized": False, "partial": True,
-        "organize_error": "1 file(s) could not be moved into the library — "
-                          "they are still in the download folder"}
+        "organize_error": "1 file(s) could not be placed (a locked or "
+                          "read-only file?) — the album is in the library"}
     PIPE.imports["Lossy"] = {"imported": True, "organized": True, "lossy": "MP3"}
     for mbid, artist, title in (("88888888-0000-0000-0000-000000000001", "Partial", "Move"),
                                 ("88888888-0000-0000-0000-000000000002", "Lossy", "Copy")):
@@ -540,8 +540,7 @@ with Patch(auto, load_config=lambda: dict(CFG),
     partial_row = [r for r in got if r["title"] == "Move"][0]
     assert partial_row["stage"] == "completed", partial_row
     assert partial_row["note"].startswith("Imported into the library"), partial_row
-    assert "naming script could not move every file" in partial_row["note"], partial_row
-    assert "still in the download folder" in partial_row["note"], partial_row
+    assert "could not place every file" in partial_row["note"], partial_row
     assert partial_row["partial"] is True, partial_row
     assert partial_row["organize_error"].startswith("1 file(s)"), partial_row
     lossy_row = [r for r in got if r["title"] == "Copy"][0]

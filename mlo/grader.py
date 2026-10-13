@@ -3349,7 +3349,8 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
     if naming_rows:
         from mlo.naming import shared_album_tags
 
-        album_shared = shared_album_tags([tags_map for _, tags_map, _ in naming_rows])
+        album_shared = shared_album_tags(
+            [tags_map for _, tags_map, _ in naming_rows], naming_dir)
     for basename, tags_map, track in naming_rows:
         try:
             kind, expected = _naming_mismatch(

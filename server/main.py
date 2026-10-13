@@ -6435,6 +6435,32 @@ def organize_albums(req: OrganizeRequest, cfg: Optional[dict] = None):
 
         # album-level tags from the first tagged track
         meta_tags = next((t["tags"] for t in tracks if t["tags"].get("TITLE") or t["tags"].get("ALBUM")), tracks[0]["tags"])
+
+        # The album's OWN album-level values (ALBUM_LEVEL_TAGS): the folder is
+        # a fact about the RELEASE, so one file's copy of MEDIA / DATE /
+        # RELEASECOUNTRY / LABEL / the ids must not name a second folder
+        # beside this album's own (mlo.naming.shared_album_tags — the same
+        # rule the grade and beets' path plugin use).
+        # ...and for a FRAMEWORK album the folder's own marker answers for it
+        # (mlo.naming.shared_album_tags' `folder`): the record the add wrote
+        # names the release this folder IS, so a download whose identity stamp
+        # missed a file is not named by its thin tags into a SECOND folder
+        # beside the one the user added (measured 2026-10-13).
+        shared = shared_album_tags([t["tags"] for t in tracks], p)
+        marker = {}
+        try:
+            from mlo.naming import marker_album_tags
+            marker = marker_album_tags(p)
+        except Exception:
+            traceback.print_exc()
+        # the album's own identity: `adopt_root` below reads it, and the
+        # release-type lookup must not ask MusicBrainz for an id the markers'
+        # own record already explains
+        meta_tags = dict(meta_tags)
+        for name in ("MUSICBRAINZ_ALBUMID", "MUSICBRAINZ_RELEASEGROUPID",
+                     "RELEASETYPE"):
+            if not str(meta_tags.get(name) or "").strip() and marker.get(name):
+                meta_tags[name] = marker[name]
         release_type = meta_tags.get("RELEASETYPE")
         if not release_type and meta_tags.get("MUSICBRAINZ_ALBUMID"):
             try:
@@ -6442,13 +6468,6 @@ def organize_albums(req: OrganizeRequest, cfg: Optional[dict] = None):
                 release_type = rel.get("release_type")
             except Exception:
                 release_type = None
-
-        # The album's OWN album-level values (ALBUM_LEVEL_TAGS): the folder is
-        # a fact about the RELEASE, so one file's copy of MEDIA / DATE /
-        # RELEASECOUNTRY / LABEL / the ids must not name a second folder
-        # beside this album's own (mlo.naming.shared_album_tags — the same
-        # rule the grade and beets' path plugin use).
-        shared = shared_album_tags([t["tags"] for t in tracks])
         moves = []  # (src, dst)
         dst_dirs = []  # target dir of every track (moved or in place)
         errors = []

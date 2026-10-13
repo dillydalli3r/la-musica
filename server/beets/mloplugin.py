@@ -418,7 +418,21 @@ def stash_album_tags(items):
     items = list(items or ())
     if not items:
         return None
-    shared = shared_album_tags([_item_album_tag_values(it) for it in items])
+    # ...and the album FOLDER is asked too: a framework album `pending_albums.
+    # create` made carries the release it stands for, so beets names the album
+    # the way the organizer and the grade do (mlo.naming.shared_album_tags'
+    # `folder`). Its folder is the items' own directory — beets imports the
+    # folder the import already moved into.
+    folder = ""
+    for it in items:
+        try:
+            folder = os.path.dirname(str(it.path or ""))
+        except Exception:
+            folder = ""
+        if folder:
+            break
+    shared = shared_album_tags([_item_album_tag_values(it) for it in items],
+                               folder)
     for it in items:
         _item_album_tags[id(it)] = shared
     return shared

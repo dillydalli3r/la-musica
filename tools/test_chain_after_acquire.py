@@ -443,7 +443,7 @@ def check_partial_organize():
 
     eq(res.get("imported"), True, "the import still reports the album imported")
     eq(res.get("organized"), False, "with the namer's failure on the record")
-    ok("could not be moved" in str(res.get("organize_error") or ""),
+    ok("could not be placed" in str(res.get("organize_error") or ""),
        "naming what could not be placed", res.get("organize_error"))
     eq(res.get("partial"), True,
        "and flagging the download as unsafe to clear (the files are still there)")

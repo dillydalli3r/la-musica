@@ -697,15 +697,77 @@ def _album_value(value):
     return str(value or "").strip()
 
 
-def shared_album_tags(tag_dicts):
-    """The album's OWN value per ALBUM-LEVEL tag.
+def marker_album_tags(folder_or_info):
+    """The album-level values a FRAMEWORK album's marker states, in the tag
+    names this module reads, or {}.
+
+    `folder_or_info` is a folder or an already-loaded marker
+    (`mlo.paths.load_pending`). This is what keeps an album the app itself
+    ASKED FOR from being named by its files' thin tags: the marker is the
+    record `pending_albums.create` wrote when the release was added, and it
+    names the release the folder IS — ids, title, artist (and the artist's own
+    id), dates, release type, medium, country, label, catalogue number.
+
+    Only what the marker states: a value nothing recorded is absent. The
+    caller decides what to do with it — `shared_album_tags(folder=…)` below
+    is the rule the organizer and the grade both run."""
+    if isinstance(folder_or_info, dict):
+        info = folder_or_info
+    else:
+        from .paths import load_pending
+        info = load_pending(str(folder_or_info or "")) or {}
+    if not info:
+        return {}
+    rel = info.get("release") or {}
+    countries = []
+    for event in rel.get("countries") or ():
+        code = str((event.get("code") if isinstance(event, dict) else event)
+                   or "").strip()
+        if code and code not in countries:
+            countries.append(code)
+    media = rel.get("media") or ()
+    medium = str((media[0] if media else "") or "").strip()
+    out = {
+        "ALBUM": str(info.get("title") or ""),
+        "ALBUMARTIST": str(info.get("artist") or ""),
+        "MUSICBRAINZ_ALBUMARTISTID": str(info.get("artist_id") or ""),
+        "MUSICBRAINZ_ALBUMID": str(info.get("release_id") or ""),
+        "MUSICBRAINZ_RELEASEGROUPID": str(info.get("release_group_id") or ""),
+        "RELEASETYPE": str(info.get("release_type") or ""),
+        "DATE": str(info.get("date") or ""),
+        "ORIGINALDATE": str(rel.get("originaldate") or ""),
+        "RELEASECOUNTRY": "; ".join(countries) or str(rel.get("country") or ""),
+        "MEDIA": medium,
+        "LABEL": str(rel.get("label") or ""),
+        "CATALOGNUMBER": str(rel.get("catalog_number") or ""),
+    }
+    return {k: v for k, v in out.items() if v}
+
+
+def shared_album_tags(tag_dicts, folder=""):
+    """The album's OWN value per ALBUM-LEVEL tag — plus, for a FRAMEWORK
+    album, the record its own marker holds.
 
     The value MOST of the album's tracks state; a tie goes to the earliest
     track that states one (a deterministic answer whatever order the files are
     read in); "" when no track states the name at all. Every name in
     ALBUM_LEVEL_TAGS is present in the answer, "" included — an album none of
     whose files state a medium must not let one of them invent a second
-    folder."""
+    folder.
+
+    *folder*, when given and when it carries a marker (`.mlo_pending.json` —
+    the folder an "Add to library" created), is the app's own record of which
+    release that folder IS. It FILLS every name the files state nothing about,
+    and when the files name no release at all it IS the album's own answer: a
+    download the import's identity stamp could not reach (a locked file, a
+    queued write — the verdict is per file and silent, see
+    `soulseek_auto._stamp_one`) spelled the album "<artist>/<year> - <album>
+    {<medium>}", and the folder the user added was RENAMED to that and left
+    behind while its audio moved beside it: two folders for one acquisition,
+    measured 2026-10-13 on the owner's Cracker Island. A file that DOES state
+    a release id wins outright — that is a re-point (`POST /api/mb/assign`),
+    and the marker is the stale record then. A folder with no marker is
+    untouched by any of this."""
     counts = {}
     for index, tags in enumerate(tag_dicts or ()):
         for name in ALBUM_LEVEL_TAGS:
@@ -721,6 +783,16 @@ def shared_album_tags(tag_dicts):
     out = {name: "" for name in ALBUM_LEVEL_TAGS}
     for name, slot in counts.items():
         out[name] = max(slot.items(), key=lambda kv: (kv[1][0], -kv[1][1]))[0]
+    if folder:
+        marker = marker_album_tags(folder)
+        if marker:
+            if not (out.get("MUSICBRAINZ_ALBUMID")
+                    or out.get("MUSICBRAINZ_RELEASEGROUPID")):
+                out.update(marker)
+            else:
+                for name, value in marker.items():
+                    if not out.get(name):
+                        out[name] = value
     return out
 
 

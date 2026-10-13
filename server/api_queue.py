@@ -253,16 +253,17 @@ def _job_row(job, wish_id=None):
             # for.
             if result.get("lossy"):
                 note += f" — a lossy copy ({result['lossy']})"
-            # A PARTIAL move: the naming script placed what it could and the
-            # album's remaining files are STILL in the download folder. The old
-            # line named only the script, so the row read as "the album is fine,
-            # a script grumbled" while the tracks that never moved sat in the
-            # staging folder the user has to import again — the sentence the
-            # notification has always carried (see `_notify_finish`) and the row
-            # did not.
+            # A PARTIAL move: the naming script placed what it could, and what
+            # it could not (a locked or read-only file) stayed where it was —
+            # INSIDE the album, which the import already moved in: a download
+            # the import could not move at all is the error state, not this
+            # one. The old line sent the user back to a download folder that
+            # holds nothing of the album any more, and importing a leftover
+            # copy is how one release grew a second folder (2026-10-13).
             if result.get("organized") is False:
-                note += (" — the naming script could not move every file, and what "
-                         "stayed behind is still in the download folder")
+                note += (" — the naming script could not place every file; the "
+                         "album is in the library and script 10 · Organize "
+                         "completes it")
         elif result.get("wished"):
             note = "Nothing was found — it is on the queue to keep looking"
         else:
@@ -315,9 +316,8 @@ def _job_row(job, wish_id=None):
         "outcome": str(result.get("outcome") or ""),
         # A move the naming script could not complete: `partial` is the import's
         # own verdict and `organize_error` its sentence, so a client renders the
-        # row's line (and the "import that folder again" step) without inventing
-        # either — `note` says it in one line, these two say it in a form a
-        # client can act on.
+        # row's line without inventing either — `note` says it in one line,
+        # these two say it in a form a client can act on.
         "partial": bool(result.get("partial")),
         "organize_error": str(result.get("organize_error") or ""),
         # The album imported under `soulseek_auto_lossy_policy`: the format it
