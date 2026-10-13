@@ -5038,6 +5038,18 @@ used to be a second ffprobe on a file this pipeline had just produced; a
   ranked below 100, 62 rejected naming the score, invalid/AR-fail still
   rejected, the logless floor-0 case).
 
+  The change from 100 to 85 also MIGRATES an install that still holds the old
+  value: Settings writes the whole schema, so every install made while 100 was
+  the default carries a copy of it, and no later save moves it. `100` is
+  Logchecker's PERFECT band — one gap-handling note or an EAC older than 0.99
+  scores a good rip below it — so such an install rejected practically every
+  CD candidate while its setting looked deliberate. `mlo.config.LEGACY_
+  DEFAULT_LOG_MIN_SCORE` is the old value, and `normalize_config` maps a saved
+  copy of it to the shipped default exactly as it does the medium order (R246):
+  a copy of the default is not a choice. Any other value — `0` included — is
+  the user's own and stands. Pinned in `tools/test_soulseek_candidates.py`
+  (`normalize_config({log_min_score: 100}) == 85`, `90`/`0`/`85` untouched).
+
 ### 7.37 The library page says what is failing, and the tools install themselves
 
 - **R232 — Home and the Library open with the grading verdict, and it names
@@ -7865,7 +7877,7 @@ checks see or how they judge it.
 | `audit_check_cd_format` | ON | whether a `CD_FORMAT` failure turns the album audit FAKE |
 | `audit_verify_cd_checksums` / `audit_integrity` / `audit_cd_require_both` | ON | what script 6 verifies on a CD rip |
 | `audit_log_score_threshold` | 100 | the log score the audit accepts |
-| `soulseek_auto_log_min_score` | 100 | the Logchecker score a candidate's `.log` must reach before its album is downloaded — judged only when Logchecker COULD score it, so an unscored log's album is still tried and judged on its per-track CRCs (R391) |
+| `soulseek_auto_log_min_score` | 85 | the Logchecker score a candidate's `.log` must reach before its album is downloaded — judged only when Logchecker COULD score it, so an unscored log's album is still tried and judged on its per-track CRCs (R391). 100 is Logchecker's PERFECT band, so the value this key shipped with at first (100) is migrated to 85 rather than kept: an untouched install holds a copy of the old default, and keeping it rejected nearly every CD candidate (R402) |
 | `audit_fail_on_unscorable_log` | ON | whether an unscorable log fails where a scorer exists |
 | `audit_thorough`, `audit_clipping`, `audit_scaled_clipping`, `audit_mqa`, `audit_ai`, `audit_fake_stereo`, `audit_silence`, `audit_dynamic_range`, `audit_true_peak`, `audit_lufs`, `audit_bpm`, `audit_cutoff_allow` | ON (`0` for the cutoff) | which AudioAuditor detectors run — they decide the verdict, not the grade directly |
 | `write_audit_tag` / `write_log_grade` / `write_replaygain_tags` / `write_dynamic_range_tags` | ON | whether the scripts write the tags the checks require |
@@ -8856,6 +8868,30 @@ when the log itself says something is wrong.** Pinned in
   finds says which pass found it (`alias_pass` with `"credit": True`), and
   `Deadline.why` names the pass when a budget cuts it. Pinned by
   `tools/test_lyrics_aliases.py` §3b.
+
+- **R432 — a release is searched by its tracks' own names, because the payload
+  is read as it is published.** The owner's report, 2026-10-13: *"Soulseek
+  importing seems to be rejecting practically every candidate."* The MBID-driven
+  queries (`_mbid_queries`, on by default) are meant to add, beside the pressing
+  traits, the release's own MusicBrainz id AND each of its first
+  `soulseek_auto_mbid_tracks` tracks' recording id and "artist title" — the one
+  way a peer that holds exactly the album's tracks under a folder name the
+  catalog-number/barcode traits never match is reachable at all. They are built
+  on `_release_tracks`, which read only NESTED payloads (`release["tracks"]` or
+  `media[].tracks[]`) — but `server.integrations.resolve_release` publishes
+  `media` as a FLAT track list (one entry per track, carrying `recording_mbid`,
+  `title`, `artist_credit`). So `_release_tracks` returned `[]` for every real
+  payload, the track queries never fired, and a release was searched by its
+  catalog number and barcode alone. Measured live on Gorillaz's *D-Sides* (a
+  22-track CD): 3 queries, one peer folder; with the payload read correctly, 11
+  queries (both catalog numbers, the release id, and four tracks' recording ids
+  and names), and the peers that name the album differently became reachable.
+  `_release_tracks` now reads the flat shape (each `media` entry IS a track)
+  and STILL reads the nested one (a raw MusicBrainz release), so both payloads
+  answer. Pinned in `tools/test_soulseek_candidates.py` (a flat-`media` release
+  yields its track queries; a nested-disc one yields the same; the two
+  end-to-end job tests assert the per-track queries reach slskd in the one
+  batch).
 
 ---
 

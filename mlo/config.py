@@ -191,6 +191,14 @@ LEGACY_DEFAULT_MEDIUM_ORDER = (
     ["CD", "Vinyl", "Cassette", "Other", "Digital Media"],
 )
 
+# The log floor the acquisition settings shipped with before R402 moved it to
+# 85 (see DEFAULT_CONFIG / soulseek_auto_log_min_score). 100 is Logchecker's
+# PERFECT band — a good EAC rip with a gap-handling note, or one cut by an EAC
+# older than 0.99, scores below it — so a config still holding 100 is not a
+# choice an install made: it never changes, and an untouched install follows
+# the current default instead.
+LEGACY_DEFAULT_LOG_MIN_SCORE = 100
+
 # Run All order — PATH-CHANGING SCRIPTS FIRST (11 videos → 3 FLACs → 14
 # beets, whose generated config sets `move: yes`), then the sidecar namers
 # that must see final audio names (15 manifest → 2 CUEs → 1 lyrics format),
@@ -2358,6 +2366,21 @@ def normalize_config(user=None) -> dict:
     # and finally gets the disc numbers its label promised.
     if str(cfg.get("export_structure") or "").strip() in ("artist_album", "artist_album_disc"):
         cfg["export_structure"] = "albumartist_album_disc"
+
+    # The download gate's log floor shipped at 100 for a while (Settings writes
+    # the whole schema, so every install made then holds a copy of it), and 100
+    # is Logchecker's PERFECT band: a good EAC rip with a gap-handling note, or
+    # one made by an EAC older than 0.99, scores below it, so such an install
+    # rejected practically every CD candidate (the owner's report). R402 moved
+    # the shipped default to 85; an install still holding the OLD default never
+    # chose 100, so it follows the new one — exactly as the medium order above
+    # does. Any other value is the user's own and is kept as saved.
+    try:
+        _log_floor = int(cfg.get("soulseek_auto_log_min_score"))
+    except (TypeError, ValueError):
+        _log_floor = None
+    if _log_floor == LEGACY_DEFAULT_LOG_MIN_SCORE:
+        cfg["soulseek_auto_log_min_score"] = DEFAULT_CONFIG["soulseek_auto_log_min_score"]
 
     for key in _BOOL_KEYS:
         cfg[key] = _as_bool(cfg.get(key), DEFAULT_CONFIG.get(key, False))

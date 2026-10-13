@@ -2453,6 +2453,20 @@ assert soulseek_auto._log_passes(None, "invalid", 100) is False    # wrong check
 assert soulseek_auto._LOG_FLOOR_DEFAULT == 85, soulseek_auto._LOG_FLOOR_DEFAULT
 assert mlo_config_defaults["soulseek_auto_log_min_score"] == 85, \
     mlo_config_defaults["soulseek_auto_log_min_score"]
+# an install that still holds the OLD shipped default (100) follows the new one:
+# 100 is Logchecker's PERFECT band, so a copy of it is not a choice, and keeping
+# it rejected practically every CD candidate (the owner's report). Any other
+# value is the user's own and stands untouched.
+assert _mlo_config.LEGACY_DEFAULT_LOG_MIN_SCORE == 100, \
+    _mlo_config.LEGACY_DEFAULT_LOG_MIN_SCORE
+assert _mlo_config.normalize_config(
+    {"soulseek_auto_log_min_score": 100})["soulseek_auto_log_min_score"] == 85
+assert _mlo_config.normalize_config(
+    {"soulseek_auto_log_min_score": 90})["soulseek_auto_log_min_score"] == 90
+assert _mlo_config.normalize_config(
+    {"soulseek_auto_log_min_score": 0})["soulseek_auto_log_min_score"] == 0
+assert _mlo_config.normalize_config(
+    {"soulseek_auto_log_min_score": 85})["soulseek_auto_log_min_score"] == 85
 
 # (d) end to end: a log that happens to STATE an AccurateRip failure rejects the
 #     candidate with AccurateRip's own words, and the album is never requested.
@@ -2986,6 +3000,42 @@ assert soulseek_auto.release_queries(
     ["MB-1", MBID_RELEASE["id"]]
 assert soulseek_auto.release_queries(
     {k: v for k, v in MBID_RELEASE.items() if k not in ("id", "tracks")}, {}) == ["MB-1"]
+
+# ...and the shape `integrations.resolve_release` ACTUALLY publishes: a FLAT
+# `media` list — one entry per track, NO `tracks` key and NO nested
+# `media[].tracks`. `_release_tracks` used to read only the nested shape, so
+# for every real payload it returned nothing and the track queries below never
+# fired: a release was searched by its pressing traits alone (a catalog number
+# and a barcode), which is how "practically every candidate" got rejected —
+# the peers who hold the album under another folder name were never asked.
+FLAT_MEDIA_RELEASE = {
+    "id": MBID_RELEASE["id"], "title": "Mbid Album", "date": "1999",
+    "medium_formats": ["CD"], "country": "GB", "catalog_number": "MB-1",
+    "artists": [{"name": "Mbid Artist"}],
+    "media": [
+        {"disc": 1, "position": 1, "title": "First Song",
+         "recording_mbid": "aaaaaaaa-0000-0000-0000-00000000000a",
+         "artist_credit": "Mbid Artist"},
+        {"disc": 1, "position": 2, "title": "Second Song",
+         "recording_mbid": "aaaaaaaa-0000-0000-0000-00000000000b"},
+    ],
+}
+assert soulseek_auto._release_tracks(FLAT_MEDIA_RELEASE) == FLAT_MEDIA_RELEASE["media"], \
+    soulseek_auto._release_tracks(FLAT_MEDIA_RELEASE)
+_flat_q = soulseek_auto.release_queries(FLAT_MEDIA_RELEASE, {})
+assert _flat_q == [
+    "MB-1", MBID_RELEASE["id"],
+    "aaaaaaaa-0000-0000-0000-00000000000a", "Mbid Artist First Song",
+    "aaaaaaaa-0000-0000-0000-00000000000b", "Mbid Artist Second Song",
+], _flat_q
+# a nested-disc payload is still read too (a raw MusicBrainz release fetched by
+# the manual route, which nests the recordings under each medium)
+NESTED_MEDIA_RELEASE = dict(
+    FLAT_MEDIA_RELEASE,
+    media=[{"position": 1, "tracks": FLAT_MEDIA_RELEASE["media"]}])
+assert soulseek_auto._release_tracks(NESTED_MEDIA_RELEASE) == FLAT_MEDIA_RELEASE["media"], \
+    soulseek_auto._release_tracks(NESTED_MEDIA_RELEASE)
+assert soulseek_auto.release_queries(NESTED_MEDIA_RELEASE, {}) == _flat_q
 # …and an explicit template set a caller decided (the job's own stored queries,
 # its broad second pass) renders EXACTLY as given: no aliases, no MBID set.
 assert soulseek_auto.release_queries(MBID_RELEASE, {}, ["artist album"]) == \
@@ -3153,9 +3203,15 @@ try:
                         artists=CJK_RELEASE["artists"])
     run = run_job(_cjk_digital, DIGITAL_ROWS, queries=[])
     assert run.imported, run.job["result"]
+    # The per-track queries ride the batch too: `_release_tracks` reads the
+    # FLAT `media` list `resolve_release` publishes, so each of the release's
+    # tracks contributes its own "artist title" (the fixture states no
+    # recording ids, so no `recording_mbid` query). Before that fix these were
+    # dropped and a release was searched by its pressing traits alone.
     assert [q for q, _t, _l in run.stub.searches] == [
         "ぴーなた アンタに言ってんの 2026",
         CJK_RELEASE["id"],
+        "ぴーなた Alpha", "ぴーなた Beta",
         "pinata What I'm Telling You 2026"], run.stub.searches
 finally:
     _intg.mb_get_cached = _real_mb_cached
@@ -3316,10 +3372,14 @@ assert _sj_calls[1]["queries"] == ["pinned query"], _sj_calls[1]
 run = run_job(TWO_CAT, ONE_DISC_ROWS, queries=[])
 assert run.imported, run.job["result"]
 assert [q for q, _t, _l in run.stub.searches] == [
-    "CAT-1", "CAT-2", TWO_CAT["id"]], run.stub.searches
+    "CAT-1", "CAT-2", TWO_CAT["id"],
+    "Job Artist Alpha", "Job Artist Beta"], run.stub.searches
 # …and the release's own MBID rides the SAME batch (the MBID-driven queries,
 # on by default): it is POSTed as its own slskd search beside the templates,
-# in the one window — never a second wait.
+# in the one window — never a second wait. Its TRACKS ride it too (each
+# track's own artist+title, read from the FLAT `media` payload), which is the
+# whole point: a peer that holds the album under a name the catalog-number
+# traits never match is otherwise unreachable.
 
 clock = FakeClock()
 _real_time = soulseek_auto.time

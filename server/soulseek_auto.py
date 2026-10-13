@@ -1760,19 +1760,29 @@ def release_queries(release, cfg, templates=None):
 def _release_tracks(release):
     """The release's tracks, in disc/position order, as the payload states them.
 
-    `integrations.resolve_release` publishes the tracklist TWICE — the flat
-    `tracks` list and `media[].tracks` — and every row carries the recording's
-    MBID, its title and its artist credit (`inc=recordings+artist-credits`), so
-    asking for them here costs NO MusicBrainz request. A row MusicBrainz states
-    no ordering for keeps the place it came in at."""
+    `integrations.resolve_release` publishes the tracklist as a FLAT `media`
+    list — one entry per track, each carrying the recording's MBID, its title
+    and its artist credit (`inc=recordings+artist-credits`) — so asking for
+    them here costs NO MusicBrainz request. A payload whose `media` is a list
+    of DISCS (`media[].tracks[]`, the raw MusicBrainz shape) is read too: the
+    tracks land wherever the payload puts them. Reading only the nested shape
+    is why the MBID / track-name queries below never fired for a `resolve_
+    release` payload, leaving a release searched by its pressing traits alone.
+    A row MusicBrainz states no ordering for keeps the place it came in at."""
     rows = [t for t in (release.get("tracks") or []) if isinstance(t, dict)]
     if not rows:
         for medium in (release.get("media") or []):
             if not isinstance(medium, dict):
                 continue
-            for t in (medium.get("tracks") or []):
-                if isinstance(t, dict):
+            nested = [t for t in (medium.get("tracks") or [])
+                      if isinstance(t, dict)]
+            if nested:
+                for t in nested:
                     rows.append(dict(t, disc=t.get("disc") or medium.get("position")))
+            else:
+                # a FLAT media list: this entry IS the track, and it carries
+                # the recording MBID / title / artist credit the queries need.
+                rows.append(medium)
     order = []
     for i, row in enumerate(rows):
         order.append((_position_of(row.get("disc"), 1),
@@ -6534,6 +6544,16 @@ def _stamp_media(album_dir, media, cfg):
     Returns (stamped, problems). A file whose tag cannot be written is a
     problem, never a silent skip: verify_album_checksums keys off MEDIA, so a
     swallowed failure would let a CD rip "verify" without one CRC check.
+
+    FILL-ONLY: a MEDIA the copy arrived with is the uploader's and stands
+    (R398). A download accepted through the "no rip log — import as Digital
+    Media?" prompt keeps that value too — forcing "Digital Media" onto it would
+    leave the album claiming a medium its RELEASE is not, and the naming
+    script, the folder name and the Digital Media SOURCE fill all follow the
+    release's own identity, so only the tag would change (measured 2026-10-13:
+    the forced stamp replaced "Missing .log/.cue" with PATH and SOURCE
+    failures). `media` here is the update path's word; `_verify_album`'s
+    decode-not-CRC switch is what the prompt actually changes.
 
     The SOURCE deletion used to be unconditional here, which is how an
     auto-import stripped a tag the download arrived with. It now mirrors the
