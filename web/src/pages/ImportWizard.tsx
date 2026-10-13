@@ -2173,7 +2173,10 @@ export default function ImportWizard() {
   const albumTargets = (): string[] =>
     uploaded.length ? uploaded.map((a) => a.path) : albumPath ? [albumPath] : [];
 
-  const nextFromLinks = async () => {
+  /** `land` is the step to show once the link is written — null means DON'T
+   *  MOVE: a step JUMP calls this as it leaves Links (`goTo`), so the write
+   *  lands in the background while the step the user asked for is already up. */
+  const nextFromLinks = async (land: number | null = 2) => {
     const typed = extractMbid(mbLink) || "";
     const rid = typed || releaseId || "";
     if (!albumPath || !rid) {
@@ -2201,8 +2204,9 @@ export default function ImportWizard() {
       // re-link that stopped at the id would leave the gaps of the release
       // the album just left (the release changed, the tracklist did not).
       await recordExpectedTracks(albumPath, rel, "Links saved");
+      markSaved(1);
       toast("Links saved to album");
-      advanceTo(2);
+      if (land !== null) advanceTo(land);
     } catch (e) {
       toast.error(String(e));
     } finally {
@@ -2402,6 +2406,7 @@ export default function ImportWizard() {
   // ---------------- Step 2: matching ----------------
   const setSuggestion = (path: string, disc: number, position: number) => {
     const m = release?.media.find((x) => x.disc === disc && x.position === position);
+    markEdited(2); // an unmatched mapping this step still owes the files
     setSuggestions((ss) => ss.map((s) => (s.local === path ? { ...s, matched: !!m, confidence: 1, release_track: m ?? null } : s)));
   };
 
@@ -2464,6 +2469,7 @@ export default function ImportWizard() {
       const rid = release?.id || releaseId || "";
       if (rid) {
         const matched = await api.mbMatch(target, rid, staged);
+        markEdited(2); // new rows arrived unmapped — the Match step owes them
         setSuggestions(matched.suggestions);
       }
       toast(`Added ${added} file${added === 1 ? "" : "s"} — check the matches below`);
@@ -2674,6 +2680,59 @@ export default function ImportWizard() {
     setStep(to);
   };
 
+  /** The steps holding edits nobody has written yet. A step JUMP (the strip,
+   *  a missing-family chip, Back) reads this to decide what the step it leaves
+   *  has to save: an untouched step writes NOTHING — walking through the
+   *  wizard must not churn files, fire a fetch or toast a save that did not
+   *  happen — and each save clears its own step once it succeeded, so a write
+   *  that failed stays pending (and its error toast says so). */
+  const [editedSteps, setEditedSteps] = useState<Set<number>>(new Set());
+  const markEdited = (n: number) =>
+    setEditedSteps((s) => (s.has(n) ? s : new Set(s).add(n)));
+  const markSaved = (n: number) =>
+    setEditedSteps((s) => {
+      if (!s.has(n)) return s;
+      const next = new Set(s);
+      next.delete(n);
+      return next;
+    });
+
+  /** The step's OWN save — the very action its Continue press runs — called as
+   *  the step is LEFT, with `land` null: the jump has already moved the wizard,
+   *  so the save writes what the step holds and touches no step state. Answers
+   *  whether the step had anything to write at all. */
+  const saveStep = (n: number): boolean => {
+    // `busy` = an action is already running (this step's own save included):
+    // a second press of the same save would write the same values twice, and
+    // the mark it is about to clear is what says the write is in flight.
+    if (!editedSteps.has(n) || busy) return false;
+    if (n === 1) void nextFromLinks(null);
+    else if (n === 2) {
+      // Nothing to write without the release payload itself (a release id the
+      // files named buys rows, not the metadata to write them from): the step
+      // keeps its edit rather than toasting a save it cannot make.
+      if (!release) return false;
+      void confirmMatch(null);
+    } else if (n === 4) void saveGenres(null);
+    else if (n === 6) void saveLyricsStep(null);
+    else if (n === 7) void saveAdvisory(null);
+    else return false;
+    return true;
+  };
+
+  /** Every step JUMP comes through here — the step strip, a missing-family
+   *  chip and Back. The step being LEFT saves first, in the background while
+   *  the target shows, so hopping tabs cannot lose a genre list, a lyric
+   *  draft, a match or a link — and the Finish step's chain then reads what
+   *  the steps actually hold instead of whatever was written last. The
+   *  landing still goes through `advanceTo`, so leaving a step with a release
+   *  in hand leaves the folder describing it. */
+  const goTo = (to: number) => {
+    if (to < 0 || to >= STEPS.length || to === step) return;
+    saveStep(step);
+    advanceTo(to);
+  };
+
   /** Write the SOURCE this album's Digital Media release needs — the
    *  pipeline's own function through the pipeline's own route, so nothing
    *  here decides for itself: the value lands on every track that lacks one
@@ -2712,7 +2771,10 @@ export default function ImportWizard() {
     }
   };
 
-  const confirmMatch = async () => {
+  /** Write the matched release's metadata onto the album's files — the Match
+   *  step's own Save (and its Continue). `land` is the step to show once it
+   *  landed; null is a step JUMP calling it as it leaves (`goTo`). */
+  const confirmMatch = async (land: number | null = 3) => {
     if (!albumPath || !release) {
       toast("Fetch the MusicBrainz release first");
       return;
@@ -2737,7 +2799,8 @@ export default function ImportWizard() {
         }
       }
       toast("MusicBrainz metadata written to files (titles, artists, album, dates, MBIDs)");
-      advanceTo(3);
+      markSaved(2);
+      if (land !== null) advanceTo(land);
     } catch (e) {
       toast.error(String(e));
     } finally {
@@ -3006,8 +3069,10 @@ export default function ImportWizard() {
     });
   }, [ratingRows, stepTracks]);
 
-  const setGenreList = (path: string, list: string[]) =>
+  const setGenreList = (path: string, list: string[]) => {
+    markEdited(4); // a genre edit the step still owes the files
     setGenres((g) => ({ ...g, [path]: list }));
+  };
 
   const addGenre = (path: string, value: string) => {
     const typed = value.trim();
@@ -3032,6 +3097,7 @@ export default function ImportWizard() {
   const applyGenresToDisc = (disc: number, value: string) => {
     const paths = stepTracks.filter((t) => discOfTrack(t) === disc).map((t) => t.path);
     if (!paths.length) return;
+    markEdited(4);
     setGenres((g) => {
       const next = { ...g };
       for (const p of paths) next[p] = splitGenres(value).slice(0, genreCap);
@@ -3041,7 +3107,8 @@ export default function ImportWizard() {
   };
 
   /** Drop one genre from EVERY track — album-wide cleanup of a bad genre. */
-  const removeGenreEverywhere = (genre: string) =>
+  const removeGenreEverywhere = (genre: string) => {
+    markEdited(4);
     setGenres((g) => {
       const next = { ...g };
       for (const t of stepTracks) {
@@ -3050,16 +3117,21 @@ export default function ImportWizard() {
       }
       return next;
     });
+  };
 
   /** Drop ALL genres from every track, leaving the step empty to re-import. */
-  const removeAllGenres = () =>
+  const removeAllGenres = () => {
+    markEdited(4);
     setGenres((g) => {
       const next = { ...g };
       for (const t of stepTracks) next[t.path] = [];
       return next;
     });
+  };
 
-  const saveGenres = async () => {
+  /** `land` is the step to show once the genres are written; null is a step
+   *  JUMP saving them as it leaves (`goTo`). */
+  const saveGenres = async (land: number | null = 5) => {
     setBusy(true);
     setAct({ label: `Saving genres for ${Object.keys(genres).length} track(s)…` });
     try {
@@ -3073,8 +3145,9 @@ export default function ImportWizard() {
       for (const [p, list] of Object.entries(genres))
         writes[p] = { GENRE: list.length ? list : null };
       await api.mbAssign(writes, staged);
+      markSaved(4);
       toast("Genres saved");
-      advanceTo(5);
+      if (land !== null) advanceTo(land);
     } catch (e) {
       toast.error(String(e));
     } finally {
@@ -3369,7 +3442,9 @@ export default function ImportWizard() {
     }
   };
 
-  const saveLyricsStep = async () => {
+  /** `land` is the step to show once the lyrics and INSTRUMENTAL are written;
+   *  null is a step JUMP saving them as it leaves (`goTo`). */
+  const saveLyricsStep = async (land: number | null = 7) => {
     setBusy(true);
     setAct({ label: `Saving lyrics & INSTRUMENTAL for ${stepTracks.length} track(s)…` });
     try {
@@ -3407,7 +3482,8 @@ export default function ImportWizard() {
         untimed ? `${untimed} track(s) have lyrics without timestamps — not saved as .lrc` : null
       );
       toast(`Lyrics format ${fmt}: ${embedded} Embedded, ${sidecars} .lrc — INSTRUMENTAL saved`);
-      advanceTo(7);
+      markSaved(6);
+      if (land !== null) advanceTo(land);
     } catch (e) {
       toast.error(String(e));
     } finally {
@@ -3524,6 +3600,7 @@ export default function ImportWizard() {
   };
 
   const applyAdvisoryToAll = (v: string) => {
+    markEdited(7);
     setAdvisory((a) => {
       const next = { ...a };
       for (const t of stepTracks) next[t.path] = v;
@@ -3531,7 +3608,9 @@ export default function ImportWizard() {
     });
   };
 
-  const saveAdvisory = async () => {
+  /** `land` is the step to show once the advisory values are written; null is a
+   *  step JUMP saving them as it leaves (`goTo`). */
+  const saveAdvisory = async (land: number | null = 8) => {
     setBusy(true);
     setAct({ label: `Saving advisory for ${stepTracks.length} track(s)…` });
     try {
@@ -3545,13 +3624,15 @@ export default function ImportWizard() {
         if (picked !== existing) writes[t.path] = { ITUNESADVISORY: picked };
       }
       if (!Object.keys(writes).length) {
-        toast("No advisory changes — pick values or use Apply to all");
-        advanceTo(8);
+        markSaved(7);
+        toast("No advisory changes to save");
+        if (land !== null) advanceTo(land);
         return;
       }
       await api.mbAssign(writes, staged);
+      markSaved(7);
       toast("Advisory ratings saved");
-      advanceTo(8);
+      if (land !== null) advanceTo(land);
     } catch (e) {
       toast.error(String(e));
     } finally {
@@ -3883,6 +3964,10 @@ const finish = async (closeByNavigation: boolean, runScripts = true) => {
     setRunRows(null);
     setFinishMsg(null);
     setAcoustid(null);
+    // The steps' edits belonged to the album just left: nothing of album A is
+    // pending against album B (and a jump from here must not write A's drafts
+    // onto B's files).
+    setEditedSteps(new Set());
   };
 
   /** Open the album a prompt is about, on the step that needs the decision.
@@ -3890,6 +3975,10 @@ const finish = async (closeByNavigation: boolean, runScripts = true) => {
    *  same step with the same warning. */
   const openPrompt = (p: ImportPrompt) => {
     const ids = p.families.map((f) => f.id).filter((id) => id in FAMILY_STEP);
+    // Another album's prompt: the edits the steps hold are THIS album's, and
+    // they must not follow the wizard over (the drafts reset with the album
+    // anyway — see `resetAlbumRelease`).
+    setEditedSteps(new Set());
     setMissingFamilies(ids);
     setAlbumPath(p.album);
     setStep(stepFromParam(null, ids) ?? 1);
@@ -4098,16 +4187,19 @@ const finish = async (closeByNavigation: boolean, runScripts = true) => {
           setup wizard's own rail. The strip used to swallow a forward click
           (`i < step && setStep(i)`), which reads as a dead button; a step
           whose body needs data that is not there yet stays disabled and says
-          what it is waiting for, so a jump never lands on an empty form. */}
+          what it is waiting for, so a jump never lands on an empty form.
+          Every jump goes through `goTo`, which first saves the step being
+          LEFT (R417) — so a tab is never a way to lose an edit. */}
       <div className="flex items-center gap-1.5 overflow-x-auto">
         {STEPS.map((s, i) => {
           const waiting = stepGate(i);
           return (
             <div key={s} className="flex items-center gap-1.5 shrink-0">
               <button
-                onClick={() => setStep(i)}
+                onClick={() => goTo(i)}
                 disabled={busy || !!waiting}
                 title={waiting ?? undefined}
+                data-step={i}
                 className={`flex items-center gap-1.5 rounded-lg px-3 py-1 text-xs tap transition-colors ${
                   i === step
                     ? "bg-accent on-accent"
@@ -4155,7 +4247,7 @@ const finish = async (closeByNavigation: boolean, runScripts = true) => {
                     className={`!py-1 !px-2 text-[11px] tap rounded-lg border border-border ${
                       i === step ? "bg-accent on-accent" : "bg-raise text-zinc-300 hover:text-white"
                     }`}
-                    onClick={() => i >= 0 && setStep(i)}
+                    onClick={() => i >= 0 && goTo(i)}
                   >
                     {FAMILY_LABEL[id]}
                   </button>
@@ -4600,6 +4692,10 @@ const finish = async (closeByNavigation: boolean, runScripts = true) => {
                     // The badge describes how the FIELD was filled; a value
                     // the user is typing is not "detected from track tags".
                     setDetectedFromTags(false);
+                    // A typed/selected link is the album's release waiting to
+                    // be written: the step's own Save (`nextFromLinks`) runs
+                    // as the step is left (R417).
+                    markEdited(1);
                   }}
                 />
                 {releaseId ? (
@@ -4703,7 +4799,7 @@ const finish = async (closeByNavigation: boolean, runScripts = true) => {
                 <div className="max-h-48 overflow-auto space-y-1">
                   {searchHits.map((h) => (
                     <button key={h.id} className={`${ROW} w-full text-left text-sm hover:bg-raise`}
-                      onClick={() => { setMbLink(`https://musicbrainz.org/release/${h.id}`); setReleaseId(h.id); setAutoNote(""); }}>
+                      onClick={() => { setMbLink(`https://musicbrainz.org/release/${h.id}`); setReleaseId(h.id); setAutoNote(""); markEdited(1); }}>
                       <span className="flex-1 truncate min-w-0">
                         <span className="text-zinc-200">{h.title}</span>
                         <span className="text-zinc-500"> — {h.artist} ({h.date})</span>
@@ -4909,7 +5005,7 @@ const finish = async (closeByNavigation: boolean, runScripts = true) => {
             </div>
           )}
           <div className="flex justify-end">
-            <button className="btn-primary tap" onClick={confirmMatch} disabled={busy}>
+            <button className="btn-primary tap" onClick={() => confirmMatch()} disabled={busy}>
               Save matching
             </button>
           </div>
@@ -5545,7 +5641,7 @@ const finish = async (closeByNavigation: boolean, runScripts = true) => {
               </DiscSection>
             ))}
             <div className="flex justify-end">
-              <button className="btn-primary tap" onClick={saveGenres} disabled={busy}>Save genres</button>
+              <button className="btn-primary tap" onClick={() => saveGenres()} disabled={busy}>Save genres</button>
             </div>
           </MinBlock>
         </div>
@@ -5791,7 +5887,10 @@ const finish = async (closeByNavigation: boolean, runScripts = true) => {
                       <input
                         type="checkbox"
                         checked={inst === "1"}
-                        onChange={(e) => setInstrumental((m) => ({ ...m, [t.path]: e.target.checked ? "1" : "0" }))}
+                        onChange={(e) => {
+                          markEdited(6);
+                          setInstrumental((m) => ({ ...m, [t.path]: e.target.checked ? "1" : "0" }));
+                        }}
                         className=""
                       />
                       INSTRUMENTAL
@@ -5827,7 +5926,10 @@ const finish = async (closeByNavigation: boolean, runScripts = true) => {
                       <LyricsViewer
                         path={t.path}
                         initialLyrics={lyricsDrafts[t.path] ?? ""}
-                        onChange={(lrc) => setLyricsDrafts((d) => ({ ...d, [t.path]: lrc }))}
+                        onChange={(lrc) => {
+                          markEdited(6);
+                          setLyricsDrafts((d) => ({ ...d, [t.path]: lrc }));
+                        }}
                         artist={trackArtist(t.path)}
                         track={trackTitle(t.path)}
                         album={trackAlbum}
@@ -5840,7 +5942,7 @@ const finish = async (closeByNavigation: boolean, runScripts = true) => {
               );
             })}
             <div className="flex justify-end">
-              <button className="btn-primary tap" onClick={saveLyricsStep} disabled={busy}>Save lyrics & instrumental</button>
+              <button className="btn-primary tap" onClick={() => saveLyricsStep()} disabled={busy}>Save lyrics & instrumental</button>
             </div>
           </MinBlock>
         </div>
@@ -5969,7 +6071,10 @@ const finish = async (closeByNavigation: boolean, runScripts = true) => {
                   {["0", "1", "2"].map((v) => (
                     <button
                       key={v}
-                      onClick={() => setAdvisory((a) => ({ ...a, [t.path]: v }))}
+                      onClick={() => {
+                        markEdited(7);
+                        setAdvisory((a) => ({ ...a, [t.path]: v }));
+                      }}
                       className={`px-2 sm:px-3 py-1 rounded text-xs border ${
                         (advisory[t.path] ?? t.tags.ITUNESADVISORY) === v
                           ? "bg-accent on-accent border-accent"
@@ -5983,7 +6088,7 @@ const finish = async (closeByNavigation: boolean, runScripts = true) => {
               </div>
             ))}
             <div className="flex justify-end">
-              <button className="btn-primary tap" onClick={saveAdvisory} disabled={busy}>Save advisory</button>
+              <button className="btn-primary tap" onClick={() => saveAdvisory()} disabled={busy}>Save advisory</button>
             </div>
           </MinBlock>
         </div>
@@ -6214,7 +6319,7 @@ const finish = async (closeByNavigation: boolean, runScripts = true) => {
       {/* nav buttons */}
       {step > 0 && step < 8 && (
         <div className="flex flex-wrap items-center justify-between gap-2 pt-2">
-          <button className="btn-ghost tap" onClick={() => setStep(step - 1)}>
+          <button className="btn-ghost tap" onClick={() => goTo(step - 1)}>
             <ChevronLeft className="h-4 w-4" /> Back
           </button>
           <div className="flex flex-wrap items-center gap-2 ml-auto justify-end">

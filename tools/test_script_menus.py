@@ -704,6 +704,69 @@ def check_wizard_close_and_expected(check):
           and 'forceSel["web_ratings"]' in src)
 
 
+def check_wizard_step_jumps(check):
+    """R417: a step JUMP saves the step being LEFT.
+
+    The owner's rule (2026-10-13): "for each page of importing, if the user
+    goes to another tab the one they were previously on saves
+    automatically". Every jump surface — the step strip, a missing-family chip
+    in the "Still missing" banner, and Back — routes through ONE `goTo`, which
+    runs the departing step's own save (its Continue action) before landing.
+    The save is dirty-gated (`editedSteps`): a step nobody edited writes
+    nothing at all, so a browse-through cannot churn files or toast a save
+    that did not happen. `tools/check_import_minimum.mjs` drives the real page
+    for the behaviour; this pins the wiring."""
+    src = read("web/src/pages/ImportWizard.tsx")
+    # Every jump surface routes through `goTo`, and it saves the step it leaves
+    # BEFORE moving — a plain `setStep` on any of them is the bug this pins.
+    strip = src[src.index("data-step={i}") - 400:src.index("data-step={i}") + 100]
+    check("the step strip jumps through goTo", "onClick={() => goTo(i)}" in strip)
+    check("a missing-family chip jumps through goTo",
+          "onClick={() => i >= 0 && goTo(i)}" in src)
+    check("Back jumps through goTo", "onClick={() => goTo(step - 1)}" in src)
+    check("no step strip or banner jump calls setStep directly",
+          "onClick={() => setStep(i)}" not in src)
+    go_to = re.search(r"const goTo = \(to: number\) => \{(.*?)\n  \};", src, re.S)
+    check("goTo saves the step being left, then lands",
+          bool(go_to) and "saveStep(step);" in go_to.group(1)
+          and "advanceTo(to);" in go_to.group(1),
+          go_to.group(1) if go_to else "no goTo body")
+    # The save is DIRTY-GATED: a browse-through writes nothing.
+    save_step = re.search(r"const saveStep = \(n: number\): boolean => \{(.*?)\n  \};", src, re.S)
+    check("saveStep writes nothing for a step nobody edited",
+          bool(save_step) and "if (!editedSteps.has(n) || busy) return false;" in save_step.group(1),
+          save_step.group(1) if save_step else "no saveStep body")
+    check("…and nothing while another action already runs (no double write)",
+          bool(save_step) and "|| busy" in save_step.group(1).split("if (!editedSteps")[1].split("\n")[0],
+          save_step.group(1) if save_step else "no saveStep body")
+    check("…and dispatches to the five steps that hold drafts",
+          bool(save_step) and all(
+              f"void {fn}(null);" in save_step.group(1)
+              for fn in ("nextFromLinks", "confirmMatch", "saveGenres", "saveLyricsStep", "saveAdvisory")),
+          save_step.group(1) if save_step else "no saveStep body")
+    # Each of those saves takes the landing step, so a jump's background save
+    # cannot move the wizard out from under the user.
+    for fn in ("nextFromLinks", "confirmMatch", "saveGenres", "saveLyricsStep", "saveAdvisory"):
+        sig = re.search(rf"const {fn} = async \(([^)]*)\)", src)
+        check(f"{fn} takes the landing step (null = don't move)",
+              bool(sig) and "land: number | null" in sig.group(1),
+              sig.group(1) if sig else f"no {fn} signature")
+    # The marks: a user edit marks its step, a successful save clears it — and a
+    # save that FAILED leaves it pending (its catch says so).
+    check("the edits are marked at the user's own actions",
+          all(s in src for s in (
+              "markEdited(1);", "markEdited(2);", "markEdited(4);",
+              "markEdited(6);", "markEdited(7);")))
+    check("…and cleared by the save that succeeded",
+          all(f"markSaved({n});" in src for n in (1, 2, 4, 6, 7)))
+    check("switching albums drops the marks (A's drafts never land on B)",
+          src.count("setEditedSteps(new Set());") == 2)
+    # The Ratings step and Covers have nothing of their own to write — their
+    # absence from the dispatch is the claim.
+    check("the dispatch never invents a save for Covers or Ratings",
+          "saveCovers(null)" not in src and "ratingsImport(null" not in src)
+
+
 def main():
     fail = 0
     canon = EXPECTED_SCRIPTS
@@ -814,6 +877,9 @@ def main():
 
     print("wizard Close + release tracklist")
     check_wizard_close_and_expected(check)
+
+    print("wizard step jumps (R417)")
+    check_wizard_step_jumps(check)
 
     print("terminal runners")
     check_cli_runners(check)

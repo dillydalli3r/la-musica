@@ -8243,6 +8243,44 @@ when the log itself says something is wrong.** Pinned in
   Close press over stubbed APIs and counts: zero `/api/run`, zero
   `/api/organize`, one settle whose body carries `scripts: []`.
 
+- **R417 — leaving a wizard step saves it.** The owner's rule, 2026-10-13:
+  *"for each page of importing, if the user goes to another tab the one they
+  were previously on saves automatically"*. Every step JUMP — the step strip,
+  a missing-family chip in the "Still missing" banner, and **Back** — goes
+  through ONE `goTo`, which first runs the step being LEFT through its own
+  Save: `nextFromLinks` (Links), `confirmMatch` (Match), `saveGenres`
+  (Genres), `saveLyricsStep` (Lyrics), `saveAdvisory` (Advisory). So a hop
+  can no longer strand a genre list, a lyric or INSTRUMENTAL draft, an
+  advisory value, an edited match (a row set by hand, or rows a re-match
+  brought in) or a chosen release — and the Finish
+  step's chain then reads what the steps actually hold instead of whatever
+  the files were last written with. The save runs in the BACKGROUND while the
+  target step shows (its own toast and the action strip report it), which is
+  why each save takes a `land` argument: `null` = the jump has already moved
+  the wizard, so the save writes and touches no step state (Continue passes
+  nothing and its own landing is unchanged). A jump still lands through
+  `advanceTo`, so leaving a step with a release in hand leaves the folder
+  describing it. The three steps with nothing of their own to write stay
+  untouched: **Covers** writes per press (upload / URL / clear), **Ratings**
+  is written by the fetch itself, and step 0's save is the Import press that
+  stages the album. **An untouched step writes NOTHING** — `editedSteps` marks
+  a step only where a user action edits it (typing or choosing a link, a
+  suggestion row or the re-match that follows "Add tracks…", a genre
+  add/remove/disc-apply, the lyric editor or the INSTRUMENTAL box, an advisory
+  value or Apply-to-all; a plain FETCH is not an edit — the release a fetch
+  brings can be re-fetched, and its metadata reaches the files through the
+  import chain anyway), and each
+  save clears its own mark only once it SUCCEEDED: a browse-through cannot
+  churn files, fire a MusicBrainz fetch or toast a save that did not happen,
+  and a failed write stays pending with its own error toast saying why.
+  Switching albums (the picker, another album's prompt) clears the marks —
+  album A's drafts are never written onto album B. Pinned by
+  `tools/check_import_minimum.mjs` (the real page over stubbed APIs: a jump
+  off an untouched step sends no write at all; a jump off an edited one sends
+  exactly one `/api/mb/assign` carrying the value the user picked) and
+  `tools/test_script_menus.py` (every jump surface routes through `goTo`, and
+  the dispatch is dirty-gated).
+
 ---
 
 ## 10. Honest limits of this spec

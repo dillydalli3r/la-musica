@@ -1120,6 +1120,102 @@ try {
   await app6.close();
 }
 
+// --------------------------------------------------------------------------- #
+// 11. A step JUMP saves the step being LEFT (R417)
+// --------------------------------------------------------------------------- #
+// The owner's rule (2026-10-13): "for each page of importing, if the user goes
+// to another tab the one they were previously on saves automatically". The
+// wizard's steps hold drafts — a genre list, lyric text and INSTRUMENTAL, an
+// advisory value, an unconfirmed match, a chosen release — and until now only
+// the footer's Continue ran a step's own save, so a hop through the step strip
+// (or Back, or a "Still missing" chip) dropped the edit on the floor while the
+// Finish step's chain read the files, not the screen. Every jump now goes
+// through `goTo`, which runs the departing step's own save — and ONLY when
+// that step holds an edit (`editedSteps`), so a browse-through writes nothing
+// at all.
+//
+// Driven on the real page over stubbed APIs: one jump off an UNTOUCHED step
+// (no write), one off an EDITED one (exactly one POST /api/mb/assign carrying
+// the value the user picked), and one more jump after that save (nothing
+// again — a successful save clears the step's mark).
+const jumpAssigns = [];
+const app7 = await createServer({
+  configFile: path.join(webDir, "vite.config.ts"),
+  root: webDir,
+  logLevel: "error",
+  server: { host: "127.0.0.1", port: 8011, strictPort: false },
+});
+await app7.listen();
+const port7 = app7.httpServer.address().port;
+const browser7 = await chromium.launch();
+try {
+  const page = await (await browser7.newContext({ serviceWorkers: "block" })).newPage();
+  await page.route("**/sw.js", (route) => route.abort());
+  await page.route("**/api/**", (route) => {
+    const url = route.request().url();
+    const send = (status, body) => route.fulfill({
+      status, contentType: "application/json", body: JSON.stringify(body) });
+    if (url.includes("/api/auth/status"))
+      return send(200, { required: false, gate: false, local: true, has_password: false,
+                         authenticated: true, username: "", public_url: "", session_days: 30,
+                         setup_hint: "" });
+    if (url.includes("/api/auth/users"))
+      return send(200, { users: ["owner"], current: "owner", required: false });
+    if (url.includes("/api/config")) return send(200, { ...CONFIG, first_run_done: true });
+    if (url.includes("/api/library")) return send(200, LIBRARY);
+    if (url.includes("/api/import/sessions")) return send(200, { sessions: [] });
+    if (url.includes("/api/import/prompts")) return send(200, { prompts: [] });
+    if (url.includes("/api/grades/summary"))
+      return send(200, { ok: true, pass_count: 1, total_checks: 70, grade_pct: 100,
+                         albums_failing: 0, albums_importing: 0, tracks_failing: 0,
+                         items: [], more: 0 });
+    if (url.includes("/api/album?")) return send(200, { ...LIBRARY.artists[0].albums[0], artist: "Daft Punk" });
+    // THE WRITE this section counts: one entry per tag write the wizard asks
+    // for, however it got there.
+    if (url.includes("/api/mb/assign")) {
+      jumpAssigns.push(route.request().postDataJSON());
+      return send(200, { ok: true, changed: 1 });
+    }
+    return send(200, {});
+  });
+  await page.goto(`http://127.0.0.1:${port7}/import?album=${encodeURIComponent(ALBUM)}&step=Advisory`);
+  await page.waitForSelector("text=Save advisory", { timeout: 20000 });
+  /** Jump the way the strip does — `data-step` is the strip's own button. */
+  const jumpTo = async (i) => {
+    await page.locator(`[data-step="${i}"]`).click();
+    await page.waitForTimeout(600);
+  };
+  // 7 → 4 (Genres): the Advisory step holds nothing — no write.
+  await jumpTo(4);
+  check("a jump off a step nobody edited writes NOTHING",
+        jumpAssigns.length === 0, JSON.stringify(jumpAssigns));
+  // 4 → 7: back, and the Genres step was equally untouched.
+  await jumpTo(7);
+  check("…and back again: still nothing",
+        jumpAssigns.length === 0, JSON.stringify(jumpAssigns));
+  // Pick a value on the Advisory step, then leave it: the pick IS saved.
+  await page.locator("button", { hasText: "1 · explicit" }).first().click();
+  await page.waitForTimeout(150);
+  await jumpTo(6);
+  const firstJump = jumpAssigns[0] || {};
+  const jumpTracks = firstJump.tracks || {};
+  const wroteOne = Object.values(jumpTracks).some((t) => t && t.ITUNESADVISORY === "1");
+  check("a jump off an edited step SAVES it — one write, carrying the value picked",
+        jumpAssigns.length === 1 && wroteOne, JSON.stringify(jumpAssigns));
+  check("…and says so, the way the step's own Save does",
+        (await page.evaluate("document.body.innerText")).includes("Advisory ratings saved"),
+        (await page.evaluate("document.body.innerText")).slice(0, 300));
+  // The save cleared the step's mark: leaving again writes nothing more.
+  await jumpTo(7);
+  await jumpTo(4);
+  check("…and the step is CLEAN afterwards — leaving again writes nothing",
+        jumpAssigns.length === 1, JSON.stringify(jumpAssigns));
+  await page.context().close();
+} finally {
+  await browser7.close();
+  await app7.close();
+}
+
 if (failures.length) {
   console.error(`[minimum] FAILED (${failures.length} of ${checks}):`);
   for (const f of failures) console.error("  - " + f);
@@ -1148,4 +1244,6 @@ console.log(`ok  the wizard's minimum entry mode shows the missing family's cont
   `id, while the ` +
   `Library's Import menu opens every selected album's row on the release its ` +
   `files name, sends an edited row as its pin and sends nothing for a row ` +
-  `left alone (${checks} checks)`);
+  `left alone; and a step JUMP saves the step being left — an untouched step ` +
+  `writes nothing, an edited one writes exactly its own edit and is clean ` +
+  `afterwards (${checks} checks)`);
