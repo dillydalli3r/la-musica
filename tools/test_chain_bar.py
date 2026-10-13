@@ -218,3 +218,93 @@ assert lane_frames[-1]["steps"] == [3, 3], lane_frames[-1]
 shutil.rmtree(LANE_ROOTS, ignore_errors=True)
 print("chain lanes: the free-lane step ran beside the spine (no album-lane "
       "step overlapped another), and the spine's frames are the strip's")
+
+# --------------------------------------------------------------------------- #
+# A free-lane step landing EARLY never draws the bar back
+# --------------------------------------------------------------------------- #
+# A free step is booked into the run's finished count the moment it lands, and
+# the run's step boundaries have to keep up with that: the reading was that a
+# step's own start frame claimed "#index-1" while the side step had already
+# pushed the count past it, so the bar and the readout slid back at every
+# boundary — measured 2026-10-13 (0.3.0's own frames: bar 2 after a frame at 3)
+# on an auto-import and a Run All, which is the owner's "cuts back and forth".
+# Two more things the same walk proves: a QUIET step must never own the run's
+# frame writer (its frames are dropped, so the run's own announcements were
+# swallowed while it ran — the bar froze at "#1/2" and never filled), and the
+# run has to say when it is over, or a free step still in flight at the end
+# left the bar parked below its total.
+FREE_ROOTS = tempfile.mkdtemp(prefix="mlo_chain_free_")
+FREE_ALBUM = os.path.join(FREE_ROOTS, "Artists", "Free Album")
+os.makedirs(FREE_ALBUM, exist_ok=True)
+with open(os.path.join(FREE_ALBUM, "01 - Track.flac"), "w", encoding="utf-8") as fh:
+    fh.write("not really audio")
+
+free_frames = []
+
+
+def free_record(done, total, desc, steps=None):
+    free_frames.append({"done": done, "total": total, "desc": desc,
+                        "steps": list(steps) if steps else None})
+
+
+real_runners = dict(script_runners.RUNNERS)
+real_hook = getattr(_stats, "progress_hook", None)
+_stats.progress_hook = free_record
+try:
+    free_landed = threading.Event()
+    free_ready = threading.Event()
+
+    def spine_first(cfg):
+        # The side step lands while THIS step runs: the drain after it is
+        # booked then counts it in the run's own totals.
+        free_landed.set()
+        return {"modified_count": 0}
+
+    def spine_second(cfg):
+        time.sleep(0.05)
+        return {"modified_count": 0}
+
+    def spine_last(cfg):
+        return {"modified_count": 0}
+
+    def free_step_early(cfg):
+        assert free_landed.wait(10), "the spine never started"
+        free_ready.set()
+        return {"modified_count": 0}
+
+    script_runners.RUNNERS[3] = ("Spine first", spine_first)
+    script_runners.RUNNERS[5] = ("Spine second", spine_second)
+    script_runners.RUNNERS[7] = ("Spine last", spine_last)
+    script_runners.RUNNERS[25] = ("Fetch artist images", free_step_early)
+    free_results = script_runners.run_chain({"music_folder": FREE_ROOTS},
+                                            [3, 5, 7, 25],
+                                            targets=[FREE_ALBUM])
+finally:
+    _stats.progress_hook = real_hook
+    script_runners.RUNNERS.clear()
+    script_runners.RUNNERS.update(real_runners)
+
+assert [r.get("id") for r in free_results] == [3, 5, 7, 25], free_results
+assert free_ready.is_set(), "the free-lane step never ran"
+assert free_frames, "the run published no frames at all"
+backwards = []
+bar_floor, read_floor = -1.0, 0
+for i, f in enumerate(free_frames):
+    read = f["steps"][0] if f["steps"] else None
+    if f["done"] < bar_floor or (read is not None and read < read_floor):
+        backwards.append(f"frame {i + 1}: {f} after {free_frames[i - 1]}")
+    bar_floor = max(bar_floor, f["done"])
+    if read is not None:
+        read_floor = max(read_floor, read)
+assert not backwards, ("the bar stepped backwards mid-run:\n  "
+                       + "\n  ".join(backwards))
+# A quiet step never owns the run's frame writer, and the run announces its own
+# end: a frame the free step swallowed, or a tail left unfilled, shows up here.
+last = free_frames[-1]
+assert (last["done"], last["total"]) == (4, 4), last
+assert last["steps"] == [4, 4], last
+assert not any("Fetch artist images" in f["desc"] for f in free_frames), free_frames
+assert any("Spine last" in f["desc"] for f in free_frames), free_frames
+shutil.rmtree(FREE_ROOTS, ignore_errors=True)
+print("chain free lane: a side step landing early never draws the bar back "
+      f"({len(free_frames)} frames, all forward), and the run ends full")

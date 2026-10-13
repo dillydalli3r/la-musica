@@ -438,6 +438,42 @@ producer's report): those leave the bar indeterminate under the action's own
 label, with the clock moving. Both of the wizard's chain bars (the strip and the
 Finish step's own) draw from that one reading, so they cannot disagree.
 `tools/test_chain_bar.py` pins it against the frames a real chain publishes.
+**R78b — a bar never draws a number below the last one it drew.** Two readings
+fed one bar, and both slid backwards on the owner's report (2026-10-13: *"the
+import progress bar can cut back and forth with progress during
+auto-importing / run all"*):
+
+  * **A run's frames** (`server/script_runners.py`) carry two numbers each — the
+    bar's position and the whole-step pair the readout prints. The spine
+    announces a step's start at `index-1`, its runner's ticks move a fraction
+    above it, and the step's finish books `len(results)` — which includes a
+    FREE-lane step (artist art, a submission) the moment it is booked. One early
+    side step then pushed the count past the NEXT step's own start frame, so the
+    bar and the readout slid back at every boundary (measured on a 4-step chain
+    whose free step landed during step 1: `done` 3/4 published, then a start
+    frame at 2/4 — `tools/test_chain_bar.py`'s free-lane half reproduces
+    exactly that). Every frame a run publishes now passes through `_run_pos`,
+    which floors BOTH numbers at the run's own high-water marks; a step's
+    fraction sits on the run's finished steps (`bar["done"]`) so the bar keeps
+    moving inside the step instead of standing still behind a side step's
+    completion; a QUIET step (the free lane) claims nothing at all — it neither
+    publishes nor moves the floors, and it never owns the run's frame writer
+    (letting it own one swallowed the run's own announcements, measured: a
+    two-step chain whose free step outlived the spine ended at `#1/2` with the
+    bar half drawn); and a run that finished every step announces it once
+    (`#total/total`), so its bar always ends full instead of parked on the
+    spine's last frame while a side step drains.
+  * A **bulk import's** strip (`web/src/pages/ImportWizard.tsx`) draws the JOB's
+    own row — albums finished of albums queued, already polled for the queue
+    panel — rather than the newest relay frame of any producer: with
+    `import_bulk_concurrency` albums in flight, each publishing its own chain's
+    `#1/18 …`, that read alternated between five albums' numbers on every
+    frame. The strip is also rendered while such a job runs: an auto-import
+    clears the selection it came from, so before this the page accounted for it
+    nowhere.
+
+  Pinned by `tools/test_chain_bar.py` (a free-lane step landing early: every
+  frame forward, the run ending full) and `tools/check_import_minimum.mjs`.
 **R79 — the worker budget is what the WHOLE run costs.** `worker_limit`
 (Settings → General → "Worker threads", 0 = every core the machine has) bounds
 the worker pools (`mlo.stats.worker_count`) and, through
@@ -4960,7 +4996,10 @@ used to be a second ffprobe on a file this pipeline had just produced; a
   logs from different programs". `soulseek_auto_log_min_score` ships **85**
   (was 100): a log Logchecker cannot score (`None`) was already accepted and
   still is, an unrecognised dialect (dBpoweramp, foobar, CUETools, anything
-  newer than the scorer) passes, and a score BELOW the bar now **down-ranks**
+  newer than the scorer) passes — R425 is where that promise is kept: the
+  scorer answers such a log with a Score of 0 that is not a grade, and the gate
+  must read it as NO score, not as a 0 below the floor — and a score BELOW the
+  bar now **down-ranks**
   a candidate (`_log_rank` orders the batch's waits: accepted-but-under-100
   last) instead of killing it. Three things still reject, and every message
   names the value rather than the ripper: the log's own checksum does not
@@ -7886,8 +7925,9 @@ when the log itself says something is wrong.** Pinned in
   absent/unverifiable is not required, R30), (2) an AccurateRip section that
   reports a failed track (R392), and (3) a Logchecker score **below**
   `soulseek_auto_log_min_score` — and only when Logchecker COULD produce a
-  score. A log with `score = None` (an unrecognised format, or no
-  Logchecker/`php` on this machine) is **not** a rejection by itself: the log
+  score. A log with `score = None` (an unrecognised format, no
+  Logchecker/`php` on this machine, or a program the scorer has no reader for —
+  R425) is **not** a rejection by itself: the log
   is accepted and the outcome says which format the toolchain could not read
   (`<name>: Logchecker could not score it (XLD) — accepted; its per-track CRCs
   are still checked against the log`). The same rule governs
@@ -8517,6 +8557,69 @@ when the log itself says something is wrong.** Pinned in
   asked again. Pinned by `tools/check_import_minimum.mjs` (the wizard's
   multi-album and auto presses both reach the dialog) and the Soulseek page's
   own render checks.
+
+- **R425 — a program the scorer has no reader for is not a bad rip, and its
+  log's own CRCs are what the app reads.** The owner's report, 2026-10-13:
+  *"investigate what logs the soulseek importer / app will use / accept in
+  general … the app isn't supporting lots of programs and that causes lots of
+  candidates to be rejected. Actually investigate and lookup cd ripping
+  programs / logs."* The bundled scorer (OPSnet Logchecker, pinned 0.14.4)
+  recognises EAC, XLD and whipper (`src/Check/Ripper.php`) and answers every
+  other log with `Ripper : unknown` beside a **`Score : 0` that is not a
+  grade** — measured on the pinned phar against a real dBpoweramp 16.6 log and
+  a real CUERipper v2.2.2 log (both `Score 0`, "Unknown log file, could not
+  determine ripper.") while the same disc's EAC log scored 70. Read as a
+  score, that 0 killed every such candidate at the auto-import floor
+  (`Logchecker 0/100 (below 85)` — so R402's promise that the program is never
+  the reason was true of the gate's code and false in practice), wrote
+  `LOG_GRADE=0` onto library tracks, and failed those albums twice over (the
+  grader's score check and the audit's "unscorable .log → FAKE" rule).
+
+  One rule now: **the log's program decides what is read of it, and a score
+  exists only where a scorer can produce one.**
+
+  * `mlo.discs.log_score_state` is the ONE reading of the scorer — `scored` /
+    `unreadable` (it ran and could not name the program) / `failed` (it ran and
+    fell over, or its checksum validation failed) / `no_scorer` (Logchecker+PHP
+    not installed) — and `score_disc_log` answers that score or `None`, never
+    the phar's 0 for a program it does not support.
+  * `mlo.discs.LOG_PROGRAMS` states what the app reads of each program. EAC,
+    XLD and whipper are scored AND CRC-read. **dBpoweramp** and **CUERipper**
+    are CRC-read only: dBpoweramp's per-track `CRC32:` is its own extraction
+    CRC — the CRC-32 of the decoded PCM, the value EAC prints as `Copy CRC`
+    (dBpoweramp's [Calculate Audio CRC] utility is defined as the CRC "of
+    decoded audio data only", and it is the documented way to check a file
+    against a secure log) — while the `AccurateRip CRC: … (CRCv2)` printed
+    beside it is a different algorithm and is never compared; its AccurateRip
+    wordings read too (`AccurateRip: Inaccurate` and the footer's own `1
+    Inaccurate` count are failures, `AccurateRip: Accurate (confidence N)`,
+    `AccurateRip Verified Confidence N` and `Tracks Ripped Accurately` are
+    passes, and `AccurateRip: Not in Database` is neither — the absent-track
+    case R423 drops EAC's ambiguous footer for). CUERipper writes an EAC-STYLE
+    log (`EAC extraction logfile from …` with EAC's own `Track  N` / `Test
+    CRC` / `Copy CRC` blocks) and names itself only in its first line, so it is
+    recognised there — before the EAC test — and read by the EAC rules.
+  * The auto-import gate takes such a log as NO score (R402's rule, now
+    reachable), and its message names the program (`_log_format` →
+    `mlo.discs.log_program`). Programs this app still cannot read — EZ CD Audio
+    Converter, fre:ac, cyanrip, morituri, anything newer — stay rejected as
+    unverifiable CD rips, and the rejection names the program it could not read.
+  * `grade_album_logs` reports such a disc as a program WITHOUT a scorer, apart
+    from `unscorable`: it writes no `LOG_GRADE` (never a 0). The audit marks
+    neither the disc FAKE nor its leg failed, registers NO `log-score` leg for
+    it (a switched-off check's shape, not an "unknown" one), and the grader's
+    `grade_check_log_grade` does not count the missing score as a failure when
+    every log of the album names such a program — the disc is graded on the CRC
+    leg (`grade_check_crc`) and the AccurateRip verdict instead, and the grade
+    says so in a note.
+
+  Pinned in `tools/test_grading_paths.py` (the dialect table, both programs'
+  CRCs and AccurateRip wordings, and a dBpoweramp log covering — then
+  mismatching — a real CD track through the grader), `tools/test_cd_audit.py`
+  (the phar's 0 is no score; no LOG_GRADE write; a note instead of a failing
+  check; an EAC log still demands its LOG_GRADE) and
+  `tools/test_soulseek_candidates.py` (a dBpoweramp candidate passes the floor,
+  and the message names the program).
 
 ---
 

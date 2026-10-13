@@ -514,6 +514,13 @@ export interface LogReportPayload {
     raw: string;
   };
   checksum: { state: string | null; detail: string | null };
+  /** The program this log names ("Exact Audio Copy", "dBpoweramp", …), "" when
+   *  no dialect claims it — the app's own reading of the file. */
+  program: string;
+  /** What the rip-log scorer could say: "scored" | "unreadable" (it could not
+   *  NAME the program, so `report.score` is the 0 it prints for that and NOT a
+   *  grade) | "failed" | null (no scorer installed). */
+  score_state: string | null;
   text: string;
   /** The `.log` files in the folder that was asked for, when the caller named
    *  a FOLDER — empty for a path that was already one log. The route reports

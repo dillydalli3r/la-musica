@@ -658,34 +658,6 @@ export default function ImportWizard() {
     frameAtAct.current = progress;
     setAct({ label, kind: "run" });
   };
-  // ---- what the wizard's ONE progress strip draws ------------------------
-  // Two sources: the action the wizard started, and the relay frame the engine
-  // publishes over the websocket the header bar also draws.
-  //
-  // An action that counts its own steps (the metadata rows, the per-album
-  // lyrics fetch) owns the strip outright. A RUN — the script chain, the
-  // ticked scripts — is the opposite case: its numbers are the engine's, and
-  // the run claims the surfaces with its own zero state the moment it really
-  // starts (server/script_runners.run_start_frame: "#1/N · <first script>"
-  // with the whole-step pair `steps`, which every frame of a chained run
-  // carries).
-  //
-  // So a run draws only frames that arrived after it began, and the label
-  // always names the numbers beside it: the run's own "#i/N · <script>" once
-  // its frames land; the frame's own desc while an import STAGE is what is
-  // actually running; and the action's own label — indeterminate bar, clock
-  // moving — while nothing of its own has arrived. What it may never draw is a
-  // stage's "4/8" under the chain's label, which is what a half-filled bar at
-  // the start of a chain was. `steps` is passed through rather than nulled, so
-  // the readout prints the run's own pair instead of a rounded count of the
-  // same numbers.
-  const runFrame = act?.kind === "run" && progress && progress !== frameAtAct.current ? progress : null;
-  const strip = runFrame
-    ? { label: runFrame.desc, frame: runFrame, steps: runFrame.steps ?? null }
-    : act?.kind === "run"
-      ? { label: act.label, frame: null, steps: null }
-      : { label: act?.label ?? progress?.desc ?? fetchStatus ?? "Working…",
-          frame: progress, steps: act ? null : progress?.steps };
   const qc = useQueryClient();
 
   // ---- Auto-import (the drop hands the whole batch to the pipeline) ------
@@ -716,6 +688,50 @@ export default function ImportWizard() {
   // queue itself is imported and post-processed through api.importBulk.
   const [bulkJob, setBulkJob] = useState<ImportBulkJob | null>(null);
   const queueMode = uploaded.length > 1 || albums.length > 1;
+  // ---- what the wizard's ONE progress strip draws ------------------------
+  // Two sources: the action the wizard started, and the relay frame the engine
+  // publishes over the websocket the header bar also draws.
+  //
+  // An action that counts its own steps (the metadata rows, the per-album
+  // lyrics fetch) owns the strip outright. A RUN — the script chain, the
+  // ticked scripts — is the opposite case: its numbers are the engine's, and
+  // the run claims the surfaces with its own zero state the moment it really
+  // starts (server/script_runners.run_start_frame: "#1/N · <first script>"
+  // with the whole-step pair `steps`, which every frame of a chained run
+  // carries).
+  //
+  // So a run draws only frames that arrived after it began, and the label
+  // always names the numbers beside it: the run's own "#i/N · <script>" once
+  // its frames land; the frame's own desc while an import STAGE is what is
+  // actually running; and the action's own label — indeterminate bar, clock
+  // moving — while nothing of its own has arrived. What it may never draw is a
+  // stage's "4/8" under the chain's label, which is what a half-filled bar at
+  // the start of a chain was. `steps` is passed through rather than nulled, so
+  // the readout prints the run's own pair instead of a rounded count of the
+  // same numbers.
+  //
+  // A BULK job is the third case, and the one the relay cannot answer: an
+  // auto-import runs SEVERAL albums at once (`import_bulk_concurrency`) and
+  // each publishes its own chain's frames ("#1/18 · …", then a fresh "#1/18 · …"
+  // for the next album) beside its own import stage's bare counts — so "the
+  // newest frame of any producer" alternates between five albums' numbers and
+  // the page's bar cut back and forth (the owner's report, 2026-10-13). The
+  // batch's OWN row — albums finished of albums queued, already polled every
+  // 1.5 s for the queue panel — is the one number that only ever grows, and it
+  // is what the rows above the strip say.
+  const bulkRunning = !!bulkJob && bulkJob.status === "running" && (bulkJob.total ?? 0) > 0;
+  const runFrame = act?.kind === "run" && progress && progress !== frameAtAct.current ? progress : null;
+  const strip = bulkRunning
+    ? { label: bulkJob!.label || "Importing…",
+        frame: { done: bulkJob!.done ?? 0, total: bulkJob!.total ?? 0,
+                 desc: bulkJob!.label || "Importing…" },
+        steps: null }
+    : runFrame
+      ? { label: runFrame.desc, frame: runFrame, steps: runFrame.steps ?? null }
+      : act?.kind === "run"
+        ? { label: act.label, frame: null, steps: null }
+        : { label: act?.label ?? progress?.desc ?? fetchStatus ?? "Working…",
+            frame: progress, steps: act ? null : progress?.steps };
   const [acoustid, setAcoustid] = useState<AcoustidMatch | null>(null);
   const [acoustidBusy, setAcoustidBusy] = useState(false);
   const [matchAllBusy, setMatchAllBusy] = useState(false);
@@ -2023,6 +2039,11 @@ export default function ImportWizard() {
       const others = (job?.jobs ?? []).filter((j) => j.id !== job?.id);
       const pinned = Object.values(pins).filter(Boolean).length;
       const n = staged.length;
+      // The wizard's strip draws THIS job's own count while it runs (see the
+      // strip's comment): the batch's row is polled below like any other, even
+      // though the selection it came from is dropped here — an auto-import
+      // would otherwise run with nothing on the page accounting for it.
+      if (job) setBulkJob(job);
       toast([
         `Auto-importing ${n === 1 ? staged[0].name : `${n} albums`}`,
         pinned ? `${pinned} pinned to a release` : null,
@@ -4388,8 +4409,12 @@ const finish = async (closeByNavigation: boolean, runScripts = true) => {
           Every action below reports here: the action's own step count when it
           has one, else the relay frame a script/import run publishes (the same
           websocket the header bar draws), else an indeterminate, ticking bar.
-          A disabled button with nothing moving is what "looks stuck" was. */}
-      {(busy || act) && (
+          A disabled button with nothing moving is what "looks stuck" was.
+          A BULK job (an auto-import, the queue) reports too, and it is the one
+          producer that runs with NOTHING else on screen: it clears the
+          selection it was given, so the strip is the page's only account of it
+          (see the strip's own comment). */}
+      {(busy || act || bulkRunning) && (
         <div className="panel px-3 py-2">
           <ActionBar
             active

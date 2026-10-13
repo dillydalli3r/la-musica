@@ -452,7 +452,7 @@ else:
     def score():
         """A Logchecker score for every disc, so a row can put the score leg
         above or below the threshold without a scorer on the machine."""
-        return ({1: (100 if _SCORE[0] else 40)}, [], [])
+        return ({1: (100 if _SCORE[0] else 40)}, [], [], {})
 
     def set_score(ok):
         _SCORE[0] = ok
@@ -655,6 +655,168 @@ finally:
     (discs_mod.HAS_EAC_CHECKER, discs_mod.eac_logchecker, discs_mod.run_tool,
      discs_mod._eac_helper_on_path) = _saved_csum
     tools_mod.detect_all_tools = _saved_detect
+
+# ---------------------------------------------------------------------------
+print("== a program the scorer has no reader for is not a score of 0 ==")
+# Logchecker's Ripper check recognises EAC, XLD and whipper; every other
+# program — dBpoweramp, CUERipper, EZ CD Audio Converter, … — comes back
+# "Ripper : unknown" with a **Score : 0** that is NOT a grade (measured
+# 2026-10-13 on the pinned 0.14.4 phar: a real dBpoweramp 16.6 log and a real
+# CUERipper v2.2.2 log both answer Score 0, while the same disc's EAC log
+# scores 70). Read as a score, that 0 killed every such candidate at the
+# auto-import floor ("Logchecker 0/100 (below 85)") and wrote LOG_GRADE=0 onto
+# library tracks. It is NO score, and the app judges such a disc on the
+# evidence it reads itself: the log's per-track CRCs against the decoded
+# audio, and the AccurateRip verdict the log states.
+DBPA_LOG = (
+    "dBpoweramp Release 17.4 Digital Audio Extraction Log from Monday, "
+    "March 15, 2021 10:22\n"
+    "\n"
+    "Drive & Settings\n"
+    "----------------\n"
+    "\n"
+    "Ripping with drive 'E:   [ASUS     - BW-16D1HT       ]',  Drive offset: 6\n"
+    "AccurateRip: Active,  Using C2: No,  Cache: 1024 KB\n"
+    "\n"
+    "Extraction Log\n"
+    "--------------\n"
+    "\n"
+    "Track 1:  Ripped LBA 0 to 18532 (4:07) in 0:48. Filename: D:\\Rips\\x\\01 - Song._\n"
+    "  AccurateRip: Accurate (confidence 22)     [Pass 1]\n"
+    "  CRC32: A1B2C3D4     AccurateRip CRC: B3C4D5E6 (CRCv2)     [DiscID: 009-1]\n"
+    "  AccurateRip Verified Confidence 22 [CRCv2 b3c4d5e6]\n"
+    "\n"
+    "--------------\n"
+    "\n"
+    "1 Tracks Ripped Accurately\n")
+DBPA_PATH = os.path.join(ALBUM, "CD-1.log")
+with open(DBPA_PATH, "w", encoding="utf-8", newline="\n") as fh:
+    fh.write(DBPA_LOG)
+ok(discs_mod.log_dialect(DBPA_LOG) == "dbpoweramp",
+   "a dBpoweramp log is named by its own header "
+   f"({discs_mod.log_dialect(DBPA_LOG)!r})")
+ok(discs_mod.parse_log_checksums(DBPA_LOG) == {1: "A1B2C3D4"},
+   "its per-track CRC is the plain CRC32 — never the AccurateRip CRC printed "
+   f"beside it ({discs_mod.parse_log_checksums(DBPA_LOG)})")
+ok(discs_mod.parse_log_accuraterip(DBPA_LOG)[0] == "ok",
+   "and 'AccurateRip: Accurate (confidence N)' is a stated pass "
+   f"({discs_mod.parse_log_accuraterip(DBPA_LOG)})")
+ok(discs_mod.program_without_scorer(DBPA_PATH) == "dBpoweramp",
+   "the program is named as one no scorer reads "
+   f"({discs_mod.program_without_scorer(DBPA_PATH)!r})")
+
+_saved2 = (discs_mod.run_tool, tools_mod.detect_all_tools)
+from mutagen.flac import FLAC as _MFLAC
+try:
+    tools_mod.detect_all_tools = lambda *a, **k: {
+        "logchecker": {"phar_path": __file__, "php_exe": __file__},
+        "php": {"php_exe": __file__},
+    }
+
+    def _phar2(text):
+        def fake(argv, **kw):
+            class P:
+                returncode = 0
+                stdout = text
+                stderr = ""
+            return P()
+        return fake
+
+    discs_mod.run_tool = _phar2(
+        "Ripper  : unknown\nVersion : \nLanguage: en\nScore   : 0\n"
+        "Checksum: checksum_ok\nDetails :\n"
+        "    Unknown log file, could not determine ripper.\n")
+    _state, _score, _why = discs_mod.log_score_state(DBPA_PATH)
+    ok(_state == "unreadable" and _score is None,
+       f"the phar's 0 for an unknown ripper is NO score, not a score of 0 "
+       f"({_state!r}, {_score!r}, {_why!r})")
+    ok(discs_mod.score_disc_log(DBPA_PATH) is None,
+       f"score_disc_log answers None for it ({discs_mod.score_disc_log(DBPA_PATH)!r})")
+
+    # A log nobody can read (nor name) is a different finding from one that
+    # names a program with no scorer: still None, and not "unreadable-program".
+    BLANK_PATH = os.path.join(TMP, "blank.log")
+    with open(BLANK_PATH, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write("some notes about the rip, in no dialect at all\n")
+    ok(discs_mod.program_without_scorer(BLANK_PATH) == "",
+       "a log no dialect claims names no program")
+
+    # grade_album_logs: neither scored nor unscorable, and NO LOG_GRADE write.
+    # The tag is cleared first: the sections above (script 6's real audit runs)
+    # wrote LOG_GRADE=0 for their own synthetic log through the OLD reading of
+    # a phar 0, and this assertion is about what THIS run writes.
+    def _no_log_grade():
+        _f = _MFLAC(TRACK)
+        if "LOG_GRADE" in _f:
+            del _f["LOG_GRADE"]
+            _f.save()
+
+    _no_log_grade()
+    scores, notes, unscorable, unsupported = discs_mod.grade_album_logs(
+        None, ALBUM, force=True, config=_cfg(), write_tags=True)
+    ok(scores == {} and unscorable == [] and unsupported == {1: "dBpoweramp"},
+       f"the disc is reported as a program without a scorer, never unscorable "
+       f"({scores}, {unscorable}, {unsupported})")
+    _tag = _MFLAC(TRACK)
+    ok(str((_tag.get("LOG_GRADE") or [""])[0]) == "",
+       "and no LOG_GRADE is written for it "
+       f"({_tag.get('LOG_GRADE')})")
+    ok(any("no installed scorer reads that program" in n for n in notes),
+       f"the note names the program ({notes})")
+
+    # …and the grader neither demands a LOG_GRADE nor counts a failure for it.
+    _gcfg = _cfg(grade_check_log_grade=True)
+    gres = _grade_album(ALBUM, "EMBEDDED", _gcfg)
+    ok(not any("Missing LOG_GRADE" in i for i in gres["issues"]),
+       f"no 'Missing LOG_GRADE' issue is raised ({gres['issues']})")
+    ok(any("no Logchecker score is possible" in n
+           for n in (gres.get("notes") or ())),
+       f"the grade says why instead ({gres.get('notes')})")
+
+    # The auto-import's own verifier — `verify_album_checksums`, the gate a
+    # Soulseek download passes — reads that CRC too: REAL when the log's own
+    # CRC32 matches the decoded track, FAKE when it does not. A log of a
+    # program NOTHING can read still answers "unverifiable", which is the
+    # rejection whose message now names the program.
+    if FFMPEG:
+        with open(DBPA_PATH, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(DBPA_LOG.replace("A1B2C3D4", f"{real_crc:0>8}".upper()))
+        verdicts, unverified = discs_mod.verify_album_checksums(
+            FFMPEG, ALBUM, [TRACK], {"audit_verify_cd_checksums": True})
+        ok(verdicts.get(TRACK) == "REAL" and not unverified,
+           "the auto-import verifier matches a dBpoweramp log's CRC32 against "
+           f"the audio ({verdicts}, {unverified})")
+        with open(DBPA_PATH, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(DBPA_LOG)              # the fixture's own A1B2C3D4
+        verdicts, unverified = discs_mod.verify_album_checksums(
+            FFMPEG, ALBUM, [TRACK], {"audit_verify_cd_checksums": True})
+        ok(verdicts.get(TRACK) == "FAKE",
+           f"and a wrong CRC32 is FAKE ({verdicts}, {unverified})")
+        # A dialect nothing recognises stays unverifiable.
+        with open(DBPA_PATH, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write("EZ CD Audio Converter 10.0 rip log\n\n"
+                     "Track 1:  some notes\n")
+        verdicts, unverified = discs_mod.verify_album_checksums(
+            FFMPEG, ALBUM, [TRACK], {"audit_verify_cd_checksums": True})
+        ok(not verdicts and any("no per-track CRCs" in r
+                                for r in unverified.values()),
+           f"a program no reader claims stays unverifiable ({unverified})")
+
+    # The same album with an EAC log still demands its LOG_GRADE: the rule is
+    # about the program, not a way to switch the check off.
+    _no_log_grade()
+    with open(DBPA_PATH, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write("Exact Audio Copy v1.6\n\n"
+                 "Track  1\n     Copy CRC 00000000\n")
+    ok(discs_mod.program_without_scorer(DBPA_PATH) == "",
+       "an EAC log names a program the scorer reads")
+    eres = _grade_album(ALBUM, "EMBEDDED", _gcfg)
+    ok(any("Missing LOG_GRADE" in i for i in eres["issues"]),
+       f"so its missing LOG_GRADE is still a failing check ({eres['issues']})")
+finally:
+    with open(DBPA_PATH, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(DBPA_LOG)
+    discs_mod.run_tool, tools_mod.detect_all_tools = _saved2
 
 shutil.rmtree(TMP, ignore_errors=True)
 

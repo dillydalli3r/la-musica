@@ -20,7 +20,12 @@ content-derived evidence, never order or fuzzy matching:
 
 Per-disc rip-log scoring: OPSnet Logchecker (PHP) scores each log directly
 via `php logchecker.phar analyze --no_text <log>` and returns the 0-100 score.
-No stub audio needed — Logchecker parses the log text itself.
+No stub audio needed — Logchecker parses the log text itself. Its Ripper check
+knows EAC, XLD and whipper only, and answers every other program's log with
+"Ripper : unknown" and a Score of 0 that is NOT a grade: `log_score_state`
+turns that into NO score, and `LOG_PROGRAMS` says what this app reads of each
+program instead (dBpoweramp's and CUERipper's own per-track CRCs, plus the
+AccurateRip verdict the log states). See spec R425.
 """
 import hashlib
 import os
@@ -91,20 +96,95 @@ TOC_ROW_RE = re.compile(
 #        written a second time as "CRC32 hash (test run) : 3F2A51A2" and a
 #        third, DIFFERENT "CRC32 hash (skip zero) : ..." that is never read
 #        (it skips zero samples, so it describes no file on disk).
+#   dBpoweramp: "  CRC32: 1A2B3C4D     AccurateRip CRC: 2B3C4D5E (CRCv2)     […"
+#        — the first eight hex digits are the track's own extraction CRC, the
+#        same CRC-32 of the decoded PCM EAC prints as "Copy CRC" (dBpoweramp's
+#        documented way to check a file against a secure log is its [Calculate
+#        Audio CRC] utility, which is defined as the CRC "of decoded audio data
+#        only"). The "AccurateRip CRC" beside it is AccurateRip's own v2 value:
+#        the same audio by a different algorithm, and never the value this app
+#        compares a decoded track against.
 COPY_CRC_RE = re.compile(r"^Copy CRC\s+([0-9A-Fa-f]{8})")
 TEST_CRC_RE = re.compile(r"^Test CRC\s+([0-9A-Fa-f]{8})")
 XLD_CRC_RE = re.compile(r"^CRC32 hash\s*:\s*([0-9A-Fa-f]{8})")
 XLD_TEST_CRC_RE = re.compile(r"^CRC32 hash\s+\(test run\)\s*:\s*([0-9A-Fa-f]{8})")
 XLD_SKIP_ZERO_RE = re.compile(r"^CRC32 hash\s+\(skip zero\)\s*:\s*([0-9A-Fa-f]{8})")
+DBPA_CRC_RE = re.compile(r"^CRC32\s*:\s*([0-9A-Fa-f]{8})\b")
 ACCURATE_CRC_RE = re.compile(r"\[([0-9A-Fa-f]{8})\]")
 
-# The ripper a rip log's header names — the same three-way split Logchecker
-# makes (Ripper::EAC / Ripper::XLD / Ripper::WHIPPER). EAC and XLD keep the
+# The ripper a rip log's header names. EAC, XLD and whipper keep the
 # fingerprints they always had; whipper's YAML log (whipper/result/logger.py)
 # begins with the header line it always writes,
 # "Log created by: whipper X.Y.Z (internal logger)".
 WHIPPER_HEADER_RE = re.compile(r"^Log created by:\s*whipper\b",
                                re.MULTILINE | re.IGNORECASE)
+
+# dBpoweramp's secure log opens with "dBpoweramp Release 17.4 Digital Audio
+# Extraction Log from …" (macOS builds omit the Release number). Its per-track
+# sections are "Track 1:  Ripped LBA 0 to 18532 (4:07) in 0:48. Filename: …".
+DBPA_HEADER_RE = re.compile(r"^dBpoweramp\b[^\n]*Audio Extraction Log",
+                            re.MULTILINE | re.IGNORECASE)
+
+# CUERipper (CUETools) writes an EAC-STYLE log: its first line is
+# "CUERipper v2.2.2 Copyright (C) 2008-2022 Grigory Chudov" and its third is
+# "EAC extraction logfile from …", with EAC's own "Track  N" sections and
+# "Test CRC"/"Copy CRC" lines — so its CRCs are read by the EAC rules already.
+# It is still named apart, because the SCORER cannot read it: Logchecker's
+# Ripper check looks for "Exact Audio Copy" (this log says "EAC extraction
+# logfile" on its THIRD line, and only the first line is read there) and
+# answers the whole log with "Ripper : unknown" and a Score of 0 that is no
+# grade (measured on the pinned 0.14.4 phar, 2026-10-13, against a real
+# CUERipper v2.2.2 log).
+CUERIPPER_HEADER_RE = re.compile(r"^CUERipper v\S+", re.MULTILINE)
+
+# The programs a rip log can name, and what the app can read of each. The
+# name is what a message prints; `scorer` says whether the bundled rip-log
+# scorer (OPSnet Logchecker, pinned in fetchdeps.LOGCHECKER) can read that
+# program's log at all — its Ripper class recognises EAC, XLD and whipper, and
+# answers every other log with "Ripper : unknown" and a **Score : 0** that is
+# not a grade (measured 2026-10-13 on the pinned 0.14.4 phar: an EAC log
+# scores 70, while a dBpoweramp 16.6 log and a real CUERipper v2.2.2 log both
+# come back "Score 0 / Unknown log file, could not determine ripper.").
+#
+# A program OUTSIDE that set is still judged here — on the evidence this app
+# reads itself, the log's own per-track CRCs against the decoded audio, plus
+# the AccurateRip verdict the log states — and is never failed for the missing
+# Logchecker score (see grade_album_logs / grader's grade_check_log_grade).
+# Programs whose per-track CRCs this app cannot read stay rejected as
+# unverifiable CD rips: EZ CD Audio Converter, fre:ac, cyanrip and morituri
+# are the ones a modern ripper may write instead, and none is supported here.
+LOG_PROGRAMS = {
+    "eac": ("Exact Audio Copy", True),
+    "xld": ("X Lossless Decoder", True),
+    "whipper": ("whipper", True),
+    "dbpoweramp": ("dBpoweramp", False),
+    "cueripper": ("CUERipper", False),
+}
+
+
+def log_program(dialect):
+    """The program a dialect names, and whether the scorer can read it.
+
+    ``("", False)`` for a dialect nothing here recognises: an unreadable log,
+    which is not the same thing as a readable log from a program with no
+    scorer (see LOG_PROGRAMS)."""
+    return LOG_PROGRAMS.get(dialect, ("", False))
+
+
+def program_without_scorer(log_path):
+    """The program a rip log names when no installed scorer reads it, else "".
+
+    The gap `log_program` draws, asked of a file: an EAC/XLD/whipper log
+    answers "" (the scorer reads those, so a missing score there is a different
+    problem), a log nothing recognises answers "" too (nothing can read it at
+    all — that is not the same finding), and a dBpoweramp/CUERipper log answers
+    its program's name."""
+    try:
+        name, scorer_reads = log_program(log_dialect(read_log_text(log_path)))
+    except Exception:
+        return ""
+    return "" if scorer_reads else name
+
 
 # whipper's YAML log keys each Tracks entry with an INDENTED "N:" line under a
 # top-level "Tracks:" section, and writes the extraction / test CRCs as
@@ -124,7 +204,8 @@ WHIPPER_TOC_RE = re.compile(
 
 
 def log_dialect(text):
-    """Which ripper wrote a rip log: 'whipper' | 'xld' | 'eac' | ''.
+    """Which ripper wrote a rip log: 'whipper' | 'xld' | 'eac' | 'dbpoweramp'
+    | 'cueripper' | ''.
 
     Read off the header each signs itself with — the split `parse_log_checksums`
     and `check_log_checksum` branch on. EAC and XLD are recognised exactly as
@@ -133,8 +214,14 @@ def log_dialect(text):
         return "whipper"
     if "X Lossless Decoder" in text or text.lstrip().startswith("XLD"):
         return "xld"
+    # Before the EAC test: a CUERipper log SAYS "EAC extraction logfile from"
+    # on its third line, and only its first line names its own program.
+    if CUERIPPER_HEADER_RE.search(text):
+        return "cueripper"
     if "Exact Audio Copy" in text:
         return "eac"
+    if DBPA_HEADER_RE.search(text):
+        return "dbpoweramp"
     return ""
 
 
@@ -570,6 +657,16 @@ def parse_log_checksums(text):
                 per_track[current] = m.group(1).upper()
                 priority[current] = 3
             continue
+        m = DBPA_CRC_RE.match(line)
+        if m:
+            # dBpoweramp's own extraction CRC is the track's: top priority, the
+            # same slot EAC's "Copy CRC" takes. The "AccurateRip CRC" printed
+            # after it on the same line is AR v2 and is never read (it matches
+            # none of these patterns: no "CRC32 hash", no "Copy CRC").
+            if priority.get(current, -1) < 4:
+                per_track[current] = m.group(1).upper()
+                priority[current] = 4
+            continue
         m = XLD_CRC_RE.match(line)
         if m:
             # XLD's extraction CRC: outranks its own test run (below)
@@ -609,6 +706,26 @@ def parse_log_checksums(text):
 # mismatch always carries the per-track "AccurateRip returned [...]" line, so
 # the aggregate's ambiguous wording is dropped and the per-track evidence
 # decides; "not accurately ripped" stays because that phrasing IS a verdict.
+#
+# dBpoweramp's own wording is read too, and it is unambiguous about the two
+# things EAC's footer conflates:
+#   * GOOD — "AccurateRip: Accurate (confidence 22)     [Pass 1]", the
+#     verification line a verified track carries ("AccurateRip Verified
+#     Confidence 22 [CRCv2 …]"), and the footer "10 Tracks Ripped Accurately".
+#   * BAD — "AccurateRip: Inaccurate     [Pass 1 & 2]" (the track disagreed
+#     with the database), and the footer's own count, "11 Tracks Ripped: 7
+#     Secure, …, 1 Inaccurate".
+#   * NEITHER — "AccurateRip: Not in Database" (an absent track, exactly the
+#     case "could not be verified as accurate" is dropped for), which is listed
+#     in that footer as its own count.
+# These three phrases cannot appear in an EAC/XLD/whipper log verbatim, so they
+# are read for every dialect rather than gated on one.
+_AR_DBPA_OK_RE = re.compile(
+    r"accuraterip\s*:\s*accurate\b|accuraterip verified confidence|"
+    r"\btracks ripped accurately\b", re.IGNORECASE)
+_AR_DBPA_FAIL_RE = re.compile(
+    r"accuraterip\s*:\s*inaccurate\b|\btracks ripped\b[^\n]*\binaccurate\b",
+    re.IGNORECASE)
 _AR_FOOTER_OK_RE = re.compile(r"all tracks accurately ripped", re.IGNORECASE)
 _AR_FAIL_RE = re.compile(
     r"cannot be verified as accurate|not accurately ripped|"
@@ -649,6 +766,14 @@ def parse_log_accuraterip(text):
         if not line:
             continue
         low = line.lower()
+        # dBpoweramp's own verdicts first: "AccurateRip: Accurate" is a whole
+        # verdict where the generic rules below look for "accurately ripped".
+        if _AR_DBPA_FAIL_RE.search(line):
+            fail = fail or line
+            continue
+        if _AR_DBPA_OK_RE.search(line):
+            ok = True
+            continue
         if "accurately ripped" in low or _AR_FOOTER_OK_RE.search(line):
             ok = True
             continue
@@ -2486,12 +2611,16 @@ def log_report(log_path, timeout=30, max_text=200_000):
     Read-only, and the answer the owner asked for ("I don't even know a way to
     view logs"): the score alone never said WHY a log scored 60, and the text is
     what a person reads to see it. `available` is false when no scorer is
-    installed — an empty report is never dressed up as a scored one."""
+    installed — an empty report is never dressed up as a scored one. `program`
+    is the program the log names ("" when no dialect claims it), so a panel can
+    say that the scorer has no READER for it instead of showing the 0 the phar
+    prints for an unidentified ripper (see `log_score_state`)."""
     log_path = str(log_path or "")
     report = {"path": log_path, "name": os.path.basename(log_path),
               "exists": bool(log_path) and os.path.isfile(log_path),
               "available": False, "report": parse_logchecker(None),
               "checksum": {"state": None, "detail": None},
+              "program": "", "score_state": None,
               "text": "", "truncated": False, "bytes": 0}
     if not report["exists"]:
         return report
@@ -2503,12 +2632,89 @@ def log_report(log_path, timeout=30, max_text=200_000):
     report["available"] = out is not None
     if out:
         report["report"] = parse_logchecker(out)
+        # What the scorer could say about it, in the same words the gate uses:
+        # a ripper it could not NAME has no score at all, so the panel draws the
+        # program instead of the phar's 0 (see score_state_from_output).
+        report["score_state"] = score_state_from_output(out)[0]
     state, detail = check_log_checksum(log_path)
     report["checksum"] = {"state": state, "detail": detail}
     text = read_log_text(log_path)
+    report["program"] = log_program(log_dialect(text))[0]
     report["truncated"] = len(text) > max_text
     report["text"] = text[:max_text]
     return report
+
+
+def log_score_state(log_path, timeout=30):
+    """What the rip-log scorer says about ONE disc's log.
+
+    Returns ``(state, score, detail)``:
+
+      * ``("scored", 0-100, "")`` — Logchecker read the program and scored it.
+      * ``("unreadable", None, <its own words>)`` — it ran and could not name
+        the program at all. Logchecker's Ripper check recognises EAC, XLD and
+        whipper (`Ripper.php`) and answers every other log with "Ripper :
+        unknown" / "Unknown log file, could not determine ripper." — and a
+        **Score : 0** beside them that is NOT a grade. Measured on the pinned
+        0.14.4 phar (2026-10-13) against a dBpoweramp 16.6 log and a real
+        CUERipper v2.2.2 log: both print Score 0 with that detail, while the
+        same disc's EAC log scores 70. Reading that 0 as a score rejected every
+        dBpoweramp/CUERipper candidate at the log gate ("Logchecker 0/100
+        (below 85)") and wrote `LOG_GRADE=0` onto library files — both fixed
+        here: there is no score for a program the scorer does not support.
+      * ``("failed", None, <why>)`` — it ran and fell over (a non-zero exit, a
+        log it could not finish), or its own checksum validation FAILED: the
+        number it prints for a log whose SHA256 does not match grades the log's
+        text, so it is not a grade either.
+      * ``("no_scorer", None, <why>)`` — Logchecker/PHP is not installed at
+        all, so nothing was judged (see `logchecker_available`).
+
+    The one runner is `run_logchecker`, so this and the log report can never
+    disagree about what Logchecker said.
+    """
+    if not log_path or not isinstance(log_path, str) or not os.path.isfile(log_path):
+        return "failed", None, "no log file to score"
+    try:
+        php_exe, phar = _logchecker_paths()
+    except Exception as e:
+        return "failed", None, str(e)[:120]
+    if not php_exe:
+        # Fallback: try to locate php via PATH if not in deps.
+        php_exe = shutil.which("php")
+    if not phar or not php_exe:
+        return "no_scorer", None, "Logchecker/PHP is not installed"
+    out = run_logchecker(log_path, timeout=timeout)
+    if out is None:
+        return ("failed", None,
+                "Logchecker did not run to completion (non-zero exit)")
+    return score_state_from_output(out)
+
+
+def score_state_from_output(out):
+    """``(state, score, detail)`` from ONE Logchecker run's output.
+
+    The reader `log_score_state` and `log_report` both use, so the auto-import
+    gate and the rip-log panel can never disagree about the same log — and the
+    panel can say "no scorer reads this program" instead of drawing the 0 the
+    phar prints for an unidentified ripper as a score.
+    """
+    m_chk = re.search(r"Checksum\s*:\s*(\w+)", out or "", re.IGNORECASE)
+    if m_chk and m_chk.group(1).lower() in ("checksum_invalid", "checksum_error"):
+        return "failed", None, "the log's own checksum does not verify"
+    rep = parse_logchecker(out)
+    if (str(rep.get("ripper") or "").strip().lower() == "unknown"
+            or any("could not determine ripper" in d.lower()
+                   for d in rep.get("details") or ())):
+        why = next((d for d in rep.get("details") or ()
+                    if "could not determine ripper" in d.lower()),
+                   "Logchecker could not determine the ripper")
+        return "unreadable", None, why
+    if rep.get("score") is not None:
+        try:
+            return "scored", int(rep["score"]), ""
+        except (TypeError, ValueError):
+            return "failed", None, f"Logchecker's score is not a number ({rep['score']!r})"
+    return "failed", None, "Logchecker printed no score"
 
 
 def score_disc_log(cli_exe, log_path=None, disc_files=None, timeout=30):
@@ -2516,6 +2722,11 @@ def score_disc_log(cli_exe, log_path=None, disc_files=None, timeout=30):
 
     Supports both old calling convention score_disc_log(cli, log_path, disc_files)
     and new score_disc_log(log_path). disc_files is ignored (Logchecker only needs log).
+
+    None means NO score — a log whose program the scorer cannot name, one whose
+    own checksum fails, and a broken install all answer None (see
+    `log_score_state` for which), never a 0 the phar printed for a program it
+    does not support.
     """
     # Handle overloaded signatures
     actual_log = log_path if log_path is not None else cli_exe
@@ -2526,72 +2737,7 @@ def score_disc_log(cli_exe, log_path=None, disc_files=None, timeout=30):
         # timeout passed as disc_files when called with 3 args where third is timeout
         timeout = disc_files
         disc_files = None
-    log_path = actual_log
-    if not log_path or not isinstance(log_path, str) or not os.path.isfile(log_path):
-        return None
-    try:
-        from .tools import detect_all_tools
-        tools = detect_all_tools()
-        lc_info = tools.get("logchecker")
-        php_info = tools.get("php")
-        if not lc_info:
-            return None
-        phar = lc_info.get("phar_path")
-        php_exe = lc_info.get("php_exe") or (php_info.get("php_exe") if php_info else None)
-        if not phar or not php_exe or not os.path.isfile(phar) or not os.path.isfile(php_exe):
-            # Fallback: try to locate php via PATH if not in deps
-            php_exe = shutil.which("php") or php_exe
-            if not php_exe or not os.path.isfile(php_exe):
-                return None
-        # Ensure Python Scripts for checksum validation are findable (Logchecker tries python/eac-logchecker)
-        env = dict(os.environ)
-        try:
-            import sys as _sys
-            import glob as _glob
-            candidates = [os.path.join(os.path.dirname(_sys.executable), "Scripts")]
-            # Also scan common user-level Python installs so Logchecker's
-            # eac-logchecker helper resolves on any machine (the Scripts
-            # dir of a second, non-runtime Python often holds the shim).
-            for pattern in (
-                os.path.expandvars(r"%LocalAppData%\Python\*\Scripts"),
-                os.path.expandvars(r"%LocalAppData%\Programs\Python\Python*\Scripts"),
-                os.path.expandvars(r"%LocalAppData%\Programs\Python\*\Scripts"),
-            ):
-                candidates.extend(_glob.glob(pattern))
-            for p in candidates:
-                if os.path.isdir(p) and p not in env.get("PATH", ""):
-                    env["PATH"] = p + os.pathsep + env.get("PATH", "")
-            # Also add python exe dir
-            py_dir = os.path.dirname(_sys.executable)
-            if py_dir not in env.get("PATH", ""):
-                env["PATH"] = py_dir + os.pathsep + env.get("PATH", "")
-        except Exception:
-            pass
-        proc = run_tool([php_exe, phar, "analyze", "--no_text", log_path],
-                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                        text=True, encoding="utf-8", errors="replace",
-                        timeout=timeout, env=env)
-        # The score is the rip grade only when Logchecker actually finished
-        # AND its own checksum validation did not FAIL: the number it prints
-        # for a log whose SHA256 does not match grades the log's text (and a
-        # crashed run can print a partial one). A log Logchecker never
-        # validated (XLD logs, no checksum concept) is still scored — the
-        # audit's own checksum gate owns that verdict.
-        if proc.returncode != 0:
-            return None
-        out = (proc.stdout or "") + "\n" + (proc.stderr or "")
-        m_chk = re.search(r"Checksum\s*:\s*(\w+)", out, re.IGNORECASE)
-        if m_chk and m_chk.group(1).lower() in ("checksum_invalid", "checksum_error"):
-            return None
-        m = re.search(r"Score\s*:\s*(\d+)", out)
-        if m:
-            try:
-                return int(m.group(1))
-            except ValueError:
-                pass
-        return None
-    except Exception:
-        return None
+    return log_score_state(actual_log, timeout=timeout)[1]
 
 
 # ----------------------------------------------------------------------
@@ -2784,12 +2930,17 @@ def grade_album_logs(cli_exe, album_dir, force=False, log_fn=None,
     write LOG_GRADE (0-100) to every track of MEDIA=CD albums, one score
     per disc.
 
-    Returns ({disc: score}, notes list, unscorable list). *unscorable* holds
-    the disc numbers whose .log could not be scored (missing or unreadable) as
-    DATA: the audit fails exactly those discs, and used to recover the numbers
-    by regexing this function's free-text notes. Callers that act on it should
-    check discs.logchecker_available() first — with no scorer installed
-    nothing was judged, so an empty-score run says nothing about the logs.
+    Returns ({disc: score}, notes list, unscorable list, programs without a
+    scorer). *unscorable* holds the disc numbers whose .log could not be scored
+    (missing, or a log no scorer could read) as DATA: the audit fails exactly
+    those discs, and used to recover the numbers by regexing this function's
+    free-text notes. The fourth element is ``{disc: program}`` for the discs
+    whose log NAMES a program the scorer has no reader for (dBpoweramp,
+    CUERipper — see LOG_PROGRAMS): those are neither scored nor failed, so the
+    audit must not read them as unscorable and the grader must not demand a
+    LOG_GRADE no scorer can produce. Callers that act on either should check
+    discs.logchecker_available() first — with no scorer installed nothing was
+    judged, so an empty-score run says nothing about the logs.
     """
     notes = []
     unscorable = []
@@ -2805,11 +2956,11 @@ def grade_album_logs(cli_exe, album_dir, force=False, log_fn=None,
                 if aud and (len(logs_tmp) == 1 or len(cues_tmp) == 1):
                     discs = {1: [os.path.join(album_dir, f) for f in aud]}
                 else:
-                    return {}, notes, unscorable
+                    return {}, notes, unscorable, {}
             except OSError:
-                return {}, notes, unscorable
+                return {}, notes, unscorable, {}
         else:
-            return {}, notes, unscorable
+            return {}, notes, unscorable, {}
 
     # CD-DA only (mlo.tagtext.is_cd_media: CD and its HDCD variant) — check
     # all discs first file, not arbitrary order
@@ -2819,13 +2970,13 @@ def grade_album_logs(cli_exe, album_dir, force=False, log_fn=None,
             first = discs[d][0]
             break
     if first is None:
-        return {}, notes, unscorable
+        return {}, notes, unscorable, {}
     af = AudioFile(first)
     if af.audio is None:
-        return {}, notes, unscorable
+        return {}, notes, unscorable, {}
     # The same one rule as every other MEDIA comparison here.
     if not is_cd_media(af.get_tag("MEDIA")):
-        return {}, notes, unscorable
+        return {}, notes, unscorable, {}
 
     # Fix FILE entries first (conservative) so the subsequent
     # FILE->disc mapping for renaming has correct references; .log
@@ -2836,6 +2987,11 @@ def grade_album_logs(cli_exe, album_dir, force=False, log_fn=None,
     rename_accurip_for_discs(album_dir, discs, log_fn=log_fn, config=config)
 
     scores = {}
+    # disc -> the program whose log no installed scorer can read (see
+    # LOG_PROGRAMS). Kept apart from `unscorable`: a log nobody can read is a
+    # defect the audit fails, while a readable log from a program with no
+    # scorer is evidence the app judges itself.
+    unscored_programs = {}
     pattern = _disc_pattern_for(config)
     handled_logs = set()
     for d, paths in sorted(discs.items()):
@@ -2854,9 +3010,27 @@ def grade_album_logs(cli_exe, album_dir, force=False, log_fn=None,
                 have.append(v)
             if have and all(v.isdigit() and 0 <= int(v) <= 100 for v in have):
                 continue  # already graded
-        score = score_disc_log(log_path)
+        state, score, why = log_score_state(log_path)
+        if state == "unreadable" and program_without_scorer(log_path):
+            # A program the scorer has no reader for (dBpoweramp, CUERipper —
+            # see mlo.discs.LOG_PROGRAMS). Logchecker answers these with
+            # "Ripper: unknown" and a Score of 0 that is not a grade, and
+            # reading that 0 as one wrote LOG_GRADE=0 onto the tracks of every
+            # such album (and rejected every such download at the floor). The
+            # disc is not scored here and is NOT unscorable either: its own
+            # evidence — the log's per-track CRCs against the decoded audio
+            # (`verify_album_checksums`), plus the AccurateRip verdict it
+            # states — is what the audit and the grader judge it on.
+            program = program_without_scorer(log_path)
+            unscored_programs[d] = program
+            notes.append(f"disc {d}: {os.path.basename(log_path)} is a {program} "
+                         f"log — no installed scorer reads that program, so the "
+                         f"disc is graded on the log's own CRCs and its "
+                         f"AccurateRip verdict, not on a Logchecker score")
+            continue
         if score is None:
-            notes.append(f"disc {d}: could not score {_disc_expected_name(pattern, d, '.log')} (Logchecker failed)")
+            notes.append(f"disc {d}: could not score "
+                         f"{_disc_expected_name(pattern, d, '.log')} ({why})")
             unscorable.append(d)
             continue
         scores[d] = score
@@ -2890,4 +3064,4 @@ def grade_album_logs(cli_exe, album_dir, force=False, log_fn=None,
             notes.append(f"{logf}: not mapped to a disc - not graded")
     except OSError:
         pass
-    return scores, notes, sorted(unscorable)
+    return scores, notes, sorted(unscorable), unscored_programs

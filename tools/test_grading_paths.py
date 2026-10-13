@@ -1956,6 +1956,7 @@ ok(_discs.log_dialect(WHIPPER_SAMPLE) == "whipper",
 ok(_discs.log_dialect(XLD_SAMPLE) == "xld"
    and _discs.log_dialect("Exact Audio Copy v1.3\n") == "eac",
    "EAC / XLD keep the dialect they always had")
+
 _whipper_crcs = _discs.parse_log_checksums(WHIPPER_SAMPLE)
 ok(_whipper_crcs == {1: "0025D726", 2: "F77C14CB"},
    "the YAML Tracks section's `Copy CRC:` (the colon EAC omits) is read as the "
@@ -1977,8 +1978,145 @@ _whipper_state = _discs.check_log_checksum(_whipper_path)
 ok(_whipper_state[0] == "invalid" and "expected" in (_whipper_state[1] or ""),
    f"a doctored whipper log fails its own signature ({_whipper_state})")
 
+# ----------------------------------------------------------------------
+# dBpoweramp and CUERipper: programs the bundled Logchecker has no READER
+# for, whose logs this app reads itself
+# ----------------------------------------------------------------------
+# Logchecker's Ripper check knows EAC, XLD and whipper; every other program
+# comes back "Ripper : unknown" with a Score of 0 that is not a grade
+# (measured 2026-10-13 on the pinned 0.14.4 phar — see
+# mlo.discs.log_score_state). The per-track CRCs and AccurateRip verdicts are
+# still readable, and that is what such a rip is judged on:
+#   * dBpoweramp prints "  CRC32: <8 hex>" under each "Track N:  Ripped LBA …"
+#     section — the track's own extraction CRC, the value EAC calls
+#     "Copy CRC" (its [Calculate Audio CRC] utility is defined as the CRC "of
+#     decoded audio data only") — beside an "AccurateRip CRC: … (CRCv2)" that
+#     is a different algorithm and never the value compared.
+#   * CUERipper writes an EAC-STYLE log ("EAC extraction logfile from …") with
+#     EAC's own "Track  N" blocks and "Test CRC" / "Copy CRC" lines, and names
+#     itself only in its first line.
+_DBPA_SAMPLE = (
+    "dBpoweramp Release 17.4 Digital Audio Extraction Log from Monday, "
+    "March 15, 2021 10:22\n"
+    "\n"
+    "Drive & Settings\n"
+    "----------------\n"
+    "\n"
+    "Ripping with drive 'E:   [ASUS     - BW-16D1HT       ]',  Drive offset: 6\n"
+    "AccurateRip: Active,  Using C2: No,  Cache: 1024 KB\n"
+    "\n"
+    "Extraction Log\n"
+    "--------------\n"
+    "\n"
+    "Track 1:  Ripped LBA 0 to 18532 (4:07) in 0:48. Filename: D:\\Rips\\x\\01 - Song._\n"
+    "  AccurateRip: Accurate (confidence 22)     [Pass 1]\n"
+    "  CRC32: A1B2C3D4     AccurateRip CRC: B3C4D5E6 (CRCv2)     [DiscID: 009-1]\n"
+    "  AccurateRip Verified Confidence 22 [CRCv2 b3c4d5e6]\n"
+    "\n"
+    "Track 2:  Ripped LBA 18532 to 38471 (4:26) in 0:52. Filename: D:\\Rips\\x\\02 - Song._\n"
+    "  AccurateRip: Inaccurate     [Pass 1 & 2]\n"
+    "  CRC32: C4D5E6F7     AccurateRip CRC: D5E6F7A8 (CRCv2)     [DiscID: 009-2]\n"
+    "\n"
+    "--------------\n"
+    "\n"
+    "2 Tracks Ripped: 1 Secure, 1 Inaccurate\n")
+ok(_discs.log_dialect(_DBPA_SAMPLE) == "dbpoweramp",
+   f"a dBpoweramp log is named by its own header "
+   f"({_discs.log_dialect(_DBPA_SAMPLE)!r})")
+ok(_discs.log_program("dbpoweramp") == ("dBpoweramp", False)
+   and _discs.log_program("") == ("", False),
+   "and the program table says the scorer has no reader for it, while a "
+   "dialect nothing names is a different finding")
+ok(_discs.parse_log_checksums(_DBPA_SAMPLE) == {1: "A1B2C3D4", 2: "C4D5E6F7"},
+   "its per-track CRC32 is read as the track's CRC — never the AccurateRip "
+   f"CRC beside it ({_discs.parse_log_checksums(_DBPA_SAMPLE)})")
+ok(_discs.parse_log_accuraterip(_DBPA_SAMPLE) == (
+    "fail", "AccurateRip: Inaccurate     [Pass 1 & 2]"),
+   f"and 'AccurateRip: Inaccurate' is a stated failure "
+   f"({_discs.parse_log_accuraterip(_DBPA_SAMPLE)})")
+_DBPA_MIXED = _DBPA_SAMPLE.replace(
+    "  AccurateRip: Inaccurate     [Pass 1 & 2]\n"
+    "  CRC32: C4D5E6F7     AccurateRip CRC: D5E6F7A8 (CRCv2)     [DiscID: 009-2]\n",
+    "  AccurateRip: Not in Database     [Pass 1]\n"
+    "  CRC32: C4D5E6F7     AccurateRip CRC: D5E6F7A8 (CRCv2)     [DiscID: 009-2]\n"
+).replace("2 Tracks Ripped: 1 Secure, 1 Inaccurate",
+          "2 Tracks Ripped: 1 Secure, 1 Not in Database")
+ok(_discs.parse_log_accuraterip(_DBPA_MIXED)[0] == "ok",
+   "'AccurateRip: Not in Database' is NOT a failure — it is an absent track, "
+   f"the same case EAC's ambiguous footer is dropped for "
+   f"({_discs.parse_log_accuraterip(_DBPA_MIXED)})")
+# …and a log that states ONLY absence (its footer listing that count) says
+# nothing at all: AccurateRip is never required, so the CRCs decide.
+_DBPA_ABSENT = (
+    _DBPA_MIXED
+    .replace("  AccurateRip: Accurate (confidence 22)     [Pass 1]\n",
+             "  AccurateRip: Not in Database     [Pass 1]\n")
+    .replace("  AccurateRip Verified Confidence 22 [CRCv2 b3c4d5e6]\n", "")
+    .replace("2 Tracks Ripped: 1 Secure, 1 Not in Database",
+             "2 Tracks Ripped: 2 Not in Database"))
+ok(_discs.parse_log_accuraterip(_DBPA_ABSENT) == (None, ""),
+   f"a log with nothing but absences states no verdict "
+   f"({_discs.parse_log_accuraterip(_DBPA_ABSENT)})")
+ok(_discs.parse_log_accuraterip(
+    "dBpoweramp Release 14.2 Digital Audio Extraction Log from x\n\n"
+    "Track 1:  ERROR Ripping LBA 0 to 27167 (6:02) in 2:08. Filename: x\n"
+    "\nUser Stopped Ripping\n")[0] is None,
+   "and a log with no AccurateRip section at all states no verdict")
+
+_CUERIPPER_SAMPLE = """CUERipper v2.2.2 Copyright (C) 2008-2022 Grigory Chudov
+
+EAC extraction logfile from 4. January 2023, 0:18
+
+Artist / Album
+
+Used drive  : BENQ DVD DD DW1650   Adapter: 1  ID: 0
+
+Read mode               : Secure
+Utilize accurate stream : Yes
+
+Track  9
+
+     Filename C:\\Rip Temp1\\09. Track 09.wav
+
+     Peak level 83.6 %
+     Track quality 100.0 %
+     Test CRC D23BB86A
+     Copy CRC 1217DD47
+     Cannot be verified as accurate (confidence 2)  [0D4AECC6], AccurateRip returned [0C87D727]
+     Copy OK
+"""
+ok(_discs.log_dialect(_CUERIPPER_SAMPLE) == "cueripper",
+   "a CUERipper log is named by its FIRST line, not by the 'EAC extraction "
+   f"logfile' line it also writes ({_discs.log_dialect(_CUERIPPER_SAMPLE)!r})")
+ok(_discs.parse_log_checksums(_CUERIPPER_SAMPLE) == {9: "1217DD47"},
+   "its EAC-style blocks are read by the EAC rules: `Copy CRC` (the "
+   f"extraction's own), never the failed `Test CRC` "
+   f"({_discs.parse_log_checksums(_CUERIPPER_SAMPLE)})")
+ok(_discs.parse_log_accuraterip(_CUERIPPER_SAMPLE)[0] == "fail",
+   "and the AccurateRip mismatch it states is a failure "
+   f"({_discs.parse_log_accuraterip(_CUERIPPER_SAMPLE)})")
+# The same disc logged by EAC — CUERipper's own log and EAC's, track 9 both
+# times, from the CUETools issue the fixture comes from. The two programs'
+# CRCs for the track agree, which is why the EAC rules read a CUERipper log.
+_EAC_TRACK9 = """Track  9
+
+     Filename C:\\Rip Temp\\09 Track09.wav
+
+     Peak level 83.6 %
+     Extraction speed 2.0 X
+     Track quality 100.0 %
+     Test CRC D23BB86A
+     Copy CRC 1217DD47
+     Cannot be verified as accurate (confidence 1)  [8A326031], AccurateRip returned [0C87D727]  (AR v2)
+     Copy OK
+"""
+ok(_discs.parse_log_checksums(_EAC_TRACK9)
+   == _discs.parse_log_checksums(_CUERIPPER_SAMPLE) == {9: "1217DD47"},
+   "and EAC's own log of the same disc gives the same CRC "
+   f"({_discs.parse_log_checksums(_EAC_TRACK9)})")
 # …and the TOC is what attributes a log to its disc when its NAME does not
 # (rename_logs_for_discs step 3, which the real owner's log needs): the two
+
 # discs below are named D-TT, the log carries no disc number, and the playtime
 # totals are distinct by far more than the tolerance.
 xld_dir = os.path.join(music, "Artists", "Artist", "XLD Discs (2016)")
@@ -2041,6 +2179,39 @@ if _FFMPEG:
     res = _grade_album(cd_dir, "EMBEDDED", _crc_cfg)
     ok("CRC_MISMATCH" in res["tracks"][0]["issues"],
        "and `(test run)` does not stand in for the plain line either")
+
+    # dBpoweramp's own CRC32 is the track's CRC, so it covers and verifies a
+    # CD track exactly as EAC's `Copy CRC` does — the log of a program
+    # Logchecker cannot score is still EVIDENCE the grader reads.
+    def _write_dbpa_log(crc):
+        with open(log_path, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(
+                "dBpoweramp Release 17.4 Digital Audio Extraction Log from "
+                "Monday, March 15, 2021 10:22\n\n"
+                "Drive & Settings\n----------------\n\n"
+                "Ripping with drive 'E:   [ASUS     - BW-16D1HT       ]',  "
+                "Drive offset: 6\n"
+                "AccurateRip: Active,  Using C2: No,  Cache: 1024 KB\n\n"
+                "Extraction Log\n--------------\n\n"
+                "Track 1:  Ripped LBA 0 to 18532 (4:07) in 0:48. "
+                "Filename: D:\\Rips\\x\\01 - Song._\n"
+                "  AccurateRip: Accurate (confidence 22)     [Pass 1]\n"
+                f"  CRC32: {crc}     AccurateRip CRC: B3C4D5E6 (CRCv2)"
+                "     [DiscID: 009-1]\n"
+                "  AccurateRip Verified Confidence 22 [CRCv2 b3c4d5e6]\n\n"
+                "--------------\n\n"
+                "1 Tracks Ripped Accurately\n")
+
+    _write_dbpa_log(_real_crc_cd)
+    res = _grade_album(cd_dir, "EMBEDDED", _crc_cfg)
+    ok("CRC" not in res["tracks"][0]["issues"],
+       "a dBpoweramp log's own CRC32 covers and matches the track "
+       f"({res['tracks'][0]['issues']})")
+    _write_dbpa_log("00000000")
+    res = _grade_album(cd_dir, "EMBEDDED", _crc_cfg)
+    ok("CRC_MISMATCH" in res["tracks"][0]["issues"],
+       "a wrong CRC32 fails — the AccurateRip CRC printed beside it is never "
+       f"the value compared ({res['tracks'][0]['issues']})")
 
 # ----------------------------------------------------------------------
 # A second XLD log — The King of Limbs, TICK001CD — teaches the verdict to

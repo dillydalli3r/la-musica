@@ -676,7 +676,64 @@ _bar_dispatch._mlo_chain = True
 
 def _bar_context():
     """A fresh bar context — one per RUN (see run_chain), not per script."""
-    return {"joined": False, "ident": None, "emit": None, "publish": None}
+    return {"joined": False, "ident": None, "emit": None, "publish": None,
+            "pos": 0.0, "readout": 0}
+
+
+# A run's own frames carry TWO numbers — the bar's position (how far into the
+# run the spin is) and the whole-step pair the readout prints — and neither may
+# go below the last one the run published. The frame sequence is what makes
+# that necessary: the spine announces step k's start at ``k-1``, the runner's
+# ticks move a fraction above it, the step's finish books ``len(results)`` — and
+# a FREE-lane step (artist art, a submission) finishing beside the spine lands
+# in that same count the moment it is booked (see _finish). One early side step
+# then pushes the number past the NEXT step's own start frame, so the bar and
+# the readout slid back on every step boundary: "cuts back and forth", the
+# owner's report (2026-10-13) on an auto-import and a Run All. Every frame a run
+# publishes therefore passes through `_run_pos` first.
+#
+# A LONE script's own bar is left alone: its numbers are the runner's own (a bar
+# that redraws between an album pass and a file pass is that runner's design),
+# and its closing frame must be able to say "over" after a short tick.
+_pos_lock = threading.Lock()
+
+
+def _run_pos(bar, pos, readout=None):
+    """``(pos, readout)`` floored at the run's own high-water marks.
+
+    *pos* is the bar's position (a float — an index plus the running step's
+    fraction) and *readout* the whole-step number the same frame prints in its
+    text and sends as the ``steps`` pair. Each is clamped up to the last value
+    the RUN published for it and the new high-water mark is kept on *bar*, so
+    two frames can never draw either number below its predecessor — whatever
+    order the spine's steps and the free lane's steps happen to finish in. A
+    bar with no context (a headless caller) passes its numbers through.
+    """
+    if not bar:
+        return pos, readout
+    try:
+        want = float(pos)
+    except (TypeError, ValueError):
+        return pos, readout
+    with _pos_lock:
+        floor = float(bar.get("pos") or 0.0)
+        if want < floor:
+            want = floor
+        else:
+            bar["pos"] = want
+        if readout is not None:
+            try:
+                shown = int(readout)
+            except (TypeError, ValueError):
+                shown = None
+            if shown is not None:
+                last = int(bar.get("readout") or 0)
+                if shown < last:
+                    shown = last
+                else:
+                    bar["readout"] = shown
+                readout = shown
+    return want, readout
 
 
 def _bar_join(bar):
@@ -707,13 +764,21 @@ def _bar_join(bar):
         _bars[bar["ident"]] = bar
 
 
-def _bar_attach(bar, emit, publish):
+def _bar_attach(bar, emit, publish, quiet=False):
     """Point this run's slot at the script that is running now.
 
     *emit* re-labels a runner's own tick as this script's step; *publish* is
     the run's frame writer (`job_locks.publish` with this run's job and the bar
     relay it is entitled to), which is what a frame from the CHAIN itself — a
     step that never entered its runner, the run's opening frame — goes through.
+
+    *quiet* (a free-lane step) keeps the run's frame writer where it is: that
+    step's own emit publishes NOTHING, and letting it own the slot swallowed
+    every frame the RUN wrote while it ran — the spine's own step
+    announcements and the run's last one among them (measured 2026-10-13: a
+    free step outliving the spine left a two-step run's bar at "#1/2" with no
+    step-boundary frames at all). A quiet step still installs its tick hook
+    (``bar["emit"]``), so no raw runner bar leaks to the header.
 
     The CURRENT thread is registered beside the run's own slot, because a chain
     now runs its steps on pool threads (`_run_chain_locked`): a runner's own
@@ -725,7 +790,8 @@ def _bar_attach(bar, emit, publish):
     _bar_join(bar)
     with _bars_lock:
         bar["emit"] = emit
-        bar["publish"] = publish
+        if not quiet:
+            bar["publish"] = publish
         _bars[threading.get_ident()] = bar
 
 
@@ -886,15 +952,25 @@ def _run_with_progress(runner, cfg, label, chain=None, job=None, bar=None,
             return
         job_locks.publish(done, total, text, steps, job=job, hook=_bar_relay(bar))
 
+    def frame_pos(pos, shown):
+        """This step's frame numbers, floored by the run's high-water marks.
+
+        A QUIET step (the free lane, see the doc above) claims nothing — its
+        frames are never published — so its numbers must not move the run's
+        floors either: a side step is often one of the LAST in the run's order
+        (artist art, a submission), and letting its own place in the run raise
+        the readout meant every spine frame after it printed a step the run had
+        not reached (measured: a two-step run whose free step was #2 made the
+        spine's own frames read "#2/2" while its bar was still empty).
+        """
+        if quiet:
+            return pos, shown
+        return _run_pos(bar, pos, shown)
+
     def hook(done, total, detail):
         last[0], last[1] = done, total
-        # The runner's own description when it has one, behind the step's
-        # position in the run: "…· Beets tagging — MusicBrainz lookup". A long
-        # step that prints nothing (beets' lookup phase) then still shows the
-        # user WHERE in the run they are instead of only a step name.
-        text = f"#{index}/{count} · {detail}" if detail and chained else label
         if not chained:
-            emit(done, total, text)
+            emit(done, total, label)
             return
         try:
             frac = float(done) / float(total) if total else span[0]
@@ -902,8 +978,17 @@ def _run_with_progress(runner, cfg, label, chain=None, job=None, bar=None,
             frac = span[0]
         span[0] = frac = max(span[0], min(1.0, frac))
         # The bar follows the fraction; the readout prints #index/count, so a
-        # half-finished step never reads as "1.9 of 18".
-        emit(index - 1 + frac, count, text, (index, count))
+        # half-finished step never reads as "1.9 of 18". The FRACTION sits on
+        # the run's finished steps (`bar["done"]`), not on this step's place in
+        # the run: a free-lane step booked beside the spine is one of them, so
+        # the bar keeps moving inside this step instead of standing still
+        # behind a side step's completion. The runner's own description, when
+        # it has one, is prefixed with this step's position in the run
+        # ("…· Beets tagging — MusicBrainz lookup"), so a long step that prints
+        # only phases still says WHERE in the run the user is.
+        pos, shown = frame_pos(int(bar.get("done") or 0) + frac, index)
+        text = f"#{shown}/{count} · {detail}" if detail else label
+        emit(pos, count, text, (shown, count))
 
     # The installed hook is the chain dispatcher (marked so a producer that is
     # NOT a chain — the bulk importer's own mirror, a download job's ticks —
@@ -911,13 +996,14 @@ def _run_with_progress(runner, cfg, label, chain=None, job=None, bar=None,
     # instead of painting its frames into it): this script hands its bar and its
     # frame writer to the run's context, which is what tells two overlapping
     # chains apart and keeps the chain's own step frames this run's.
-    _bar_attach(bar, hook, emit)
+    _bar_attach(bar, hook, emit, quiet=quiet)
     try:
         if chained:
             # Claim the bar at this script's slice — determinate from the very
             # first frame, so the header never falls back to the sweep between
             # two steps of a run that is still going.
-            emit(index - 1, count, f"#{index}/{count} · {label}", (index, count))
+            pos, shown = frame_pos(int(bar.get("done") or 0), index)
+            emit(pos, count, f"#{shown}/{count} · {label}", (shown, count))
         else:
             # Claim the bar before the first file. Announced with NO total on
             # purpose: a runner that never ticks (AccurateRip's CUETools pass,
@@ -930,8 +1016,13 @@ def _run_with_progress(runner, cfg, label, chain=None, job=None, bar=None,
     finally:
         if chained:
             # This script is done: its whole slice is behind us whatever it
-            # reported on its own (a no-op script still consumed a step).
-            emit(index, count, f"#{index}/{count} · {label}", (index, count))
+            # reported on its own (a no-op script still consumed a step). Its
+            # own completion is booked by the run (`_finish`), whose frame
+            # moves the bar onto the step it just finished — this one only
+            # keeps the readout this step's, at the same number the next frame
+            # will publish.
+            pos, shown = frame_pos(int(bar.get("done") or 0), index)
+            emit(pos, count, f"#{shown}/{count} · {label}", (shown, count))
         elif not last[1] or last[0] < last[1]:
             # Whatever this runner reported, it is over: either it never
             # opened a bar (AccurateRip, Beets), or its own bar is still short
@@ -1439,7 +1530,13 @@ def run_chain(cfg, ids, targets=None, force=None, progress=None, wait=False,
             _bar_join(bar)
             done, total, text, steps = run_start_frame(ids, extra_labels)
             if text:
-                _bar_frame(bar, done, total, text, job=job, steps=steps)
+                # The run's own high-water marks start here: its first script
+                # publishes the same numbers this zero state does, so claiming
+                # them together is what makes the floors above mean "what this
+                # run has already drawn".
+                pos, shown = _run_pos(bar, done, steps[0] if steps else None)
+                _bar_frame(bar, pos, total, text, job=job,
+                           steps=(shown, total) if steps else None)
             with _chain_scan(cfg, targets) as scan_owner:
                 try:
                     return _run_chain_locked(cfg, ids, targets=targets, force=force,
@@ -1913,6 +2010,13 @@ def _run_chain_locked(cfg, ids, targets=None, force=None, progress=None,
                 mlo_stats.chain_scan_drop()
         label = labels[key]
         done = len(results)
+        # The run's position for whoever frames next: this count is the base a
+        # running step's fraction sits on and the number a finished step's own
+        # frame publishes, so a FREE-lane step landing here (announce=False
+        # below) counts as the work it is instead of being held back to the
+        # spine's own numbering.
+        if bar:
+            bar["done"] = done
         if announce:
             # Every step ends announced, including one that never entered its
             # runner (a switched-off feature, an unavailable module): the
@@ -1924,9 +2028,15 @@ def _run_chain_locked(cfg, ids, targets=None, force=None, progress=None,
             # while the spine is mid-script is booked in the LOG instead: the
             # bar and the row speak for the spine (see _run_with_progress's
             # `quiet`), and a side step's label there would read as the run's
-            # own position.
-            _bar_frame(bar, done, total, f"#{done}/{total} · {label}", job=job,
-                       steps=(done, total))
+            # own position. The readout carries THIS step's place in the run
+            # (what the label names) while the bar carries the steps finished,
+            # and `_run_pos` keeps both from ever drawing below the last frame
+            # — a step's start used to claim "#index-1" after a side step had
+            # already pushed the count past it (the owner's "cuts back and
+            # forth", 2026-10-13).
+            pos, shown = _run_pos(bar, done, order.index(key) + 1)
+            _bar_frame(bar, pos, total, f"#{shown}/{total} · {label}", job=job,
+                       steps=(shown, total))
         elif lanes[key] == "free":
             log(f"{label}: done in parallel (#{done}/{total})")
         if progress is not None:
@@ -2006,9 +2116,10 @@ def _run_chain_locked(cfg, ids, targets=None, force=None, progress=None,
                     # it finished, and a step's whole point is that the user
                     # can see which one is running.
                     idx = order.index(spine) + 1
-                    _bar_frame(bar, idx - 1, total,
-                               f"#{idx}/{total} · {labels[spine]}", job=job,
-                               steps=(idx, total))
+                    pos, shown = _run_pos(bar, len(results), idx)
+                    _bar_frame(bar, pos, total,
+                               f"#{shown}/{total} · {labels[spine]}", job=job,
+                               steps=(shown, total))
                 _finish(spine, _run_node(spine, cfg, job, bar, script_keys,
                                          runners, total, order))
                 _drain_free(block=False)
@@ -2042,6 +2153,19 @@ def _run_chain_locked(cfg, ids, targets=None, force=None, progress=None,
                    f"{run_label(ids, targets if targets is not None else cfg.get('targets'), extra)}"
                    f" stopped", job=job,
                    steps=(ran, total))
+    elif nodes:
+        # Every step ran: the run says so once, at the end, so its surfaces
+        # always end FULL. A free-lane step still in flight when the spine's
+        # last step landed used to leave the bar parked on the last spine frame
+        # for the whole tail — and the readout stuck below the run's own count
+        # (measured 2026-10-13: a two-step run whose free step outlived the
+        # spine finished at "#1/2" with the bar half drawn). The readout is the
+        # run's own whole count here: there is no step left to name.
+        pos, shown = _run_pos(bar, total, total)
+        _bar_frame(bar, pos, total,
+                   f"#{shown}/{total} · "
+                   f"{run_label(ids, targets if targets is not None else cfg.get('targets'), extra)}",
+                   job=job, steps=(shown, total))
     if nodes:
         try:
             removed = _prune_empty_target_dirs(cfg)

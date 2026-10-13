@@ -2480,10 +2480,13 @@ assert job.imported and job.job["attempts"] == [], job.job
 assert any("Logchecker could not score it" in e["msg"] for e in job.job["log"]), \
     [e["msg"] for e in job.job["log"]][-6:]
 
-# (f) A dBpoweramp / foobar2000 / CUETools log is a dialect the toolchain does
-#     not NAME — that is not a defect, and a folder whose log Logchecker cannot
-#     score is still accepted on its per-track CRCs. The rejection never blames
-#     the program that wrote the log.
+# (f) A dBpoweramp log is a program Logchecker has no READER for — that is not
+#     a defect, and a folder whose log it cannot score is still accepted on its
+#     per-track CRCs. The app NAMES the program (its own dialect table reads it)
+#     and never blames it for a rejection: the phar answers such a log with
+#     "Ripper : unknown" and a Score of 0 that is NOT a grade (see
+#     mlo.discs.log_score_state), so the gate sees NO score at all — reading
+#     that 0 as one killed every dBpoweramp candidate on the 85 floor.
 _DPP_LOG = """dBpoweramp Release 17.3 Digital Audio Extraction Log from 2024
 
 Track 1
@@ -2491,14 +2494,16 @@ Track 1
 Track 2
      CRC32: BBBBBBBB
 """
-assert mlo_discs.log_dialect(_DPP_LOG) == "", mlo_discs.log_dialect(_DPP_LOG)
+assert mlo_discs.log_dialect(_DPP_LOG) == "dbpoweramp", mlo_discs.log_dialect(_DPP_LOG)
+assert mlo_discs.log_program("dbpoweramp") == ("dBpoweramp", False), \
+    mlo_discs.log_program("dbpoweramp")
 assert soulseek_auto._log_passes(None, "unsupported", 85) is True
 job = run_job(JOB_RELEASE, ONE_DISC_ROWS,
               cfg=dict(JOB_CFG, soulseek_auto_log_min_score=85),
               bodies={"Music/Album/rip 1.log": _DPP_LOG.encode()},
               scores=score_logs(unscored=("rip 1.log",)))
 assert job.imported and job.job["attempts"] == [], job.job
-assert any("Logchecker could not score it (unrecognised log format)" in e["msg"]
+assert any("Logchecker could not score it (dBpoweramp)" in e["msg"]
            for e in job.job["log"]), [e["msg"] for e in job.job["log"]][-6:]
 
 # (g) A score BELOW Logchecker's clean band (100) but at or above the floor (85)

@@ -1675,6 +1675,13 @@ def run_audit_library(config):
     log_scores = {}
     log_notes = []
     log_unscorable = {}   # album dir -> disc numbers whose .log could not be scored
+    # album dir -> {disc: program} for discs whose log NAMES a program no
+    # installed scorer reads (dBpoweramp, CUERipper). A different finding from
+    # "the .log could not be graded": the app reads those logs itself (per-track
+    # CRCs against the decoded audio, plus the AccurateRip verdict they state),
+    # so they are neither failed here nor demanded a LOG_GRADE that no scorer
+    # can produce.
+    log_program_unscored = {}
     from .discs import grade_album_logs, logchecker_available
     from concurrent.futures import as_completed
     # A missing scorer and an unscorable log are different things: with
@@ -1686,12 +1693,12 @@ def run_audit_library(config):
     def _grade_one(album_dir):
         if not os.path.isdir(album_dir):
             return album_dir, {}, [], []
-        scores, notes, unscorable = grade_album_logs(
+        scores, notes, unscorable, unscored_programs = grade_album_logs(
             cli, album_dir, force=force,
             write_tags=config.get("write_log_grade", True),
             config=config,
             log_fn=(lambda m: log(f"  {m}")) if verbose else None)
-        return album_dir, scores, notes, unscorable
+        return album_dir, scores, notes, unscorable, unscored_programs
 
     if cd_candidate_dirs:
         workers = worker_count(config, maximum=8, items=len(cd_candidate_dirs))
@@ -1702,12 +1709,15 @@ def run_audit_library(config):
         with ThreadPoolExecutor(max_workers=workers) as ex:
             futures = [ex.submit(_grade_one, d) for d in cd_candidate_dirs]
             for fut in as_completed(futures):
-                album_dir, scores, notes, unscorable = fut.result()
+                (album_dir, scores, notes, unscorable,
+                 unscored_programs) = fut.result()
                 _pbar_update(log_pbar, log_counts, kind="ok" if scores else "skip")
                 if scores:
                     log_scores[album_dir] = scores
                 if unscorable:
                     log_unscorable[album_dir] = unscorable
+                if unscored_programs:
+                    log_program_unscored[album_dir] = unscored_programs
                 log_notes.extend(f"{os.path.basename(album_dir)}: {n}" for n in notes)
         if log_pbar:
             log_pbar.close()
@@ -2232,9 +2242,17 @@ def run_audit_library(config):
         for d in cd_candidate_dirs:
             scores = log_scores.get(d) or {}
             unscorable = set(log_unscorable.get(d) or ())
+            no_scorer = log_program_unscored.get(d) or {}
             for disc_n, trs in sorted(_discs_of(d).items()):
                 sc = None if disc_n in unscorable else scores.get(disc_n)
-                if sc is None and disc_n not in unscorable:
+                if (sc is None and disc_n not in unscorable
+                        and disc_n not in no_scorer):
+                    # A disc whose log NAMES a program no installed scorer
+                    # reads is not asked for a stored LOG_GRADE either: an
+                    # earlier run of this app wrote the 0 Logchecker prints
+                    # for an unidentified program onto those tracks, and
+                    # reading it back would fail the disc on a value that was
+                    # never a score (see mlo.discs.log_score_state).
                     sc = _stored_log_grade(trs)
                 if not isinstance(sc, int):
                     log_unscored.setdefault(d, []).append((disc_n, trs, sc))
@@ -2261,10 +2279,28 @@ def run_audit_library(config):
                 for fp in trs:
                     if fp in files:
                         set_leg(fp, "log-score", "ok")
-        # Nothing here scored this disc: say which of the two reasons it is, so
+        # Nothing here scored this disc: say which of the reasons it is, so
         # the missing leg the verdict phase reports is actionable.
         for d, lst in log_unscored.items():
             for disc_n, trs, sc in lst:
+                program = (log_program_unscored.get(d) or {}).get(disc_n, "")
+                if sc is None and program:
+                    # NO leg at all, not an "unknown" one: the score leg does
+                    # not apply to a disc whose log names a program no scorer
+                    # reads (dBpoweramp, CUERipper — see mlo.discs.LOG_PROGRAMS),
+                    # exactly as a switched-off check leaves no leg. Its own
+                    # evidence — the .log's per-track CRCs against the decoded
+                    # audio, and the AccurateRip verdict the log states — is
+                    # then the whole CD verdict, which is what the grader's
+                    # note for such a disc promises. Setting it "unknown" left
+                    # every such disc without a verdict for a score no install
+                    # can produce; setting it "fail" blamed the rip for the
+                    # program that wrote its log.
+                    log(c(f"  {os.path.basename(d)}: disc {disc_n} — "
+                          f"{program} log, and no installed scorer reads that "
+                          f"program: the CD verdict rests on the log's own "
+                          f"CRCs and its AccurateRip verdict", Color.YELLOW))
+                    continue
                 if sc is None and scorer_present:
                     why = ("no rip-log score: the tracks carry no LOG_GRADE and "
                            "Logchecker did not produce one for this .log")

@@ -3470,7 +3470,37 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
 
         # CD releases must carry the rip-log score on every track (skipped if
         # LOG_GRADE disabled for this filetype). Digital Media has no log.
+        #
+        # A log whose PROGRAM has no scorer cannot carry a LOG_GRADE anywhere:
+        # Logchecker answers a dBpoweramp or CUERipper log with "Ripper:
+        # unknown" and a Score of 0 that is not a grade (see
+        # mlo.discs.log_score_state), so the tag never exists to be written —
+        # and demanding it failed an album no scorer on any machine can judge
+        # (it also read a stale LOG_GRADE=0, written by an older run of this
+        # app off that same 0, as "below the threshold"). Such a disc is judged
+        # on the evidence this app reads ITSELF — `grade_check_crc`'s per-track
+        # CRCs against the decoded audio, plus the AccurateRip verdict the log
+        # states — and the check says so in a note rather than counting a
+        # failure. `grade_check_cd_log` (the .log must be there) is untouched.
+        no_scorer_logs = False
+        _unscored = {}
         if _is_cd(media_summary) and cfg.get("grade_check_log_grade", True):
+            # `program_without_scorer` is total (it answers "" for anything it
+            # cannot read), so this cannot fail a check by accident.
+            from .discs import program_without_scorer as _no_scorer_log
+            _log_files = [f for f in all_files if f.lower().endswith(".log")]
+            _unscored = {f: _no_scorer_log(os.path.join(album_dir, f))
+                         for f in _log_files}
+            no_scorer_logs = bool(_log_files) and all(_unscored.values())
+            if no_scorer_logs:
+                programs = " / ".join(sorted(set(_unscored.values())))
+                notes.append(
+                    f"no Logchecker score is possible for this disc: its "
+                    f"{programs} log names a program the rip-log scorer has no "
+                    f"reader for, so the disc is judged on that log's own "
+                    f"per-track CRCs and the AccurateRip verdict it states")
+        if (_is_cd(media_summary) and cfg.get("grade_check_log_grade", True)
+                and not no_scorer_logs):
             for tr in tracks:
                 if tr.get("unreadable"):
                     continue

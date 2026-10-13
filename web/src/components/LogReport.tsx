@@ -11,7 +11,10 @@
  *  Everything shown is served by `GET /api/log/report` — the phar's real output
  *  parsed on the server, never re-derived here — and `available: false` is said
  *  out loud rather than drawn as a score of zero (that is "no scorer
- *  installed", a different fact from "this log is bad"). */
+ *  installed", a different fact from "this log is bad"). The same rule covers a
+ *  program the scorer cannot read (`score_state: "unreadable"`): the phar's
+ *  `Score : 0` beside "Ripper : unknown" is not a grade, so the panel names the
+ *  program and says what the disc IS judged on instead. */
 
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
@@ -51,6 +54,9 @@ export default function LogReport({ albumPath, disc, onClose }: {
 
   const checksum = data?.checksum?.state ?? "";
   const score = data?.report?.score;
+  /** The scorer ran but could not NAME this log's program (dBpoweramp,
+   *  CUERipper, …): its `Score : 0` is not a grade, and the chip says so. */
+  const noReader = data?.score_state === "unreadable";
   const title = data?.name || "rip log";
 
   return (
@@ -61,12 +67,19 @@ export default function LogReport({ albumPath, disc, onClose }: {
         </span>
         {data && (
           <>
-            <span className={`chip border ${score != null && score >= 100
-              ? "bg-emerald-900/40 text-emerald-300 border-emerald-800"
-              : "bg-amber-900/40 text-amber-300 border-amber-800"}`}
-              title="Logchecker's own score for this log">
-              score {score == null ? "—" : score}/100
-            </span>
+            {noReader ? (
+              <span className="chip bg-raise border border-border text-zinc-300"
+                title="The rip-log scorer has no reader for this program, so there is no score for it — not a score of zero">
+                no Logchecker score for {data.program || "this log"}
+              </span>
+            ) : (
+              <span className={`chip border ${score != null && score >= 100
+                ? "bg-emerald-900/40 text-emerald-300 border-emerald-800"
+                : "bg-amber-900/40 text-amber-300 border-amber-800"}`}
+                title="Logchecker's own score for this log">
+                score {score == null ? "—" : score}/100
+              </span>
+            )}
             <span className={`chip border ${CHECKSUM_TONE[checksum] ?? "bg-raise border-border text-zinc-400"}`}
               title={data.checksum?.detail ?? undefined}>
               {CHECKSUM_WORDS[checksum] ?? (checksum || "checksum unknown")}
@@ -129,6 +142,14 @@ export default function LogReport({ albumPath, disc, onClose }: {
 
       {data?.available && (
         <>
+          {noReader && (
+            <div className="text-xs text-zinc-300 bg-raise/60 border border-border rounded px-2 py-1.5">
+              {data.program || "This log's program"} is not one the bundled
+              Logchecker reads, so this log has no score — the auto-import and
+              the audit judge this disc on the log's own per-track CRCs against
+              the audio, and on the AccurateRip verdict the log states.
+            </div>
+          )}
           {data.report.details.length > 0 && (
             <div>
               <div className="text-[10px] uppercase tracking-widest text-zinc-500 mb-1">

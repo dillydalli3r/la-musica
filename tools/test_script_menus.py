@@ -776,11 +776,18 @@ def check_wizard_import_prompts(check):
     check cannot reach (a native folder split into two albums)."""
     src = read("web/src/pages/ImportWizard.tsx")
     begin = re.search(r"const beginAutoImport = async \((.*?)\n  \};", src, re.S)
-    check("the auto-import builds a row for EVERY staged album",
-          bool(begin) and "rows.push({" in begin.group(1)
-          and "current: pin," in begin.group(1)
-          and "unknown.push" not in begin.group(1),
-          begin.group(1)[:200] if begin else "no beginAutoImport")
+    # The row builder lives in its own function since R424: EVERY press that
+    # queues a batch (Auto-import, the plain multi-album Import) raises the same
+    # dialog, so the row-per-album rule is pinned where it now is — one row for
+    # each staged album, carrying the release its files name as `current` (the
+    # value the dialog compares an edit against), with no separate "unknown"
+    # list for a row to hide in.
+    rows_fn = re.search(r"const identifyRows = async \(.*?\n  \};", src, re.S)
+    check("the identify dialog builds a row for EVERY staged album",
+          bool(rows_fn) and "rows.push({" in rows_fn.group(0)
+          and "current: pin," in rows_fn.group(0)
+          and "unknown.push" not in rows_fn.group(0),
+          rows_fn.group(0)[:200] if rows_fn else "no identifyRows")
     check("…and always raises the dialog (no early import without it)",
           bool(begin) and "setIdentify({" in begin.group(1)
           and "startAutoImport(staged, {})" not in begin.group(1))

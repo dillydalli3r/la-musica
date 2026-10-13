@@ -3230,13 +3230,18 @@ def _log_format(path):
     prints ("Logchecker could not score it (XLD)"). A log whose header no
     dialect claims reads "unrecognised log format" — the honest answer, and
     the one that says the toolchain, not the rip, is what could not read it."""
-    from mlo.discs import log_dialect, read_log_text
+    from mlo.discs import log_dialect, log_program, read_log_text
     try:
         d = log_dialect(read_log_text(path))
     except Exception:
         d = ""
-    return {"eac": "EAC", "xld": "XLD", "whipper": "whipper"}.get(d) \
-        or "unrecognised log format"
+    # The program a log names, from the one table that decides what this app
+    # can read of it (mlo.discs.LOG_PROGRAMS): EAC, XLD, whipper, dBpoweramp and
+    # CUERipper are all read — the first three by Logchecker, and every one of
+    # them by this app's own per-track CRC and AccurateRip readers — while a
+    # program no table entry claims is the "unrecognised log format" a message
+    # names.
+    return log_program(d)[0] or "unrecognised log format"
 
 
 def _log_fail_reason(name, score, state, min_score, why="",
@@ -3717,6 +3722,20 @@ def _verify_album(album_dir, cfg, is_cd):
         for p, v in verdicts.items():
             if v != "REAL":
                 problems.append(f"{os.path.basename(p)}: CRC mismatch vs .log (FAKE)")
+        # A log whose CRCs are not there at all is worth NAMING: a program this
+        # app has no reader for (EZ CD Audio Converter, fre:ac, cyanrip …) is a
+        # different finding from a log whose CRCs simply do not cover a track,
+        # and it is the one a user can act on (re-rip, or pick another release).
+        if any("no per-track CRCs" in r for r in unverified.values()):
+            try:
+                logs_here = sorted(f for f in os.listdir(album_dir)
+                                   if f.lower().endswith(".log"))
+            except OSError:
+                logs_here = []
+            if logs_here:
+                problems.append(
+                    f"the rip log's format is {_log_format(os.path.join(album_dir, logs_here[0]))} "
+                    f"and this app has no per-track CRC reader for it")
         for p, reason in unverified.items():
             problems.append(f"{os.path.basename(p)}: not verifiable ({reason})")
         return not problems, problems
