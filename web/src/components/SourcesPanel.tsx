@@ -63,6 +63,32 @@ const KEY_INFO: Record<string, { label: string; hint: string; url?: string; link
     url: "https://www.last.fm/api/account/create",
     link: "last.fm API account",
   },
+  // The SECRET is the other half of that same page: the key names the app and
+  // the secret signs every authenticated call (the Connect flow, and every
+  // scrobble after it), which is why an install can discover charts with the
+  // key alone and still be unable to scrobble.
+  lastfm_api_secret: {
+    label: "Last.fm shared secret",
+    hint: "Shown beside the API key on the same page — copy it too, or scrobbling cannot be authorized.",
+    url: "https://www.last.fm/api/accounts",
+    link: "last.fm API accounts",
+    secret: true,
+  },
+  // MusicBrainz is the app's own OAuth2 registration: a PUBLIC (installed)
+  // client with the OOB redirect, used only to submit ratings back.
+  musicbrainz_client_id: {
+    label: "MusicBrainz OAuth2 client ID",
+    hint: "Register an application (installed client, redirect URI urn:ietf:wg:oauth:2.0:oob) and paste its Client ID.",
+    url: "https://musicbrainz.org/account/applications",
+    link: "MusicBrainz applications",
+  },
+  musicbrainz_client_secret: {
+    label: "MusicBrainz OAuth2 client secret",
+    hint: "Same application page → the secret it shows.",
+    url: "https://musicbrainz.org/account/applications",
+    link: "MusicBrainz applications",
+    secret: true,
+  },
   // The AcoustID pair belongs HERE, in the wizard's Keys step: the application
   // key is what makes fingerprint matching work at all, and the user key is
   // what publishing a match needs — telling someone to go to Settings → Import
@@ -99,6 +125,10 @@ const KEY_HOME: Record<string, string> = {
   ai_model: "Settings → AI",
   ai_api_key: "Settings → AI",
   auth_password_hash: "first-run setup, or Sign-in & security",
+  // The credentials the two Connect flows produce themselves: a row that
+  // needs one is not a dead end, it names the button that fills it.
+  lastfm_session_key: "the Connect button (Settings → Scrobbling & submissions, or this panel)",
+  musicbrainz_refresh_token: "the Connect button (the MusicBrainz page, or Settings → Scrobbling & submissions)",
 };
 
 /** What to say about a `needs` entry that is an installed PROGRAM rather than

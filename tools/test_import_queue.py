@@ -12,9 +12,11 @@ against a temp download tree:
     transfers slskd still reports as running, skips a rip-evidence-only
     folder, and reports the ONE parent of a disc-folder pair rather than its
     discs;
-  * the runner processes the worklist in order, never overlaps two albums,
-    records per-album failures without stopping the run, calls its on_done
-    hook with the results, and refuses a second concurrent run.
+  * the runner processes every album on the worklist, up to the app's own
+    `import_bulk_concurrency` at once (two albums' imports really overlap —
+    proven with a barrier, not inferred from timings), records per-album
+    failures without stopping the run, calls its on_done hook with the
+    results, and refuses a second concurrent run.
 
 No subprocess, no network, no real audio: the importer is injected, exactly
 as server.main injects it (that inversion is what makes the runner testable).
@@ -40,6 +42,7 @@ def check(name, ok, detail=""):
 
 
 from server import import_queue, soulseek  # noqa: E402
+from mlo import config as mlo_config  # noqa: E402
 
 # ---- a fake music folder + download dir -----------------------------------
 music = tempfile.mkdtemp(prefix="mlo-import-")
@@ -82,21 +85,31 @@ check("a folder still downloading is not ready",
       "Still Downloading" not in sorted(os.path.basename(p) for p in soulseek.ready_albums(cfg)))
 soulseek._pending_album_folders = lambda cfg=None: set()
 
-print("== the runner ==")
+print("== the runner: up to the app's own budget, at once ==")
+# The run imports `import_bulk_concurrency` albums at once — the SAME number
+# (and the same pool) the wizard's bulk import runs at. Pinned here so the case
+# cannot depend on whatever config.json a checkout happens to hold; the queue
+# reads it through the real `mlo.config.load_config`, stubbed exactly as the
+# app's own config would answer it.
+mlo_config.load_config = lambda: {"import_bulk_concurrency": 3}
+check("the budget comes from import_bulk_concurrency",
+      import_queue._concurrency() == 3, str(import_queue._concurrency()))
+
 seen = []
-order = []
+inflight = {"now": 0, "peak": 0}
 lock = threading.Lock()
 
 
 def importer(path):
-    """Stands in for server.main._import_one_album: records ordering and
-    proves two albums are never in flight at once."""
+    """Stands in for server.main._import_one_album: records every album it is
+    handed and how many were in flight at once — never more than the budget."""
     with lock:
         seen.append(path)
-        order.append(len(seen))
-    time.sleep(0.15)  # long enough for a second thread to overlap if one existed
+        inflight["now"] += 1
+        inflight["peak"] = max(inflight["peak"], inflight["now"])
+    time.sleep(0.15)  # long enough for the other alarms to be in flight too
     with lock:
-        order.remove(len(seen))
+        inflight["now"] -= 1
     if os.path.basename(path) == "Album Two":
         return {"path": path, "album_root": path, "errors": ["stub failure"]}
     return {"path": path, "album_root": path + "-imported", "errors": []}
@@ -118,7 +131,8 @@ for _ in range(200):
 st = import_queue.status()
 check("the run finished", st["state"] in ("done", "error"), st["state"])
 check("every ready album was visited", len(seen) == len(ready), f"{len(seen)} of {len(ready)}")
-check("only one album was in flight at any moment", order in ([], [1], [2]), str(order))
+check("albums import at once, up to the app's own budget",
+      2 <= inflight["peak"] <= 3, str(inflight))
 check("total/done agree with the worklist", st["total"] == len(ready) and st["done"] == len(ready))
 check("a failing album is recorded, not fatal",
       any(not r["ok"] and "stub failure" in r["error"] for r in st["results"]),
@@ -128,6 +142,56 @@ check("a failing album does not stop the ones after it",
 check("the on_done hook saw the results", done_payload.get("n") == len(ready), str(done_payload))
 check("the successes carry the album root the importer reported",
       any(r["album_root"].endswith("-imported") for r in st["results"]))
+
+print("== two albums' imports really OVERLAP ==")
+# The proof, not an inference: each importer blocks on a barrier until BOTH
+# have entered. A runner that still took one album at a time could never let
+# the second in while the first waits, so it would time the barrier out — and
+# both `timed_out` and the per-album outcomes below say so. A failure in one
+# album must not touch the other's result.
+both = threading.Barrier(2, timeout=10)
+entered = []
+timed_out = []
+
+
+def together(path):
+    with lock:
+        entered.append(path)
+    try:
+        both.wait()                      # neither passes until both are inside
+    except threading.BrokenBarrierError:
+        timed_out.append(path)           # only reachable if they never met
+        return {"path": path, "album_root": path, "errors": ["no overlap"]}
+    if os.path.basename(path) == "Album Two":
+        return {"path": path, "album_root": path, "errors": ["stub failure"]}
+    return {"path": path, "album_root": path + "-imported", "errors": []}
+
+
+import_queue.set_importer(together)
+overlap_done = {}
+res = import_queue.start(paths=[one, two],
+                         on_done=lambda results: overlap_done.update(results=results))
+check("the two-album run starts", res.get("ok") is True, str(res))
+for _ in range(200):
+    if import_queue.status()["state"] != "running":
+        break
+    time.sleep(0.05)
+overlap = import_queue.status()
+check("both albums were inside the importer at the same time",
+      sorted(os.path.basename(p) for p in entered) == ["Album One", "Album Two"]
+      and timed_out == [], f"{entered} / timed out: {timed_out}")
+by_name = {os.path.basename(r["path"]): r for r in overlap["results"]}
+check("...so a failure in ONE album leaves the other's result intact",
+      by_name.get("Album One", {}).get("ok") is True
+      and by_name.get("Album One", {}).get("album_root", "").endswith("-imported")
+      and by_name.get("Album Two", {}).get("ok") is False
+      and "stub failure" in by_name.get("Album Two", {}).get("error", ""),
+      str(by_name))
+check("...and the run still reports every album's own outcome",
+      overlap["done"] == 2 and len(overlap["results"]) == 2
+      and overlap["state"] == "error", str(overlap))
+check("...and the on_done hook saw both",
+      len(overlap_done.get("results") or []) == 2, str(overlap_done))
 
 print("== one run at a time ==")
 gate = threading.Event()

@@ -91,7 +91,7 @@ export interface SetupStep {
   title: string;
   blurb: string;
   /** The panel this step draws above its groups. */
-  panel?: "folder" | "dependencies" | "sources" | "slskd" | "password" | "done";
+  panel?: "folder" | "dependencies" | "sources" | "slskd" | "password" | "connections" | "done";
   /** CONFIG_GROUPS titles this step renders, in order. */
   groups?: string[];
   /** Keys of THIS step's groups that are asked on the step itself, above the
@@ -291,7 +291,7 @@ export const CONFIG_GROUPS: CfgGroup[] = [
                 + "and clearing a rating removes the tag. Off, ratings stay in the app only. Keeping it on is what "
                 + "makes an imported Picard-rated library and this app agree." },
         { k: "normalize_media_source", label: "Normalize MEDIA / SOURCE", type: "bool" },
-        { k: "strip_source_on_cd", label: "Strip SOURCE on CD rips", type: "bool" },
+        { k: "strip_source_on_cd", label: "Strip SOURCE on CD rips", type: "bool", help: "OFF by default: an import never deletes a tag it did not write, so a SOURCE a rip arrived with — the user's own, another tagger's, a store's — travels untouched. On, script 1 removes SOURCE from a CD (and only a CD) and the grade asks for that removal the same way, naming this switch." },
         { k: "fill_empty_source", label: "Fill empty SOURCE on digital", type: "bool" },
         { k: "digital_media_source_value", label: "Digital SOURCE value", type: "text" },
         { k: "audio_tag_writes", label: "Tag writes per file type", type: "matrix", rows: [["AUDIT", "AUDIT"], ["LOG_GRADE", "LOG_GRADE"], ["REPLAYGAIN", "ReplayGain"], ["DYNAMIC_RANGE", "DR"], ["MEDIA_SOURCE", "MEDIA / SOURCE"], ["INSTRUMENTAL", "INSTRUMENTAL"], ["ADVISORY", "ADVISORY"], ["LYRICS", "Lyrics"], ["GENRE", "Genre"], ["BPM", "BPM"], ["INITIALKEY", "Key"], ["MOOD", "MOOD"], ["ENERGY", "ENERGY"]], cols: [["flac", "FLAC"], ["mp3", "MP3"], ["mp4", "M4A"], ["ogg", "OGG"], ["opus", "Opus"], ["aac", "AAC"]], help: "Unchecking a family for a file type means that tag is never written into those files, whatever the switches above say." },
@@ -503,7 +503,7 @@ export const CONFIG_GROUPS: CfgGroup[] = [
     },
     {
       title: "Home",
-      blurb: "The Home section in the sidebar — its shelves are built from the library itself (recently added, best graded, top artists, favorites, needs attention) with nothing fetched online.",
+      blurb: "The Home section in the sidebar — its shelves are built from the library itself (recently added, best graded, top artists, favorites, needs attention), and below them an Online section pulls from the music services: Trending now (Apple Music's most-played songs, Deezer's chart as its stand-in), New & notable albums (Deezer's current album chart) and For you (recommendations seeded by this library). The Online section is served only when \"Use online discovery providers\" is on in the Discovery tab (discovery_enabled) — off, Home shows the library shelves alone.",
       fields: [
         { k: "home_recent_count", label: "Recently-added albums shown", type: "number", min: 4, max: 60 },
       ],
@@ -522,6 +522,26 @@ export const CONFIG_GROUPS: CfgGroup[] = [
         { k: "discogs_token", label: "Discogs token (optional)", type: "password", help: "A personal access token from discogs.com/settings/developers. Used to rate a release while a genre import runs; without it Discogs is skipped." },
         { k: "lastfm_api_key", label: "Last.fm API key (optional)", type: "password", help: "A free API key from last.fm/api. Only used by the discovery providers; without it Last.fm is skipped." },
         { k: "discovery_enabled", label: "Use online discovery providers", type: "bool", help: "Off, the Home shelves and every artist/album lookup answer from the library and MusicBrainz alone: no Deezer, ListenBrainz, Last.fm or Wikipedia request leaves the server." },
+      ],
+    },
+    {
+      title: "Scrobbling & submissions",
+      blurb: "What the app writes BACK to the services it reads. Last.fm scrobbling sends a now-playing notice the moment a track starts and one scrobble under Last.fm's own rule (played 50 %, or 4 minutes, of a track at least 30 s long) — a scrobble that cannot be sent is queued and retried, never dropped. It needs the app's OWN Last.fm application: the API key from the Discovery tab AND the shared secret issued beside it, then one authorization (the Connect button on this tab). MusicBrainz submissions are rating writes only: the app registers an OAuth2 application once, the owner pastes its client id and secret here and authorizes once, and the refresh token that comes back is renewed automatically. Nothing is ever sent with a blank credential, and every failure is reported in the service's own words on Settings → Sources.",
+      fields: [
+        { k: "lastfm_scrobble_enabled", label: "Scrobble plays to Last.fm", type: "bool", help: "Off, nothing is announced or scrobbled and nothing is queued — the session key stays saved, so turning it back on resumes scrobbling without re-authorizing." },
+        { k: "lastfm_api_secret", label: "Last.fm shared secret", type: "password", help: "Issued beside the API key on the same page (last.fm/api/account/create). The API key alone cannot sign a scrobble — this is what authorizes the Connect flow and every scrobble after it." },
+        { k: "musicbrainz_client_id", label: "MusicBrainz OAuth2 client ID", type: "text", help: "Register an application at musicbrainz.org/account/applications (type: installed/public client; redirect URI: urn:ietf:wg:oauth:2.0:oob) and paste its Client ID. The `rating` scope is what lets the app submit your stars; reads need no login at all." },
+        { k: "musicbrainz_client_secret", label: "MusicBrainz OAuth2 client secret", type: "password", help: "The secret the same application page shows. Paste both, then press Connect on the MusicBrainz page (or Settings → Sources) and authorize once." },
+        // The three the Connect flow WRITES. They are rows (not hidden keys)
+        // because a token a person can also paste is a credential this app
+        // offers a control for — the test_setup_coverage rule — and because a
+        // hand-made refresh token is a legitimate way to authorize without the
+        // browser round trip; the access token and its expiry are renewed
+        // automatically the moment they are due.
+        { k: "musicbrainz_refresh_token", label: "MusicBrainz refresh token", type: "password", help: "Filled by Connect. A long-lived token — only a hand-made one needs pasting here." },
+        { k: "musicbrainz_access_token", label: "MusicBrainz access token (renewed automatically)", type: "password", help: "Short-lived, renewed from the refresh token whenever it is due (and on every submission attempt). Nothing to fill in by hand." },
+        { k: "musicbrainz_token_expires_at", label: "MusicBrainz access-token expiry (epoch seconds, 0 = unknown)", type: "number", min: 0, help: "When the access token stops being valid. The app renews it on demand, so a stale value here is corrected by the next call, not a failure." },
+        { k: "musicbrainz_submit_enabled", label: "Allow MusicBrainz rating submissions", type: "bool", help: "Off, the app never writes a rating back — the wizard's ratings step and the MusicBrainz page's Submit button both stop sending (they show this switch as the reason). The step still IMPORTS ratings; only the write-back is gated." },
       ],
     },
     {
@@ -565,7 +585,7 @@ export const CONFIG_GROUPS: CfgGroup[] = [
         { k: "auto_acquisition_enabled", label: "Automatic acquisition (searching and downloading on their own)", type: "bool", help: "Off, nothing the app starts by itself searches or downloads. What you asked for is still recorded, and the wizard and every import path still work, because those are you acting, not the app." },
         { k: "manual_import_enabled", label: "Manual importing (the wizard and POST /api/import/*)", type: "bool", help: "Off, the import wizard and every importing /api/import/* route refuse with a sentence naming this setting instead of importing — the wizard shows that sentence where its steps would be. The automatic pipeline still imports what it downloads; only the paths you drive by hand are turned off." },
         { k: "import_autonomy", label: "Import autonomy", type: "select", options: [["automatic", "Automatic — decide everything the sources can answer (default)"], ["review", "Review — stop at each step that needs a decision"]], help: "Automatic runs the whole chain and only comes back to you for what nothing could supply: the album is imported either way and whatever it still lacks is reported as ONE prompt — a notification plus an entry the Import page lists — naming the families and linking to the album at the step where each decision is made. Review is the wizard's own behaviour applied to an import: it stops before the first step that needs a decision (a family the album is still missing) and hands the album over instead of deciding past it." },
-        { k: "import_review_families", label: "Decide by hand, even when automatic", type: "multi", options: [["links", "Links"], ["cover", "Cover art"], ["genres", "Genres"], ["lyrics", "Lyrics"], ["advisory", "Advisory"]], help: "Families an import must never decide for you, whatever the mode above. A cover kept here has its candidates staged instead of writing the first hit; the links and advisory fetches are skipped; lyrics drop out of the chain. The rest of the import stays automatic, and the album's prompt names that family as waiting for you rather than as unsourced." },
+        { k: "import_review_families", label: "Decide by hand, even when automatic", type: "multi", options: [["links", "Links"], ["cover", "Cover art"], ["genres", "Genres"], ["ratings", "Ratings"], ["lyrics", "Lyrics"], ["advisory", "Advisory"]], help: "Families an import must never decide for you, whatever the mode above. A cover kept here has its candidates staged instead of writing the first hit; the links and advisory fetches are skipped; lyrics drop out of the chain and so does the ratings fetch (script 24). The rest of the import stays automatic, and the album's prompt names that family as waiting for you rather than as unsourced." },
         { k: "import_keep_synced_lyrics", label: "Keep a synced lyric an import arrives with", type: "bool", help: "An import replaces the families it decides for itself with what it found — the album's lyrics, genres, advisories and cover art win over whatever the download came with (a family you kept above, or one whose own switch is off, is never touched). This is the lyric family's one exception: ON, a track whose lyric already carries timestamps (a synced one) keeps it and the fetch skips that track; OFF, the shipped default, the peer's lyric is replaced like everything else. A PLAIN (untimed) lyric is always replaced — that is the form the providers answer with." },
         { k: "import_auto_scripts", label: "Run the script chain after import", type: "bool" },
         { k: "import_scripts", label: "Import script ids (e.g. 1, 3, 5, 7 — blank = built-in chain)", type: "text", pattern: "^(\\s*\\d+\\s*[,;]?)*$", patternHelp: "comma-separated script ids, e.g. 1, 3, 5, 7" },
@@ -821,6 +841,11 @@ export const CONFIG_GROUPS: CfgGroup[] = [
 export const OPEN_GROUPS: Record<string, true> = {
   Dependencies: true,
   "Login gate": true,
+  // The Connections step's own group: the Last.fm shared secret and the
+  // MusicBrainz client id/secret are what that step exists to collect, so
+  // folding them behind "the defaults are fine" would hide the very fields it
+  // asks the reader to paste into.
+  "Scrobbling & submissions": true,
 };
 
 /** The wizard, in order: a first run is asked only what it cannot answer for
@@ -866,6 +891,17 @@ export const SETUP_STEPS: SetupStep[] = [
     panel: "sources",
   },
   {
+    label: "Connections",
+    title: "Log in to Last.fm & MusicBrainz (optional)",
+    blurb:
+      "Both logins below are OPTIONAL — nothing in your library needs them. Last.fm only reports what you play (a now-playing notice and one scrobble per play); MusicBrainz only writes your own star ratings back. Neither is required to browse, tag, grade or play anything, and both can be set up later in Settings. " +
+      "Last.fm: create an API account at last.fm/api/account/create — that one page shows the app's API key AND its shared secret; paste the key on the Sources step and the shared secret here, then press Connect and authorize in the browser. " +
+      "MusicBrainz: register an application at musicbrainz.org/account/applications as an installed (public) client with redirect URI urn:ietf:wg:oauth:2.0:oob; paste its Client ID and secret here, press Connect, authorize, then paste back the code the page shows. " +
+      "The numbered how-to above each panel repeats this with the same links. The credential fields below are the Scrobbling & submissions settings; skipping this step keeps every one of them at its default.",
+    panel: "connections",
+    groups: ["Scrobbling & submissions"],
+  },
+  {
     label: "Soulseek",
     title: "Soulseek login & sharing",
     blurb:
@@ -892,6 +928,18 @@ export const WIZARD_MANAGED_KEYS: string[] = ["music_folder", "first_run_done"];
  *  of the groups above, which the Settings page renders whether or not a setup
  *  step does. */
 export const HIDDEN_KEYS: string[] = [
+  // The Last.fm session and the MusicBrainz identity are WRITTEN by the two
+  // Connect flows (server/api_lastfm.py, server/api_mb_auth.py) and read by
+  // the clients that sign and submit. `lastfm_session_key`/`lastfm_username`
+  // and `musicbrainz_username` are hidden: they are what the flow REPORTS and
+  // stores, and the panels on Settings → Sources and the MusicBrainz page are
+  // where they are read (who is connected) and cleared (Disconnect). The
+  // MusicBrainz token PAIR is deliberately NOT hidden — it is a credential a
+  // person may also paste by hand, so it keeps its rows on the Scrobbling &
+  // submissions tab.
+  "lastfm_session_key",
+  "lastfm_username",
+  "musicbrainz_username",
   // The password hash is refused by POST /api/config (it must be: a session
   // could otherwise replace the credential with a hash of its choosing) and is
   // set through /api/auth/setup, which is where the wizard's own password

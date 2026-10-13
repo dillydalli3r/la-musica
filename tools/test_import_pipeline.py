@@ -639,6 +639,91 @@ assert "abc" in imports.release_group_mismatch({"release_group_id": "abc"}, "xyz
 assert imports.release_group_mismatch({}, "xyz") == ""
 
 # --------------------------------------------------------------------------- #
+# AcoustID, the wizard's DETECT path: the tracks are FINGERPRINTED on
+# `worker_count` lanes (fpcalc decodes up to 120 s of every file — the most
+# expensive thing this module does), the lookups stay in file order, every
+# reported row/count is the serial pass's own, and a SECOND detect over an
+# unchanged folder runs no fpcalc at all (the stat-keyed `_FP_MEMO`).
+# --------------------------------------------------------------------------- #
+import json as _json
+import threading as _threading
+import time as _time
+
+_fp_album = staging_album("Footprint Album", tracks=4)
+_fp_files = sorted(os.listdir(_fp_album))
+FP_ALBUM_CFG = {"acoustid_enabled": True, "acoustid_api_key": "k"}
+
+
+class _Tool:
+    def __init__(self, rc=0, out="", err=""):
+        self.returncode, self.stdout, self.stderr = rc, out, err
+
+
+_fp_calls = []
+_fp_probe = {"inside": 0, "peak": 0}
+_fp_lock = _threading.Lock()
+_real_run_tool, _real_request = _acoustid.run_tool, _acoustid._request
+
+
+def _stub_fpcalc(argv, capture_output=True, text=True, timeout=None):
+    """fpcalc, SLOWLY: `_fp_probe["peak"]` counts how many files are being
+    decoded at once, which a one-lane pass can never push above 1."""
+    with _fp_lock:
+        _fp_probe["inside"] += 1
+        _fp_probe["peak"] = max(_fp_probe["peak"], _fp_probe["inside"])
+    try:
+        _time.sleep(0.05)
+        name = os.path.basename(argv[-1])
+        _fp_calls.append(name)
+        # A fingerprint that is the FILE's own, so two runs over the same
+        # folder compare equal row for row.
+        return _Tool(0, _json.dumps({"duration": 30.0, "fingerprint": "AQ" + name}))
+    finally:
+        with _fp_lock:
+            _fp_probe["inside"] -= 1
+
+
+def _stub_request(cfg, fp):
+    """The service answers "nothing" for every track: the album's verdict (and
+    its own sentence) is what the two runs are compared on."""
+    return {"ok": True, "results": []}
+
+
+def _detect(cfg):
+    _fp_probe.update(inside=0, peak=0)
+    return imports.acoustid_match(
+        [_fp_album], dict(FP_ALBUM_CFG, **cfg))["albums"][0]
+
+
+_acoustid.run_tool = _stub_fpcalc
+_acoustid._request = _stub_request
+_acoustid._FP_MEMO.clear()
+try:
+    _fp_calls.clear()
+    laned = _detect({"worker_limit": 4})
+    assert _fp_probe["peak"] > 1, f"the fingerprints must overlap: {_fp_probe}"
+    assert _fp_probe["peak"] <= 4, f"never more lanes than worker_count: {_fp_probe}"
+    assert len(_fp_calls) == len(_fp_files), _fp_calls
+
+    # the same folder, one lane: the serial pass this replaced
+    _acoustid._FP_MEMO.clear()
+    _fp_calls.clear()
+    serial = _detect({"worker_limit": 1})
+    assert _fp_probe["peak"] == 1, f"one lane must never overlap: {_fp_probe}"
+    for key in sorted(set(laned) | set(serial)):
+        assert laned.get(key) == serial.get(key), \
+            f"{key}: {laned.get(key)!r} != {serial.get(key)!r}"
+
+    # …and a SECOND detect over the unchanged folder: no fpcalc at all
+    _fp_calls.clear()
+    again = _detect({"worker_limit": 4})
+    assert _fp_calls == [], f"the memo must answer the second detect: {_fp_calls}"
+    assert again == laned, f"{again} != {laned}"
+finally:
+    _acoustid.run_tool, _acoustid._request = _real_run_tool, _real_request
+    _acoustid._FP_MEMO.clear()
+
+# --------------------------------------------------------------------------- #
 # Bulk queue: staging -> library, idempotent, pollable
 # --------------------------------------------------------------------------- #
 a1, a2 = staging_album("Album One"), staging_album("Album Two")
@@ -2883,3 +2968,96 @@ finally:
     shutil.rmtree(RT_MF, ignore_errors=True)
 
 print("a manifest from another release is refetched after a re-point: all assertions passed")
+
+# --------------------------------------------------------------------------- #
+# The settle's three legs: the DESCRIPTION leg (files) runs beside the two TAG
+# legs (stamp_album_source, settle_digital_lyrics), because a wizard Finish
+# used to pay them one after another — and the two tag legs stay in their order
+# on the request thread, since both rewrite the same audio containers. Same
+# keys, same order, same values: only the wall clock moves.
+# --------------------------------------------------------------------------- #
+print("== the settle's legs: description beside the tag writers ==")
+
+import threading as _settle_threading  # noqa: E402
+import time as _settle_time  # noqa: E402
+
+SET_MF = tempfile.mkdtemp(prefix="mlo_settle_lanes_")
+SET_ALBUM = os.path.join(SET_MF, "Settle Album")
+os.makedirs(SET_ALBUM)
+make_wav(os.path.join(SET_ALBUM, "1-01 - track.wav"))
+SET_CFG = {"music_folder": SET_MF}
+
+_events = []
+_inside = {"n": 0, "peak": 0}
+_guard = _settle_threading.Lock()
+_real_legs = (imports.stamp_album_source, imports.settle_digital_lyrics,
+              imports.run_metadata_step)
+
+
+def _enter(tag):
+    with _guard:
+        _inside["n"] += 1
+        _inside["peak"] = max(_inside["peak"], _inside["n"])
+        _events.append(tag + "+")
+
+
+def _leave(tag):
+    with _guard:
+        _inside["n"] -= 1
+        _events.append(tag + "-")
+
+
+def _leg(tag, result, seconds):
+    def run(*a, **k):
+        _enter(tag)
+        try:
+            _settle_time.sleep(seconds)
+            if isinstance(result, Exception):
+                raise result
+            return result
+        finally:
+            _leave(tag)
+    return run
+
+
+def _settled(metadata=True, meta_result=None):
+    _events.clear()
+    _inside.update(n=0, peak=0)
+    imports.stamp_album_source = _leg("source", {"state": "asked"}, 0.02)
+    imports.settle_digital_lyrics = _leg("lyrics", {"state": "ok"}, 0.02)
+    imports.run_metadata_step = _leg(
+        "metadata", {"staged": False, "applied": {"x": 1}}
+        if meta_result is None else meta_result, 0.15)
+    try:
+        return imports.settle_digital_import(
+            SET_ALBUM, SET_CFG, chain=[1, 13], metadata=metadata)
+    finally:
+        (imports.stamp_album_source, imports.settle_digital_lyrics,
+         imports.run_metadata_step) = _real_legs
+
+
+_out = _settled()
+assert list(_out) == ["path", "source", "lyrics", "metadata"], list(_out)
+assert _out["path"] == os.path.normpath(SET_ALBUM), _out["path"]
+assert _out["source"] == {"state": "asked"}, _out["source"]
+assert _out["lyrics"] == {"state": "ok"}, _out["lyrics"]
+assert _out["metadata"] == {"staged": False, "applied": {"x": 1}}, _out["metadata"]
+assert _inside["peak"] == 2, f"the description leg must overlap a tag leg: {_events}"
+assert _events.index("metadata+") < _events.index("source+"), _events
+assert _events.index("source-") < _events.index("lyrics+"), \
+    f"the two tag legs must stay in order: {_events}"
+assert _events.index("lyrics-") < _events.index("metadata-"), _events
+
+# a description step that blows up is reported as its own empty answer, and the
+# tag legs are unaffected (the settle never raises)
+_broken = _settled(meta_result=RuntimeError("no provider"))
+assert _broken["metadata"] == {"staged": False, "applied": {}}, _broken["metadata"]
+assert _broken["source"] == {"state": "asked"} and _broken["lyrics"] == {"state": "ok"}
+
+# `metadata=False` still reports exactly the two tag halves — no third key
+_two = _settled(metadata=False)
+assert list(_two) == ["path", "source", "lyrics"], list(_two)
+assert _inside["peak"] == 1, f"nothing to overlap with: {_events}"
+
+shutil.rmtree(SET_MF, ignore_errors=True)
+print("the settle's legs: description beside the tag writers — all assertions passed")

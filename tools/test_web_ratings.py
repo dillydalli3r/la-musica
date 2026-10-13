@@ -279,6 +279,48 @@ eq(wr.track_rating("Pink Floyd", "x", "", {},
    None, "no MBIDs at all -> no answer")
 eq(_calls, ["track"], "…and no rung below the recording to ask")
 
+print("== the release id: the track rung carries it to the source ==")
+# The album identity may name the RELEASE (`MUSICBRAINZ_ALBUMID`): it is what
+# lets MusicBrainz answer the whole album from ONE browse instead of a lookup
+# per track, so it rides on the TRACK rung's identity — the rung the source
+# reads it from. Nothing else about the ladder changes: the levels words, the
+# value and the provenance are exactly what the per-track path produces.
+_seen_ident = []
+
+
+def _release_aware_fetch(source, kind, ident, cfg):
+    _seen_ident.append((kind, dict(ident)))
+    if kind == "track":
+        return MB_TRACK_OWN
+    return MB_UNRATED
+
+
+rel_got = wr.track_rating("Pink Floyd", "Time", "rec-1", {},
+                          _release_aware_fetch,
+                          album={"artist": "Pink Floyd", "album": "x",
+                                 "mbid": "rg-1", "artist_mbid": "art-1",
+                                 "release_mbid": "rel-1"})
+eq(_seen_ident[0],
+   ("track", {"artist": "Pink Floyd", "title": "Time", "mbid": "rec-1",
+              "release_mbid": "rel-1"}),
+   "the RELEASE id rides on the track rung's own identity")
+eq(rel_got["levels"], {"musicbrainz": "track"},
+   "…and the rung word is the one the per-track path reports: `track` "
+   "(printed as the recording — the work fallback is INSIDE this rung)")
+eq(rel_got["level"], "track", "…and it is the winning level")
+eq(rel_got["value"], 84, "…with the recording's own 4.2/5 -> 84")
+eq(rel_got["sources"], ["MusicBrainz"], "…attributed to the source that answered")
+
+# No release id in the album identity = no release id on the ident: the
+# source then takes the per-track path (see the browse cases below).
+_seen_ident.clear()
+wr.track_rating("Pink Floyd", "Time", "rec-1", {}, _release_aware_fetch,
+                album={"artist": "Pink Floyd", "album": "x", "mbid": "rg-1",
+                       "artist_mbid": "art-1"})
+eq(_seen_ident[0][1],
+   {"artist": "Pink Floyd", "title": "Time", "mbid": "rec-1"},
+   "no release id -> the identity names none (the per-track path)")
+
 print("== the choice function ==")
 eq(wr.choose([((84, 31, "MusicBrainz"), "track")]),
    {"value": 84, "sources": ["MusicBrainz"]},
@@ -536,6 +578,141 @@ else:
 
     for d in (tmp, library):
         shutil.rmtree(d, ignore_errors=True)
+
+print("== the album browse (server.integrations): ONE read for the folder ==")
+# The other half of the contract: the source `server.integrations.
+# web_rating_fetchers()` really is. The MusicBrainz seam is stubbed (no
+# socket), and every case pins WHICH requests were made — the point of the
+# change being that the album's browse answers every track at once.
+from server import integrations as intg                              # noqa: E402
+
+_real_cached = intg.mb_get_cached
+_real_data_cache_dir = intg._data_cache_dir
+intg._data_cache_dir = lambda name: None                             # no disk cache
+
+
+def use_mb(router):
+    """Install a stubbed `mb_get_cached`; returns the endpoint call log."""
+    seen = []
+
+    def fake(endpoint, params=None, timeout=None, retries=None):
+        seen.append((endpoint, dict(params or {})))
+        return router(endpoint, dict(params or {}))
+
+    intg.mb_get_cached = fake
+    return seen
+
+
+BROWSE_ROW = {"id": "rec-1",
+              "rating": {"value": 4.2, "votes-count": 18},
+              "genres": [{"name": "progressive rock"}],
+              "relations": [{"type": "performance",
+                             "work": {"id": "work-1"}}]}
+BROWSE_UNRATED = {"recording-count": 1, "recordings": [
+    {"id": "rec-2", "rating": {"value": None, "votes-count": 0},
+     "relations": [{"type": "performance", "work": {"id": "work-2"}}]}]}
+
+
+def browse_router(endpoint, params):
+    if endpoint == "recording":
+        return {"recording-count": 1, "recordings": [BROWSE_ROW]}
+    if endpoint == "recording/rec-1":
+        return {"rating": {"value": 3.0, "votes-count": 9}}
+    if endpoint == "recording/rec-9":
+        return {"rating": {"value": 3.0, "votes-count": 9}}
+    raise AssertionError(f"unexpected request: {endpoint}")
+
+
+# ONE browse, paged while `recording-count` says there are more rows.
+paged = use_mb(lambda endpoint, params: (
+    {"recording-count": 130,
+     "recordings": [{"id": f"r{i:03d}"} for i in range(100)]}
+    if params.get("offset") == 0 else
+    {"recording-count": 130,
+     "recordings": [{"id": f"r{i:03d}"} for i in range(100, 130)]}))
+index = intg.release_recording_index("rel-1")
+eq(len(index), 130, "the album browse is paged until every row is read")
+eq([p.get("offset") for _e, p in paged], [0, 100],
+   "…100 rows at a time, following `recording-count`")
+eq(index["r129"], {"id": "r129"}, "…each row indexed by its recording id")
+eq(intg.release_recording_index(""), {}, "no release id -> no browse at all")
+
+# THE BROWSE PATH: a release id is known and the browse answered for this
+# recording, so its own rating is the answer and NOTHING else is read.
+seen = use_mb(browse_router)
+fetch = intg.web_rating_fetchers()
+got = fetch("musicbrainz", "track",
+            {"artist": "A", "title": "T", "mbid": "rec-1",
+             "release_mbid": "rel-1"}, {})
+eq(wr.parse_source("musicbrainz", got, "track"), (84, 18, "MusicBrainz"),
+   "the browse's recording rating is the track's answer")
+eq([e for e, _p in seen], ["recording"],
+   "…and the album's ONE browse is the only request made")
+eq(seen[0][1].get("inc"), "genres+ratings+work-rels",
+   "…carrying genres, ratings and the work relations in one read")
+eq(seen[0][1].get("limit"), 100, "…100 recordings per page")
+
+# …through the LADDER, the rung word is exactly the per-track path's.
+seen.clear()
+lv = wr.track_rating("A", "T", "rec-1", {}, fetch,
+                     album={"artist": "A", "album": "Al", "mbid": "rg-1",
+                            "artist_mbid": "art-1", "release_mbid": "rel-1"})
+eq(lv["levels"], {"musicbrainz": "track"},
+   "the browse path reports the SAME `levels` word as the per-track path")
+eq(lv["level"], "track", "…the winning level is `track` too")
+eq(lv["value"], 84, "…and the value is the recording's own")
+eq([e for e, _p in seen], ["recording"], "…one request for the whole album")
+
+# THE FALLBACK: no release id -> the per-track lookup, exactly as before.
+seen.clear()
+got = fetch("musicbrainz", "track", {"artist": "A", "title": "T",
+                                     "mbid": "rec-1"}, {})
+eq([e for e, _p in seen], ["recording/rec-1"],
+   "no release id -> the per-track lookup, the only path there is")
+eq(wr.parse_source("musicbrainz", got, "track"), (60, 9, "MusicBrainz"),
+   "…whose own rating is the answer")
+
+# THE FALLBACK: the browse answered but does not list THIS recording.
+seen.clear()
+got = fetch("musicbrainz", "track",
+            {"artist": "A", "title": "T", "mbid": "rec-9",
+             "release_mbid": "rel-1"}, {})
+eq([e for e, _p in seen], ["recording", "recording/rec-9"],
+   "a track the browse does not list falls back to its own lookup")
+eq(wr.parse_source("musicbrainz", got, "track"), (60, 9, "MusicBrainz"),
+   "…which then answers")
+
+# THE FALLBACK: the browse itself failed (a refused read is a miss, never fatal).
+def boom_router(endpoint, params):
+    if endpoint == "recording":
+        raise RuntimeError("MusicBrainz is busy")
+    return {"rating": {"value": 4.2, "votes-count": 18}}
+
+
+seen = use_mb(boom_router)
+got = fetch("musicbrainz", "track",
+            {"artist": "A", "title": "T", "mbid": "rec-1",
+             "release_mbid": "rel-1"}, {})
+eq([e for e, _p in seen], ["recording", "recording/rec-1"],
+   "a browse that failed is a miss -> the per-track lookup")
+eq(wr.parse_source("musicbrainz", got, "track"), (84, 18, "MusicBrainz"),
+   "…and the track still gets its rating")
+
+# THE WORK FALLBACK: the recording is unrated, and its WORK's id rides ON the
+# browse — so only the work itself is asked (no identity lookup to find it).
+seen = use_mb(lambda endpoint, params: (
+    BROWSE_UNRATED if endpoint == "recording" else
+    {"rating": {"value": 5, "votes-count": 1}}))
+got = fetch("musicbrainz", "track",
+            {"artist": "A", "title": "T", "mbid": "rec-2",
+             "release_mbid": "rel-1"}, {})
+eq([e for e, _p in seen], ["recording", "work/work-2"],
+   "the browse's own work relation is what the work lookup uses")
+eq(wr.parse_source("musicbrainz", got, "track"), (100, 1, "MusicBrainz"),
+   "…and the work's rating is the track's, as the per-track path gave it")
+
+intg.mb_get_cached = _real_cached
+intg._data_cache_dir = _real_data_cache_dir
 
 print(f"\n{'PASS' if not failed else 'FAIL'} — {passed} ok, {failed} failed")
 sys.exit(1 if failed else 0)

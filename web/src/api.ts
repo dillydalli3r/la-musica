@@ -25,6 +25,10 @@ import type {
   ImportSession,
   ImportSettleResult,
   ImportSourceResult,
+  LastfmConnect,
+  LastfmFinish,
+  LastfmStatus,
+  LastfmWriteResult,
   LayoutReport,
   LayoutSnapshot,
   LibraryAddResult,
@@ -40,6 +44,7 @@ import type {
   MBSearchRows,
   NeedsWarning,
   PodcastSeries,
+  RatingsImportResult,
   ScriptRunResult,
   ScriptMenu,
   SlskReleaseIdentity,
@@ -3638,6 +3643,20 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ paths, limit, sources, staged }),
     }, 300000),
+  /** Fetch the public web-rating tags (WEBRATING / ALBUMWEBRATING) for ONE
+   *  album — the Ratings step's own option, running the very entry point the
+   *  chain's script 24 runs. FILL-ONLY: a value already on a file is never
+   *  replaced, so pressing Fetch again is never destructive — unless *force*
+   *  is set (the one-shot Force and the "24 · Web ratings re-fetch" tick),
+   *  which re-asks and replaces. The reply lists one row per readable track
+   *  (`file`, `title`, `value`, `level`, `source`) plus the run's counts;
+   *  `enabled` is `web_ratings_enabled` as the run read it. */
+  ratingsImport: (path: string, staged = false, force = false) =>
+    json<RatingsImportResult>(`${API}/import/ratings`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path, staged, force }),
+    }, 300000),
   /** Fetch what an album's metadata step owes: the artist's image and
    *  description, and the album's own description. Omit `items` for all
    *  three, or send one per request to drive a bar per item (each call is
@@ -3735,6 +3754,46 @@ export const api = {
       },
       20000
     ),
+
+  // ----------------------------------------------------------------- //
+  // Last.fm scrobbling — Settings → Scrobbling, and the player's two   //
+  // fire-and-forget writes (server/api_lastfm.py).                     //
+  // ----------------------------------------------------------------- //
+  /** Everything the Scrobbling panel shows (no network on the server side). */
+  lastfmStatus: () => json<LastfmStatus>(`${API}/lastfm/status`),
+  /** Start the authorization: a request token and the URL to send the user to
+   *  (opened with `openExternal`). Needs the app's own key + shared secret. */
+  lastfmConnect: () =>
+    json<LastfmConnect>(`${API}/lastfm/connect`, { method: "POST" }, 30000),
+  /** Finish it: exchange the authorized token for the session Last.fm stores
+   *  (the token is consumed once). */
+  lastfmConnectFinish: (token: string) =>
+    json<LastfmFinish>(`${API}/lastfm/connect/finish`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token }),
+    }, 30000),
+  /** Forget the saved session (the app's key/secret stay). */
+  lastfmDisconnect: () =>
+    json<{ ok: boolean; status: LastfmStatus }>(
+      `${API}/lastfm/disconnect`, { method: "POST" }, 20000),
+  /** Announce what started playing. Never awaited by the player: a refusal is
+   *  a sentence in the reply, and the audio never waits on it. */
+  lastfmNowPlaying: (path: string) =>
+    json<LastfmWriteResult>(`${API}/lastfm/now-playing`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path }),
+    }, 20000),
+  /** Report ONE play. The server re-checks Last.fm's own rule against the
+   *  file's duration; a send it cannot make is queued rather than lost, and
+   *  this call never fails the playback path. */
+  lastfmScrobble: (p: { path: string; played_at: number; played_seconds: number }) =>
+    json<LastfmWriteResult>(`${API}/lastfm/scrobble`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(p),
+    }, 20000),
 
   /** Candidate artist images + descriptions for the metadata review modal. */
   metadataCandidates: (artist: string, albumPath?: string, staged = false) => {

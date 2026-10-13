@@ -163,6 +163,139 @@ if entry:
           repr(entry.get("values")))
     check("…tracks-only", entry.get("targets") == ["tracks"], repr(entry.get("targets")))
 
+# --------------------------------------------------------------------------- #
+# 2b) the grader verdict behind those flags is MEMOIZED per folder, on the
+#     folder's own signature: the wizard mounts and re-fetches, and re-opening
+#     every file for an answer those files already decide was pure cost. A
+#     write in the folder, and every tag-cache invalidation, must still miss.
+#     (A stale verdict is worse than a slow scan: the wizard's per-track steps
+#     read it as "Plain" / "no lyrics".)
+# --------------------------------------------------------------------------- #
+from mlo import grader  # noqa: E402
+from server import tagcache  # noqa: E402
+
+_real_grade = grader._grade_album
+_graded = []
+
+
+def _counting_grade(folder, fmt, cfg=None):
+    _graded.append(os.path.normpath(folder))
+    return _real_grade(folder, fmt, cfg)
+
+
+def _scan():
+    return client.get("/api/album/scan-tracks", params={"path": ALBUM})
+
+
+grader._grade_album = _counting_grade
+try:
+    tagcache.invalidate_album(ALBUM)
+    _graded.clear()
+    r = _scan()
+    check("the first scan after an invalidation grades the folder",
+          r.status_code == 200 and _graded == [os.path.normpath(ALBUM)], f"{_graded}")
+    _graded.clear()
+    r2 = _scan()
+    check("a second scan answers the SAME rows from the memo",
+          r2.status_code == 200 and r2.json() == r.json(), r2.text[:200])
+    check("…and grades nothing again", _graded == [], f"{_graded}")
+
+    # a write inside the folder misses: the file's own stat is in the signature
+    target = os.path.join(ALBUM, "1-05 None.mp3")
+    st = os.stat(target)
+    os.utime(target, (st.st_atime, st.st_mtime + 5))
+    _graded.clear()
+    r3 = _scan()
+    check("a file rewritten in the folder re-grades it",
+          _graded == [os.path.normpath(ALBUM)], f"{_graded}")
+    check("…and the rows are still the file's own", r3.json() == r.json())
+
+    # an in-app write drops it outright (the wizard's own lyrics step writes)
+    tagcache.invalidate_album(ALBUM)
+    _graded.clear()
+    _scan()
+    check("the tag cache's own invalidation drops the verdict",
+          _graded == [os.path.normpath(ALBUM)], f"{_graded}")
+    # a per-file invalidation (a tag write to one track) reaches the folder too
+    tagcache.invalidate_path(target)
+    _graded.clear()
+    _scan()
+    check("a per-file invalidation drops the folder's verdict",
+          _graded == [os.path.normpath(ALBUM)], f"{_graded}")
+finally:
+    grader._grade_album = _real_grade
+
+# --------------------------------------------------------------------------- #
+# 2c) /api/lyrics/auto asks its tracks on `worker_count` lanes, and answers the
+#     serial loop's own rows: same result dicts, same order, same counts. The
+#     stub fetcher is the instrument — it counts how many fetches are inside it
+#     at once, so a one-lane run can never exceed 1.
+# --------------------------------------------------------------------------- #
+from server import api_lyrics  # noqa: E402
+import threading  # noqa: E402
+import time  # noqa: E402
+
+_probe = {"inside": 0, "peak": 0}
+_probe_lock = threading.Lock()
+_real_load_config = api_lyrics.load_config
+_real_fetch_one = api_lyrics.fetch_one
+
+
+def _stub_fetch_one(path, cfg, replace=False, mark_absent=True):
+    with _probe_lock:
+        _probe["inside"] += 1
+        _probe["peak"] = max(_probe["peak"], _probe["inside"])
+    try:
+        time.sleep(0.05)
+        return {"path": path, "status": "ok", "provider": "stub",
+                "provider_label": "Stub", "kind": "synced", "synced": True,
+                "wrote": {"embedded": True, "lrc": None},
+                "reason": "", "error": ""}
+    finally:
+        with _probe_lock:
+            _probe["inside"] -= 1
+
+
+def _auto(paths, lanes):
+    _probe.update(inside=0, peak=0)
+    api_lyrics.load_config = lambda *a, **k: dict(CFG)
+    api_lyrics.fetch_one = _stub_fetch_one
+    real_wc = api_lyrics.worker_count
+    api_lyrics.worker_count = lambda *a, **k: lanes
+    try:
+        return api_lyrics.lyrics_auto(api_lyrics.LyricsPathsRequest(paths=paths))
+    finally:
+        api_lyrics.worker_count = real_wc
+
+
+try:
+    LANE_PATHS = [os.path.join(ALBUM, n) for n in sorted(EXPECTED)]
+    OUTSIDE = os.path.join(TMP, "outside.mp3")
+    with open(OUTSIDE, "wb") as fh:
+        fh.write(_MP3_FRAME * 4)
+    sent = LANE_PATHS + [OUTSIDE]
+
+    serial = _auto(sent, 1)
+    check("one lane never overlaps", _probe["peak"] == 1, repr(_probe))
+    laned = _auto(sent, 8)
+    check("the lanes really overlap", _probe["peak"] > 1, repr(_probe))
+    check("…never more than worker_count", _probe["peak"] <= 8, repr(_probe))
+
+    check("the reply is the serial loop's own, row for row",
+          laned == serial, f"{laned} != {serial}")
+    check("the counts are the serial loop's own",
+          (laned["ok"], laned["skipped"], laned["failed"])
+          == (len(LANE_PATHS), 0, 1), str(laned["ok"]) + "/" + str(laned["failed"]))
+    check("a rejected path is still reported FIRST, as its own failure",
+          laned["results"][0]["path"] == OUTSIDE
+          and laned["results"][0]["status"] == "failed", str(laned["results"][0]))
+    check("the accepted rows are the paths as SENT, in request order",
+          [r["path"] for r in laned["results"][1:]] == LANE_PATHS,
+          str([r["path"] for r in laned["results"]]))
+finally:
+    api_lyrics.load_config = _real_load_config
+    api_lyrics.fetch_one = _real_fetch_one
+
 shutil.rmtree(TMP, ignore_errors=True)
 
 if failures:

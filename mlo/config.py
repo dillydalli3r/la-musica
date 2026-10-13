@@ -560,8 +560,14 @@ DEFAULT_CONFIG = {
     # When True, empty SOURCE on Digital Media is filled with the value above;
     # when False (default, per request), empty stays empty.
     "fill_empty_source": False,
-    # Strip SOURCE on CD rips — CD must never carry SOURCE (per user request, on by default)
-    "strip_source_on_cd": True,
+    # Strip SOURCE on CD rips. OFF by default (the owner's rule, 2026-10-12:
+    # "importing must not strip tags already present"). A SOURCE a rip arrived
+    # with — the user's own word, another tagger's, a store's — is a tag this
+    # app did not write, and no import deletes it: ON, script 1 removes it from
+    # a CD (and only a CD), the grader asks for that removal the same way, and
+    # the Soulseek stamp removes it as it writes MEDIA. OFF, the value travels
+    # untouched, and the grade is silent about a SOURCE on a non-digital album.
+    "strip_source_on_cd": False,
 
     # CD rips (MEDIA=CD): deterministic CD-N renaming of .log/.cue and
     # conservative CUE FILE-name correction. Both are content-derived —
@@ -1357,13 +1363,21 @@ DEFAULT_CONFIG = {
     # asking the network one question per track of a thirty-track box set.
     "soulseek_auto_mbid_tracks": 4,
     # Every disc's .log must score at least this (Logchecker 0-100) before
-    # the full album is downloaded. Only a score Logchecker COULD form is
-    # judged by this bar: a log it cannot score (an unrecognised format, or no
-    # scorer installed) is not rejected for the missing score — the importer
-    # still checks its per-track CRCs against the decoded audio. A log whose
-    # own checksum does not verify, or whose AccurateRip section reports a
-    # track it could not verify, is rejected whatever the score (spec R391).
-    "soulseek_auto_log_min_score": 100,
+    # the full album is downloaded — the FLOOR below which a score means real
+    # damage. 85 by default: Logchecker's own band for a log with minor
+    # complaints is 90+, so a score between 85 and 100 is accepted and only
+    # DOWN-RANKS the candidate behind a cleaner log instead of rejecting it.
+    # The log's PROGRAM never decides on its own (an EAC, XLD, whipper,
+    # dBpoweramp, foobar2000 or CUETools log is read the same way), and a log
+    # Logchecker cannot score (an unrecognised format, or no scorer installed)
+    # is not rejected for the missing score — the importer still checks its
+    # per-track CRCs against the decoded audio. A log whose own checksum does
+    # not verify, or whose AccurateRip section reports a track it could not
+    # verify, is rejected whatever the score (spec R391). Setting this to 0
+    # switches the requirement off entirely: a candidate whose folder has NO
+    # log at all is then offered as a low-ranking candidate (verified by a
+    # clean decode) instead of nothing.
+    "soulseek_auto_log_min_score": 85,
     # Fraction of the release track list a candidate folder must contain.
     "soulseek_auto_complete_ratio": 1.0,
     # Every candidate the search turns up is tried in score order (there is no
@@ -1689,6 +1703,33 @@ DEFAULT_CONFIG = {
     # its own source lists).
     "discogs_token": "",
     "lastfm_api_key": "",
+    # Scrobbling: the app's OWN Last.fm application (last.fm/api/account/create
+    # issues an API key AND a shared secret). The secret is what signs every
+    # authenticated call; the session key is what the one-time authorization
+    # hands back, and a blank one means "not connected" — then nothing is ever
+    # sent, whatever the switch says. `lastfm_username` is what auth.getSession
+    # reported, kept only so the UI can say WHO is connected.
+    "lastfm_api_secret": "",
+    "lastfm_session_key": "",
+    "lastfm_username": "",
+    "lastfm_scrobble_enabled": True,
+    # MusicBrainz login — rating SUBMISSIONS only (every read needs no
+    # account). The app registers its own OAuth2 client
+    # (musicbrainz.org/account/applications), the owner pastes its id and
+    # secret once and authorizes once; the refresh token that comes back renews
+    # the short-lived access token on demand (`musicbrainz_token_expires_at` is
+    # an epoch stamp, 0 = never fetched). All five are written by the Connect
+    # flow, never typed by hand; `musicbrainz_username` is what /oauth2/userinfo
+    # reported. The switch gates the submission PATHS — the wizard's ratings
+    # step and the MusicBrainz page's own button are presses either way — and
+    # an install with no token is inert whatever it says.
+    "musicbrainz_client_id": "",
+    "musicbrainz_client_secret": "",
+    "musicbrainz_refresh_token": "",
+    "musicbrainz_access_token": "",
+    "musicbrainz_token_expires_at": 0,
+    "musicbrainz_username": "",
+    "musicbrainz_submit_enabled": True,
     # The per-cookie notes for the cookie logins (server/api_cookies.py): one
     # JSON object per source, one entry per cookie identity
     # ("domain\tpath\tname"), holding the comment the user wrote against an

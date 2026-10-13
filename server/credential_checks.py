@@ -49,6 +49,17 @@ CREDENTIALS = (
      "needs": ["discogs_token"], "free": True},
     {"id": "lastfm", "label": "Last.fm API key",
      "needs": ["lastfm_api_key"], "free": True},
+    # A SECOND Last.fm credential, and a different question: the API key above
+    # only proves the app can READ charts, while a scrobble needs the shared
+    # secret AND a session key the user authorized once. A row that only
+    # checked the key would stay green on an install that can never scrobble.
+    {"id": "lastfm-scrobble", "label": "Last.fm scrobbling (session)",
+     "needs": ["lastfm_api_key", "lastfm_api_secret", "lastfm_session_key"],
+     "free": True},
+    {"id": "musicbrainz", "label": "MusicBrainz login (rating submissions)",
+     "needs": ["musicbrainz_client_id", "musicbrainz_client_secret",
+               "musicbrainz_refresh_token"],
+     "free": True},
     {"id": "spotify", "label": "Spotify client credentials",
      "needs": ["spotify_client_id", "spotify_client_secret"], "free": True},
     {"id": "acoustid", "label": "AcoustID application key",
@@ -106,6 +117,45 @@ def _check_lastfm(cfg):
     from server import discovery
 
     got = discovery.lastfm_check(cfg)
+    if got["ok"]:
+        return "ok", got["detail"]
+    if not got["checked"]:
+        return "skipped", got["detail"]
+    return "fail", got["detail"]
+
+
+def _check_lastfm_scrobble(cfg):
+    """Is the SAVED Last.fm session accepted? — the scrobble seam's own answer.
+
+    `server.lastfm.verify_session` proves the session with the cheapest
+    AUTHENTICATED read Last.fm answers for it (`user.getInfo` on the session's
+    own user), and its refusal travels back in Last.fm's own words. A blank
+    key, secret or session is `skipped` — never a pass: the row exists to say
+    whether scrobbling would work, and "not connected" is not "working"."""
+    try:
+        from server import lastfm
+    except ImportError:
+        return "skipped", "the Last.fm client is not available in this build"
+    got = lastfm.verify_session(cfg)
+    if got["ok"]:
+        return "ok", got["detail"]
+    if not got["checked"]:
+        return "skipped", got["detail"]
+    return "fail", got["detail"]
+
+
+def _check_musicbrainz(cfg):
+    """Is the saved MusicBrainz login accepted? -> the account it belongs to.
+
+    `server.mb_submit.whoami` renews the short-lived access token when it is
+    due and asks `/oauth2/userinfo`, so the answer names the account every
+    submission would be made BY; a refusal is MusicBrainz's own text. No
+    refresh token (or no client pair) is `skipped`, never a pass."""
+    try:
+        from server import mb_submit
+    except ImportError:
+        return "skipped", "the MusicBrainz submit client is not available in this build"
+    got = mb_submit.whoami(cfg)
     if got["ok"]:
         return "ok", got["detail"]
     if not got["checked"]:
@@ -217,6 +267,8 @@ _CHECKS = {
     "ai": _check_ai,
     "discogs": _check_discogs,
     "lastfm": _check_lastfm,
+    "lastfm-scrobble": _check_lastfm_scrobble,
+    "musicbrainz": _check_musicbrainz,
     "spotify": _check_spotify,
     "acoustid": _check_acoustid,
     "acoustid-user": _check_acoustid_user,

@@ -1482,6 +1482,106 @@ def check_tag_hygiene_writes_only_what_it_changes(tmp):
        "unneeded alias")
 
 
+# --------------------------------------------------------------------------- #
+# The chain's read scope — a Run All over one album parses each track ONCE.
+# --------------------------------------------------------------------------- #
+def check_chain_reads_each_file_once(tmp):
+    """A Run All over one album parses every container ONCE, not once per script.
+
+    A chain runs its album-lane scripts over the SAME files, and each of them
+    opening the container for itself cost the album one parse per script per
+    track (the ~14 album-lane scripts x N tracks of a Run All). The read scope
+    (mlo.stats.run_scope_*, armed by the run itself in
+    server.script_runners._chain_scan) serves the later scripts the parse the
+    first one already paid for.
+
+    Counted by CONTAINER PARSE, not by AudioFile() calls: every mutagen
+    constructor the class builds a container with is wrapped, so a call that
+    never parses one is not counted. The chain runs TWICE — the first run
+    writes what the album was missing, the second must be idempotent (no
+    container write at all), which is what makes "one parse per file" an exact
+    expectation rather than a bound — and then a THIRD time with the scope not
+    armed, which is the number the album paid before it existed.
+    """
+    if not (FLAC_EXE or FFMPEG_EXE):
+        return skip("no flac/ffmpeg: the chain cannot run")
+    import contextlib
+
+    from mlo.config import DEFAULT_RUN_ALL_ORDER
+    from server import script_runners
+
+    lib = os.path.join(tmp, "chain_read_lib")
+    album = os.path.join(lib, "Artists", "Chain Artist", "2001 - Chain Album")
+    os.makedirs(album, exist_ok=True)
+    files = []
+    for n in (1, 2, 3):
+        files.append(make_flac(
+            os.path.join(album, f"0{n} - Track {n}.flac"), 2,
+            {"TITLE": f"Track {n}", "ARTIST": "Chain Artist",
+             "ALBUMARTIST": "Chain Artist", "ALBUM": "Chain Album",
+             "TRACKNUMBER": str(n), "DATE": "2001",
+             "MEDIA": "Digital Media"}))
+
+    # The run's own order minus the steps that go to the network (13 fetch,
+    # 14 beets, 17 AI, 18 publish, 24 ratings, 25/26 artist data): what is
+    # left is the album lane this is about.
+    ids = [s for s in DEFAULT_RUN_ALL_ORDER
+           if s not in {13, 14, 17, 18, 24, 25, 26}]
+
+    parses = []
+    restores = []
+    for name in ("FLAC", "OggVorbis", "OggOpus", "MP3", "MP4"):
+        real = getattr(mlo_audio, name)
+
+        def counting(*a, _real=real, _name=name, **kw):
+            parses.append(_name)
+            return _real(*a, **kw)
+
+        restores.append((name, real))
+        setattr(mlo_audio, name, counting)
+    saves, restore_save = count_calls(mlo_audio.AudioFile, "_save_container")
+
+    def run():
+        return script_runners.run_chain(cfg(music_folder=lib), ids,
+                                       targets=None, wait=True, timeout=300)
+
+    unscoped = 0
+    real_scan = script_runners._chain_scan
+
+    @contextlib.contextmanager
+    def no_scope(cfg_, targets_):
+        yield False
+
+    try:
+        run()                       # settle the album (this run writes)
+        parses.clear()
+        saves.clear()
+        run()                       # the idempotent run: a pure read cost
+        measured, written = len(parses), len(saves)
+
+        script_runners._chain_scan = no_scope
+        parses.clear()
+        saves.clear()
+        run()
+        unscoped = len(parses)
+    finally:
+        script_runners._chain_scan = real_scan
+        for name, real in restores:
+            setattr(mlo_audio, name, real)
+        restore_save()
+
+    ok(written == 0,
+       f"the chain's second run writes no container at all ({written} saves), "
+       f"so the parse count below is a pure read cost")
+    ok(measured == len(files),
+       f"a Run All over one album parses each container ONCE "
+       f"({measured} parses for {len(files)} files; the same run with the "
+       f"scope unarmed parses {unscoped})")
+    ok(unscoped > measured,
+       f"and the scope is what did it: {unscoped} parses with it unarmed, one "
+       f"per album-lane script that reads the file")
+
+
 def _tone_flac(path, seconds=3, freq=220.0):
     """A real, non-silent FLAC: the audit's detectors decide on audio, and a
     silent fixture gets no verdict to skip on."""
@@ -1744,6 +1844,7 @@ def main():
         ("script 1  Format lyrics (album pass reads)", check_lyrics_album_pass_still_reads),
         ("script 10 Format all (cover cache)", check_format_all_cover_prepared_once),
         ("script 23 Optimize tags (writes)", check_tag_hygiene_writes_only_what_it_changes),
+        ("chain      one container parse per file", check_chain_reads_each_file_once),
         ("script 7/3 ffprobe spawns", check_ffprobe_asked_only_when_needed),
         ("all       atomic sidecar writes", check_fsync_dir),
         ("all       the worker budget knob", check_worker_budget_semantics),

@@ -106,8 +106,14 @@ _CREDENTIAL_PROVIDES = {
     "discogs": "proves the token with GET /oauth/identity — who it belongs to.",
     "lastfm": "proves the key with chart.gettoptags — a chart, so nothing else "
               "has to exist.",
+    "lastfm-scrobble": "proves the SAVED session with an AUTHENTICATED read "
+                       "(user.getInfo) — Last.fm's own words when it refuses, "
+                       "and a blank key/secret/session is skipped, never a pass.",
     "spotify": "proves the pair with the same client-credentials grant the "
                "sources themselves need.",
+    "musicbrainz": "proves the saved login with GET /oauth2/userinfo (renewing "
+                   "the access token when it is due) — the account every "
+                   "submission would be made by, or MusicBrainz's own refusal.",
     "acoustid": "proves the application key with one lookup on a probe "
                 "fingerprint.",
     "acoustid-user": "proves the user key with a real probe SUBMISSION — the "

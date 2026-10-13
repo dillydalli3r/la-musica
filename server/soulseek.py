@@ -1527,6 +1527,33 @@ def search_results(search_id, cfg=None):
     }
 
 
+def search_state(search_id, cfg=None):
+    """A running search's STATE alone — one GET, no `/responses` fetch.
+
+    The poll loop of a multi-search window (`soulseek_auto._search_queries`)
+    watches every template until one reaches a terminal state, and slskd serves
+    a search's responses only once it HAS ended — so fetching `/responses` on
+    every tick was a second request per search that could only ever come back
+    empty. This asks the one question the loop needs between polls; the caller
+    reads the responses ONCE, through `search_results`, when this says the
+    search is done. Same shape as `search_results` minus `responses`, so the
+    terminal check (`is_search_done`) reads one DTO either way."""
+    try:
+        state = _request("GET", f"/searches/{search_id}")
+    except httpx.HTTPStatusError as e:
+        if e.response is not None and e.response.status_code == 404:
+            return {"state": "NotFound", "isComplete": True,
+                    "responseCount": 0, "fileCount": 0}
+        raise
+    st = state if isinstance(state, dict) else {}
+    return {
+        "state": st.get("state"),
+        "isComplete": bool(st.get("isComplete")),
+        "responseCount": int(st.get("responseCount") or 0),
+        "fileCount": int(st.get("fileCount") or 0),
+    }
+
+
 def search_many(queries, cfg=None, timeout_ms=None, response_limit=None):
     """Start ONE slskd search per query, ALL AT ONCE. Returns (ids, errors).
 
@@ -1704,7 +1731,28 @@ def _percent(value, done, size):
     return max(0.0, min(100.0, round(pct, 1)))
 
 
-def _user_transfers(slsk, username, pending, states=None):
+def downloads_by_user(slsk):
+    """`slsk`'s whole download transfer tree, indexed by lowercased username.
+
+    ONE `GET /transfers/downloads` (through `slsk.downloads_state`), so a caller
+    that watches SEVERAL peers in one poll reads every peer out of one snapshot
+    instead of issuing a transfer-tree request per peer (see `_user_transfers`,
+    whose per-file decoding this index is fed to). Each value is the raw user
+    entry slskd returned; an unreachable slskd yields no verdicts at all,
+    exactly like `_user_transfers`."""
+    try:
+        tree = slsk.downloads_state() or []
+    except Exception:
+        return {}
+    out = {}
+    for entry in tree:
+        user = str(entry.get("username") or "").lower()
+        if user:
+            out.setdefault(user, []).append(entry)
+    return out
+
+
+def _user_transfers(slsk, username, pending, states=None, index=None):
     """slskd's transfers of `username` whose remote filename is in `pending`.
 
     [{"id", "filename", "state", "bytes", "size", "percent", "speed",
@@ -1714,16 +1762,13 @@ def _user_transfers(slsk, username, pending, states=None):
     percentComplete, averageSpeed (bytes/s) and remainingTime in seconds
     (None when slskd does not report one). Best effort — an older API without
     a transfer tree, or one that is momentarily unreachable, simply yields no
-    verdicts."""
-    try:
-        tree = slsk.downloads_state() or []
-    except Exception:
-        return []
-    user = str(username or "").lower()
+    verdicts. `index` is a snapshot from `downloads_by_user`: when given, this
+    peer is read out of it instead of asking slskd for the tree again, which is
+    how one poll over a whole batch costs ONE transfer-tree request."""
+    if index is None:
+        index = downloads_by_user(slsk)
     out = []
-    for entry in tree:
-        if str(entry.get("username") or "").lower() != user:
-            continue
+    for entry in index.get(str(username or "").lower()) or []:
         for d in entry.get("directories") or []:
             for f in d.get("files") or []:
                 name = f.get("filename") or ""

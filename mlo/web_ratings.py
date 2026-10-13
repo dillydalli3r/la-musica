@@ -376,6 +376,10 @@ def _ladder(kind, ident, album=None):
     OUT, so it costs no request (`web_rating_fetchers` would answer None
     anyway); a track's album rung is the album identity the caller passed,
     and both kinds take the artist rung from that identity's `artist_mbid`.
+    The TRACK rung carries whatever `track_rating` put in the identity — the
+    recording's id and, when the caller knows it, the RELEASE's own id (the
+    source may then answer the whole album in one browse; see
+    `server.integrations.release_recording_index`).
     """
     ident = ident or {}
     steps = [(kind, ident)]
@@ -483,17 +487,27 @@ def track_rating(artist, title, recording_mbid, cfg, fetch, album=None):
     Every source is asked down the ladder (`_ladder`): the track first
     (MusicBrainz's recording, with the WORK behind it), then the ALBUM — the
     release GROUP, never the specific release — then the ARTIST. `album` is
-    the album's identity (``{"artist", "album", "mbid", "artist_mbid"}``)
-    when the caller has it; a rung with no id is skipped without a request.
-    The walk stops at the first TRACK-level answer; an album- or artist-level
-    one is kept only while nothing better arrives. The level each source
-    answered at is on the result's ``levels`` map, and the winning rung on
-    ``level``.
+    the album's identity (``{"artist", "album", "mbid", "artist_mbid"}``, plus
+    ``"release_mbid"`` — the RELEASE's own id, `MUSICBRAINZ_ALBUMID` — when the
+    caller knows it) when the caller has it; a rung with no id is skipped
+    without a request. The walk stops at the first TRACK-level answer; an album-
+    or artist-level one is kept only while nothing better arrives. The level
+    each source answered at is on the result's ``levels`` map, and the winning
+    rung on ``level``.
+
+    The release id rides ON THE TRACK's identity, not on a rung: it is what
+    lets the source answer the whole album in one browse
+    (``server.integrations.release_recording_index``) instead of a lookup per
+    track. A track asked without one — or one the browse did not answer for —
+    takes the per-track path, and the values are the same either way.
     """
-    return _rate("track", {"artist": str(artist or "").strip(),
-                           "title": str(title or "").strip(),
-                           "mbid": str(recording_mbid or "").strip()},
-                 cfg, fetch, album=album)
+    ident = {"artist": str(artist or "").strip(),
+             "title": str(title or "").strip(),
+             "mbid": str(recording_mbid or "").strip()}
+    release_mbid = str((album or {}).get("release_mbid") or "").strip()
+    if release_mbid:
+        ident["release_mbid"] = release_mbid
+    return _rate("track", ident, cfg, fetch, album=album)
 
 
 # --------------------------------------------------------------------------- #
@@ -599,8 +613,8 @@ def write_ratings(path, album=None, track=None, cfg=None, force=False):
 # Script 24 — the album-scoped runner
 # --------------------------------------------------------------------------- #
 def _album_identity(rows):
-    """``(artist, album, release-group mbid, artist mbid)`` from an album's
-    read tracks.
+    """``(artist, album, release-group mbid, artist mbid, release mbid)`` from
+    an album's read tracks.
 
     Album-level identity is uniform across the files, so the first readable
     track that states each field settles it — the same probe
@@ -609,16 +623,24 @@ def _album_identity(rows):
     ALBUM artist's (`MUSICBRAINZ_ALBUMARTISTID`, else the track artist's) —
     it is the ladder's last rung, so an album whose release group is unrated
     can still fall back to the artist the files name.
+
+    The RELEASE's own id (`MUSICBRAINZ_ALBUMID`) is the last of them and is
+    NOT an MBID the ladder is asked about: it is what lets the source answer
+    every track's rating from the album's one browse
+    (`server.integrations.release_recording_index`) instead of a lookup per
+    track. "" when the files name no release — the per-track path then, exactly
+    as before.
     """
-    artist = album = rg = artist_mbid = ""
+    artist = album = rg = artist_mbid = release_mbid = ""
     for row in rows:
         artist = artist or row["artist"] or row["albumartist"]
         album = album or row["album"]
         rg = rg or row["rg_mbid"]
         artist_mbid = artist_mbid or row["artist_mbid"]
-        if artist and album and rg and artist_mbid:
+        release_mbid = release_mbid or row["release_mbid"]
+        if artist and album and rg and artist_mbid and release_mbid:
             break
-    return artist, album, rg, artist_mbid
+    return artist, album, rg, artist_mbid, release_mbid
 
 
 def run_web_ratings(config, fetch=None):
@@ -628,13 +650,20 @@ def run_web_ratings(config, fetch=None):
     ``config["targets"]`` when a run is scoped and from a walk of the music
     folder otherwise, and the albums are processed by a ThreadPoolExecutor so
     the per-source network waits overlap instead of queueing. One album's
-    identity is read ONCE (the release-group id and the names the sources are
-    asked by), its ALBUM rating is fetched once and written to every track,
-    and each track's own rating is fetched for that track — the album answer
-    and every track answer of one album ride the SAME bounded pool, so the
-    per-track network waits overlap instead of queueing (MusicBrainz serves
-    one request per second; the request COUNT is unchanged, only the waits
-    overlap).
+    identity is read ONCE (the release-group id, the release id and the names
+    the sources are asked by), its ALBUM rating is fetched once and written to
+    every track, and each track's own rating is fetched for that track — the
+    album answer and every track answer of one album ride the SAME bounded
+    pool, so the per-track network waits overlap instead of queueing.
+
+    ONE REQUEST PER ENTITY, NOT PER TRACK: a file that names its RELEASE
+    (`MUSICBRAINZ_ALBUMID`) lets MusicBrainz answer every track's rating from
+    the album's own browse — one read for the whole folder
+    (`server.integrations.release_recording_index`), the values the per-track
+    lookups used to fetch one at a time (`_track_answer`). A folder that names
+    no release id, or a track the browse did not answer for, keeps the
+    per-track path; and the ALBUM rung (the release group) and the ARTIST rung
+    are the same one request each they always were.
 
     Nothing is invented: a track whose recording has no rating keeps no
     WEBRATING, an album no source answered for keeps no ALBUMWEBRATING, and
@@ -707,8 +736,13 @@ def run_web_ratings(config, fetch=None):
 
         The overlap is the point: every ask is against MusicBrainz, which serves
         one request per second, so a strictly serial track loop paid that wait
-        once per track — only the WAITS overlap. Request COUNT is unchanged —
-        still one ask per source per entity. Order is unchanged too: each
+        once per track — only the WAITS overlap. Request COUNT is smaller than
+        it was, never larger: a folder whose files name their RELEASE answers
+        every track from ONE browse for the album (the source reads it; the
+        lanes share it through the MusicBrainz cache, single-flight), where the
+        per-track lookups used to cost one request each — and the tracks keep
+        the per-track path for a folder with no release id. The album and
+        artist rungs are one ask each, as before. Order is unchanged too: each
         answer is parsed in the configured source order (see ``_rate``), and
         the writes below visit ``rows`` (sorted file names) in order, so a
         ThreadPool completion order can never reach a
@@ -738,6 +772,10 @@ def run_web_ratings(config, fetch=None):
                     "album": str(af.get_tag("ALBUM") or "").strip(),
                     "rg_mbid": str(af.get_tag("MUSICBRAINZ_RELEASEGROUPID") or "").strip(),
                     "rec_mbid": str(af.get_tag("MUSICBRAINZ_TRACKID") or "").strip(),
+                    # The RELEASE's own id — what lets the source answer this
+                    # track's rating from the album's ONE browse rather than a
+                    # lookup per track (see `track_rating`).
+                    "release_mbid": str(af.get_tag("MUSICBRAINZ_ALBUMID") or "").strip(),
                     # The album artist's own MBID — the ladder's last rung.
                     # `MUSICBRAINZ_ALBUMARTISTID` is the album's credit (the
                     # one the release group belongs to); a file that names
@@ -762,7 +800,7 @@ def run_web_ratings(config, fetch=None):
                 out["errors"].append(f"{os.path.basename(path)}: {e}")
         if not rows:
             return out
-        artist, album, rg, artist_mbid = _album_identity(rows)
+        artist, album, rg, artist_mbid, release_mbid = _album_identity(rows)
 
         # THE FETCHES FOLLOW THE WRITES' OWN FILL-ONLY RULE. A request is
         # worth making only while its answer could still be written:
@@ -790,7 +828,8 @@ def run_web_ratings(config, fetch=None):
                 return None
             artist_row = row["artist"] or row["albumartist"]
             around = {"artist": artist, "album": album, "mbid": rg,
-                      "artist_mbid": artist_mbid or row["artist_mbid"]}
+                      "artist_mbid": artist_mbid or row["artist_mbid"],
+                      "release_mbid": row["release_mbid"] or release_mbid}
             got = track_rating(artist_row, row["title"], row["rec_mbid"],
                                config, fetch, album=around)
             if got is not None:

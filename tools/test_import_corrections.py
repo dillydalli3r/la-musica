@@ -89,10 +89,10 @@ import importlib  # noqa: E402
 from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
-from mlo import import_policy, lyrics_fetch, lyrics_xlit  # noqa: E402
+from mlo import import_policy, lyrics_fetch, lyrics_xlit, web_ratings  # noqa: E402
 from mlo.audio import AudioFile  # noqa: E402
 from mlo.scripts import SCRIPT_LABELS  # noqa: E402
-from server import api_lyrics, script_runners  # noqa: E402
+from server import api_imports, api_lyrics, script_runners  # noqa: E402
 import server.main as mlo_main  # noqa: E402
 
 # The routes under test, on their own app: the wizard's Lyrics step, the tag
@@ -290,7 +290,9 @@ eq(sorted(family["codes"]), ["LYRICS", "XLIT_MISSING"],
    "the family's gap codes name both local halves")
 eq(tuple(family["chain"]), (13, 17),
    "a lyrics review drops the fetch and the transliteration pass")
-eq(sorted(import_policy.dropped_chain_ids({"import_autonomy": "review"})), [13, 17],
+# Every family's own chain drops with it: the lyrics pair AND the web-rating
+# script (24), which is the Ratings family's own chain id.
+eq(sorted(import_policy.dropped_chain_ids({"import_autonomy": "review"})), [13, 17, 24],
    "review mode drops exactly those scripts")
 eq([SCRIPT_LABELS[13], SCRIPT_LABELS[17]],
    ["Fetch lyrics", "Lyrics transliterate (AI)"],
@@ -310,6 +312,135 @@ ok(lyrics_fetch.run_fetch_lyrics.__globals__["fetch_one"] is lyrics_fetch.fetch_
 # are not two implementations that agree: they are one function.
 ok(api_lyrics.fetch_one is lyrics_fetch.fetch_one,
    "the lyrics route holds the very function script 13 calls")
+
+# --------------------------------------------------------------------------- #
+# 2b) the Ratings family: right after Genres, owning script 24, and its route
+#     runs the chain's own entry point for the ONE album it is asked about
+# --------------------------------------------------------------------------- #
+print("== the Ratings family sits right after Genres and owns script 24 ==")
+_fam_ids = [f["id"] for f in import_policy.FAMILIES]
+eq(_fam_ids[_fam_ids.index("ratings") - 1], "genres",
+   "the ratings family sits right after genres in the wizard's step order")
+_ratings = import_policy.family("ratings")
+eq(tuple(_ratings["chain"]), (24,),
+   "a ratings review drops script 24 from the chain")
+eq(_ratings["off"], {"web_ratings_enabled": False},
+   "the family's own switch is what 'do not gather this' means")
+eq(sorted(_ratings["codes"]), ["WEBRATING_MISSING"],
+   "the grader's code for a missing public score is the family's")
+eq(sorted(import_policy.dropped_chain_ids({"import_autonomy": "review"})), [13, 17, 24],
+   "review mode drops the lyrics pair AND the web-rating script")
+_row = import_policy.manual_option("ratings-fetch")
+eq((_row["route"], _row["method"]), ("/api/import/ratings", "POST"),
+   "the manual option names the ratings route and verb")
+eq(_row["auto"], "mlo.web_ratings:run_web_ratings",
+   "the automatic counterpart is script 24's own runner")
+eq(_row["service"], "server.api_imports:import_ratings",
+   "the option calls the ratings route's handler")
+eq(sorted(_row["tags"]),
+   ["ALBUMWEBRATING", "ALBUMWEBRATING_SOURCE", "WEBRATING", "WEBRATING_SOURCE"],
+   "the step owns both value pairs and their provenance tags")
+ok(script_runners.RUNNERS[24][1] is web_ratings.run_web_ratings,
+   "script 24 is mlo.web_ratings.run_web_ratings")
+
+print("== the ratings route runs the chain's entry point for ONE album ==")
+_rating_dir = os.path.join(MF, "Album")
+_rating_track = make_flac("01 - rated.flac")
+_rating_calls = []
+
+
+def record_run_web_ratings(config, fetch=None):
+    """The ONE callable the route must reach, recording its scope.
+
+    It writes WEBRATING / WEBRATING_SOURCE the way the real writer does, so
+    the rows the route reads BACK off the file are exercised, not argued."""
+    _rating_calls.append({"targets": list(config.get("targets") or []),
+                          "enabled": bool(config.get("web_ratings_enabled", True)),
+                          "force": bool(config.get("force_web_ratings", False)),
+                          "sources": config.get("web_ratings_sources")})
+    from mutagen.flac import FLAC as _FLAC
+    for name in sorted(os.listdir(_rating_dir)):
+        if not name.lower().endswith(".flac"):
+            continue
+        f = _FLAC(os.path.join(_rating_dir, name))
+        f["WEBRATING"] = ["89"]
+        f["WEBRATING_SOURCE"] = ["MusicBrainz"]
+        f.save()
+    return {"modified_count": 1, "skipped_count": 0, "error_count": 0, "errors": [],
+            "by_source": {"musicbrainz": 1}, "levels": {"track": 1},
+            "album_level_artist": 0}
+
+
+_RATING_CFG = {"music_folder": MF, "web_ratings_enabled": True,
+               "web_ratings_sources": ["musicbrainz"], "manual_import_enabled": True}
+
+with patched(web_ratings, run_web_ratings=record_run_web_ratings), \
+        patched(cfgmod, load_config=lambda: dict(_RATING_CFG)):
+    _res = api_imports.import_ratings(api_imports.RatingsRequest(path=_rating_dir))
+eq(_rating_calls, [{"targets": [_rating_dir], "enabled": True, "force": False,
+                    "sources": ["musicbrainz"]}],
+   "the route scopes the run to THIS one album, with the configured sources")
+eq(_res["enabled"], True, "the reply reports the switch the run read")
+_rows = {os.path.basename(r["file"]): r for r in _res["rows"]}
+eq(_rows["01 - rated.flac"]["value"], "89",
+   "the reply reads the value back off the file")
+eq((_rows["01 - rated.flac"]["level"], _rows["01 - rated.flac"]["source"]),
+   ("track", "MusicBrainz"),
+   "…and says which tag pair carries it and who wrote it")
+eq(_res["counts"]["written"], 1, "the run's own counts ride along")
+
+# The switch off is REPORTED, not answered as an empty run — and the route
+# still asks the chain's entry point (which itself refuses; see its docstring).
+_rating_calls.clear()
+with patched(web_ratings, run_web_ratings=record_run_web_ratings), \
+        patched(cfgmod, load_config=lambda: {**_RATING_CFG, "web_ratings_enabled": False}):
+    _off = api_imports.import_ratings(api_imports.RatingsRequest(path=_rating_dir))
+eq(_off["enabled"], False, "the reply says the switch is off")
+eq(_rating_calls, [{"targets": [_rating_dir], "enabled": False, "force": False,
+                    "sources": ["musicbrainz"]}],
+   "…and the run was handed the off config rather than skipped silently")
+
+# The one-shot Force (the "24 · Web ratings re-fetch" control) is honoured: the
+# run is handed `force_web_ratings`, the key script 24 and the Force menu read,
+# which is what lets a re-fetch replace a value instead of filling only.
+_rating_calls.clear()
+with patched(web_ratings, run_web_ratings=record_run_web_ratings), \
+        patched(cfgmod, load_config=lambda: dict(_RATING_CFG)):
+    api_imports.import_ratings(
+        api_imports.RatingsRequest(path=_rating_dir, force=True))
+eq([c["force"] for c in _rating_calls], [True],
+   "a forced press hands script 24 `force_web_ratings`")
+
+print("== a rated album is no ratings gap, and the prompt lands on Ratings ==")
+# Only the ratings family is graded here (the other families' checks are off),
+# so the assertions are about THIS family and nothing else.
+_GAP_CFG = {
+    "music_folder": MF, "web_ratings_enabled": True, "grade_check_web_rating": True,
+    "grade_check_mb_links": False, "grade_check_source": False,
+    "grade_check_cover": False, "grade_check_genre": False,
+    "grade_check_genre_count": False, "grade_check_genre_order": False,
+    "grade_check_genre_vocab": False, "grade_check_lyrics": False,
+    "grade_check_xlit_transliteration": False, "grade_check_xlit_translation": False,
+    "grade_check_missing_tags": False, "import_autonomy": "automatic",
+    "import_review_families": [],
+}
+_g_rated = import_policy.gaps(_rating_dir, _GAP_CFG)
+ok("ratings" not in _g_rated,
+   f"a track carrying WEBRATING is no ratings gap ({sorted(_g_rated)})")
+# The value IS what the family is about: take it off the file and the family
+# appears — the check cannot be a constant.
+from mutagen.flac import FLAC as _RFLAC  # noqa: E402
+_rated_flac = _RFLAC(_rating_track)
+for _key in ("WEBRATING", "WEBRATING_SOURCE"):
+    if _key in _rated_flac:
+        del _rated_flac[_key]
+_rated_flac.save()
+_g_bare = import_policy.gaps(_rating_dir, _GAP_CFG)
+ok("ratings" in _g_bare, f"a track with no WEBRATING is a ratings gap ({sorted(_g_bare)})")
+eq(_g_bare["ratings"]["step"], "Ratings", "the gap names the Ratings step")
+_link = import_policy.wizard_link(_rating_dir, ("ratings",))
+ok(_link.endswith("&step=Ratings&missing=ratings"),
+   f"the family's prompt link lands on the Ratings step ({_link})")
 
 # --------------------------------------------------------------------------- #
 # 3) the manual routes go through those same entry points

@@ -1,6 +1,7 @@
 """Shared statistics, byte accounting, progress shims and file walking."""
 import os
 import threading
+from collections import OrderedDict
 
 from .deps import tqdm
 from .paths import LIB_AUDIO_EXTS, SKIP_DIRS, AUDIO_EXTS
@@ -172,10 +173,11 @@ def _walk_files(root_dir, extensions, dirs_out=None):
     """
     if not os.path.isdir(root_dir):
         return
-    yield from _walk_dir(root_dir, extensions, dirs_out)
+    yield from _walk_dir(root_dir, extensions, dirs_out,
+                         _memo=_walk_memo(root_dir, extensions))
 
 
-def _walk_dir(root_dir, extensions, dirs_out=None, _links=None):
+def _walk_dir(root_dir, extensions, dirs_out=None, _links=None, _memo=None):
     """The recursion half of :func:`_walk_files`.
 
     *root_dir* is known to be a directory here — its parent's scandir said so —
@@ -199,13 +201,14 @@ def _walk_dir(root_dir, extensions, dirs_out=None, _links=None):
     if _links is None:
         _links = set()
     try:
-        for entry in os.scandir(root_dir):
+        for entry in _dir_entries(root_dir, _memo):
             if entry.is_dir(follow_symlinks=True):
                 if entry.name.lower() in _SKIP_DIRS_LOWER:
                     continue
                 if _linked_dir(entry) and _link_loops(entry.path, root_dir, _links):
                     continue
-                yield from _walk_dir(entry.path, extensions, dirs_out, _links)
+                yield from _walk_dir(entry.path, extensions, dirs_out, _links,
+                                     _memo)
             elif entry.is_file(follow_symlinks=True):
                 matched = os.path.splitext(entry.name)[1].lower() in extensions
                 if dirs_out is not None:
@@ -318,6 +321,188 @@ _SCAN = {"root": "", "albums": None}
 _SCAN_LOCK = threading.Lock()
 
 
+# --------------------------------------------------------------------------- #
+# Chain-scoped read scope (walk memo + tag memo)
+# --------------------------------------------------------------------------- #
+# The album list above answers "WHERE are the albums" once per chain. The read
+# scope answers the two per-file questions a chain pays for a dozen times over,
+# over the SAME files:
+#
+#   * the WALK: every script that expands targets or looks for album folders
+#     scandir's the same directories again. The walk memo keeps each directory's
+#     entry list, and reuses it while the directory's own mtime_ns is unchanged
+#     — an added, removed or renamed file bumps that mtime, so a sidecar the
+#     chain just wrote (.accurip, .lrc) or a mover (11/14/20) invalidates
+#     exactly the folders it touched, and nothing stale is ever served.
+#   * the TAG READ: a container parse (mutagen reads the metadata blocks, and a
+#     FLAC's pictures with them) is what "read this track" costs. The tag memo
+#     keeps the parsed handle under a (mtime_ns, size) key, so the second
+#     script to look at an UNCHANGED file pays nothing — and any write (our own
+#     save, flac.exe, ffmpeg, beets) moves that key, so a stale handle can never
+#     be served (see mlo.audio.AudioFile).
+#
+# Both live exactly as long as the scope: armed once per chain (see
+# _chain_scan in server/script_runners.py), dropped wholesale when a script
+# moved something (run_scope_drop), and freed at the scope's end
+# (run_scope_end) — nothing survives the chain that armed it. Outside a scope
+# both are inert: `_walk_memo` returns None (a plain scandir per directory,
+# exactly as before) and the tag cache answers nothing.
+_RUN_SCOPE = {"active": False}
+_WALK_MEMO = {}                       # (rootkey, exts) -> {dir: (mtime, entries)}
+_TAG_MEMO = OrderedDict()             # pathkey -> ((mtime_ns, size), {key: value})
+# The tag memo holds parsed containers, so its cap is what bounds the run's
+# memory. honey: cap ~4096 entries (parsed containers, pictures included);
+# revisit if a run ever legitimately holds more, or if a big library's chain
+# shows the ceiling in RSS.
+_TAG_MEMO_MAX = 4096
+_MEMO_LOCK = threading.Lock()
+
+
+def run_scope_start():
+    """Arm the run's read scope: walks and container parses may be reused."""
+    with _MEMO_LOCK:
+        _RUN_SCOPE["active"] = True
+        _WALK_MEMO.clear()
+        _TAG_MEMO.clear()
+
+
+def run_scope_drop():
+    """Forget the run's walk listings: something moved on disk.
+
+    The scope STAYS active — the tag memo is stat-keyed and self-invalidating,
+    but a walk listing answers "what is in this folder" and a move renames it
+    without necessarily changing a directory the run will ask about next, so
+    the whole walk memo goes.
+    """
+    with _MEMO_LOCK:
+        _WALK_MEMO.clear()
+
+
+def run_scope_end():
+    """End the read scope: no walk listing or parsed container outlives it."""
+    with _MEMO_LOCK:
+        _RUN_SCOPE["active"] = False
+        _WALK_MEMO.clear()
+        _TAG_MEMO.clear()
+
+
+def _walk_memo(root_dir, extensions):
+    """The memo bucket for one (root, exts) walk, or None outside a scope.
+
+    Keyed by the NORMCASED root and the extension set, so two callers asking
+    about different folders (or different file kinds) never share a listing.
+    """
+    if not _RUN_SCOPE["active"]:
+        return None
+    try:
+        key = (os.path.normcase(os.path.abspath(str(root_dir))),
+               frozenset(extensions))
+    except Exception:
+        return None
+    with _MEMO_LOCK:
+        if not _RUN_SCOPE["active"]:
+            return None
+        bucket = _WALK_MEMO.get(key)
+        if bucket is None:
+            bucket = {}
+            _WALK_MEMO[key] = bucket
+            # A run walks a handful of roots (targets, plus the music folder):
+            # a bucket nobody is asking about any more is dead weight, and the
+            # whole memo is dropped when the chain ends anyway. honey: 8
+            # (root, exts) buckets per run; revisit if a chain ever walks more
+            # distinct roots than that and shows the re-scans in its timings.
+            while len(_WALK_MEMO) > 8:
+                _WALK_MEMO.pop(next(iter(_WALK_MEMO)))
+        return bucket
+
+
+def _dir_entries(path, memo):
+    """One directory's entries: the memo's list when it is still current.
+
+    "Still current" is the directory's own st_mtime_ns — creating, deleting or
+    renaming an entry inside a folder ticks it on every filesystem this app
+    runs on, while editing a file's CONTENTS does not (and must not: the entry
+    list is names and kinds, which a content edit never changes).
+    """
+    if memo is None:
+        return os.scandir(path)
+    try:
+        stamp = os.stat(path).st_mtime_ns
+    except OSError:
+        memo.pop(path, None)
+        raise
+    hit = memo.get(path)
+    if hit is not None and hit[0] == stamp:
+        return hit[1]
+    entries = list(os.scandir(path))
+    memo[path] = (stamp, entries)
+    return entries
+
+
+def _tag_key(path):
+    """The stat key a tag memo entry is valid under, or None when unreadable."""
+    try:
+        st = os.stat(path)
+        return (os.path.normcase(os.path.abspath(str(path))),
+                st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
+
+
+def tag_cache_get(path, key):
+    """The memoized *key* for *path*, or None.
+
+    None means "read it yourself": no scope is armed, the path is unreadable,
+    or what is on disk is not what the entry was stored for (a write by any
+    writer — ours, flac.exe, ffmpeg, beets — moved the (mtime_ns, size) key).
+    """
+    if not _RUN_SCOPE["active"]:
+        return None
+    stat_key = _tag_key(path)
+    if stat_key is None:
+        return None
+    with _MEMO_LOCK:
+        hit = _TAG_MEMO.get(stat_key[0])
+        if hit is None or hit[0] != stat_key[1:]:
+            return None
+        _TAG_MEMO.move_to_end(stat_key[0])
+        return hit[1].get(key)
+
+
+def tag_cache_put(path, key, value):
+    """Memoize *value* for *path* under its CURRENT stat key.
+
+    A no-op outside a scope, so nothing an isolated caller parses is retained.
+    Returns whether the value was kept — a caller that hands its own handle to
+    the memo must treat itself as a borrower too (see AudioFile._from_memo).
+    """
+    if not _RUN_SCOPE["active"]:
+        return False
+    stat_key = _tag_key(path)
+    if stat_key is None:
+        return False
+    with _MEMO_LOCK:
+        hit = _TAG_MEMO.get(stat_key[0])
+        if hit is None or hit[0] != stat_key[1:]:
+            hit = (stat_key[1:], {})
+            _TAG_MEMO[stat_key[0]] = hit
+        hit[1][key] = value
+        _TAG_MEMO.move_to_end(stat_key[0])
+        while len(_TAG_MEMO) > _TAG_MEMO_MAX:
+            _TAG_MEMO.popitem(last=False)
+    return True
+
+
+def tag_cache_drop(path):
+    """Forget every memoized value for *path* (a write, a rename, a move)."""
+    try:
+        pathkey = os.path.normcase(os.path.abspath(str(path)))
+    except Exception:
+        return
+    with _MEMO_LOCK:
+        _TAG_MEMO.pop(pathkey, None)
+
+
 def _scan_root_key(root_dir):
     """The comparison key for *root_dir* ("" when it is not a usable path)."""
     try:
@@ -352,8 +537,11 @@ def chain_scan_start(root_dir):
 
     Returns the list (empty for a root that does not exist — the same answer a
     walk would give). Every `_find_albums` inside the scope is then answered
-    from it until the scope is dropped or ended.
+    from it until the scope is dropped or ended. The chain's read scope (the
+    walk memo and the tag memo, see the section above) is armed here too — a
+    chain is what it belongs to, whether or not it also resolves the album list.
     """
+    run_scope_start()
     with _SCAN_LOCK:
         _SCAN["root"], _SCAN["albums"] = _scan_root_key(root_dir), None
     if not os.path.isdir(str(root_dir or "")):
@@ -368,17 +556,21 @@ def chain_scan_drop():
     """Forget the chain's album list: a script moved an album (or failed).
 
     The scope STAYS active — the next walker resolves the library again and the
-    scripts after it share that fresh answer.
+    scripts after it share that fresh answer. The walk memo goes too (a mover
+    changed folders the album list cannot see).
     """
     with _SCAN_LOCK:
         if _SCAN["root"]:
             _SCAN["albums"] = None
+    run_scope_drop()
 
 
 def chain_scan_end():
-    """End the scope: walkers discover the library for themselves again."""
+    """End the scope: walkers discover the library for themselves again, and
+    nothing the run parsed or listed outlives it."""
     with _SCAN_LOCK:
         _SCAN["root"], _SCAN["albums"] = "", None
+    run_scope_end()
 
 
 def _find_albums(root_dir, dirs_out=None):

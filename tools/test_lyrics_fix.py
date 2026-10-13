@@ -347,4 +347,100 @@ try:
 finally:
     shutil.rmtree(tmp_z, ignore_errors=True)
 
+# ---------------------------------------------------------------------------
+# SOURCE is the OWNER'S tag: script 1's MEDIA/SOURCE pass removes it only from
+# a CD, and only while `strip_source_on_cd` (OFF by default) asks for it —
+# every other medium keeps it ALWAYS (this branch used to delete it with no
+# switch, which is how a hand-imported vinyl rip lost the store the user had
+# recorded). The digital path is untouched by the switch: an empty SOURCE is
+# still filled when `fill_empty_source` asks, exactly as before.
+# ---------------------------------------------------------------------------
+from mlo.lyrics import _normalize_album_media_source  # noqa: E402
+from mlo.paths import DEFAULT_DIGITAL_SOURCE  # noqa: E402
+
+
+def _ms_album(root, name, media, source=None):
+    """A one-track album whose file carries *media* (and *source* when given)."""
+    album = os.path.join(root, name)
+    os.makedirs(album, exist_ok=True)
+    track = os.path.join(album, "01 - Track.flac")
+    _make_flac(track)
+    af = AudioFile(track)
+    af.set_tag("TITLE", "Track")
+    af.set_tag("MEDIA", media)
+    if source is not None:
+        af.set_tag("SOURCE", source)
+    return album, track
+
+
+def _ms_source(track):
+    """The SOURCE tag on disk, "" when the file carries none."""
+    return str(AudioFile(track).get_tag("SOURCE") or "").strip()
+
+
+def _ms_run(album, cfg, default=DEFAULT_DIGITAL_SOURCE):
+    """The pass's (status, note) for one album."""
+    res = _normalize_album_media_source((album, default, cfg))
+    return res[1], res[4]
+
+
+tmp_ms = tempfile.mkdtemp(prefix="mlo_media_source_")
+try:
+    off = dict(DEFAULT_CONFIG, music_folder="")
+    on = dict(off, strip_source_on_cd=True)
+    assert DEFAULT_CONFIG["strip_source_on_cd"] is False, \
+        "the shipped default keeps the switch off"
+
+    # (a) A CD whose files carry SOURCE: kept under the default config ...
+    cd_album, cd_track = _ms_album(tmp_ms, "CD Album", "CD", "Store X")
+    assert _ms_source(cd_track) == "Store X", _ms_source(cd_track)
+    status, note = _ms_run(cd_album, off)
+    assert status == "unchanged" and _ms_source(cd_track) == "Store X", \
+        f"the default keeps a CD's SOURCE ({status}: {note}, " \
+        f"SOURCE={_ms_source(cd_track)!r})"
+
+    # ... and loses it with strip_source_on_cd: True (HDCD is the same disc,
+    # mlo.tagtext.is_cd_media — the switch reaches it too).
+    hdcd_album, hdcd_track = _ms_album(tmp_ms, "HDCD Album", "HDCD", "Store X")
+    for album, track in ((cd_album, cd_track), (hdcd_album, hdcd_track)):
+        status, note = _ms_run(album, on)
+        assert status == "modified" and _ms_source(track) == "", \
+            f"strip_source_on_cd=True removes a CD's SOURCE " \
+            f"({status}: {note}, SOURCE={_ms_source(track)!r})"
+        status, note = _ms_run(album, on)
+        assert status == "unchanged", \
+            f"the strip is idempotent ({status}: {note})"
+
+    # (b) Every other medium — Vinyl, Cassette — keeps SOURCE ALWAYS.
+    for medium in ("Vinyl", "Cassette"):
+        album, track = _ms_album(tmp_ms, f"{medium} Album", medium, "Bandcamp")
+        for label, cfg in (("default", off), ("switch on", on)):
+            status, note = _ms_run(album, cfg)
+            assert status == "unchanged" and _ms_source(track) == "Bandcamp", \
+                f"a {medium} album keeps its SOURCE ({label}: {status}, " \
+                f"SOURCE={_ms_source(track)!r})"
+
+    # (e) The digital path is unchanged by the switch: an empty SOURCE is
+    # still filled when the owner asked for it (fill_empty_source) ...
+    dig_album, dig_track = _ms_album(tmp_ms, "Digital Album", "Digital Media")
+    status, note = _ms_run(dig_album, dict(on, fill_empty_source=True), "Web")
+    assert status == "modified" and _ms_source(dig_track) == "Web", \
+        f"the digital path fills an empty SOURCE ({status}: {note}, " \
+        f"SOURCE={_ms_source(dig_track)!r})"
+    # ... and stays empty under the shipped default (fill off) ...
+    dig2_album, dig2_track = _ms_album(tmp_ms, "Digital Album 2", "Digital Media")
+    status, note = _ms_run(dig2_album, off)
+    assert status == "unchanged" and _ms_source(dig2_track) == "", \
+        f"with fill_empty_source off an empty SOURCE stays empty " \
+        f"({status}: {note}, SOURCE={_ms_source(dig2_track)!r})"
+    # ... while a value already there is never overwritten by the fill.
+    dig3_album, dig3_track = _ms_album(tmp_ms, "Digital Album 3", "Digital Media",
+                                       "My Rip")
+    status, note = _ms_run(dig3_album, dict(on, fill_empty_source=True), "Web")
+    assert _ms_source(dig3_track) == "My Rip", \
+        f"the fill never overwrites the owner's SOURCE " \
+        f"({status}: {note}, SOURCE={_ms_source(dig3_track)!r})"
+finally:
+    shutil.rmtree(tmp_ms, ignore_errors=True)
+
 print("ALL LYRICS TESTS PASSED")

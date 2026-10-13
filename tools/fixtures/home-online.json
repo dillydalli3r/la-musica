@@ -1,0 +1,699 @@
+{
+ "note": "Stub payloads for tools/check_home_online.mjs: the /api/home answer (built from tools/fixtures/library-az.json's own first artist), the /api/config gate, and one answer per online shelf (charts?kind=tracks&source=itunes, charts?kind=albums&source=deezer, recommended?seed=library&kind=albums).",
+ "home": {
+  "stats": {
+   "artists": 1,
+   "albums": 1,
+   "tracks": 3,
+   "playlists": 0,
+   "grade_pct": null
+  },
+  "recent": [
+   {
+    "path": "F:/tmp/mlo-lib-az/Artist Alpha/2020 - First Album",
+    "album_artist": "Artist Alpha",
+    "audit_summary": "REAL",
+    "media": "Digital Media",
+    "source_summary": "Digital",
+    "track_count": 3,
+    "partial": false,
+    "partial_reason": null,
+    "expected_total": null,
+    "expected_present": null,
+    "pass_count": 61,
+    "total_checks": 106,
+    "cover_file": "cover.jpg",
+    "cover_detail": "cover.jpg (100x100, below the 1200px target (never upscaled))",
+    "cover_ok": false,
+    "has_log": true,
+    "has_cue": true,
+    "checksum_status": "NONE",
+    "accuraterip_status": "NONE",
+    "lyrics_present": 1,
+    "lyrics_expected": 1,
+    "instrumental_count": 0,
+    "tracks": [
+     {
+      "file": "01 - Intro.flac",
+      "issues": [
+       "MOOD_MISSING",
+       "ENERGY_MISSING",
+       "INITIALKEY",
+       "BPM",
+       "PATH",
+       "ENCODER_QUALITY",
+       "ENCODER_VERSION",
+       "AUDIT",
+       "MB_LINK",
+       "RYM_LINK",
+       "LYRICS",
+       "ALBUMITUNESADVISORY",
+       "ALBUM DYNAMIC RANGE",
+       "COVER"
+      ],
+      "values": {
+       "TITLE": "01 - Intro",
+       "ARTIST": "Artist Alpha",
+       "ALBUM": "First Album",
+       "ALBUMARTIST": "Artist Alpha",
+       "DATE": "2020",
+       "TRACKNUMBER": "01",
+       "DISCNUMBER": null,
+       "GENRE": "Rock",
+       "MOOD": null,
+       "ENERGY": null,
+       "ITUNESADVISORY": "0",
+       "REPLAYGAIN_TRACK_GAIN": "-3.00 dB",
+       "REPLAYGAIN_TRACK_PEAK": "0.5",
+       "REPLAYGAIN_ALBUM_GAIN": "-3.00 dB",
+       "REPLAYGAIN_ALBUM_PEAK": "0.5",
+       "DYNAMIC RANGE": "8",
+       "INSTRUMENTAL": "0",
+       "INITIALKEY": null,
+       "BPM": null,
+       "MEDIA": "Digital Media",
+       "SOURCE": "Digital",
+       "AUDIOAUDITOR_OVERRIDE": null,
+       "ALBUMITUNESADVISORY": "0",
+       "ALBUM DYNAMIC RANGE": "8"
+      },
+      "lyrics_embedded": true,
+      "lyrics_lrc": false,
+      "lyrics_kind": "synced",
+      "unreadable": false,
+      "audit": null,
+      "log_grade": null,
+      "sidecar_cover": null,
+      "sidecar_cover_file": null,
+      "checksum_status": "NONE",
+      "accuraterip_status": "NONE",
+      "path": "F:/tmp/mlo-lib-az/Artist Alpha/2020 - First Album/01 - Intro.flac",
+      "tags": {
+       "TITLE": "01 - Intro",
+       "ARTIST": "Artist Alpha",
+       "ALBUMARTIST": "Artist Alpha",
+       "ALBUM": "First Album",
+       "DATE": "2020",
+       "GENRE": "Rock",
+       "ITUNESADVISORY": "0",
+       "INSTRUMENTAL": "0",
+       "MEDIA": "Digital Media",
+       "SOURCE": "Digital",
+       "TRACKNUMBER": "01",
+       "DISCNUMBER": null,
+       "MUSICBRAINZ_ALBUMID": null,
+       "MUSICBRAINZ_ALBUMARTISTID": null,
+       "MUSICBRAINZ_ARTISTID": null,
+       "MUSICBRAINZ_TRACKID": null,
+       "MUSICBRAINZ_RELEASEGROUPID": null,
+       "MUSICBRAINZ_RELEASETRACKID": null,
+       "MUSICBRAINZ_WORKID": null,
+       "RATEYOURMUSIC_ALBUM": null,
+       "RATEYOURMUSIC_TRACK": null,
+       "RATEYOURMUSIC_ARTIST": null,
+       "ALBUMARTISTSORT": null,
+       "ORIGINALDATE": null,
+       "RELEASETYPE": null,
+       "RELEASESTATUS": null,
+       "RELEASECOUNTRY": null,
+       "CATALOGNUMBER": null,
+       "LABEL": null,
+       "BARCODE": null,
+       "SCRIPT": null,
+       "PODCASTSERIES": null,
+       "PODCASTSERIESMBID": null,
+       "PODCASTEPISODE": null,
+       "TRACKTOTAL": null,
+       "DISCTOTAL": null,
+       "COMPOSER": null,
+       "COPYRIGHT": null,
+       "ISRC": null,
+       "LYRICIST": null,
+       "REMIXER": null,
+       "DYNAMIC RANGE": "8",
+       "MOOD": null,
+       "ENERGY": null,
+       "RATING": null,
+       "BPM": null,
+       "INITIALKEY": null,
+       "ALBUM DYNAMIC RANGE": "8"
+      },
+      "tech": {
+       "length": 2.0,
+       "bitrate": 104068.0,
+       "sample_rate": 44100.0,
+       "bits_per_sample": 16.0,
+       "channels": 2.0,
+       "codec": "FLAC"
+      },
+      "cover_file": null,
+      "discnumber": null,
+      "tracknumber": 1,
+      "is_video": false,
+      "grade_pass": false,
+      "lyrics_present": true
+     },
+     {
+      "file": "02 - Second.flac",
+      "issues": [
+       "GENRE_MISSING",
+       "MOOD_MISSING",
+       "ENERGY_MISSING",
+       "DYNAMIC RANGE",
+       "INSTRUMENTAL",
+       "INITIALKEY",
+       "BPM",
+       "PATH",
+       "ENCODER_QUALITY",
+       "ENCODER_VERSION",
+       "AUDIT",
+       "MB_LINK",
+       "RYM_LINK",
+       "SOURCE",
+       "ALBUMITUNESADVISORY",
+       "ALBUM DYNAMIC RANGE",
+       "COVER"
+      ],
+      "values": {
+       "TITLE": "02 - Second",
+       "ARTIST": "Artist Alpha",
+       "ALBUM": "First Album",
+       "ALBUMARTIST": "Artist Alpha",
+       "DATE": "2020",
+       "TRACKNUMBER": "02",
+       "DISCNUMBER": null,
+       "GENRE": null,
+       "MOOD": null,
+       "ENERGY": null,
+       "ITUNESADVISORY": null,
+       "REPLAYGAIN_TRACK_GAIN": null,
+       "REPLAYGAIN_TRACK_PEAK": null,
+       "REPLAYGAIN_ALBUM_GAIN": null,
+       "REPLAYGAIN_ALBUM_PEAK": null,
+       "DYNAMIC RANGE": null,
+       "INSTRUMENTAL": null,
+       "INITIALKEY": null,
+       "BPM": null,
+       "MEDIA": null,
+       "SOURCE": null,
+       "AUDIOAUDITOR_OVERRIDE": null,
+       "ALBUMITUNESADVISORY": "0",
+       "ALBUM DYNAMIC RANGE": "8"
+      },
+      "lyrics_embedded": false,
+      "lyrics_lrc": false,
+      "lyrics_kind": null,
+      "unreadable": false,
+      "audit": null,
+      "log_grade": null,
+      "sidecar_cover": null,
+      "sidecar_cover_file": null,
+      "checksum_status": "NONE",
+      "accuraterip_status": "NONE",
+      "path": "F:/tmp/mlo-lib-az/Artist Alpha/2020 - First Album/02 - Second.flac",
+      "tags": {
+       "TITLE": "02 - Second",
+       "ARTIST": "Artist Alpha",
+       "ALBUMARTIST": "Artist Alpha",
+       "ALBUM": "First Album",
+       "DATE": "2020",
+       "GENRE": null,
+       "ITUNESADVISORY": null,
+       "INSTRUMENTAL": null,
+       "MEDIA": null,
+       "SOURCE": null,
+       "TRACKNUMBER": "02",
+       "DISCNUMBER": null,
+       "MUSICBRAINZ_ALBUMID": null,
+       "MUSICBRAINZ_ALBUMARTISTID": null,
+       "MUSICBRAINZ_ARTISTID": null,
+       "MUSICBRAINZ_TRACKID": null,
+       "MUSICBRAINZ_RELEASEGROUPID": null,
+       "MUSICBRAINZ_RELEASETRACKID": null,
+       "MUSICBRAINZ_WORKID": null,
+       "RATEYOURMUSIC_ALBUM": null,
+       "RATEYOURMUSIC_TRACK": null,
+       "RATEYOURMUSIC_ARTIST": null,
+       "ALBUMARTISTSORT": null,
+       "ORIGINALDATE": null,
+       "RELEASETYPE": null,
+       "RELEASESTATUS": null,
+       "RELEASECOUNTRY": null,
+       "CATALOGNUMBER": null,
+       "LABEL": null,
+       "BARCODE": null,
+       "SCRIPT": null,
+       "PODCASTSERIES": null,
+       "PODCASTSERIESMBID": null,
+       "PODCASTEPISODE": null,
+       "TRACKTOTAL": null,
+       "DISCTOTAL": null,
+       "COMPOSER": null,
+       "COPYRIGHT": null,
+       "ISRC": null,
+       "LYRICIST": null,
+       "REMIXER": null,
+       "DYNAMIC RANGE": null,
+       "MOOD": null,
+       "ENERGY": null,
+       "RATING": null,
+       "BPM": null,
+       "INITIALKEY": null,
+       "ALBUM DYNAMIC RANGE": null
+      },
+      "tech": {
+       "length": 2.0,
+       "bitrate": 104068.0,
+       "sample_rate": 44100.0,
+       "bits_per_sample": 16.0,
+       "channels": 2.0,
+       "codec": "FLAC"
+      },
+      "cover_file": null,
+      "discnumber": null,
+      "tracknumber": 2,
+      "is_video": false,
+      "grade_pass": false,
+      "lyrics_present": false
+     },
+     {
+      "file": "03 - Bonus.mp3",
+      "issues": [
+       "GENRE_MISSING",
+       "MOOD_MISSING",
+       "ENERGY_MISSING",
+       "DYNAMIC RANGE",
+       "INSTRUMENTAL",
+       "INITIALKEY",
+       "BPM",
+       "PATH",
+       "AUDIT",
+       "MB_LINK",
+       "RYM_LINK",
+       "SOURCE",
+       "ALBUMITUNESADVISORY",
+       "ALBUM DYNAMIC RANGE",
+       "COVER"
+      ],
+      "values": {
+       "TITLE": "03 - Bonus",
+       "ARTIST": "Artist Alpha",
+       "ALBUM": "First Album",
+       "ALBUMARTIST": "Artist Alpha",
+       "DATE": "2020",
+       "TRACKNUMBER": "03",
+       "DISCNUMBER": null,
+       "GENRE": null,
+       "MOOD": null,
+       "ENERGY": null,
+       "ITUNESADVISORY": null,
+       "REPLAYGAIN_TRACK_GAIN": null,
+       "REPLAYGAIN_TRACK_PEAK": null,
+       "REPLAYGAIN_ALBUM_GAIN": null,
+       "REPLAYGAIN_ALBUM_PEAK": null,
+       "DYNAMIC RANGE": null,
+       "INSTRUMENTAL": null,
+       "INITIALKEY": null,
+       "BPM": null,
+       "MEDIA": null,
+       "SOURCE": null,
+       "AUDIOAUDITOR_OVERRIDE": null,
+       "ALBUMITUNESADVISORY": "0",
+       "ALBUM DYNAMIC RANGE": "8"
+      },
+      "lyrics_embedded": false,
+      "lyrics_lrc": false,
+      "lyrics_kind": null,
+      "unreadable": false,
+      "audit": null,
+      "log_grade": null,
+      "sidecar_cover": null,
+      "sidecar_cover_file": null,
+      "checksum_status": "NONE",
+      "accuraterip_status": "NONE",
+      "path": "F:/tmp/mlo-lib-az/Artist Alpha/2020 - First Album/03 - Bonus.mp3",
+      "tags": {
+       "TITLE": "03 - Bonus",
+       "ARTIST": "Artist Alpha",
+       "ALBUMARTIST": "Artist Alpha",
+       "ALBUM": "First Album",
+       "DATE": "2020",
+       "GENRE": null,
+       "ITUNESADVISORY": null,
+       "INSTRUMENTAL": null,
+       "MEDIA": null,
+       "SOURCE": null,
+       "TRACKNUMBER": "03",
+       "DISCNUMBER": null,
+       "MUSICBRAINZ_ALBUMID": null,
+       "MUSICBRAINZ_ALBUMARTISTID": null,
+       "MUSICBRAINZ_ARTISTID": null,
+       "MUSICBRAINZ_TRACKID": null,
+       "MUSICBRAINZ_RELEASEGROUPID": null,
+       "MUSICBRAINZ_RELEASETRACKID": null,
+       "MUSICBRAINZ_WORKID": null,
+       "RATEYOURMUSIC_ALBUM": null,
+       "RATEYOURMUSIC_TRACK": null,
+       "RATEYOURMUSIC_ARTIST": null,
+       "ALBUMARTISTSORT": null,
+       "ORIGINALDATE": null,
+       "RELEASETYPE": null,
+       "RELEASESTATUS": null,
+       "RELEASECOUNTRY": null,
+       "CATALOGNUMBER": null,
+       "LABEL": null,
+       "BARCODE": null,
+       "SCRIPT": null,
+       "PODCASTSERIES": null,
+       "PODCASTSERIESMBID": null,
+       "PODCASTEPISODE": null,
+       "TRACKTOTAL": null,
+       "DISCTOTAL": null,
+       "COMPOSER": null,
+       "COPYRIGHT": null,
+       "ISRC": null,
+       "LYRICIST": null,
+       "REMIXER": null,
+       "DYNAMIC RANGE": null,
+       "MOOD": null,
+       "ENERGY": null,
+       "RATING": null,
+       "BPM": null,
+       "INITIALKEY": null,
+       "ALBUM DYNAMIC RANGE": null
+      },
+      "tech": {
+       "length": 1.014,
+       "bitrate": 32000.0,
+       "sample_rate": 44100.0,
+       "channels": 2.0,
+       "codec": "MP3"
+      },
+      "cover_file": null,
+      "discnumber": null,
+      "tracknumber": 3,
+      "is_video": false,
+      "grade_pass": false,
+      "lyrics_present": false
+     }
+    ],
+    "sidecars": [],
+    "album_values": {
+     "ALBUMITUNESADVISORY": "0",
+     "ALBUM DYNAMIC RANGE": "8"
+    },
+    "issues": {
+     "Missing MOOD": [
+      "01 - Intro.flac",
+      "02 - Second.flac",
+      "03 - Bonus.mp3"
+     ],
+     "Missing ENERGY": [
+      "01 - Intro.flac",
+      "02 - Second.flac",
+      "03 - Bonus.mp3"
+     ],
+     "Missing INITIALKEY": [
+      "01 - Intro.flac",
+      "02 - Second.flac",
+      "03 - Bonus.mp3"
+     ],
+     "Missing BPM": [
+      "01 - Intro.flac",
+      "02 - Second.flac",
+      "03 - Bonus.mp3"
+     ],
+     "Missing RELEASETYPE tag (the naming script writes it into the path)": [
+      "01 - Intro.flac"
+     ],
+     "PATH: expected 'Artist Alpha/[?] 2020 - First Album {Digital Media}/1-01 01 - Intro.flac' (run organize)": [
+      "01 - Intro.flac"
+     ],
+     "Missing ENCODER_QUALITY (re-optimize)": [
+      "01 - Intro.flac",
+      "02 - Second.flac"
+     ],
+     "Missing ENCODER_VERSION (re-optimize)": [
+      "01 - Intro.flac",
+      "02 - Second.flac"
+     ],
+     "Missing AUDIT tag (run Audit Library)": [
+      "01 - Intro.flac",
+      "02 - Second.flac",
+      "03 - Bonus.mp3"
+     ],
+     "Missing MusicBrainz release link (import from MusicBrainz)": [
+      "01 - Intro.flac",
+      "02 - Second.flac",
+      "03 - Bonus.mp3"
+     ],
+     "Missing RateYourMusic release link": [
+      "01 - Intro.flac",
+      "02 - Second.flac",
+      "03 - Bonus.mp3"
+     ],
+     "Lyrics not optimally formatted (run Lyrics script)": [
+      "01 - Intro.flac"
+     ],
+     "Missing GENRE": [
+      "02 - Second.flac",
+      "03 - Bonus.mp3"
+     ],
+     "Missing DYNAMIC RANGE": [
+      "02 - Second.flac",
+      "03 - Bonus.mp3"
+     ],
+     "Missing INSTRUMENTAL": [
+      "02 - Second.flac",
+      "03 - Bonus.mp3"
+     ],
+     "PATH: expected 'Artist Alpha/[?] 2020 - First Album/1-02 02 - Second.flac' (run organize)": [
+      "02 - Second.flac"
+     ],
+     "PATH: expected 'Artist Alpha/[?] 2020 - First Album/1-03 03 - Bonus.mp3' (run organize)": [
+      "03 - Bonus.mp3"
+     ],
+     "Missing SOURCE (required for Digital Media)": [
+      "02 - Second.flac",
+      "03 - Bonus.mp3"
+     ],
+     "Album tag ALBUMITUNESADVISORY missing on some tracks": [
+      "album-wide"
+     ],
+     "Album tag ALBUM DYNAMIC RANGE missing on some tracks": [
+      "album-wide"
+     ],
+     "Cover missing ENCODER_QUALITY (re-optimize)": [
+      "album"
+     ],
+     "Cover missing ENCODER_VERSION (re-optimize)": [
+      "album"
+     ],
+     "CUE sheet not optimally formatted (run CUE Sheets script)": [
+      "album"
+     ],
+     "CUE references a file the album does not have (2020 - First Album.cue: 01 - Side A.flac) \u2014 run CUE Sheets": [
+      "album"
+     ],
+     "Album description missing \u2014 fetch one on the album page": [
+      "album"
+     ]
+    },
+    "notes": [],
+    "meta": {
+     "ALBUM": "First Album",
+     "ALBUMARTIST": "Artist Alpha",
+     "ARTIST": "Artist Alpha",
+     "DATE": "2020",
+     "ORIGINALDATE": null,
+     "ORIGINALYEAR": null,
+     "ITUNESADVISORY": "0",
+     "ALBUMITUNESADVISORY": null,
+     "MUSICBRAINZ_ALBUMID": null,
+     "MUSICBRAINZ_ALBUMARTISTID": null,
+     "MUSICBRAINZ_RELEASEGROUPID": null,
+     "RATEYOURMUSIC_ALBUM": null,
+     "MEDIA": "Digital Media",
+     "CATALOGNUMBER": null,
+     "LABEL": null,
+     "BARCODE": null,
+     "RELEASETYPE": null,
+     "RELEASESTATUS": null,
+     "RELEASECOUNTRY": null,
+     "SCRIPT": null,
+     "PODCASTSERIES": null,
+     "PODCASTSERIESMBID": null,
+     "PODCASTEPISODE": null,
+     "ALBUM DYNAMIC RANGE": "8"
+    },
+    "podcast": null,
+    "expected_tracks": [],
+    "pending": false,
+    "artwork": {
+     "description": false,
+     "description_text": null,
+     "description_source": null,
+     "description_url": null
+    },
+    "grade_pct": 57.5,
+    "pass": false,
+    "reason": "Recently added"
+   }
+  ],
+  "top_rated": [],
+  "rated": [],
+  "favorites": [],
+  "discover": [],
+  "podcasts": [],
+  "pending": [],
+  "needs_attention": [],
+  "top_artists": [],
+  "grade_warning": null
+ },
+ "config": {
+  "discovery_enabled": true,
+  "music_folder": "F:/tmp/mlo-lib-az",
+  "ui_locale": "en"
+ },
+ "charts_trending": {
+  "period": "all",
+  "kind": "tracks",
+  "source": "itunes",
+  "limit": 12,
+  "items": [
+   {
+    "kind": "track",
+    "title": "Chart Song One",
+    "artist": "Chart Artist Alpha",
+    "year": "2026",
+    "source": "itunes",
+    "source_label": "Apple Music",
+    "cover_url": null,
+    "page_url": "https://music.apple.com/us/song/chart-song-one/1",
+    "mbid": null,
+    "release_group_mbid": null,
+    "path": null,
+    "owned": false,
+    "in_library": false,
+    "also_from": [],
+    "tracks": [],
+    "score": null,
+    "reason": "",
+    "rank": 1,
+    "score_label": null
+   },
+   {
+    "kind": "track",
+    "title": "Chart Song Two",
+    "artist": "Chart Artist Beta",
+    "year": "2026",
+    "source": "itunes",
+    "source_label": "Apple Music",
+    "cover_url": null,
+    "page_url": "https://music.apple.com/us/song/chart-song-two/2",
+    "mbid": null,
+    "release_group_mbid": null,
+    "path": null,
+    "owned": false,
+    "in_library": false,
+    "also_from": [],
+    "tracks": [],
+    "score": null,
+    "reason": "",
+    "rank": 2,
+    "score_label": null
+   }
+  ],
+  "sources_asked": [
+   "itunes"
+  ],
+  "notes": {},
+  "sources": [
+   {
+    "id": "itunes",
+    "label": "Apple Music",
+    "periods": [
+     "all"
+    ],
+    "supports_period": true,
+    "needs": [],
+    "missing": [],
+    "ready": true
+   }
+  ]
+ },
+ "charts_new": {
+  "period": "all",
+  "kind": "albums",
+  "source": "deezer",
+  "limit": 12,
+  "items": [
+   {
+    "kind": "album",
+    "title": "Fresh Album One",
+    "artist": "Fresh Artist",
+    "year": "2026",
+    "source": "deezer",
+    "source_label": "Deezer",
+    "cover_url": null,
+    "page_url": "https://www.deezer.com/album/1",
+    "mbid": null,
+    "release_group_mbid": null,
+    "path": null,
+    "owned": false,
+    "in_library": false,
+    "also_from": [],
+    "tracks": [],
+    "score": null,
+    "reason": "",
+    "rank": 1,
+    "score_label": "1M fans"
+   }
+  ],
+  "sources_asked": [
+   "deezer"
+  ],
+  "notes": {},
+  "sources": [
+   {
+    "id": "deezer",
+    "label": "Deezer",
+    "periods": [
+     "all"
+    ],
+    "supports_period": true,
+    "needs": [],
+    "missing": [],
+    "ready": true
+   }
+  ]
+ },
+ "recommended": {
+  "items": [
+   {
+    "kind": "album",
+    "title": "Suggested Album",
+    "artist": "Suggested Artist",
+    "year": "2025",
+    "source": "deezer",
+    "source_label": "Deezer",
+    "cover_url": null,
+    "page_url": "https://www.deezer.com/album/9",
+    "mbid": null,
+    "release_group_mbid": null,
+    "path": null,
+    "owned": false,
+    "in_library": false,
+    "also_from": [],
+    "tracks": [],
+    "score": null,
+    "reason": "genre: rock"
+   }
+  ],
+  "sources_asked": [
+   "deezer"
+  ],
+  "notes": {},
+  "basis": "Library genres: Rock \u00b7 Top artists: Artist Alpha"
+ }
+}

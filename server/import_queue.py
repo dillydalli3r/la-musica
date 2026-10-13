@@ -1,4 +1,4 @@
-"""Sequential "import everything that finished downloading" runner.
+"""Import everything that finished downloading, up to the process's budget.
 
 The Downloads / Soulseek pages can have several albums sitting in the download
 dir at once, each needing the SAME per-album treatment (convert lossless →
@@ -6,30 +6,36 @@ write MEDIA → stamp the MusicBrainz identity → organize → run the configur
 import chain). Importing them as one batch is what this deliberately is NOT:
 the chain of scripts is long, a failure in the middle of album 3 must not
 leave albums 4..N half-done, and the user asking for "import all" wants each
-album taken all the way through, one after another, exactly as if they had
-pressed Import on each row in turn.
+album taken all the way through, exactly as if they had pressed Import on each
+row in turn — just not one after another: this runner drives
+`import_bulk_concurrency` albums at once, on the SAME pool the wizard's bulk
+import uses (`server.imports._import_pool`), so the two add up to that one
+number and never to twice it. Each album is still taken all the way through,
+and a failure in album 3 still leaves 4..N untouched and reported.
 
-So: a small job object holding an ordered worklist, one worker thread, and a
-status dict the UI polls (or hears about through `server.events`). The runner
-owns *sequencing* only — what "import one album" means is `server.main`'s
+So: a small job object holding an ordered worklist, the process's own import
+pool, and a status dict the UI polls (or hears about through `server.events`).
+The runner owns *sequencing* only — what "import one album" means is `server.main`'s
 `_import_one_album`, injected through `set_importer()` at startup. That
 inversion keeps this module importable from the routes without importing
 `server.main` (which imports these).
 
-`honey: one job at a time, process-wide. Two concurrent "import all" runs
+`honey: one RUN at a time, process-wide. Two concurrent "import all" runs
 would race over the same folders — one clearing a pending marker the other is
-still working on — and the second call answers "already running" with the live
-status instead. That is a decision about SEQUENCING, not about the machine:
-this runner takes each album all the way through before it starts the next, so
-a failure in album 3 leaves 4..N untouched and reported. It costs nobody else
-anything: a script run serializes on its own TARGET paths
-(server.job_locks; see R94 in docs/OPTIMIZATION-GRADING-SPEC.md), so an
-import-all job neither blocks nor is blocked by someone working on a different
-album — it holds the album it is on while it works on it, which is the claim a
-delete, a move or a tag write is refused against.
+still working on — and a second `start()` is refused with the live status,
+never a second pass. That is a decision about SEQUENCING, not about the
+machine: ONE run imports up to `import_bulk_concurrency` albums at once (each
+all the way through), and what the budget does not admit waits its turn on
+the shared pool, so a failure in album 3 leaves the rest untouched and
+reported. It costs nobody else anything: a script run serializes on its own
+TARGET paths (server.job_locks; see R94 in
+docs/OPTIMIZATION-GRADING-SPEC.md), so an import-all job neither blocks nor is
+blocked by someone working on a different album — it holds each album it is
+working on while it works on it, which is the claim a delete, a move or a tag
+write is refused against.
 
 The run also registers itself in :mod:`server.job_locks`: one job for the whole
-run, holding the album it is on while it works on it, so a delete, a move or a
+run, holding each album it is on while it works on it, so a delete, a move or a
 tag write aimed at that album is refused (409) rather than racing the import —
 and MAINTAIN → In progress can show the run and its progress."""
 import os
@@ -88,8 +94,9 @@ def running():
 
 
 def cancel():
-    """Ask the runner to stop after the album it is on. Never kills the
-    import in progress: a half-imported album is worse than a slow one."""
+    """Ask the runner to stop after the albums it is on. Never kills the
+    import in progress: a half-imported album is worse than a slow one. The
+    albums the pool has not started yet are simply never started."""
     if not running():
         return False
     _stop.set()
@@ -97,8 +104,9 @@ def cancel():
 
 
 def start(paths=None, on_done=None):
-    """Import `paths` (default: everything ready in the download dir), one
-    album at a time, in the background. Returns the initial status.
+    """Import `paths` (default: everything ready in the download dir), up to
+    `import_bulk_concurrency` albums at a time, in the background. Returns the
+    initial status.
 
     `on_done(results)` runs once the run stops (finished, failed or
     cancelled) with the per-album results — how the wishes route learns that
@@ -178,8 +186,103 @@ def _run_note(entries):
     return note + (f"; {off} have no chain configured" if off else "")
 
 
+def _concurrency():
+    """How many albums ONE run imports at once — the process's own budget.
+
+    ``import_bulk_concurrency`` is the number of albums in flight for the
+    WHOLE process (`mlo/config.py`), the number the wizard's bulk import runs
+    at — so this runner borrows the SAME pool (`server.imports._import_pool`)
+    instead of opening a second budget beside it: a downloads run and a bulk
+    run add up to that one number, never to twice it. A config that cannot be
+    read means a serial run (1), the safe reading of a broken one."""
+    try:
+        from mlo import config as mlo_config
+        cfg = mlo_config.load_config()
+    except Exception:
+        return 1
+    # The bulk path's own clamp, so both read the setting exactly the same way.
+    return imports._bulk_concurrency(cfg)
+
+
+def _import_album(total, path, job):
+    """Import ONE album, on whichever pool lane runs this. Returns
+    ``(entry, job_error)``: ``entry`` is ``None`` when the run was cancelled
+    before this album started, and ``job_error`` is the line the run keeps in
+    ``_job["errors"]`` (``None`` when the album was fine) — the same string
+    the serial runner built.
+
+    The album is held on its OWN path for the whole import, under the RUN's
+    job, so the rest of the library stays editable in between and a delete, a
+    move or a tag write aimed at this album is refused while it is imported."""
+    from server import job_locks
+    if _stop.is_set():
+        return None, None
+    name = os.path.basename(path.rstrip("\\/")) or path
+    with _lock:
+        _job["current"] = path
+        started = _job["done"]       # albums already finished when this began
+    # Take part in the run's job on THIS thread, and make the hold below a
+    # NESTED one so it does not END the job: the run's job is closed once, by
+    # `_run`'s outermost block, after every album is back (see
+    # server.job_locks.holding's `nested`, and `_push` in `in_background` —
+    # a pool lane starts with an empty context of its own).
+    job_locks._push(job)
+    try:
+        job_locks.publish(started, total, f"importing {name}", job=job)
+        try:
+            with job_locks.holding([path], job, wait=True):
+                res = _importer(path) or {}
+            chain = _chain_of(res)
+            ok = not res.get("errors")
+            error = "; ".join(str(x) for x in (res.get("errors") or []))
+            if ok and chain and not chain.get("scripts") \
+                    and not chain.get("chain_off") \
+                    and not res.get("chain_started"):
+                # The album landed but its configured chain never ran (the
+                # library lock timed out, a crash): the same rule the bulk
+                # queue applies — "imported" is only honest when the chain
+                # ran, or when this library configures none.
+                ok = False
+                error = ("imported, but the script chain did not run: "
+                         + (imports.chain_summary(chain) or "no reason reported"))
+        except Exception as e:
+            traceback.print_exc()
+            res = {"path": path, "errors": [str(e)]}
+            chain = {}
+            ok = False
+            error = str(e)
+    finally:
+        job_locks._pop(job)
+    entry = {
+        "path": path,
+        "ok": bool(ok),
+        "album_root": res.get("album_root") or path,
+        "error": error,
+        # What the chain did with this album, on the row: which scripts
+        # ran, what failed, or that there was nothing to run. The queue
+        # view reads these; so does anything reporting the run.
+        "chained": bool(chain.get("chained")),
+        "chain_off": bool(chain.get("chain_off")),
+        "chain": list(chain.get("chain") or []),
+        "scripts": [{"id": s.get("id"), "label": s.get("label"),
+                     "error": str(s.get("error") or "")}
+                    for s in (chain.get("scripts") or [])
+                    if isinstance(s, dict)],
+        "note": imports.chain_summary(chain) if chain else (
+            "the script chain is running in the background"
+            if res.get("chain_started") else ""),
+    }
+    job_error = None if ok else (
+        f"{path}: {'; '.join(str(x) for x in (res.get('errors') or []))}")
+    return entry, job_error
+
+
 def _run(work, on_done=None):
-    """The worker: one album fully through the import, then the next."""
+    """The worker: up to ``import_bulk_concurrency`` albums through the import
+    at once, and every observable of the serial runner kept — ONE row for the
+    run, each album held on its own folder only while it is worked on, a
+    failure of one album never stopping the others, one notice at the end."""
+    from concurrent.futures import as_completed
     from server import events
     from server import job_locks
     imported = 0
@@ -189,69 +292,54 @@ def _run(work, on_done=None):
     # them — marking a wish imported with another album's path is not a race
     # worth tolerating.
     mine = []
+    size = _concurrency()
     # One job for the whole run, so the in-progress list shows one row for it
     # (with the album it is on); each album is held only while it is being
     # worked on, so the rest of the library stays editable in between.
     with job_locks.holding((), kind="import",
                            label="Import all downloads") as job:
-        for index, path in enumerate(work, 1):
-            if _stop.is_set():
-                break
-            name = os.path.basename(path.rstrip("\\/")) or path
-            with _lock:
-                _job["current"] = path
+        # The process-wide pool (`imports._import_pool`), the one the wizard's
+        # bulk import uses too: how many albums import at once is
+        # `import_bulk_concurrency` for the WHOLE app, so this run shares that
+        # budget instead of opening a second one beside it. Everything the
+        # budget does not admit waits its turn on the pool.
+        pool = imports._import_pool(size)
+        futures = []
+        for path in work:
             try:
-                with job_locks.holding([path], job, wait=True):
-                    job_locks.publish(index - 1, len(work),
-                                      f"importing {name}", job=job)
-                    res = _importer(path) or {}
-                chain = _chain_of(res)
-                ok = not res.get("errors")
-                error = "; ".join(str(x) for x in (res.get("errors") or []))
-                if ok and chain and not chain.get("scripts") \
-                        and not chain.get("chain_off") \
-                        and not res.get("chain_started"):
-                    # The album landed but its configured chain never ran (the
-                    # library lock timed out, a crash): the same rule the bulk
-                    # queue applies — "imported" is only honest when the chain
-                    # ran, or when this library configures none.
-                    ok = False
-                    error = ("imported, but the script chain did not run: "
-                             + (imports.chain_summary(chain) or "no reason reported"))
-                job_locks.publish(index, len(work), name, job=job)
+                futures.append(pool.submit(_import_album, len(work), path, job))
+            except RuntimeError:
+                # The shared pool was rebuilt under us (a Settings change took
+                # effect while nothing else was running): take the current one.
+                pool = imports._import_pool(size)
+                futures.append(pool.submit(_import_album, len(work), path, job))
+        for future in as_completed(futures):
+            try:
+                entry, job_error = future.result()
             except Exception as e:
+                # `_import_album` catches its own work; this is belt and
+                # braces, and must not stop the albums still running.
                 traceback.print_exc()
-                res = {"path": path, "errors": [str(e)]}
-                chain = {}
-                ok = False
-                error = str(e)
-            entry = {
-                "path": path,
-                "ok": bool(ok),
-                "album_root": res.get("album_root") or path,
-                "error": error,
-                # What the chain did with this album, on the row: which scripts
-                # ran, what failed, or that there was nothing to run. The queue
-                # view reads these; so does anything reporting the run.
-                "chained": bool(chain.get("chained")),
-                "chain_off": bool(chain.get("chain_off")),
-                "chain": list(chain.get("chain") or []),
-                "scripts": [{"id": s.get("id"), "label": s.get("label"),
-                             "error": str(s.get("error") or "")}
-                            for s in (chain.get("scripts") or [])
-                            if isinstance(s, dict)],
-                "note": imports.chain_summary(chain) if chain else (
-                    "the script chain is running in the background"
-                    if res.get("chain_started") else ""),
-            }
+                with _lock:
+                    _job["errors"].append(str(e))
+                continue
+            if entry is None:
+                continue             # cancelled before this album started
             mine.append(entry)
             with _lock:
                 _job["results"].append(dict(entry))
                 _job["done"] = len(_job["results"])
-                if not ok:
-                    _job["errors"].append(f"{path}: {'; '.join(str(x) for x in (res.get('errors') or []))}")
-            if ok:
+                if job_error:
+                    _job["errors"].append(job_error)
+                done = _job["done"]
+            if entry["ok"]:
                 imported += 1
+            # The run's own bar: how many of the worklist are back, and whose
+            # album just landed — one frame per album, so no album's line is
+            # built out of another's.
+            job_locks.publish(done, len(work),
+                              os.path.basename(entry["path"].rstrip("\\/"))
+                              or entry["path"], job=job)
     with _lock:
         cancelled = _stop.is_set() and _job["done"] < _job["total"]
         _job["state"] = "cancelled" if cancelled else ("error" if _job["errors"] else "done")

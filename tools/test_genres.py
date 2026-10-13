@@ -409,6 +409,103 @@ finally:
     intg._data_cache_dir = lambda name: None
 
 # --------------------------------------------------------------------------- #
+# 6b) The album BROWSE — the track tier's work id, and its own genres
+# --------------------------------------------------------------------------- #
+# A recording that states no genre of its own needs its WORK's classification;
+# reaching the work needs the id MusicBrainz holds on the recording. The album
+# browse (`release_recording_index`) carries that id for EVERY track of a
+# release in one page (`recording?release=<id>&inc=genres+ratings+work-rels`,
+# VERIFIED live to accept `work-rels`), where the per-recording route paid an
+# identity lookup per track to find it — and a browse that does not answer
+# leaves that per-recording route exactly where it was.
+def stub_browse(router):
+    """`mb_get_cached` answering by endpoint, with a call log."""
+    calls = []
+
+    def fake(endpoint, params=None, timeout=None, retries=None):
+        calls.append((endpoint, dict(params or {})))
+        return router(endpoint, dict(params or {}))
+
+    intg.mb_get_cached = fake
+    intg.mb_get = fake
+    return calls
+
+
+# A release payload that already states every recording's genre reads NO
+# browse: `track["genres"]` IS that recording's own list, from the same
+# entity, so a second read of it would be one request for nothing.
+clear()
+mb_calls = full_stack()
+got = chain(limit=6, release=RELEASE)
+assert got["per_track"][(1, 1)] == ["Alternative Metal"], got["per_track"]
+assert "recording" not in mb_calls, mb_calls
+
+# The recordings are silent, so the browse names the work each performs: ONE
+# browse for the album + one work request per silent track — never the
+# per-recording identity lookup the fallback uses.
+clear()
+calls = stub_browse(lambda endpoint, params: {
+    "recording": {"recording-count": 2, "recordings": [
+        {"id": "rec-1", "genres": [],
+         "relations": [{"type": "performance", "work": {"id": "w-1"}}]},
+        {"id": "rec-2", "genres": [],
+         "relations": [{"type": "performance", "work": {"id": "w-2"}}]},
+    ]},
+    "work/w-1": {"genres": [{"name": "Space Rock"}]},
+    "work/w-2": {"genres": [{"name": "Krautrock"}]},
+}.get(endpoint, {}))
+got = chain(limit=6, release=MB_ALBUM_RELEASE)
+assert got["per_track"][(1, 1)] == ["Space Rock"], got["per_track"]
+assert got["per_track"][(1, 2)] == ["Krautrock"], got["per_track"]
+assert got["levels"] == {FILE_ONE: "track", FILE_TWO: "track"}, got["levels"]
+endpoints = [e for e, _p in calls]
+assert endpoints.count("recording") == 1, calls
+assert "recording/rec-1" not in endpoints, calls
+assert "recording/rec-2" not in endpoints, calls
+assert sorted(e for e in endpoints if e.startswith("work/")) == \
+    ["work/w-1", "work/w-2"], calls
+# …and the browse asks about the RELEASE, 100 rows a page (the params the TTL
+# cache is keyed by).
+assert calls[0][1]["release"] == "rel-1", calls[0]
+assert calls[0][1]["limit"] == 100, calls[0]
+assert calls[0][1]["inc"] == "genres+ratings+work-rels", calls[0]
+
+# The browse also states each recording's OWN genres, and the track tier reads
+# them — one read answers the release per track.
+clear()
+calls = stub_browse(lambda endpoint, params: {
+    "recording": {"recording-count": 2, "recordings": [
+        {"id": "rec-1", "genres": [{"name": "Space Rock"}]},
+        {"id": "rec-2", "genres": [{"name": "Krautrock"}]},
+    ]},
+}.get(endpoint, {}))
+got = chain(limit=6, release=MB_ALBUM_RELEASE)
+assert got["per_track"][(1, 1)] == ["Space Rock"], got["per_track"]
+assert got["per_track"][(1, 2)] == ["Krautrock"], got["per_track"]
+assert got["levels"] == {FILE_ONE: "track", FILE_TWO: "track"}, got["levels"]
+assert [e for e, _p in calls].count("recording") == 1, calls
+
+# The browse does not answer for the release: the per-recording route is the
+# fallback, exactly as it was before this read existed (its own identity
+# lookup finds the work), and a track with no work keeps the album tier.
+clear()
+calls = stub_browse(lambda endpoint, params: {
+    "recording": {},
+    "recording/rec-1": {"relations": [{"type": "performance",
+                                       "work": {"id": "w-1"}}]},
+    "recording/rec-2": {},
+    "work/w-1": {"genres": [{"name": "Space Rock"}]},
+    "release-group/rg-1": {"genres": [{"name": "Progressive Rock"}]},
+}.get(endpoint, {}))
+got = chain(limit=6, release=MB_ALBUM_RELEASE)
+assert got["per_track"][(1, 1)] == ["Space Rock"], got["per_track"]
+assert got["per_track"][(1, 2)] == ["Progressive Rock"], got["per_track"]
+assert got["levels"] == {FILE_ONE: "track", FILE_TWO: "album"}, got["levels"]
+endpoints = [e for e, _p in calls]
+assert "recording/rec-1" in endpoints, calls
+assert "recording/rec-2" in endpoints, calls
+
+# --------------------------------------------------------------------------- #
 # 7) The default priority list is the documented one, both old defaults migrate
 # --------------------------------------------------------------------------- #
 assert list(intg.GENRE_SOURCES) == DOCUMENTED_SOURCES, intg.GENRE_SOURCES

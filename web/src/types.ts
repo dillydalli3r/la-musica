@@ -1719,6 +1719,38 @@ export interface ImportSettleResult {
   metadata?: { staged: boolean; applied: Record<string, string | null> };
 }
 
+/** One track's row of `POST /api/import/ratings` (the wizard's Ratings step):
+ *  the value the file carries after the run and where it came from. `level`
+ *  names the tag pair that answered for this row — "track" for the track's own
+ *  WEBRATING, "album" for the album-wide ALBUMWEBRATING — and is null when no
+ *  source stated a score (then `value`/`source` are empty too). */
+export interface RatingsTrackRow {
+  file: string;
+  title: string;
+  value: string;
+  level: "track" | "album" | null;
+  source: string;
+}
+
+/** What the Ratings step's fetch answers: the per-track rows plus the run's own
+ *  counts. `enabled` is `web_ratings_enabled` as the run read it — off, the
+ *  step says so rather than reading an unwritten run as an answer. */
+export interface RatingsImportResult {
+  enabled: boolean;
+  rows: RatingsTrackRow[];
+  counts: {
+    tracks: number;
+    rated: number;
+    written: number;
+    skipped: number;
+    failed: number;
+    by_source: Record<string, number>;
+    levels: Record<string, number>;
+    album_level_artist: number;
+  };
+  errors: string[];
+}
+
 /** One family an import could not finish by itself — the wizard's own steps
  *  are the families (mlo/import_policy.FAMILIES owns the list and the order).
  *  `state` is "decision" when the pipeline left it to the user and "unsourced"
@@ -1923,3 +1955,51 @@ export interface SourcesHealth {
   sources: SourceHealth[];
 }
 
+/** `GET /api/lastfm/status` — everything the Scrobbling panel shows in one
+ *  shape. `enabled` is the `lastfm_scrobble_enabled` switch, `connected` a
+ *  saved session key, `username` who Last.fm said it belongs to, `queued` how
+ *  many refused scrobbles wait in the spool, and `key`/`secret` whether the
+ *  app's own Last.fm application is configured (the secret is what the Connect
+ *  flow signs with). `ready` is all four together — what "scrobbling works"
+ *  means. */
+export interface LastfmStatus {
+  enabled: boolean;
+  connected: boolean;
+  username: string;
+  queued: number;
+  key: boolean;
+  secret: boolean;
+  ready: boolean;
+}
+
+/** `POST /api/lastfm/connect` — the URL the user authorizes, and the request
+ *  token that /connect/finish then exchanges for the session. */
+export interface LastfmConnect {
+  ok: boolean;
+  token?: string;
+  url?: string;
+  error?: string;
+}
+
+/** `POST /api/lastfm/connect/finish` — the stored session, plus the fresh
+ *  status. */
+export interface LastfmFinish {
+  ok: boolean;
+  username?: string;
+  status?: LastfmStatus;
+  error?: string;
+}
+
+/** `POST /api/lastfm/now-playing` and `/scrobble` — a refusal is a normal
+ *  answer: `ok: false` with a sentence, never an HTTP error. A scrobble that
+ *  reached Last.fm but was refused comes back `queued: true` with the new
+ *  count; one refused before anything was sent (off, or no session) is
+ *  `queued: false` and says why. */
+export interface LastfmWriteResult {
+  ok: boolean;
+  scrobbled?: boolean;
+  queued?: boolean;
+  queued_count?: number;
+  reason?: string;
+  error?: string;
+}

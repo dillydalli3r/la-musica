@@ -1131,10 +1131,10 @@ def _normalize_album_media_source(args):
                         bytes_removed += b_rem
                         bytes_added += b_add
 
-        elif is_cd_media(media_summary) and cfg is not None and cfg.get("strip_source_on_cd", True):
-            # A CD — and its HDCD variant, which is the same disc
-            # (mlo.tagtext.is_cd_media) — must never carry SOURCE (per user
-            # request, on by default): strip it
+        elif is_cd_media(media_summary) and cfg is not None and cfg.get("strip_source_on_cd", False):
+            # A CD whose owner asked for the removal (strip_source_on_cd, OFF
+            # by default — see mlo/config.py): the tag is theirs, so the pass
+            # deletes it ONLY when that switch says so.
             for path, af, source_clean in entries:
                 if source_clean:
                     if not should_write_audio_tag(cfg, "SOURCE", filepath=path):
@@ -1158,34 +1158,19 @@ def _normalize_album_media_source(args):
                     bytes_added += b_add
 
         elif is_cd_media(media_summary):
-            # A CD with strip_source_on_cd off — leave SOURCE as-is (grading will still fail it if present)
+            # A CD (or its HDCD variant) and strip_source_on_cd is off — the
+            # shipped default: the SOURCE travels untouched.
             pass
 
         else:
-            for path, af, source_clean in entries:
-                if source_clean:
-                    if cfg is not None and not should_write_audio_tag(cfg, "SOURCE", filepath=path):
-                        continue
-                    af, err = _handle(path, af)
-                    if err:
-                        return (album_dir, "failed", 0, 0, err)
-                    original_size = os.path.getsize(path)
-
-                    if not af.delete_tag("SOURCE"):
-                        return (
-                            album_dir,
-                            "failed",
-                            0,
-                            0,
-                            f"failed removing SOURCE in {os.path.basename(path)}: {af.error}",
-                        )
-
-                    final_size = os.path.getsize(path)
-                    b_rem, b_add = _diff_bytes(original_size, final_size)
-
-                    modified_files += 1
-                    bytes_removed += b_rem
-                    bytes_added += b_add
+            # Every other medium — Vinyl, Cassette, SACD, a blank MEDIA — keeps
+            # a SOURCE it carries, ALWAYS. This branch used to delete it with
+            # no switch at all, which is how a hand-imported vinyl rip lost the
+            # store the user had recorded: an import never strips a tag it did
+            # not write, and SOURCE is not a value this pass owns for a
+            # non-digital album (MEDIA is where "not digital" is stated, and
+            # the grader reads that, not the absence of a SOURCE).
+            pass
 
         if modified_files:
             return (

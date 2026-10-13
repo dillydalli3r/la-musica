@@ -6,6 +6,7 @@ click and a script run produce byte-identical files. Provider order and the
 plain-vs-synced policy come from the config the settings page edits.
 """
 import os
+from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
@@ -13,6 +14,7 @@ from pydantic import BaseModel
 from mlo import load_config
 from mlo.lyrics_fetch import fetch_one
 from mlo.lyrics_providers import SOURCES, SOURCE_LABELS, SOURCE_NOTES, available_sources, provider_order
+from mlo.stats import worker_count
 from server import tagcache
 from server import job_locks
 
@@ -123,8 +125,22 @@ def lyrics_auto(req: LyricsPathsRequest):
     resolved, rejected = _batch_paths(req.paths, cfg, req.staged)
     for path, error in rejected:
         results.append({"path": path, "status": "failed", "error": error})
-    for path, full in resolved:
-        res = fetch_one(full, cfg, replace=bool(req.force))
+    # ONE TRACK PER LANE (`worker_count`, the one knob every multi-file runner
+    # reads), because each track's fetch is its OWN question — its own tags
+    # decide what is searched and what is written — and the lanes only overlap
+    # the WAITS. Politeness is the provider layer's, not this loop's:
+    # `mlo.lyrics_providers._request` spaces requests PER HOST (its lock guards
+    # the timestamp bookkeeping alone, never the request), so two lanes asking
+    # lrclib queue behind each other while a lane asking NetEase does not wait
+    # for them. Writes are per file (one track, one handle), and `ex.map` hands
+    # the rows back in REQUEST ORDER, so the reply is the serial loop's own,
+    # row for row.
+    workers = worker_count(cfg, maximum=8, items=len(resolved))
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        fetched = list(ex.map(
+            lambda full: fetch_one(full, cfg, replace=bool(req.force)),
+            [full for _, full in resolved]))
+    for (path, _full), res in zip(resolved, fetched):
         res["path"] = path
         results.append(res)
     if any(r.get("status") == "ok" for r in results):

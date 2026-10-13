@@ -1523,6 +1523,12 @@ def match_release(cfg, paths, progress=None, expect=None, allow_group=None,
     track the service answered "nothing" for is neither: it is counted in
     `tracks["no_match"]` and the album's verdict stays a plain "no_match".
 
+    The tracks are FINGERPRINTED in bounded lanes (`worker_count`, the stat-keyed
+    memo below), then looked up one at a time in FILE ORDER: fpcalc is the
+    expensive local half, the service's own `_throttle` (3 req/s) is what paces
+    the other, and a transport that just failed must still end the album at the
+    first failure.
+
     With *expect* (the tag-derived candidate: `release_group_id` /
     `release_group_title` / `artists`) the match is cross-checked and
     `conflicts` (+ `conflict`) carry the disagreements; the match itself is
@@ -1554,8 +1560,21 @@ def match_release(cfg, paths, progress=None, expect=None, allow_group=None,
     groups = {}          # release_group_id -> {"rows": [...], "recordings": [...]}
     skips, failures = [], []
     fingerprinted = no_match = 0
-    for done, path in enumerate(paths, 1):
-        res = lookup(cfg, path)
+    # The tracks' FINGERPRINTING runs in the bounded lanes every other
+    # multi-file runner here uses (`submit_files`' own split, above): fpcalc
+    # DECODES up to 120 s of each file, which is the most expensive thing this
+    # module does, and it is local work that overlaps freely. The LOOKUPS stay
+    # in file order and one at a time, because the service — not the CPU — is
+    # what paces them (`_throttle`: 3 req/s) and because a transport that just
+    # failed must end the album at the FIRST failure: one timeout, not twelve
+    # (`FATAL_LOOKUP_CODES`). Each `lookup` below reads the fingerprint back
+    # from `_FP_MEMO`, so a track fingerprinted here is never decoded twice —
+    # nor by a later call over an unchanged folder.
+    lanes = worker_count(cfg, maximum=8, items=total)
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _booked(path, res):
+        nonlocal fingerprinted, no_match
         if res["ok"]:
             fingerprinted += 1
             row = res["rows"][0]        # one row per track: the best candidate
@@ -1570,22 +1589,35 @@ def match_release(cfg, paths, progress=None, expect=None, allow_group=None,
                     "score": row["score"],
                     "fingerprint": row.get("fingerprint"),
                 })
-        elif res["code"] == NO_MATCH:
+            return False
+        if res["code"] == NO_MATCH:
             # the service answered and knew this track: evidence, not a failure
             no_match += 1
-        else:
-            item = {"path": path, "code": res["code"], "reason": res["reason"]}
-            if res["code"] in SKIP_CODES:
-                skips.append(item)
-            else:
-                failures.append(item)
-                if res["code"] in FATAL_LOOKUP_CODES:
-                    break
-        if progress:
-            try:
-                progress(done, total, "AcoustID lookup")
-            except Exception:
-                pass
+            return False
+        item = {"path": path, "code": res["code"], "reason": res["reason"]}
+        if res["code"] in SKIP_CODES:
+            skips.append(item)
+            return False
+        failures.append(item)
+        return res["code"] in FATAL_LOOKUP_CODES
+
+    with ThreadPoolExecutor(max_workers=lanes) as ex:
+        window = []          # fingerprints in flight, file order
+        nxt = 0
+        for done, path in enumerate(paths, 1):
+            while nxt < total and len(window) < lanes:
+                window.append(ex.submit(fingerprint, paths[nxt], cfg))
+                nxt += 1
+            window.pop(0).result()   # this track's fingerprint is in the memo
+            res = lookup(cfg, path)
+            stopped = _booked(path, res)
+            if progress:
+                try:
+                    progress(done, total, "AcoustID lookup")
+                except Exception:
+                    pass
+            if stopped:
+                break
 
     quorum = _quorum(total)
     # Ranked best-first: most matched tracks, then the strongest mean, then the

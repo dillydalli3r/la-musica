@@ -275,15 +275,30 @@ def _add_lyrics_state(tracks):
     with a same-stem sibling), called per FOLDER because a disc folder is its
     own album to the grader. A folder the grader cannot read leaves the flags
     unset rather than claiming anything.
+
+    The verdict is MEMOIZED per folder (`tagcache.cached_folder_verdict`) on the
+    folder's own signature — its directory mtime and the stat of the tracks
+    just scanned — because this scan runs on the wizard's mount AND after every
+    fetch, and re-opening every file to re-derive an answer those files already
+    decide was pure cost. A write, an add or a removal in the folder (in-app or
+    not) misses on the next scan, and every `invalidate_*` drops it outright;
+    the config rides the key, so a settings change re-grades.
     """
     from mlo import grader
 
     cfg = load_config()
     fmt = str(cfg.get("lyrics_format") or "EMBEDDED")
+    by_folder = {}
+    for t in tracks:
+        folder = os.path.normpath(os.path.dirname(t["path"]))
+        by_folder.setdefault(folder, []).append(t["path"])
     graded = {}
-    for folder in {os.path.dirname(t["path"]) for t in tracks}:
+    for folder, files in by_folder.items():
         try:
-            res = grader._grade_album(folder, fmt, cfg)
+            res = tagcache.cached_folder_verdict(
+                "scan-grade", folder, cfg,
+                lambda f=folder: grader._grade_album(f, fmt, cfg),
+                files=files)
         except Exception:
             continue
         for row in (res or {}).get("tracks") or []:

@@ -75,6 +75,8 @@ from server import api_run
 from server import api_export
 from server import api_playlists
 from server import api_mb
+from server import api_mb_auth
+from server import api_lastfm
 from server import api_trash
 from server import api_push
 from server import ws as ws_mod
@@ -855,8 +857,9 @@ def _page_download_pass():
     """One pass: import the albums the user's own page downloads finished.
 
     Returns True when an import was started. One album per pass on purpose —
-    `import_queue` takes each album all the way through before the next one, so
-    the rest are simply taken by the following ticks."""
+    each pass hands the runner ONE album, so the rest are simply taken by the
+    following ticks (the runner itself may import several at once, see
+    `server.import_queue`)."""
     from mlo import import_policy
     from server import import_queue, soulseek
 
@@ -2050,8 +2053,10 @@ def wishes_import(wid: int):
 
 # Wired here, after both sides exist: the queue asks these for what to import
 # and for how to import one album, instead of importing server.main (which
-# would be a cycle). Inline chains only — the runner's whole contract is that
-# one album is finished before the next starts.
+# would be a cycle). Inline chains only — the importer runs ONE ALBUM AT A TIME
+# on each of the queue's own lanes (up to `import_bulk_concurrency`, see
+# server/import_queue.py), so an album's chain is still never split across two
+# callers and its files are never written by two chains at once.
 from server import import_queue as _import_queue  # noqa: E402
 _import_queue.set_importer(lambda path: _import_one_album(path, load_config(), chain_async=False))
 _import_queue.set_ready_provider(lambda: __import__(
@@ -3041,6 +3046,8 @@ app.include_router(api_run.router)
 app.include_router(api_export.router)
 app.include_router(api_playlists.router)
 app.include_router(api_mb.router)
+app.include_router(api_mb_auth.router)
+app.include_router(api_lastfm.router)
 app.include_router(api_trash.router)
 app.include_router(api_push.router)
 app.include_router(ws_mod.router)
@@ -3820,7 +3827,6 @@ def album_mbdetect(path: str = Query(...), staged: bool = Query(False)):
     MUSICBRAINZ_ALBUMID / MUSICBRAINZ_RELEASEGROUPID tags directly.
     """
     import re
-    from mlo.audio import AudioFile
 
     p = os.path.normpath(path)
     if not os.path.isdir(p):
@@ -3842,25 +3848,32 @@ def album_mbdetect(path: str = Query(...), staged: bool = Query(False)):
             scanned += 1
             if scanned > MAX_SCAN:
                 return {"mbid": None, "truncated": True}
-            af = AudioFile(os.path.join(root, f))
-            if af.audio is None:
-                continue
-            for key in ("MUSICBRAINZ_ALBUMID", "MUSICBRAINZ_RELEASEGROUPID"):
-                v = af.get_tag(key)
-                m = uuid_re.search(str(v)) if v else None
-                if m:
-                    rel = os.path.relpath(os.path.join(root, f), p)
-                    return {"mbid": m.group(0).lower(), "key": key, "track": rel}
+            # Through the tag cache, NOT a fresh AudioFile: the wizard calls
+            # this on mount and after every step, and a raw read per call
+            # re-parsed up to twelve containers each time. `read_track(None)`
+            # is the same all_tags() the loop wants (raw + semantic), memoized
+            # on (path, mtime, size) and invalidated by every tag write, and an
+            # unreadable file answers {} (so it is skipped, as before).
+            full = os.path.join(root, f)
             try:
-                for k, v in (af.all_tags() or {}).items():
-                    kl = str(k).lower()
-                    if "musicbrainz" in kl and "album" in kl and "artist" not in kl:
-                        m = uuid_re.search(str(v)) if v else None
-                        if m:
-                            rel = os.path.relpath(os.path.join(root, f), p)
-                            return {"mbid": m.group(0).lower(), "key": k, "track": rel}
+                tags, _tech = tagcache.read_track(full, None)
             except Exception:
                 continue
+            if not tags:
+                continue
+            for key in ("MUSICBRAINZ_ALBUMID", "MUSICBRAINZ_RELEASEGROUPID"):
+                v = tags.get(key)
+                m = uuid_re.search(str(v)) if v else None
+                if m:
+                    rel = os.path.relpath(full, p)
+                    return {"mbid": m.group(0).lower(), "key": key, "track": rel}
+            for k, v in tags.items():
+                kl = str(k).lower()
+                if "musicbrainz" in kl and "album" in kl and "artist" not in kl:
+                    m = uuid_re.search(str(v)) if v else None
+                    if m:
+                        rel = os.path.relpath(full, p)
+                        return {"mbid": m.group(0).lower(), "key": k, "track": rel}
     return {"mbid": None, "scanned": scanned}
 
 

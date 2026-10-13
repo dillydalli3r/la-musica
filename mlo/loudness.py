@@ -32,10 +32,10 @@ import time
 from . import dr
 from .audio import AudioFile
 from .config import should_write_audio_tag
-from .paths import AUDIO_EXTS, app_data_dir
+from .paths import AUDIO_EXTS, LIB_AUDIO_EXTS, app_data_dir
 from .stats import (
     new_stats, _make_pbar, _pbar_skip, _pbar_update, _walk_files,
-    _collect_targets, _find_albums, is_audio_file, worker_count, thread_budget,
+    _collect_targets, is_audio_file, worker_count, thread_budget,
 )
 from .subproc import run_tool
 from .tools import detect_all_tools
@@ -51,15 +51,45 @@ RGAIN_TAGS = (
 
 
 def _album_dirs(config):
-    """Album folders to process (from targets, else the whole library)."""
-    folder = config["music_folder"]
+    """Album folders to process, mapped to their audio files.
+
+    Returns ``{album folder: [audio file paths, sorted]}``. The album list and
+    each album's tracks come from the SAME walk (`mlo.stats._walk_files` hands
+    one directory's files over together), so the pass no longer walks for the
+    albums and then lists every album again just to name its tracks: one
+    directory scan per album per run, exactly as the rest of the engine does it
+    (`_find_albums`' dirs_out scan).
+    """
+    folder = str(config.get("music_folder") or "")
     if config.get("targets") is not None:
+        # A targeted run keeps its own listing: the targets name the FOLDERS
+        # (through the audio files in them), and each folder's own files are
+        # what the pass works on — video containers included, exactly as the
+        # old per-album listing had it.
         target_files = _collect_targets(config["targets"], AUDIO_EXTS)
-        dirs = sorted({os.path.dirname(f) for f in target_files})
-        return [d for d in dirs if os.path.isdir(d)]
+        out = {}
+        for d in sorted({os.path.dirname(f) for f in target_files}):
+            if not os.path.isdir(d):
+                continue
+            try:
+                names = sorted(os.listdir(d))
+            except OSError:
+                continue
+            files = [os.path.join(d, f) for f in names if is_audio_file(f)]
+            if files:
+                out[d] = files
+        return out
     if not os.path.isdir(folder):
-        return []
-    return _find_albums(folder)
+        return {}
+    out = {}
+    # LIB_AUDIO_EXTS, like _find_albums: an album holding only a music-video
+    # container is still one this pass visits, and `is_audio_file` then keeps
+    # exactly the files the old per-album listing kept.
+    for f in _walk_files(folder, LIB_AUDIO_EXTS):
+        if not is_audio_file(f):
+            continue
+        out.setdefault(os.path.dirname(f), []).append(f)
+    return {d: sorted(v) for d, v in out.items()}
 
 
 # ----------------------------------------------------------------------
@@ -166,7 +196,7 @@ def _rg_pending(row, album):
 
 
 
-def _open_album_files(album):
+def _open_album_files(album, names=None):
     """{path: AudioFile | None} for the album's audio files, opened once.
 
     The DR pass asks two questions about the same file — does it still miss a
@@ -174,12 +204,17 @@ def _open_album_files(album):
     top of the two full decodes (rsgain + dr-meter) the album already pays
     for. One handle answers both; a file that will not open keeps a None
     handle, so the album is still measured and the write pass skips it.
+
+    *names* is the album's own file names, when the caller has them (the walk
+    that found the album handed them over — see _album_dirs); the folder is
+    listed here only when it does not.
     """
     opened = {}
-    try:
-        names = sorted(os.listdir(album))
-    except OSError:
-        return opened
+    if names is None:
+        try:
+            names = sorted(os.listdir(album))
+        except OSError:
+            return opened
     for f in names:
         if not is_audio_file(f):
             continue
@@ -214,7 +249,7 @@ def _album_needs_dr(opened):
 
 
 def _dr_album(album, ffmpeg_exe, force, write_tags=True, config=None, rg=None,
-              lanes=1):
+              lanes=1, names=None):
     """Measure the album's tracks in process; write the DR tags.
 
     *rg* is ``{path: {tag: value}}`` from _scan_replaygain, already filtered by
@@ -230,6 +265,10 @@ def _dr_album(album, ffmpeg_exe, force, write_tags=True, config=None, rg=None,
     decode is handed ONE lane's thread share, so *lanes* × width decoders
     still add up to the run's budget.
 
+    *names* is the album's own file names when the caller already holds them
+    (the walk that found the album — see _album_dirs), so the folder is listed
+    once per run, not once here on top of it.
+
     Returns (files_modified, [(name, reason)]). A track the meter has no value
     for — silent, shorter than two blocks — is logged by name and simply
     carries no per-track tag, which is a skip and not a failure of the run;
@@ -240,7 +279,7 @@ def _dr_album(album, ffmpeg_exe, force, write_tags=True, config=None, rg=None,
     counting the album as finished with a tag missing.
     """
     rg = rg or {}
-    opened = _open_album_files(album)
+    opened = _open_album_files(album, names)
     if not opened or not (force or rg or _album_needs_dr(opened)):
         return 0, []
 
@@ -515,10 +554,11 @@ def run_calc_dr_replaygain(config):
         afail = None
         failures = []
         rg = {}
+        # The walk that found this album handed its files over with it — no
+        # second listing of the folder here, ever (see _album_dirs): the
+        # ReplayGain scan and the DR pass work on the SAME list.
+        files = albums.get(album_path) or []
         if rsgain:
-            files = [os.path.join(album_path, f)
-                     for f in sorted(os.listdir(album_path))
-                     if is_audio_file(f)]
             # Skip the album only when ALL FOUR tags are already on every file:
             # rsgain's own -S skips a track that carries any ReplayGain tag, so
             # handing it an album that has track values but no album ones made
@@ -544,7 +584,8 @@ def run_calc_dr_replaygain(config):
         if dr_usable and afail is None:
             dr_modified, dr_failures = _dr_album(
                 album_path, ffmpeg["ffmpeg_exe"], force,
-                write_tags=write_dr, config=config, rg=rg, lanes=workers)
+                write_tags=write_dr, config=config, rg=rg, lanes=workers,
+                names=[os.path.basename(p) for p in files])
             amod += dr_modified
             failures = dr_failures
         elif rg:

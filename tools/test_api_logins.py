@@ -680,6 +680,15 @@ print("== /api/sources/health surfaces the credential kind ==")
 BAD_CFG = {
     "discogs_token": "dc-stored-token-456",
     "lastfm_api_key": "lf-stored-key-789",
+    # The scrobbling session and the MusicBrainz login are credentials of their
+    # own (a different question from the API key's: can this install WRITE?),
+    # so the fully-configured fixture has to carry them too — `probe=0` reports
+    # what the config holds without asking anyone.
+    "lastfm_api_secret": "lf-stored-secret",
+    "lastfm_session_key": "lf-stored-session",
+    "musicbrainz_client_id": "mb-stored-cid",
+    "musicbrainz_client_secret": "mb-stored-secret",
+    "musicbrainz_refresh_token": "mb-stored-refresh",
     "spotify_client_id": "cid-stored", "spotify_client_secret": "sec-stored",
     "acoustid_enabled": True, "acoustid_api_key": "ac-stored-key-321",
     "acoustid_user_key": "ac-user-key-654",

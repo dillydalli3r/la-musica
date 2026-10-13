@@ -1706,9 +1706,9 @@ def release_queries(release, cfg, templates=None):
     cost the same single search window as the traits.
 
     `templates` renders an explicit set instead of the configured one: the job's
-    own stored queries, and its broad second pass. Those are queries a caller
-    already decided, so they are rendered exactly as given — and expand no
-    aliases and no MBID queries.
+    own stored queries, and the broad digital query the job folds into its batch
+    (`_run`). Those are queries a caller already decided, so they are rendered
+    exactly as given — and expand no aliases and no MBID queries.
     """
     formats = [str(f).strip() for f in media_formats(release)]
     digital = _is_digital(release)
@@ -2110,8 +2110,9 @@ def _rank(c):
 def _dedupe_candidates(candidates):
     """One entry per peer+folder, best-ranked first.
 
-    ONE job scores its candidates from two SEPARATE searches — the configured
-    templates and the broader second pass (`_run`) — and find_candidates groups
+    ONE job can still score its candidates from TWO SEPARATE response sets —
+    the configured templates and the broad `artist album year` query a digital
+    release folds into the same batch (`_run`) — and find_candidates groups
     within one response set only, so a folder that answered both is scored
     twice. A job that walked both copies would download that folder twice from
     the same peer, and when the first attempt failed it spent a batch slot on
@@ -2263,6 +2264,9 @@ def find_candidates(results, release, cfg):
     logs and cues, so a covering root that holds more audio (a flat
     Artist/ folder) never pulls the rest of it in."""
     min_ratio = float(cfg.get("soulseek_auto_complete_ratio", 1.0) or 1.0)
+    # The log floor, read once for the disc gate below: 0 switches the "every
+    # CD disc needs a .log" rule off for the no-log case (see `evaluate`).
+    log_floor = _log_min_score(cfg)
     expected = _expected_tracks(release)
     discs_expected = _disc_numbers(release)
     # Any CD-family pressing is a CD here (HDCD, SHM-CD, Enhanced CD…): the
@@ -2316,6 +2320,15 @@ def find_candidates(results, release, cfg):
         cue_discs = {_disc_of(f["file"]) for f in cues}
         missing_logs = [d for d in discs_expected if d not in log_discs] if is_cd else []
         missing_cues = [d for d in discs_expected if d not in cue_discs] if is_cd else []
+        # The log floor switched OFF (0) admits a CD folder with NO log at all:
+        # with the floor off a log's absence is no worse than a log with
+        # complaints, so such a folder is offered LOW-RANKING (it scores below
+        # every folder that carries a log — see `score` below) instead of being
+        # dropped, and `_verify_album` checks its audio by a clean decode. The
+        # cue requirement is untouched, and at any other floor the rule stands
+        # exactly as it was.
+        if is_cd and log_floor == 0 and missing_logs and len(missing_logs) == len(discs_expected):
+            missing_logs = []
 
         # match expected tracks to files. A file carrying BOTH the track
         # number and the expected title wins over one that only carries the
@@ -2458,6 +2471,13 @@ def _search_queries(slsk, queries, wait_s, usable=None, response_limit=0,
     that failed or never terminated, skipped = how many queries were still
     running when a usable candidate ended the wait.
 
+    The poll is CHEAP on purpose: each tick asks only the searches still
+    RUNNING, and asks them for their STATE alone (`search_state`, one GET) —
+    a search's responses are served only once it has ENDED, so fetching
+    `/responses` every tick was a second request per search that could only
+    come back empty. The responses are read ONCE, through `search_results`, on
+    the very tick a search turns terminal.
+
     `cancel_check`, when given, is asked before every poll: true means the
     caller's job was cancelled, so every search still outstanding is dropped at
     slskd (the same `DELETE /searches/{id}` the reader of the window runs) and
@@ -2492,13 +2512,13 @@ def _search_queries(slsk, queries, wait_s, usable=None, response_limit=0,
     # polled here, never sent again. `display` names every search this loop is
     # really watching — the ones it just posted and the ones it took over — so
     # the live search frame keeps naming a query.
-    watch = [[sid, q, res] for sid, q, res in (resume or ())]
-    display = " · ".join(queries or [q for _sid, q, _res in watch])
+    watch = [[sid, q, res, False] for sid, q, res in (resume or ())]
+    display = " · ".join(queries or [q for _sid, q, _res, _rd in watch])
     errors = []
     for q in queries:
         try:
             watch.append([slsk.search(q, timeout_ms=int(wait_s * 1000),
-                                      response_limit=response_limit), q, None])
+                                      response_limit=response_limit), q, None, False])
         except Exception as e:
             errors.append(f"Soulseek search could not be started for “{q}”: {e}")
     early = False
@@ -2514,8 +2534,22 @@ def _search_queries(slsk, queries, wait_s, usable=None, response_limit=0,
             cancelled = True
             break
         for e in watch:              # probe first: no dead sleep before it
+            if e[3]:
+                continue             # already terminal AND already read once
+            # Poll only what is still RUNNING, and poll it cheaply: the state
+            # GET alone. A search's responses are served only once it has
+            # ENDED, so fetching `/responses` on every tick was a second
+            # request per search that could only come back empty — the window
+            # is read ONCE, here, the tick its state turns terminal (`e[3]`
+            # marks it read so no later tick asks again).
             try:
-                e[2] = slsk.search_results(e[0])
+                e[2] = slsk.search_state(e[0])
+                if slsk.is_search_done(e[2] or {}):
+                    try:
+                        e[2] = slsk.search_results(e[0])
+                    except Exception:
+                        pass
+                    e[3] = True
             except Exception:
                 pass
         pending = [e for e in watch if not slsk.is_search_done(e[2] or {})]
@@ -2547,7 +2581,7 @@ def _search_queries(slsk, queries, wait_s, usable=None, response_limit=0,
         time.sleep(_SEARCH_POLL_S)
 
     results, skipped = [], 0
-    for sid, q, res in watch:
+    for sid, q, res, _read in watch:
         if not slsk.is_search_done(res or {}):
             # Still running when the window closed. Nothing readable will come
             # out of it yet (responses are served only after a search ends), so
@@ -3204,31 +3238,29 @@ def _log_format(path):
 
 def _log_fail_reason(name, score, state, min_score, why="",
                      ar_state=None, ar_detail=""):
-    """Why one rip log did not clear the gate, with Logchecker's own words.
+    """Why one rip log did not clear the floor, with Logchecker's own words.
 
-    The bar is `soulseek_auto_log_min_score` (Settings → Auto-import), 100 by
-    default, and Logchecker marks a log down for reasons of its own (-30 for an
-    EAC older than 0.99, -10 for gap handling). A release whose copies are all
-    the same scene rip therefore fails on every candidate — the owner's case,
-    seventeen deep — and a bare "score 60 is below the required 100" said
-    nothing about the deduction or what to do. `why` is Logchecker's own note
-    about the log; the bar and the setting are named so the way out is one
-    screen away. Only three things reject: a log checksum that does not verify,
-    an AccurateRip section that reports a failed track, or a score below the
-    bar — a log Logchecker could NOT score is not rejected here, so the reason
-    for that case is never printed as a rejection (it is logged as accepted).
-    """
+    The floor is `soulseek_auto_log_min_score` (Settings → Auto-import), 85 by
+    default: Logchecker marks a log down for reasons of its own (-30 for an EAC
+    older than 0.99, -10 for gap handling), and a log only fails on its SCORE
+    when that score means real damage rather than an opinion. The log's PROGRAM
+    is never the reason — a dBpoweramp, foobar2000, CUETools or eac3 log is read
+    exactly like EAC's — so the message names the three things that really
+    reject: a checksum that does not verify, an AccurateRip section that reports
+    a failed track, or a score below the floor. `why` is Logchecker's own note
+    about the log, and the floor and the setting are named so the way out is one
+    screen away. A log Logchecker could NOT score (score None) is not rejected
+    here at all, so this never runs for that case."""
     if ar_state == "fail":
-        base = (f"{name} — the log's AccurateRip section reports a track it "
-                f"could not verify: {ar_detail}")
+        base = (f"{name} — the log reports an AccurateRip failure "
+                f"({ar_detail})")
     elif state == "invalid":
-        base = (f"{name} — log checksum does not verify (the file changed after "
-                f"EAC signed it)")
+        base = f"{name} — the log's checksum does not verify"
     elif state == "unverified":
-        base = (f"{name} — Logchecker {score}/100, required {min_score}, and the "
+        base = (f"{name} — Logchecker {score}/100 (below {min_score}), and the "
                 f"checksum was NOT verified (no EAC log checker installed)")
     else:
-        base = f"{name} — Logchecker {score}/100, required {min_score}"
+        base = f"{name} — Logchecker {score}/100 (below {min_score})"
     return f"{base} ({why})" if why else base
 
 
@@ -3305,9 +3337,15 @@ def _wait_for_files(slsk, ddir, username, wanted, timeout_s, cancel_check=None,
     InProgress — with (username, the number of files asked for). It defaults to
     publishing the frame itself; a caller that runs TWO waits over ONE candidate
     (the CD .log gate, then the album) passes an announcer of its own so that
-    only the first of them speaks (see _start_once)."""
+    only the first of them speaks (see _start_once).
+
+    Every tick stashes this tick's `downloads_by_user` snapshot on THIS thread
+    (`_tl.transfers_index`); the batch readiness checks the cancel_check makes
+    about this candidate and its mates read it out of there (see
+    _batch_arrived / _logs_arrived), so a tick costs ONE transfer-tree request
+    however many peers it looks at."""
     deadline = time.time() + timeout_s
-    from server.soulseek import _user_transfers
+    from server.soulseek import _user_transfers, downloads_by_user
     shown = list(wanted)
     pending = {w["filename"]: w for w in wanted}
     # Transfers are fetched for the DISPLAY set and frozen at entry, so every
@@ -3339,12 +3377,21 @@ def _wait_for_files(slsk, ddir, username, wanted, timeout_s, cancel_check=None,
     try:
         while time.time() < deadline and pending:
             tick = time.time()
+            # ONE transfer-tree snapshot per tick, indexed by username
+            # (`server.soulseek.downloads_by_user`): this wait, and the batch
+            # readiness checks the cancel_check makes about this candidate and
+            # its mates, all read out of it. A per-candidate fetch made a tick
+            # cost one `GET /transfers/downloads` per peer checked — two for a
+            # lone candidate, one more for each mate — where the peer's whole
+            # state is already in the tree this wait was about to ask for.
+            index = downloads_by_user(slsk)
+            _tl.transfers_index = index
             if cancel_check and cancel_check():
                 break
-            # one transfer-tree fetch per tick, and one tree walk per tick too
-            # (only when slskd actually says a file is done, or when a file has
-            # no live record and its local counterpart has to be looked for)
-            live = _user_transfers(slsk, username, fetch_names)
+            # one transfer-tree walk per tick too (only when slskd actually
+            # says a file is done, or when a file has no live record and its
+            # local counterpart has to be looked for)
+            live = _user_transfers(slsk, username, fetch_names, index=index)
             done_states = {t["filename"] for t in live if _transfer_ok(t["state"])}
             active = {t["filename"] for t in live if _transfer_active(t["state"])}
             ready = [r for r in pending if r in done_states]
@@ -3431,6 +3478,7 @@ def _wait_for_files(slsk, ddir, username, wanted, timeout_s, cancel_check=None,
                 break
             time.sleep(_TRANSFER_POLL_S)
     finally:
+        _tl.transfers_index = None
         _job_progress(None)
     if pending:
         # giving up on this candidate: the caller deletes its partial files
@@ -3446,8 +3494,32 @@ def _wait_for_files(slsk, ddir, username, wanted, timeout_s, cancel_check=None,
 # --------------------------------------------------------------------------- #
 # Verification helpers
 # --------------------------------------------------------------------------- #
+# The floor a rip log's Logchecker score must reach before its candidate is
+# REJECTED. 85 by default: Logchecker's own band for a log with minor complaints
+# is 90+, so a score between the floor and 100 is not damage — it only
+# DOWN-RANKS the candidate (see `_log_rank`), and a folder whose audio verifies
+# is never thrown away over a score.
+_LOG_FLOOR_DEFAULT = 85
+
+
+def _log_min_score(cfg):
+    """The floor `soulseek_auto_log_min_score` sets on a rip log's Logchecker
+    score — 85 when unset.
+
+    A score only REJECTS below this floor, and the floor means real damage; the
+    deductions that describe an opinion rather than damage (an EAC older than
+    0.99, gap handling) leave a score at or above it and only rank the candidate
+    lower. 0 is a real value, not "unset": it is the switch that treats a
+    MISSING log as an acceptable (low-ranking) candidate rather than nothing
+    (see `find_candidates` / `_verify_album`), so it is honoured as given."""
+    try:
+        return int(cfg.get("soulseek_auto_log_min_score", _LOG_FLOOR_DEFAULT))
+    except (TypeError, ValueError):
+        return _LOG_FLOOR_DEFAULT
+
+
 def _log_passes(score, state, min_score, ar_state=None):
-    """Whether a log on its own is good enough to accept the album.
+    """Whether a log is EVIDENCE ENOUGH to accept the album.
 
     Three things, and only these: (1) a log that CARRIES a checksum has to
     verify — state 'invalid' means the log's own SHA256/EAC checksum does not
@@ -3455,13 +3527,40 @@ def _log_passes(score, state, min_score, ar_state=None):
     checksum is not required and costs nothing); (2) the log must not report a
     failed AccurateRip track (ar_state 'fail'; no AccurateRip section is not a
     penalty); (3) only when Logchecker COULD score it, the score must be at or
-    above the bar. A log Logchecker could not score (score None) is NOT a
-    rejection by itself: the bar is a quality opinion, and the per-track CRCs
-    (checked against the decoded audio after the album lands) are the hard
-    requirement — an unreadable-by-Logchecker log whose CRCs verify is a fine
-    rip and is accepted."""
+    above `min_score`, the FLOOR below which a log means real damage (85 by
+    default — Logchecker's own band for a log with minor complaints is 90+).
+
+    The log's PROGRAM never decides on its own: EAC, XLD, whipper, dBpoweramp,
+    foobar2000 or CUETools are all read the same way, and a dialect Logchecker
+    does not recognise (or could not score at all, score None) is NOT a defect
+    — the floor is a quality opinion, the per-track CRCs (checked against the
+    decoded audio after the album lands) are the hard requirement. A log that
+    PASSES but scores below Logchecker's clean band is accepted and merely
+    down-ranked by `_log_rank`, never killed for the score."""
     return (state != "invalid" and ar_state != "fail"
             and (score is None or score >= min_score))
+
+
+# Logchecker's own clean band: a log scoring below this has SOMETHING to
+# complain about (a gap-handling note, an EAC older than 0.99) even when it is
+# far above the floor, so its candidate is accepted but ordered behind one whose
+# log is clean. 100 is a perfect log — Logchecker's per-check deductions are the
+# only way below it — so "clean" and "perfect" are the same line here.
+_LOG_CLEAN_SCORE = 100
+
+
+def _log_rank(score):
+    """Sort key for an ACCEPTED log: 0 when it is clean, 1 when it is below
+    Logchecker's clean band but still above the floor.
+
+    Rejection is `_log_passes`' job, and this only says how two logs that BOTH
+    pass compare: a candidate whose log scored 90 is downloaded, but behind one
+    whose log scored 100 (`_try_batch` orders the batch's album waits by this).
+    A log Logchecker could not score (score None) is not a defect and ranks
+    clean — there is no number to hold against it."""
+    if score is None or score >= _LOG_CLEAN_SCORE:
+        return 0
+    return 1
 
 
 def _score_logs(local_logs, cfg):
@@ -3471,12 +3570,22 @@ def _score_logs(local_logs, cfg):
     — the difference between "score 60" and "score 60 because …", which is the
     whole diagnosis of a release whose every candidate fails on its log. The
     "could not find EAC logchecker" notice is dropped: the checksum state
-    already says that, and it is about this machine, not about the rip."""
+    already says that, and it is about this machine, not about the rip.
+
+    The logs are graded in a small POOL: each one shells out to Logchecker (php)
+    and reads the log file, and a multi-disc album — or one folder holding a
+    junk log beside the real one — used to pay for every php run in series, so
+    the first disc's verdict waited on all the others'. Same shape as
+    `_verify_group`: the run's own worker budget (`worker_count`), capped small
+    because each lane starts its own php process, bounded by the work in hand —
+    and `ex.map` keeps the result in input order, so the reported lines do not
+    change."""
     from mlo.discs import (score_disc_log, check_log_checksum, read_log_text,
                            run_logchecker, parse_logchecker)
+    from concurrent.futures import ThreadPoolExecutor
+    from mlo.stats import worker_count
 
-    out = []
-    for p in sorted(local_logs):
+    def one(p):
         try:
             score = score_disc_log(p)
         except Exception:
@@ -3492,8 +3601,14 @@ def _score_logs(local_logs, cfg):
                 if "could not find eac logchecker" not in d.lower())[:120]
         except Exception:
             why = ""
-        out.append((p, score, state, detail, why))
-    return out
+        return (p, score, state, detail, why)
+
+    logs = sorted(local_logs)
+    if not logs:
+        return []
+    with ThreadPoolExecutor(
+            max_workers=max(1, min(worker_count(cfg), 4, len(logs)))) as ex:
+        return list(ex.map(one, logs))
 
 
 _CUE_TRACK_RE = re.compile(r"^\s*TRACK\s+\d+", re.IGNORECASE | re.MULTILINE)
@@ -3518,6 +3633,17 @@ def _has_image_rip(album_dir, audio):
     return False
 
 
+def _folder_has_log(album_dir):
+    """Whether the download folder holds a .log file, anywhere under it. The CD
+    audit checks each track against a log's per-track CRCs; when there is no log
+    at all AND the log floor is switched off, the audio itself is the evidence
+    (see _verify_album and find_candidates)."""
+    for _root, _dirs, files in os.walk(album_dir):
+        if any(f.lower().endswith(".log") for f in files):
+            return True
+    return False
+
+
 def _verify_album(album_dir, cfg, is_cd):
     """Post-download verification. Returns (ok, problems[]).
 
@@ -3528,6 +3654,13 @@ def _verify_album(album_dir, cfg, is_cd):
     ffmpeg decode-to-null). The full AudioAuditor pass runs later as part of
     the normal pipeline — only .log matching (CD) and decodability matter for
     accepting or rejecting a download.
+
+    ONE exception to the CD rule: a folder with NO .log at all, when the log
+    floor is switched off (`soulseek_auto_log_min_score` = 0), is verified by
+    the same clean decode as digital media. With the floor off the user has
+    said a log's absence is not a defect, and there is no log to check the CRCs
+    against — failing the album for it would throw away a folder whose audio is
+    perfectly verifiable, which is exactly what `find_candidates` now offers.
     """
     problems = []
     from mlo.tools import detect_all_tools
@@ -3540,7 +3673,15 @@ def _verify_album(album_dir, cfg, is_cd):
     if not audio:
         return False, ["no audio files found in the download"]
 
-    if is_cd and not _has_image_rip(album_dir, audio):
+    # No log at all + the floor switched off: decode is the evidence (below),
+    # not the .log-CRC audit.
+    no_log = (is_cd and _log_min_score(cfg) == 0
+              and not _folder_has_log(album_dir))
+    if no_log:
+        _log("  no rip log in the download and the log floor is off — "
+             "verifying the audio by a clean decode")
+
+    if is_cd and not no_log and not _has_image_rip(album_dir, audio):
         # verify_album_checksums keys off MEDIA=CD — the tags were just
         # written for exactly this reason.
         ffmpeg = (detect_all_tools().get("ffmpeg") or {}).get("ffmpeg_exe")
@@ -3559,7 +3700,7 @@ def _verify_album(album_dir, cfg, is_cd):
         for p, reason in unverified.items():
             problems.append(f"{os.path.basename(p)}: not verifiable ({reason})")
         return not problems, problems
-    if is_cd:
+    if is_cd and not no_log:
         _log("  disc-image rip (one file per disc plus its cue) — verifying by "
              "decode; per-track .log CRCs do not apply")
 
@@ -3900,7 +4041,7 @@ def _batch_hint(ddir, attempt):
     return True
 
 
-def _batch_arrived(slsk, ddir, attempt):
+def _batch_arrived(slsk, ddir, attempt, index=None):
     """Whether every file of `attempt` has really arrived: on disk (see
     _batch_hint) AND vouched for by slskd's transfer record.
 
@@ -3911,13 +4052,21 @@ def _batch_arrived(slsk, ddir, attempt):
     like it does. It is not the full acceptance test of _wait_for_files — a file
     with no live record at all is left to that function's own fenced rule (b) —
     only the "this peer is really done" signal the batch needs to pick a
-    winner."""
+    winner.
+
+    `index` is this tick's `downloads_by_user` snapshot: with it every peer of a
+    batch is read out of ONE transfer-tree request (see _batch_cancel_check);
+    without it this peer asks slskd for the tree itself. The batch checks pass
+    none — they read the snapshot `_wait_for_files` stashed on this thread."""
     if not _batch_hint(ddir, attempt):
         return False
+    if index is None:
+        index = getattr(_tl, "transfers_index", None)
     from server.soulseek import _user_transfers
     left = {w["filename"] for w in attempt["wanted"]
             if w["filename"] not in attempt["got"]}
-    ok = {t["filename"] for t in _user_transfers(slsk, attempt["username"], left)
+    ok = {t["filename"] for t in _user_transfers(slsk, attempt["username"], left,
+                                                 index=index)
           if _transfer_ok(t["state"])}
     return left <= ok
 
@@ -3938,7 +4087,12 @@ def _batch_cancel_check(slsk, ddir, current, others):
     never be handed to the "another peer won" path — which would sweep the album
     it just downloaded. Its test is the same authoritative one (disk AND slskd's
     vouch), so a slower peer whose files merely lie on disk cannot hold the batch
-    either."""
+    either.
+
+    Every readiness test below reads the tick's `downloads_by_user` snapshot
+    that `_wait_for_files` stashes on this thread (`_tl.transfers_index`), so a
+    tick over a batch asks slskd for the transfer tree once instead of once per
+    peer checked."""
     def check():
         if _cancelled():
             return True
@@ -3968,18 +4122,23 @@ def _logs_hint(ddir, attempt):
     return True
 
 
-def _logs_arrived(slsk, ddir, attempt):
+def _logs_arrived(slsk, ddir, attempt, index=None):
     """Whether every .log of `attempt` is on disk AND vouched for by slskd.
 
     The .log gate's own readiness test, over the logs alone: the batch's logs
     are all queued at once, so one that has really arrived must be able to be
     graded without waiting out a sibling whose peer has stalled. Same rule as
-    `_batch_arrived` (disk plus slskd's vouch)."""
+    `_batch_arrived` (disk plus slskd's vouch), and the same per-tick snapshot
+    (`_tl.transfers_index`, stashed by `_wait_for_files`) so the whole gate costs
+    one transfer-tree request per tick."""
     if not _logs_hint(ddir, attempt):
         return False
+    if index is None:
+        index = getattr(_tl, "transfers_index", None)
     from server.soulseek import _user_transfers
     left = {w["filename"] for w in attempt["logs"]}
-    ok = {t["filename"] for t in _user_transfers(slsk, attempt["username"], left)
+    ok = {t["filename"] for t in _user_transfers(slsk, attempt["username"], left,
+                                                 index=index)
           if _transfer_ok(t["state"])}
     return left <= ok
 
@@ -3995,7 +4154,11 @@ def _log_gate_cancel_check(slsk, ddir, current, others):
     the gate takes it next) and the current wait yields — exactly as the album
     phase yields to a mate that already holds the album (see
     `_batch_cancel_check`). `current`'s own logs are tested first, so a
-    candidate that has itself arrived keeps its wait and is graded normally."""
+    candidate that has itself arrived keeps its wait and is graded normally.
+
+    Like `_batch_cancel_check`, every readiness test reads the tick's
+    `downloads_by_user` snapshot from this thread (`_tl.transfers_index`): the
+    whole logging gate costs one transfer-tree request per tick."""
     def check():
         if _cancelled():
             return True
@@ -4221,7 +4384,7 @@ def _try_batch(slsk, ddir, batch, release, cfg, is_cd, min_score):
             return "cancelled"
         _log("Grading rip log(s) with Logchecker…")
         scores = _score_logs(list(got_logs.values()), cfg)
-        good, bad = [], []
+        good, bad, ranks = [], [], []
         for p, score, state, detail, why in scores:
             ar_state, ar_detail = _log_accuraterip(p)
             _log(f"  {os.path.basename(p)}: score "
@@ -4230,6 +4393,7 @@ def _try_batch(slsk, ddir, batch, release, cfg, is_cd, min_score):
                  + (f" — {why}" if why else ""))
             if _log_passes(score, state, min_score, ar_state):
                 good.append(os.path.basename(p))
+                ranks.append(_log_rank(score))
                 if score is None:
                     # The bar is an opinion Logchecker could not form; the log
                     # is accepted on its per-track CRCs, and the outcome says
@@ -4257,6 +4421,13 @@ def _try_batch(slsk, ddir, batch, release, cfg, is_cd, min_score):
             continue
         for n, s, st, why, ar, ard in bad:
             _log(f"  ignoring {_log_fail_reason(n, s, st, min_score, why, ar_state=ar, ar_detail=ard)}")
+        # A log that PASSED but scored below Logchecker's own clean band does
+        # not kill its candidate — it DOWN-RANKS it (see _log_rank): the
+        # candidate waits its turn behind one whose log is clean, so a 90/100
+        # copy is only reached once every clean one has been tried. The best
+        # (lowest) rank of the pass logs that carry the album is the one that
+        # stands.
+        a["_log_rank"] = min(ranks) if ranks else 0
         _log(f"{len(good)} log(s) pass — downloading the full album…")
         # The log cleared the bar, so the album has earned its bytes: it is
         # requested NOW, in a second call, and only its own files — the logs are
@@ -4275,6 +4446,11 @@ def _try_batch(slsk, ddir, batch, release, cfg, is_cd, min_score):
 
     # --- the album: every peer's bytes are in flight, the first good one wins --
     order = [a for a in attempts if a["state"] == "downloading"]
+    # A candidate whose log passed but scored below Logchecker's clean band
+    # waits its turn BEHIND one whose log is clean (see _log_rank) — accepted,
+    # never killed for the score. The sort is stable, so candidates at the same
+    # log rank keep the batch's own order.
+    order.sort(key=lambda a: int(a.get("_log_rank") or 0))
     # One patience window per candidate, measured from the moment ITS transfers
     # were asked for (a batch queued together therefore shares the window): a
     # peer at the end of a long queue costs this much and no more, and the next
@@ -5596,7 +5772,7 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
         youtube_first = route == _ROUTE_YOUTUBE and _youtube_ready(cfg)
         if not youtube_first:
             _require_slskd(cfg)
-        min_score = int(cfg.get("soulseek_auto_log_min_score", 100) or 100)
+        min_score = _log_min_score(cfg)
         ddir = slsk.download_dir(cfg)
 
         # ---- release identity ------------------------------------------------
@@ -5641,8 +5817,8 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
         # route for a release that could not be read earlier.
         route = acquisition_route(release)
         is_cd = any(is_cd_format(f) for f in media_formats(release))
-        # DIGITAL decides whether the broad `artist album year` second pass may
-        # run at all (see the search block below): a pressing is searched by
+        # DIGITAL decides whether the broad `artist album year` query joins the
+        # batch at all (see the search block below): a pressing is searched by
         # what identifies the pressing and nothing else, found or not.
         digital = _is_digital(release)
         label = (f"{(release.get('artists') or [{}])[0].get('name') or ''} — "
@@ -5746,8 +5922,9 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
         # reported by the wish prompt, and the candidate loop below can reach
         # both on EITHER path (a browsed-folder grab searches with nothing).
         # `searched_s` accumulates what each `_search_queries` window really
-        # spent (the configured one and, on a digital release, the broader
-        # second pass) — the number both wish offers publish as `waited`.
+        # spent (phase 1's batch, and the top-up when it had to re-read a
+        # search still running) — the number both wish offers publish as
+        # `waited`.
         queries_built, search_wait, searched_s = [], 0, 0.0
         # What the lossy branch below decided, when it decided anything: the
         # format(s) an unattended job took under `soulseek_auto_lossy_policy`.
@@ -5798,6 +5975,20 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
                 queries_built = _build_from_templates(plans, release)
             else:
                 queries_built = release_queries(release, cfg)
+            # The broad "artist album year" wording is folded into THIS batch
+            # for a digital release. It used to be a whole SECOND window, run
+            # sequentially and only after the configured templates came back
+            # empty — another wait, for a query that could have answered
+            # alongside them. Same scorer, same acceptance: one POST batch, one
+            # window, and the same "a usable folder ends the wait at once"
+            # shortcut over all of them. A PHYSICAL release never gets it (see
+            # release_queries and _pressing_fallback): that wording asks the
+            # network for every other pressing of the same album, which is
+            # exactly what a catalog-number search must not do.
+            if digital:
+                for q in _build_from_templates(["artist album year"], release):
+                    if q not in queries_built:
+                        queries_built.append(q)
             if not queries_built:
                 raise RuntimeError(
                     "Nothing to search by: this release has no trait the "
@@ -5894,8 +6085,10 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
             # because a search a popular album keeps alive is exactly the one
             # whose responses are still on their way — and slskd serves them the
             # moment it ends. A usable folder found here ends the top-up at
-            # once, and the broad second pass below still runs after it when
-            # nothing usable came back.
+            # once. (Every QUERY already went out in phase 1's batch, the broad
+            # digital one included, so this window only ever RE-READS searches
+            # the network is still answering — it never asks slskd a new
+            # question.)
             if not best and running:
                 _stage("searching",
                        f"Top-up search: {len(running)} search(es) still running…")
@@ -5924,44 +6117,16 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
                      f"search(es) in {int(searched_s)}s")
                 running = []          # consumed: phase 2 owns the second window
 
-            # ---- ONE broader query, run after the configured one(s) -----------
-            # A DIGITAL release whose configured templates name it too
-            # precisely answered with hundreds of files and no usable folder.
-            # This is not a return of the removed templates: it fires only as a
-            # SECOND attempt, sequentially, when the first produced nothing
-            # usable, and never runs alongside it (a competing window would
-            # only cost the user another search).
-            #
-            # DIGITAL ONLY, because "artist album year" is exactly what a
-            # physical release must never be searched with: it asks the network
-            # for every other pressing of the same album, and a CD job that ran
-            # it took a WEB rip instead of the pressing its catalog number
-            # named. A pressing gets its own templates and nothing else, found
-            # or not — see release_queries and _pressing_fallback.
-            all_responses = list(responses)
-            broad = []
-            if digital:
-                broad = [q for q in _build_from_templates(["artist album year"], release)
-                         if q not in queries_built]
-            if not best and broad:
-                _log(f"No usable folder from the configured template(s) — one broader "
-                     f"search: “{'” · “'.join(broad)}”")
-                fb_results, fb_failed, _fb_skipped = _search_queries(
-                    slsk, broad, search_wait, response_limit=response_limit,
-                    cancel_check=_cancelled)
-                fb_s = _search_seconds()
-                searched_s += fb_s
-                _job_search_done()
-                for line in fb_failed:
-                    _log(f"  ✕ {line}")
-                fb_responses = [f for _q, res in fb_results
-                                for f in (res.get("responses") or [])]
-                all_responses += fb_responses
-                candidates.extend(find_candidates(fb_responses, release, cfg))
-                candidates.sort(key=_rank)
-                best = [c for c in candidates if c["complete"] and c["lossless"]]
-                _log(f"  broader query: {len(fb_responses)} result file(s) in "
-                     f"{int(fb_s)}s, {len(candidates)} candidate folder(s) in total")
+            # Every query the release is searched with — the configured
+            # templates, the MBID/alias queries release_queries appends, and
+            # (digital only) the broad "artist album year" wording — went out in
+            # ONE batch above, so these are all of its responses. There is no
+            # second window to merge and none to wait out: the broad query used
+            # to run sequentially, only after the configured templates came back
+            # empty, which cost another full search window for a query that
+            # could answer alongside them. `all_responses` keeps its name for
+            # the CD no-log scan below.
+            all_responses = responses
 
             # ---- a complete lossless copy that simply has no rip log ----------
             # (CD only.) The CD gate needs one .log + one .cue per disc, so a
@@ -6292,21 +6457,34 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
 
 def _build_from_templates(templates, release):
     """Render the caller's OWN templates for one release: the queries a job was
-    handed (a wish replays what it stored) and its broad second pass. They are
-    rendered exactly as given — no configured set is consulted, and no
-    MusicBrainz alias is expanded: those are queries somebody already decided."""
+    handed (a wish replays what it stored) and the broad digital query folded
+    into its batch. They are rendered exactly as given — no configured set is
+    consulted, and no MusicBrainz alias is expanded: those are queries somebody
+    already decided."""
     return release_queries(release, {}, templates=templates)
 
 
 def _stamp_media(album_dir, media, cfg):
-    """Write MEDIA (and clear SOURCE on a CD) before verification.
+    """Write MEDIA before verification, and clear SOURCE on a CD only when the
+    owner asked for it.
 
     Returns (stamped, problems). A file whose tag cannot be written is a
     problem, never a silent skip: verify_album_checksums keys off MEDIA, so a
-    swallowed failure would let a CD rip "verify" without one CRC check."""
+    swallowed failure would let a CD rip "verify" without one CRC check.
+
+    The SOURCE deletion used to be unconditional here, which is how an
+    auto-import stripped a tag the download arrived with. It now mirrors the
+    MEDIA/SOURCE pass and the grade: `strip_source_on_cd` (OFF by default — see
+    mlo/config.py) is the only thing that deletes, and this stamp runs before
+    the chain does, so it has to read the same switch.
+
+    A DELETE, never `set_tag("SOURCE", "")`: an empty tag stays on the file
+    forever (nothing re-clears a blank one) and reads as a cleared tag only to
+    this app."""
     from mlo.audio import AudioFile
     from server.main import is_audio_file
     n, problems = 0, []
+    strip = bool((cfg or {}).get("strip_source_on_cd", False))
     for root, _dirs, files in os.walk(album_dir):
         for f in sorted(files):
             if not is_audio_file(f):
@@ -6319,10 +6497,8 @@ def _stamp_media(album_dir, media, cfg):
                     continue
                 if not str(af.get_tag("MEDIA") or "").strip():
                     af.set_tag("MEDIA", media)
-                if is_cd_media(media) and str(af.get_tag("SOURCE") or "").strip():
-                    # DELETE it: set_tag("SOURCE", "") wrote an empty tag that
-                    # stays on the file forever (nothing re-clears a blank
-                    # one) and reads as a cleared tag only to this app.
+                if (strip and is_cd_media(media)
+                        and str(af.get_tag("SOURCE") or "").strip()):
                     af.delete_tag("SOURCE")
                 n += 1
             except Exception as e:

@@ -53,9 +53,32 @@ def _optional(module, name):
 _TRACKLIST_PROBE_FILES = 5
 
 
-def _album_release_id(album_dir):
-    """The album's MusicBrainz id, else its release-group id, else ""."""
+def _album_release_id(album_dir, manifest=None, force=False):
+    """The album's MusicBrainz id, else its release-group id, else "".
+
+    The album's `.mb_expected` manifest is read FIRST (or handed in by a caller
+    that already read it) because it decides whether the probe below is worth a
+    container parse at all:
+
+      * a manifest that names a RELEASE is a claim about which release the
+        album is, and the tracks can contradict it — a re-point through the
+        import rewrites the tags and leaves the manifest — so the probe still
+        runs and the caller's own comparison decides whether it is stale;
+      * a manifest with rows and NO release id (a rip sheet wrote it) is kept
+        as the album's own evidence whatever its tracks name, so probing could
+        change nothing the caller does: NO container is opened for it;
+      * no manifest at all, no rows, or a forced rewrite: the tracks are the
+        only thing that can name the release, so up to
+        _TRACKLIST_PROBE_FILES containers settle it (one unreadable file cannot
+        cost the album its manifest).
+    """
     from mlo.audio import AudioFile
+
+    if manifest is None:
+        manifest = load_expected_tracks(album_dir)
+    if (not force and manifest.get("tracks")
+            and not str(manifest.get("release_id") or "").strip()):
+        return ""
 
     try:
         names = sorted(f for f in os.listdir(album_dir)
@@ -123,8 +146,11 @@ def run_release_tracklist(config):
     pbar = mlo_stats._make_pbar(len(albums), "Release tracklist", unit="album")
     for album in albums:
         rel = _relpath_guard(album, folder or album)
-        mbid = _album_release_id(album)
+        # Read the manifest BEFORE the release id: it is what decides whether
+        # the id probe (up to 5 container opens) is worth doing at all — see
+        # _album_release_id.
         manifest = load_expected_tracks(album)
+        mbid = _album_release_id(album, manifest, force=force)
         if not force and manifest["tracks"]:
             # A manifest naming a DIFFERENT release than the album's own tracks
             # do is the leftover of a release change: re-pointing an album (the
@@ -1580,20 +1606,30 @@ def _chain_scan(cfg, targets):
     """Resolve the library's album list ONCE for the chain about to run.
 
     Yields whether this run owns the scope (so it — and only it — drops what it
-    armed). A run that NAMES its targets never arms one: its scripts read the
-    targets, not the library, and a scoped run must not install a library-wide
-    view for a concurrent one to trip over. See mlo.stats.chain_scan_start for
-    what the scope is and who invalidates it.
+    armed).
+
+    A run that NAMES its targets never arms the LIBRARY-WIDE album list: its
+    scripts read the targets, not the library, and a scoped run must not
+    install a library-wide view for a concurrent one to trip over. It does arm
+    the run's READ scope (the walk memo and the tag memo — mlo.stats.run_scope_*
+    and the section above them): those are keyed per path and per (root, exts),
+    so a chain over one album reuses exactly its own album's listings and
+    parses, and a chain over another album never sees them. See
+    mlo.stats.chain_scan_start for what the scope is and who invalidates it.
     """
-    if targets is not None or cfg.get("targets") is not None:
-        yield False
-        return
     from mlo import stats as mlo_stats
-    mlo_stats.chain_scan_start(cfg.get("music_folder"))
+    scoped = targets is not None or cfg.get("targets") is not None
+    if scoped:
+        mlo_stats.run_scope_start()
+    else:
+        mlo_stats.chain_scan_start(cfg.get("music_folder"))
     try:
         yield True
     finally:
-        mlo_stats.chain_scan_end()
+        if scoped:
+            mlo_stats.run_scope_end()
+        else:
+            mlo_stats.chain_scan_end()
 
 
 def _take_claimed(claimed, names, live):

@@ -22,6 +22,8 @@ import FolderPicker from "../components/FolderPicker";
 import PageHeader from "../components/PageHeader";
 import SetupRail from "../components/SetupRail";
 import SourcesPanel from "../components/SourcesPanel";
+import ScrobblePanel from "../components/ScrobblePanel";
+import MbLoginPanel from "../components/MbLoginPanel";
 import { toast } from "../store";
 import {
   OPEN_GROUPS,
@@ -671,6 +673,19 @@ export default function SetupPage() {
             // The providers themselves are triaged in Settings → Sources,
             // which draws this same panel unfolded.
             <SourcesPanel only={["credentials", "links"]} askKeys />
+          )}
+
+          {step.panel === "connections" && (
+            // The two Connect flows, side by side with the settings group
+            // below them: each panel carries its OWN numbered how-to (the
+            // shared ConnectGuide), so the wizard and the Settings surfaces
+            // that draw these same panels read the flow identically. Nothing
+            // here gates the step — both logins are optional and the group
+            // below is what the step saves.
+            <div className="space-y-3">
+              <ScrobblePanel />
+              <MbLoginPanel ids={[]} kind="album" />
+            </div>
           )}
 
           {step.panel === "password" && (

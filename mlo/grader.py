@@ -3300,11 +3300,19 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                     failed_checks += 1
                     add_issue("Missing SOURCE (required for Digital Media)", tr["file"])
                     tr["issues"].append("SOURCE")
-            else:
-                if src:
-                    failed_checks += 1
-                    add_issue("SOURCE present but MEDIA is not Digital Media", tr["file"])
-                    tr["issues"].append("SOURCE")
+            elif src and cfg.get("strip_source_on_cd", False):
+                # A SOURCE on a non-digital album is an issue ONLY while the
+                # owner asks for that value's removal (`strip_source_on_cd`,
+                # OFF by default — see mlo/config.py): the app never strips a
+                # tag it did not write, so grading a kept SOURCE as a defect
+                # would fail the very value the pass now preserves. With the
+                # switch on, the issue names it, because script 1 is what
+                # removes it.
+                failed_checks += 1
+                add_issue("SOURCE present but MEDIA is not Digital Media "
+                          "(strip_source_on_cd is on — script 1 removes it)",
+                          tr["file"])
+                tr["issues"].append("SOURCE")
 
     # SOURCE consistency for Digital Media (only if at least one track enables MEDIA_SOURCE).
     if digital and cfg.get("grade_check_source", True):

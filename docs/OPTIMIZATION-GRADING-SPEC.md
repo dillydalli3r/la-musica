@@ -647,7 +647,8 @@ the same way, case-insensitively and with the separators folded (`SHMCD` is
 `SHM-CD`). They are the same disc: red-book 16-bit/44.1 kHz audio that a ripper
 logs, cues and checksums exactly like any other pressing, so the
 CUE/LOG/AccurateRip/CRC/`LOG_GRADE` expectations, the `.log`-CRC audit legs
-(R21) and the `SOURCE` stripping a CD gets all apply to every one of them
+(R21) and the `SOURCE` removal a CD gets while `strip_source_on_cd` is on
+(off by default — see R398) all apply to every one of them
 exactly as they do to `MEDIA=CD`. Each keeps its own spelling as a value of
 `MEDIA_VALUES` rather than being rewritten to `CD` — that is what the release
 states and what an import stamps (`mlo.release_choice.cd_media_value`), so a
@@ -2569,8 +2570,41 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   and an edition that states none prints the em dash the Date column prints
   rather than an empty cell. Pinned by `tools/check_release_choice.mjs`, which
   renders the page and reads the header row's own words IN ORDER, a row's own
-  numbers joined, the tooltip, exactly one Cat # cell per edition, and the em
+  numbers joined, the tooltip, exactly one Cat # cell per album, and the em
   dash beside the edition that states none.
+
+- **R408 — a MusicBrainz login exists to WRITE, and only a rating write needs
+  one.** The owner's ask: "musicbrainz login (to submit ratings to
+  musicbrainz)". Reads never need an account, so nothing changes about them.
+  `server.mb_submit` implements the provider's own OAuth2 (`oauth2/authorize`
+  with PKCE S256 and the OOB redirect, `oauth2/token` for the code exchange and
+  for `refresh_token` renewals, `oauth2/userinfo` to name the account), stores
+  the client pair plus the refresh/access token and its expiry in config
+  (`musicbrainz_client_id`/`_client_secret`/`_refresh_token`/`_access_token`/
+  `_token_expires_at`/`_username`), and renews the short-lived access token
+  lazily — the moment it is due, never on a timer. The submission itself is
+  `POST /ws/2/rating` with an MMD-2.0 XML body and a Bearer token, **one
+  request per album**: every recording of that album plus its release group
+  (`MUSICBRAINZ_RELEASEGROUPID`) — MusicBrainz has no `release` rating entity,
+  and the release group is exactly what `ALBUMWEBRATING` already stores.
+  Because MusicBrainz rates on a 20-point grid (20 per star, and **0 REMOVES
+  the rating**), a stored value is snapped **half-up**
+  (`floor((v + 10) / 20) * 20` — half-up, not `round()`, which is banker's and
+  would answer 40 for 50) and anything that snaps to 0 is **never sent**: it
+  means "no rating of yours to submit", reported as skipped with that reason.
+  `musicbrainz_submit_enabled` (on by default) gates every submission path and
+  a blank login is refused before any request; `whoami` powers the Settings
+  credential row, and every refusal is returned in MusicBrainz's own words.
+  The UI is the MusicBrainz page's panel (Connect → open the authorize URL →
+  paste the code the page shows → connected as X; Disconnect keeps the app
+  registration and clears only the tokens) plus a **Submit ratings** action for
+  the album/track the page is showing, which reports per file what was sent
+  (and from what stored value) and what was skipped. Pinned by
+  `tools/test_mb_submit.py` (98 checks: the exact XML bodies for both entity
+  kinds batched into ONE request, the snap table 83→80, 91→100, 50→60, 10→20,
+  9→skipped, 0 never sent, both token form bodies, a refusal as text from a
+  400 and from a 200 `<error>`, and a live server whose five routes answer
+  sanely with nothing connected).
 
 ### 7.12 What enters the library: the edition, the source, and the name in your language
 
@@ -3703,8 +3737,55 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
     swallowed into a stamping note, so a pinned-mbid bulk import wrote no genres
     at all while the album's own Import genres button — which resolves its
     release itself, correctly — answered in two seconds. The stub in
-    `tools/test_import_pipeline.py` returned a bare dict and hid it; it returns
-    the real pair now.
+`tools/test_import_pipeline.py` returned a bare dict and hid it; it returns
+        the real pair now.
+
+- **R405 — the expected tracklist is recorded by whoever settles WHICH release
+  the album is.** The owner's ask: "when fetch releases / auto-match is hit /
+  the importing moves to the next page … it updates the mb expected, and make
+  this behavior apply anywhere else in the app where it should be". The
+  manifest stays `mlo.paths.save_expected_tracks`'s file, and script 15 stays
+  the library-wide writer; what changed is WHEN it is written. The wizard now
+  writes it at every point the identity settles — a fetch from the tags, a
+  manual fetch, an auto-match, an AcoustID accept, a re-link, and any forward
+  step taken with a release in hand — through ONE helper
+  (`recordExpectedTracks`/`syncExpectedTracks`, the single caller of
+  `api.importExpected`), with a supersede guard so a stale fetch writes
+  nothing; and the SERVER-side pins do it in the same breath as the identity
+  stamp: `server.imports._record_release_manifest`, called from
+  `_stamp_release`, covers a PINNED bulk import (the Library's Import dialog,
+  a framework album filled by an acquisition). The conditions are script 15's
+  own: written when the manifest is absent, re-pointed when it names a
+  DIFFERENT release (the stale-manifest case the album page would otherwise
+  keep showing), always rewritten under a user's pin (`force_ids`), and
+  **nothing is written when the release states no tracklist** — a fabricated
+  list would fail the album forever. Pinned in `tools/test_script_menus.py`
+  (one `api.importExpected` caller, reached by the save paths and the step
+  advance), `tools/test_import_corrections.py`, and
+  `tools/test_chain_after_acquire.py` section (j) — seven real `bulk_import`
+  runs covering absent/same/other/no-tracklist and the pinned rewrite.
+
+- **R406 — the Finish step offers TWO closes, and the wizard has a RATINGS
+  step after Genres.** *Close* (the secondary button beside *Done*) runs the
+  same settle + organize + session/notification dismiss and closes WITHOUT
+  running a single script — its toast says the scripts were skipped — while
+  *Done* keeps running the ticked chain (both pinned by
+  `tools/test_script_menus.py`, and by an HTTP smoke whose server log holds no
+  `POST /api/run`). The wizard's steps are now
+  `Select → Links → Match → Covers → Genres → Ratings → Lyrics → Advisory →
+  Finish`: `mlo/import_policy.FAMILIES` gained **`ratings`** immediately after
+  `genres` (chain id `24`, off switch `web_ratings_enabled`, grader code
+  `WEBRATING_MISSING`, manual row `POST /api/import/ratings` →
+  `mlo.web_ratings.run_web_ratings` for one album, tags
+  `WEBRATING`/`WEBRATING_SOURCE`/`ALBUMWEBRATING`/`ALBUMWEBRATING_SOURCE`), so
+  the import's autonomous run, the prompt's link, the Settings review list and
+  the wizard's own step all read ONE registry. The step's fetch writes
+  **fill-only** (non-destructive, like every ratings write), shows each track's
+  value plus the tag pair and source that carry it, offers the shared
+  Force control ("24 · Web ratings re-fetch") for a re-fetch, and names
+  `web_ratings_enabled` when it is off; a held or reviewed ratings family
+  drops 24 from that import's chain, and an album whose web ratings are
+  complete is never a gap.
 
 ### 7.15 Notifications and the player's own immediacy
 
@@ -4096,9 +4177,36 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   log-score leg) all ship **100** — a Logchecker-perfect log, by default, and
   `mlo/discs.score_disc_log` is what scores it (Logchecker's own
   `Checksum: checksum_invalid` is a hard refusal, never a low score). A folder
-  already on disk (a staging import) is graded after the fact, never refused —
-  the grader's own wording says what it found. Lowering either threshold is
-  a settings change, never a default.
+already on disk (a staging import) is graded after the fact, never refused —
+      the grader's own wording says what it found. Lowering either threshold is
+      a settings change, never a default.
+
+- **R401 — the auto-importer's searches are polled, not hammered, and one
+  window answers every query.** The owner's ask: "ensure the auto-importing /
+  downloads from soulseek are done in an efficient manner". `server.soulseek`
+  gained `search_state(id)` (ONE `GET /searches/{id}`, no `/responses`) and
+  `downloads_by_user(slsk)` (ONE `GET /transfers/downloads` indexed by
+  username). With them:
+  * `_search_queries` polls only searches STILL RUNNING (one state GET per
+    0.75 s tick) and reads `/responses` exactly ONCE, on the tick a search
+    turns terminal — it used to issue two blocking slskd GETs for EVERY
+    watched search each tick, terminal ones included (~16 req/s for six
+    templates);
+  * `_wait_for_files` takes ONE transfers snapshot per tick, shared by the
+    batch wait, the log wait and the cancel check — it used to ask slskd for a
+    transfer tree once per tick PER CANDIDATE (up to 15 req/s with a batch of
+    3 across 5 releases);
+  * the broad/alias/MBID query templates are POSTed in phase 1's single search
+    window (the same scorer, the same acceptance, the same early exit) — the
+    three sequential extra windows of up to wait+grace (≈300 s before the
+    first batch could start) are gone;
+  * `_score_logs` scores a batch's logs in a small pool (the same width
+    `_verify_group` decodes with), instead of one Logchecker subprocess after
+    another.
+  Pinned in `tools/test_soulseek_candidates.py` (state-only polling with one
+  responses read, one snapshot per tick, one batch, pooled scoring). Nothing
+  about WHICH candidate wins changed: the queries, the ranking, the ratio, the
+  log gate and the verification are the same code reading the same answers.
 
 ### 7.20 The library layout: what it tolerates, and what the optimize pass removes
 
@@ -4700,9 +4808,48 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   * **a converted file's duration is read from the container just written**:
     `mlo.flac._convert_lossless_source` opens the output for the tag copy anyway
     (`AudioFile(tmp)`), so its own stream info answers the duration check that
-    used to be a second ffprobe on a file this pipeline had just produced; a
-    container mutagen cannot read still falls back to the probe. The import's
-    convert step measured 0.413 s → 0.302 s in the same pair.
+used to be a second ffprobe on a file this pipeline had just produced; a
+      container mutagen cannot read still falls back to the probe. The import's
+      convert step measured 0.413 s → 0.302 s in the same pair.
+
+- **R399 — one chain reads each file and each folder ONCE.** The owner's ask
+  ("all scripts … completely overhauled to be faster … while maintaining all of
+  the same functionalities"). `run_chain` now arms a per-chain **read scope**
+  (`mlo.stats.run_scope_start/drop/end`, armed by
+  `server.script_runners._chain_scan` for every chain, scoped runs included)
+  that holds two memos, both cleared when the chain ends and INERT outside a
+  chain (a single `run_script`, a route, a suite: unchanged behaviour):
+  a **tag memo** keyed `(path, mtime_ns, size)` that `mlo.audio.AudioFile`
+  consults for the container parse, and a **walk memo** keyed
+  (normcased targets, extensions) re-validated per directory against that
+  directory's own `st_mtime_ns`. Measured through `run_chain` on a 3-track
+  album: **3 container parses for 3 files** (42 with the scope unarmed — one
+  pass per album-lane script), pinned by
+  `tools/test_script_optimizations.py:check_chain_reads_each_file_once`.
+  Correctness is the writers': a memo style handle **materialises a private
+  container before any mutation** (`AudioFile._materialize`), a `save()` drops
+  that path's entries (both old and new path on a rename), a script that
+  reports `moved_targets` (or errors) drops the walk memo, and every
+  `chain_scan_end` clears both. A file changed by a SUBPROCESS (flac.exe,
+  beet, ffmpeg) has a new stat key, so it is re-parsed, never served a stale
+  memo. Script 15's own probe reads `.mb_expected` FIRST and opens containers
+  only when no manifest settles the release.
+
+- **R400 — one MusicBrainz browse answers every track's genres and rating.**
+  `server.integrations.release_recording_index(release_mbid)` is ONE
+  `recording?release=<id>&inc=genres+ratings+work-rels&limit=100` browse
+  (paged while `recording-count` is larger, every page through
+  `mb_get_cached`'s TTL + single-flight + 1 req/s etiquette), keyed by
+  recording id; the browse **does** accept `inc=work-rels`, so the work
+  fallback's id rides along. Script 24's track rung and the genre chain's
+  recording tier read it; the per-track lookup stays as the fallback (no
+  release id, a row the browse omits, a browse that failed), the work is
+  still asked only when the recording states nothing, and the album/artist
+  tiers are untouched (R92/R360). Measured on The Dark Side of the Moon:
+  **9 per-track requests / 6.79 s → 1 browse / 0.28 s**, and the end-to-end
+  album run 10 requests / 3.48 s → 2 / 0.88 s with IDENTICAL values and the
+  same `levels` words (`tools/test_web_ratings.py` 104 → 130 assertions;
+  `tools/test_genres.py`'s new browse section).
 
 ### 7.34 The Browse sheet reads the payload's names and the store's ratings
 
@@ -4789,9 +4936,29 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   checksum state), and `_log_fail_reason` writes
   `<name> — Logchecker <score>/100, required <min_score> (<its own note>)`, or
   the checksum verdict when that is the cause. The bar stays what it was —
-  `grade_log_score_threshold`, **100 by default** (the owner's rule) — and the
-  reason names it so the way out (lower it, or pick another release) is one
-  screen away.
+`grade_log_score_threshold`, **100 by default** (the owner's rule) — and the
+      reason names it so the way out (lower it, or pick another release) is one
+      screen away.
+
+- **R402 — the log's PROGRAM is never the reason a candidate dies.**
+  The owner's report: "ensure that the app doesn't reject good candidates with
+  logs from different programs". `soulseek_auto_log_min_score` ships **85**
+  (was 100): a log Logchecker cannot score (`None`) was already accepted and
+  still is, an unrecognised dialect (dBpoweramp, foobar, CUETools, anything
+  newer than the scorer) passes, and a score BELOW the bar now **down-ranks**
+  a candidate (`_log_rank` orders the batch's waits: accepted-but-under-100
+  last) instead of killing it. Three things still reject, and every message
+  names the value rather than the ripper: the log's own checksum does not
+  verify, the log reports an AccurateRip failure, or Logchecker scores it
+  below the floor ("Logchecker 62/100 (below 85)"). A CD folder with NO log at
+  all is admitted as a LOW-RANKING candidate only when the floor is set to 0
+  (its `.cue` is still required) and is verified by a clean decode — the
+  switch is documented in the setting's own help. The GRADE keeps its own bar:
+  `grade_log_score_threshold` 100 (R174) is a verdict about a file already in
+  the library, never the download gate. Pinned in
+  `tools/test_soulseek_candidates.py` (dBpoweramp accepted, 90 accepted and
+  ranked below 100, 62 rejected naming the score, invalid/AR-fail still
+  rejected, the logless floor-0 case).
 
 ### 7.37 The library page says what is failing, and the tools install themselves
 
@@ -5215,6 +5382,8 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
 
 - **R262 — SOURCE, the lyrics format and the album description are settled by the import, which asks only for what it cannot know.** For a release whose medium is Digital Media: `SOURCE` is written from the release's own store URLs (the `purchase for download` / `download for free` / `streaming` relations, `mlo/digital_source.py`), else **asked** through the import-policy family `source` (the wizard's Match step, `POST /api/import/source`, the unattended prompt) with `digital_media_source_value` as the suggested answer — and written fill-only, never over a stated value, and only where `should_write_audio_tag` allows. The lyrics formatter (script 1, `mlo.lyrics._process_lyrics_for_audio`) runs as part of the import, so "Lyrics not optimally formatted" cannot survive it; a lyric that arrives untimed (with `lyrics_allow_plain` off) or that the app's own grade still rejects after the formatter is removed together with its `.lrc` sidecar and derived translations, **with the count reported**, and only when the chain's fetch step will replace it (never when script 13 is not in the chain, never when the user keeps the lyrics family, never when `lyrics_allow_plain` is on). The album description is fetched by the import's own metadata step (the same machinery the album page uses), and when nothing is found or reachable the import says so and points at the album page rather than implying success.
 
+- **R398 — an import never deletes a tag it did not write: `SOURCE` survives, and stripping it is opt-in.** The owner's report (2026-10-12): "make sure that auto-importing / importing doesn't strip tags already present in files like SOURCE". `SOURCE` is the one tag the app used to DELETE rather than only fill, in three places that ran on an import: script 1's MEDIA/SOURCE pass removed it from a CD (behind `strip_source_on_cd`, which shipped ON), the SAME pass removed it from **every other medium with no switch at all** (Vinyl, Cassette, SACD, a blank MEDIA — so a hand-imported vinyl rip lost the store the user had recorded), and the Soulseek stamp (`server.soulseek_auto._stamp_media`) removed it from a CD unconditionally as it wrote MEDIA, before verification. All three now read ONE switch, `strip_source_on_cd`, and it ships **OFF**: with it off, a SOURCE a rip arrived with — the user's own word, another tagger's, a store's — travels untouched through the wizard, the auto-importer, the queue and the chain, and the non-CD branch never deletes at all. With it on, script 1 and the Soulseek stamp remove it from a CD (and only a CD, the HDCD family included per R17) exactly as before. The **grade follows the same switch**: "SOURCE present but MEDIA is not Digital Media" is an issue only while `strip_source_on_cd` is on (its text names the setting and that script 1 is what removes it), because grading a value the pass now preserves would fail every album the switch protects; a digital album's SOURCE requirement (R262) is untouched. Where a value IS written, nothing changed: the digital fill (R262) and the Soulseek stamp stay fill-only.
+
 ### 7.46 AcoustID submission is opt-in and follows the service's own rules
 
 - **R263 — script 22 submits fingerprints to AcoustID, and only what the service can accept.** A submission needs `acoustid_user_key`; a fingerprint with **no** MusicBrainz recording id is refused with `NO_RECORDING_ID` (AcoustID's own rule — the only exception is the credential probe `verify_user_key`), and the recording id is taken from `ACOUSTID_ID`, then `MUSICBRAINZ_TRACKID`, then the single unclaimed bracketed UUID in the file name (R243's rule). The fingerprint comes from `ACOUSTID_FINGERPRINT` or is taken locally with the bundled `fpcalc` when the file carries none — a CD rip the file itself names must be submittable. A pair the service already links is never re-sent: the app asks `v2/lookup` (at any score, not `acoustid_min_score`) and keeps a local ledger of accepted and pending pairs (`<music>/.mlo/data/acoustid_submissions.json`). Batches respect the service's 100-entry limit, the answer is reported per file (accepted / already known / rejected with the service's words), a path the user names is what is submitted (a file path does not expand to its album), and **22 is never in the shipped Run All order or the default chain** (`server.script_runners.OPT_IN_SCRIPTS`): upgrading an install must not publish anything by itself, while a value the user saved keeps it.
@@ -5544,9 +5713,35 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   `tools/test_recommendations.py`'s wide-library case (30 records sharing one
   genre, mood, energy and era: both targets come back with exactly the default,
   an explicit `limit=20` still gets 20, and it fails against the pre-change
-  module with `AssertionError: 20` on the track shelf) and by
-  `tools/check_library_az.mjs`, which keeps the request body the page sent
-  (`limit: 12`) and reads the printed count off the shelf's heading line.
+module with `AssertionError: 20` on the track shelf) and by
+      `tools/check_library_az.mjs`, which keeps the request body the page sent
+      (`limit: 12`) and reads the printed count off the shelf's heading line.
+
+- **R407 — Home carries an ONLINE section, and an offline install never knows
+  it is there.** The owner's ask: the page "shouldn't just be referring to
+  grading and stuff, it should be pulling from online sources such as apple
+  music or spotify for album recommendations / trending stuff". Below the nine
+  library-local shelves (which are untouched, and still come from ONE cached
+  `/api/home` payload — `tools/test_home.py` still pins that contract) the page
+  renders three online shelves from the routes that already existed:
+  **Trending now** = `GET /api/discover/charts?period=all&kind=tracks&source=itunes`
+  (Apple Music's most-played, keyless; Deezer's tracks chart is fetched ONLY
+  when Apple answers with zero rows — an Apple ERROR is an absent shelf, never
+  Deezer's), **New & notable** = `?kind=albums&source=deezer` (Deezer's current
+  album chart — no dated "new releases" feed exists in the registry, and the
+  shelf's own hint says what it is rather than claiming release dates), and
+  **For you** = `GET /api/discover/recommended?seed=library&kind=albums`
+  (library-seeded, already-owned rows dropped server-side). Each shelf is its
+  own `useQuery` with its own key, `staleTime` and `retry: 1`; a pending shelf
+  shows a loading line, and an error or an empty answer renders NOTHING — the
+  local shelves never wait on a provider and never blank with one. The whole
+  section is ABSENT, and fires no request, when `discovery_enabled` is off (the
+  Home tab's blurb says so). Online rows are the one shared row shape rendered
+  by `DiscoverRow` inside `RecommendShelf`, so Add/external-link behave exactly
+  as on the Discover and Charts pages. Pinned by
+  `tools/check_home_online.mjs` (26 checks: the three shelves render, an
+  all-error online state leaves the local shelves intact, the gate hides the
+  section, the Apple→Deezer fallback fires only on an empty answer).
 
 ### 7.51 An album title wears the advisory its FILES state
 
@@ -5734,6 +5929,36 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   unchanged (an outside click still closes the menu, and the shield still
   covers the viewport).
 
+- **R409 — scrobbling is a one-way promise the app keeps in the background:
+  nothing is sent without a session, and a scrobble is never lost.** The owner's
+  ask: "last.fm scrobbling support". `server/lastfm.py` is the ONE seam: the
+  docs' own signature (`api_sig` = md5 of every param sorted by name as
+  `name+value`, the shared secret appended, `format` and `callback` excluded),
+  `auth.getToken` → the browser authorization URL (`/api/auth/?api_key&token`,
+  opened through the shell's external-link path) → `auth.getSession` for the
+  session key and the account name, then `track.updateNowPlaying` and
+  `track.scrobble` (batched up to Last.fm's own 50 per call when the spool is
+  flushed). The **rule is Last.fm's own**: a track must be longer than 30 s and
+  the play must reach max(50 % of its duration, 240 s); the client fires
+  now-playing at the SAME moment `POST /api/plays` records the play (`PlayerBar`'s
+  `countPlay`) and ONE scrobble per play, once, keyed element+path, on
+  `timeupdate`/`ended` — the server re-checks the rule and the length so a
+  client can never announce a play that did not count. NOTHING is sent while
+  `lastfm_session_key` is blank or `lastfm_scrobble_enabled` (the Scrobbling &
+  submissions tab) is off; `GET /api/lastfm/status` says which of the two it is.
+  A send the network or the service refuses is **appended to a spool**
+  (`<music>/.mlo/data/lastfm_scrobbles.jsonl`), flushed opportunistically before
+  the next send and retried after a restart — a playback path never fails
+  because Last.fm is away, and a refused scrobble is never silently dropped.
+  `verify_session` is what the Settings credential row asks (an AUTHENTICATED
+  read, so "not connected" is never mistaken for "working"), and the panel
+  offers Connect/Disconnect plus the queued count. Pinned by
+  `tools/test_lastfm.py` (128 checks: the signature against the docs' own
+  example with reference digests computed outside the code under test, the
+  threshold table, one-scrobble-per-play, the spool across a restart, and the
+  no-credential refusal paths; `tools/test_sources_health.py` and
+  `tools/test_setup_coverage.py` stay green).
+
 ### 7.55 The import queue: one chain, one row, and a notice only when it ends
 
 - **R307 — one chain per album.** An album the pipeline is already on (a
@@ -5758,9 +5983,25 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   progress text is the album-scoped label (`Remux videos (MKV) + 20 more` for a
   purely audio album is exactly what this rule forbids): a script that provably
   cannot apply to the album is dropped from the chain before it runs, and the
-  import's own `_phase` reads are published only when the step really happens
-  for this album (no genre frame with no genre source, no instrumental frame
-  with the step off). `tools/test_import_pipeline.py` asserts the sequence.
+import's own `_phase` reads are published only when the step really happens
+      for this album (no genre frame with no genre source, no instrumental frame
+      with the step off). `tools/test_import_pipeline.py` asserts the sequence.
+
+- **R403 — the queue's albums import on LANES, one chain per album.** "Import
+  all downloads" used to be ONE daemon thread that took each album through its
+  whole chain before the next (and `import_queue.start` refused while it ran),
+  while the wizard's own bulk import already ran `import_bulk_concurrency`
+  albums at once. The queue now submits every album to the process's ONE import
+  pool (`server.imports._import_pool`, the same budget the bulk import uses, so
+  the two paths share it rather than doubling it); each album still holds its
+  own `job_locks` path claim and runs its own chain, so no two chains touch one
+  album's files. Failures stay per album, cancel skips the albums not yet
+  started, the per-album publish/one-frame-per-album bookkeeping and the single
+  run row ("Import all downloads") are unchanged, and one album's log lines
+  never interleave into another's. Measured: two albums that each import in
+  1.0 s, serial 2.00 s → concurrent 1.00 s. Pinned by a `threading.Barrier`
+  case in `tools/test_import_queue.py` (deterministic, not timing-based: the
+  second album could never reach the barrier if the run were serial).
 
 ### 7.56 A verdict is not drawn while the album is still being imported
 
@@ -6199,9 +6440,39 @@ composition instead (R267). Above `lg` the pane sits beside the artwork.
   under the file's new size/mtime stamp), `mlo/grader.py`'s per-track loop
   (one pass accumulating the album's checkbook: issues, counters, the deferred
   AUDIT resolution), `mlo/acoustid.py`'s candidate lookups (paced by the
-  service's own throttle, not by the CPU). Pinned by the pipeline suites
-  (`tools/test_remux.py` accounting, `tools/test_dynamic_range.py` album DR,
-  `tools/test_script_optimizations.py`, `tools/test_config_ui_parity.py`).
+service's own throttle, not by the CPU). Pinned by the pipeline suites
+      (`tools/test_remux.py` accounting, `tools/test_dynamic_range.py` album DR,
+      `tools/test_script_optimizations.py`, `tools/test_config_ui_parity.py`).
+
+- **R404 — the wizard's steps lane their per-item work, EXCEPT where one
+  global gate decides the wall.** The owner's ask ("I want it to be very quick
+  while maintaining all of the same functionalities"). What laning buys, and
+  what it costs, both measured on scratch albums against the real providers:
+  * `/api/lyrics/auto` fetches its tracks on `mlo.stats.worker_count` lanes
+    (rows returned in REQUEST order, the per-host throttle in
+    `mlo.lyrics_providers._request` untouched): **8 tracks 41.37 s → 10.15 s**,
+    identical counts and identical per-track rows
+    (`tools/test_lyrics_kind.py`).
+  * AcoustID detection fingerprints in bounded lanes **while its LOOKUPS stay
+    serial** — the service's own 3 req/s and the "first fatal transport failure
+    ends the album at ONE request" rule are what pace them — and a second
+    detect over an unchanged folder runs NO fpcalc (the fingerprint memo).
+  * `settle_digital_import` runs its metadata leg beside the two tag legs
+    (which stay sequential on the request thread: they rewrite the same
+    containers), same keys, same values, same exception isolation.
+  * A grader verdict derived from ONE folder is memoized
+    (`tagcache.cached_folder_verdict`) on the folder's own signature — the
+    directory's mtime plus the stat of the audio files it read, plus the
+    config key — so a wizard mount and its re-fetches stop re-grading an
+    unchanged folder; every `invalidate_*` that drops the tag cache drops it.
+  * **`imports.fetch_advisories` is SERIAL on purpose, and pinned that way**
+    (`tools/test_advisory_pipeline.py:8`): Apple's advisory route spaces its
+    calls through one PROCESS-WIDE interval, so lanes have no local wait to
+    overlap and pay for the interleaving — measured on a real 8-track album
+    with real ISRCs, **36.8 s on one lane against 48.3 s on eight**, versus
+    1.96 s → 1.35 s on the same album with Apple never asked. The lane code
+    stays beside the serial call with the trigger to revisit (its gate becoming
+    per-connection, or Apple leaving the chain).
 
 ### 7.65 The queue keeps playing, and the batch that keeps it going is ordinary
 

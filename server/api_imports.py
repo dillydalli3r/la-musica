@@ -64,6 +64,7 @@ Path containment mirrors ``server.main._in_music_folder`` — imported inside
 the handler on purpose, since main imports this module to mount the router.
 """
 from typing import Dict, List, Optional
+import os
 import traceback
 
 from fastapi import APIRouter, HTTPException
@@ -516,3 +517,119 @@ def import_source(req: SourceRequest):
     return imports.stamp_album_source(req.path, load_config(), value=value,
                                       release=req.release,
                                       provider=req.provider, dry=not value)
+
+
+# --------------------------------------------------------------------------- #
+# The Ratings family's own option (`mlo/import_policy` row "ratings-fetch"):
+# the public web-rating tags (WEBRATING / ALBUMWEBRATING, script 24) for ONE
+# album. The route runs the very entry point script 24 runs, so the button and
+# the chain cannot write different things.
+# --------------------------------------------------------------------------- #
+class RatingsRequest(BaseModel):
+    path: str
+    staged: bool = False        # the wizard's album folder, wherever it put it
+    # The one-shot Force (the "24 · Web ratings re-fetch" control): true makes
+    # the run IGNORE the fill-only skips and replace the values it finds, which
+    # is what lets the step overwrite on request. False is the module's own
+    # default and never touches a value the file already holds.
+    force: bool = False
+
+
+def _rating_rows(album_dir):
+    """One row per readable track of *album_dir* AFTER a run.
+
+    The run's own per-track ladder rung (recording / release group / artist) is
+    held only while it walks the album, so what is READABLE afterwards is what
+    the writer left on the file: the value tag pair that carries the answer —
+    the track's own WEBRATING, else the album-wide ALBUMWEBRATING — and the
+    SOURCE tag beside it. `level` names which pair answered for this row, and a
+    file no source answered for is reported with an empty value rather than
+    left out, so the step can say so per track.
+    """
+    from mlo.audio import AudioFile
+    from mlo.paths import LIB_AUDIO_EXTS
+
+    rows = []
+    try:
+        names = sorted(os.listdir(album_dir))
+    except OSError:
+        return rows
+    for name in names:
+        if os.path.splitext(name)[1].lower() not in LIB_AUDIO_EXTS:
+            continue
+        path = os.path.join(album_dir, name)
+        try:
+            af = AudioFile(path)
+            if getattr(af, "audio", None) is None:
+                continue
+            web = str(af.get_tag("WEBRATING") or "").strip()
+            album_web = str(af.get_tag("ALBUMWEBRATING") or "").strip()
+            source = (str(af.get_tag("WEBRATING_SOURCE") or "").strip() if web
+                      else str(af.get_tag("ALBUMWEBRATING_SOURCE") or "").strip())
+            rows.append({
+                "file": path,
+                "title": str(af.get_tag("TITLE") or "").strip(),
+                "value": web or album_web,
+                "level": "track" if web else ("album" if album_web else None),
+                "source": source,
+            })
+        except Exception:
+            continue
+    return rows
+
+
+@router.post("/api/import/ratings")
+def import_ratings(req: RatingsRequest):
+    """Fetch and FILL the public web-rating tags for ONE album.
+
+    ONE album, and the run is the chain's own: `mlo.web_ratings.run_web_ratings`
+    over a COPY of the config scoped with ``targets=[the album]``, so
+    ``web_ratings_enabled`` (the family's master switch), ``web_ratings_sources``
+    (the order the sources are asked in) and ``force_web_ratings`` decide
+    exactly what an unattended import's script 24 would decide — and the album
+    walk never widens into the library.
+
+    The write rule is the module's own: FILL-ONLY. A value already on a file
+    (and the provenance beside it) is never replaced, so pressing Fetch again
+    is never destructive; a source that states nothing writes nothing. *force*
+    is the one-shot Force the other steps use (`force_web_ratings`, the
+    "24 · Web ratings re-fetch" control): it makes the run re-ask and replace,
+    which is the only way a value already on a file changes.
+
+    The reply is one row per readable track — `file`, `title`, the `value` the
+    file now holds, the tag pair that carries it (`level`: "track" for its own
+    WEBRATING, "album" for the album-wide ALBUMWEBRATING) and the `source` the
+    writer left beside it — plus the run's own counts. `enabled` is the switch
+    the run read: off, the step says so instead of reading an unwritten run as
+    an answer.
+    """
+    from mlo.config import load_config
+    from mlo import web_ratings
+
+    _require_manual()
+    _guard([req.path], req.staged)
+    cfg = dict(load_config() or {})
+    enabled = bool(cfg.get(web_ratings.ENABLED_KEY, True))
+    # The one-shot Force the other steps send: it is the config key script 24
+    # and the Force menu both read (`force_web_ratings`), so a forced press here
+    # IS a forced script 24 run.
+    if req.force:
+        cfg[web_ratings.FORCE_KEY] = True
+    cfg["targets"] = [req.path]
+    stats = web_ratings.run_web_ratings(cfg)
+    rows = _rating_rows(req.path)
+    return {
+        "enabled": enabled,
+        "rows": rows,
+        "counts": {
+            "tracks": len(rows),
+            "rated": sum(1 for r in rows if r["value"]),
+            "written": int(stats.get("modified_count") or 0),
+            "skipped": int(stats.get("skipped_count") or 0),
+            "failed": int(stats.get("error_count") or 0),
+            "by_source": stats.get("by_source") or {},
+            "levels": stats.get("levels") or {},
+            "album_level_artist": int(stats.get("album_level_artist") or 0),
+        },
+        "errors": list(stats.get("errors") or [])[:25],
+    }

@@ -8,6 +8,7 @@ from .deps import (
     TXXX, USLT, COMM, UFID, Encoding, TextFrame, Frames, APIC, MP4Cover, Picture,
 )
 from .stats import _decode_mp4_value
+from . import stats as _stats
 # The ONE canonical tag-value rule (spelling + spacing). Applied here on every
 # write so an import, a wizard write, a script and a manual edit all land the
 # same, and re-applied by script 10 over an existing library.
@@ -1181,6 +1182,11 @@ class VideoHandle:
         self.tech = tech
 
 
+# The tag memo slot a parsed container is kept under inside a run's read scope
+# (mlo.stats.tag_cache_*): one key, so a path's entry is the container handle.
+_TAG_MEMO_KEY = "container"
+
+
 class AudioFile:
     """Unified abstraction over FLAC / OGG / Opus / MP3 / AAC / MP4 (and,
     read via ffprobe, every music-video container in paths.LIB_VIDEO_EXTS)."""
@@ -1221,6 +1227,11 @@ class AudioFile:
         self.id3_version = 4
         self.id3v1 = False
         self._dirty = False
+        # True while self.audio is the run's memoized parse of this file (see
+        # _load / _materialize): a read-only visitor that must re-parse before
+        # it writes, so the memo's copy is never mutated by one instance while
+        # another is reading it.
+        self._from_memo = False
         self._load()
         # Write ID3 back in the version the file ARRIVED in. mutagen's save()
         # defaults to v2.4 and its up-conversion drops frames v2.4 has no
@@ -1281,14 +1292,39 @@ class AudioFile:
             if queued is exc:
                 raise
             raise queued from exc
+        # The bytes on disk just changed, so the run's tag memo must not serve
+        # what it holds for this path any more: the write moved the (mtime_ns,
+        # size) key, and dropping the entry keeps the next open honest even if
+        # a filesystem were to hand back the old stamp.
+        _stats.tag_cache_drop(self.path)
         self._invalidate_cache()
         return True
 
     def _invalidate_cache(self):
-        """Drop the per-instance read caches after any tag write."""
+        """Drop the per-instance read caches after any tag write.
+
+        Every writer calls this before it touches the handle, so this is also
+        where an instance that was served from the run's tag memo re-parses
+        its own copy (see _materialize): from here on the handle is private.
+        """
+        self._materialize()
         self._tag_cache = None
         self._all_tags_cache = None
         self._tag_values_cache = {}
+
+    def _materialize(self):
+        """Re-parse a memo-served handle before anything mutates it.
+
+        Inside a chain's read scope (mlo.stats.run_scope_*), an unchanged
+        file's container parse is shared between every AudioFile that opens it
+        — so the first WRITE must not mutate that shared handle, or every
+        other reader would see the change. `af.tags[...] = x; af.save()` (and
+        the same through set_tag/delete_tag/set_lyrics/…) therefore re-parses
+        a private handle first, which is what keeps the bytes written exactly
+        what they were before the memo existed.
+        """
+        if self._from_memo:
+            self._load(use_memo=False)
 
     def defer_save(self, on=True):
         """Defer container writes until flush() (or defer_save(False)).
@@ -1352,7 +1388,28 @@ class AudioFile:
             return "video"
         return None
 
-    def _load(self):
+    def _load(self, use_memo=True):
+        """Parse the file's container (or reuse the run's memo of that parse).
+
+        Inside a chain's read scope (mlo.stats.run_scope_*), a file that has
+        not changed since it was last parsed is answered from the memo: the
+        second script to read a track pays no container parse at all, which is
+        what a Run All used to spend once per script per track. The memo's
+        handle is shared with every reader and is never mutated by any of them
+        — a writer re-parses first (see _materialize) — so an instance served
+        from the memo behaves exactly like one that opened the file itself.
+
+        ``use_memo=False`` forces a private parse (a writer materializing, see
+        :meth:`_materialize`); its result is not put back, so a handle that
+        will be mutated never becomes the memo's copy.
+        """
+        if use_memo and self.kind not in (None, "video"):
+            hit = _stats.tag_cache_get(self.path, _TAG_MEMO_KEY)
+            if hit is not None:
+                self.audio, self.error = hit
+                self._from_memo = True
+                return
+        self._from_memo = False
         try:
             if self.kind == "flac":
                 self.audio = FLAC(self.path)
@@ -1381,6 +1438,15 @@ class AudioFile:
         except Exception as e:
             self.audio = None
             self.error = f"{type(e).__name__}: {e}"
+        if use_memo and self.kind not in (None, "video"):
+            # Keep the parse for the chain's next script under the stat key it
+            # was read at; a write moves that key, so what is kept here can
+            # only ever describe the file as it is now. That also makes THIS
+            # instance a borrower: the handle is now reachable by another
+            # reader, so this one re-parses before it writes (see
+            # _materialize) rather than mutating what they are reading.
+            self._from_memo = _stats.tag_cache_put(
+                self.path, _TAG_MEMO_KEY, (self.audio, self.error))
 
     # ------------------------------------------------------------------
     # Video containers (MKV / VOB / AVI / ...): ffprobe-backed reads,
@@ -1659,6 +1725,10 @@ class AudioFile:
         self.path = final
         self.ext = os.path.splitext(final)[1].lower()
         self.tag_output_path = final
+        # The container's bytes moved (and a remux changed the name): neither
+        # path's tag memo entry describes what is on disk any more.
+        _stats.tag_cache_drop(src)
+        _stats.tag_cache_drop(final)
         # The output container can differ from the input one (.vob/.avi/...
         # -> .mkv). Recompute BOTH kind and is_video: a stale kind made every
         # later set_tag/delete_tag take the branch of the container the file

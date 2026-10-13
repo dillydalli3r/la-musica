@@ -2880,6 +2880,65 @@ ok(os.path.isfile(os.path.join(_old_album, _paths.EXPECTED_TRACKS_FILE))
    and not os.path.isfile(os.path.join(_old_album, _paths.LEGACY_EXPECTED_TRACKS_FILE)),
    "and the file was renamed to .mb_expected")
 
+# ----------------------------------------------------------------------
+# SOURCE policy: on a non-digital album a stored SOURCE is graded only while
+# `strip_source_on_cd` asks for its removal (OFF by default — the app never
+# strips a tag it did not write, so grading a kept value would fail what the
+# MEDIA/SOURCE pass now preserves). The switch never touches a digital album,
+# whose own "Missing SOURCE" requirement is unchanged.
+# ----------------------------------------------------------------------
+print("== SOURCE on a non-digital album ==")
+src_dir, src_flac = fresh_album("Stored (2020)",
+                                dict(FULL, MEDIA="CD", SOURCE="Store X"))
+src_cfg = dict(ISO_CFG, music_folder="", grade_check_naming=False,
+               grade_check_source=True,
+               # A synthetic CD-tagged folder with no rip artefacts: the CD
+               # legs would charge "nothing established the verdict" here, and
+               # they have their own suite (as in the block above).
+               grade_check_log_grade=False, grade_check_cd_log=False,
+               grade_check_cd_cue=False, grade_check_cd_format=False,
+               grade_check_crc=False, grade_check_log_checksum=False,
+               grade_check_disc_naming=False)
+off_res = _grade_album(src_dir, "EMBEDDED",
+                       dict(src_cfg, strip_source_on_cd=False))
+on_res = _grade_album(src_dir, "EMBEDDED",
+                      dict(src_cfg, strip_source_on_cd=True))
+ok("SOURCE" not in off_res["tracks"][0]["issues"]
+   and not [i for i in off_res["issues"] if "SOURCE" in i],
+   f"a CD's SOURCE is not an issue with the switch off ({off_res['issues']})")
+ok(off_res["pass_count"] == off_res["total_checks"],
+   f"and the kept SOURCE does not cost the album a check "
+   f"({off_res['pass_count']}/{off_res['total_checks']})")
+ok(any(i.startswith("SOURCE present but MEDIA is not Digital Media")
+       and "strip_source_on_cd" in i for i in on_res["issues"]),
+   f"and IS one with it on, naming the switch ({on_res['issues']})")
+ok("SOURCE" in on_res["tracks"][0]["issues"],
+   f"the failing track is marked ({on_res['tracks'][0]['issues']})")
+ok(off_res["total_checks"] == on_res["total_checks"]
+   and off_res["pass_count"] - on_res["pass_count"] == 1,
+   f"and the switch costs exactly the one check "
+   f"({off_res['pass_count']}/{off_res['total_checks']} -> "
+   f"{on_res['pass_count']}/{on_res['total_checks']})")
+
+# The switch is about the CD's stored value, not digital: a digital album
+# carrying SOURCE passes with the switch on ...
+dig_dir, dig_flac = fresh_album("Downloaded (2020)",
+                                dict(FULL, MEDIA="Digital Media",
+                                     SOURCE="Bandcamp"))
+dig_res = _grade_album(dig_dir, "EMBEDDED",
+                       dict(src_cfg, strip_source_on_cd=True))
+ok("SOURCE" not in dig_res["tracks"][0]["issues"]
+   and not [i for i in dig_res["issues"] if "SOURCE" in i],
+   f"a digital album's SOURCE passes even with the switch on "
+   f"({dig_res['issues']})")
+# ... and its own requirement is unchanged: nothing at all is the failure.
+del_tags(dig_flac, ["SOURCE"])
+dig_res = _grade_album(dig_dir, "EMBEDDED",
+                       dict(src_cfg, strip_source_on_cd=True))
+ok("Missing SOURCE (required for Digital Media)" in dig_res["issues"]
+   and "SOURCE" in dig_res["tracks"][0]["issues"],
+   f"a digital album with no SOURCE still fails ({dig_res['issues']})")
+
 print(f"\nAll {passed} checks passed.")
 shutil.rmtree(tmp, ignore_errors=True)
 shutil.rmtree(outside, ignore_errors=True)

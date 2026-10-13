@@ -38,7 +38,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from mlo import discs as mlo_discs, tools as mlo_tools
+from mlo import discs as mlo_discs, tools as mlo_tools, subproc as mlo_subproc
 
 from server import soulseek, soulseek_auto
 
@@ -387,6 +387,16 @@ class FakeSlsk:
         # keep handing back the last scripted poll once it is exhausted
         return self.polls[min(self.polls_made, len(self.polls)) - 1]
 
+    def search_state(self, sid):
+        # The real client's cheap poll (`server.soulseek.search_state`): the
+        # search's STATE alone, no `/responses` fetch. This double scripts
+        # `search_results`, so the light poll reads the same script; the loop
+        # then reads the responses ONCE more on the tick that turns terminal.
+        res = self.search_results(sid)
+        return {"state": res.get("state"), "isComplete": bool(res.get("isComplete")),
+                "responseCount": res.get("responseCount") or 0,
+                "fileCount": res.get("fileCount") or 0}
+
 
 class MultiSearchSlsk:
     """slskd stub for N simultaneous searches: one poll script per query.
@@ -412,6 +422,13 @@ class MultiSearchSlsk:
         n = self.polls.get(sid, 0)
         self.polls[sid] = n + 1
         return polls[min(n, len(polls) - 1)]
+
+    def search_state(self, sid):
+        # See FakeSlsk.search_state: the light poll reads the same script.
+        res = self.search_results(sid)
+        return {"state": res.get("state"), "isComplete": bool(res.get("isComplete")),
+                "responseCount": res.get("responseCount") or 0,
+                "fileCount": res.get("fileCount") or 0}
 
 
 RESPONSES = [{"username": "u", "file": f"Music/A/0{i} - T.flac"} for i in (1, 2, 3)]
@@ -479,6 +496,48 @@ try:
     assert skipped == 1, skipped          # the slow template was never waited out
     assert errors == [], errors
     assert clock.now < 5, f"the second template's window was waited out (t={clock.now}s)"
+
+    # 6. Cheap polling: only searches STILL RUNNING are polled, with the light
+    #    state GET, and the responses are read exactly ONCE — on the tick a
+    #    search turns terminal. slskd serves responses only after a search has
+    #    ENDED, so fetching them every tick was a second request per search for
+    #    nothing.
+    class LightPollSlsk:
+        is_search_done = staticmethod(soulseek.is_search_done)
+        search_error = staticmethod(soulseek.search_error)
+
+        def __init__(self, done_after):
+            self.done_after = done_after
+            self.state_polls = 0
+            self.results_reads = 0
+
+        def search(self, query, timeout_ms=None, response_limit=0):
+            return "sid-1"
+
+        def search_state(self, sid):
+            self.state_polls += 1
+            done = self.state_polls >= self.done_after
+            return {"state": "Completed" if done else "InProgress",
+                    "isComplete": done, "responseCount": 1, "fileCount": 2}
+
+        def search_results(self, sid):
+            self.results_reads += 1
+            return {"state": "Completed", "isComplete": True,
+                    "responses": RESPONSES}
+
+        def cancel_search(self, sid):
+            return True
+
+    clock.now = 0.0
+    _lp = LightPollSlsk(3)
+    _lp_results, _lp_errors, _lp_skipped = soulseek_auto._search_queries(
+        _lp, ["q"], wait_s=6)
+    assert [q for q, _r in _lp_results] == ["q"], _lp_results
+    assert _lp_errors == [] and _lp_skipped == 0, (_lp_errors, _lp_skipped)
+    # three ticks of state polling, and the responses read EXACTLY once — never
+    # once per tick.
+    assert _lp.state_polls == 3, _lp.state_polls
+    assert _lp.results_reads == 1, _lp.results_reads
 finally:
     soulseek_auto.time = real_time_module
 
@@ -569,6 +628,54 @@ try:
 finally:
     soulseek._request = _real_request
 print("  ok 2 peers / 3 files for the list they describe")
+
+
+# --------------------------------------------------------------------------- #
+# soulseek.search_state: the CHEAP poll — one GET, no `/responses` fetch
+# --------------------------------------------------------------------------- #
+# The multi-template window polls only searches still running, and slskd serves
+# a search's responses only once it has ENDED: fetching `/responses` on every
+# tick was a second request per search that could only ever come back empty.
+print("== a running search is polled with its state alone ==")
+_state_paths = []
+
+
+def _counting_request(method, path, **kw):
+    _state_paths.append(str(path))
+    if str(path).endswith("/responses"):
+        raise AssertionError("search_state must not fetch /responses")
+    return {"state": "InProgress", "isComplete": False,
+            "responseCount": 5, "fileCount": 9}
+
+
+try:
+    soulseek._request = _counting_request
+    st = soulseek.search_state("sid-y")
+finally:
+    soulseek._request = _real_request
+assert st == {"state": "InProgress", "isComplete": False,
+              "responseCount": 5, "fileCount": 9}, st
+assert _state_paths == ["/searches/sid-y"], _state_paths
+# a search slskd no longer knows (restarted, cancelled) is a terminal one that
+# answered nothing, never an exception the caller has to catch.
+_404 = __import__("httpx")
+
+
+class _NotFound:
+    response = SimpleNamespace(status_code=404)
+
+
+def _missing_request(method, path, **kw):
+    raise _404.HTTPStatusError("gone", request=None, response=_NotFound.response)
+
+
+try:
+    soulseek._request = _missing_request
+    gone = soulseek.search_state("sid-z")
+finally:
+    soulseek._request = _real_request
+assert gone["isComplete"] is True and gone["state"] == "NotFound", gone
+print("  ok one GET per poll, /responses never fetched")
 
 
 # --------------------------------------------------------------------------- #
@@ -723,6 +830,31 @@ try:
         assert got == {}, got
         assert 180 < fork.now < 200, \
             f"a queue that never moved was waited out (t={fork.now}s)"
+
+        # 13b. ONE transfer-tree request per tick: the wait stashes this tick's
+        #      snapshot on the thread, and the batch checks read the peers out
+        #      of THAT, so a tick costs one request instead of one per peer.
+        put_file(_wait_dir, "Music", "A", "01 - X.flac", body=b"x" * 10)
+        fork.now = 0.0
+        snapstub = FakeTransfers("InProgress", growth=0)
+        _attempt = {"username": "peer", "wanted": WANTED, "got": {},
+                    "leaves": {"01 - X.flac"}}
+        seen = {"n": 0}
+
+        def _snapshot_check():
+            seen["n"] += 1
+            # the vouch check reads the tick's snapshot off the thread — no
+            # second tree request for it
+            soulseek_auto._batch_arrived(snapstub, _wait_dir, _attempt)
+            return False      # never cancels: run the ticks out
+
+        soulseek_auto._wait_for_files(snapstub, _wait_dir, "peer", WANTED, 2.1,
+                                      cancel_check=_snapshot_check)
+        # one tick per poll interval, each fetching the tree ONCE and sharing it
+        # with the check; the only other call is the reject sweep on the way out
+        # (which fetches the tree itself, with no snapshot in hand).
+        assert seen["n"] >= 2, seen["n"]      # more than one tick really ran
+        assert snapstub.polls == seen["n"] + 1, (snapstub.polls, seen["n"])
 
         # 14. A file on disk with the EXACT expected size is not an arrived
         #     download while slskd has not finished its transfer...
@@ -1195,6 +1327,15 @@ class AutoSlsk:
     def search_results(self, sid):
         return {"state": "Completed", "isComplete": True, "responses": self.responses}
 
+    def search_state(self, sid):
+        # The light poll (`server.soulseek.search_state`): the state alone.
+        # This double answers Completed immediately, so the loop reads the
+        # responses ONCE, on its first tick.
+        res = self.search_results(sid)
+        return {"state": res.get("state"), "isComplete": bool(res.get("isComplete")),
+                "responseCount": res.get("responseCount") or 0,
+                "fileCount": res.get("fileCount") or 0}
+
     def enqueue_download(self, username, wanted):
         self.enqueued.append([w["filename"] for w in wanted])
         self.uploader = username
@@ -1241,18 +1382,24 @@ JOB_RELEASE_2D = dict(JOB_RELEASE, media=[
     {"disc": 2, "position": 2, "title": "Delta", "length": 230000}])
 
 
-def score_logs(*, low=(), invalid=(), unscored=(), why="gap handling"):
+def score_logs(*, low=(), invalid=(), unscored=(), mid=(), low_score=50,
+               why="gap handling"):
     """A _score_logs stand-in: 'low'/'invalid' name the logs to grade badly,
     'unscored' the ones Logchecker could not score (score None — which is NOT
-    a rejection on its own; the per-track CRCs still decide).
+    a rejection on its own; the per-track CRCs still decide), and 'mid' the
+    ones that score 90 — below Logchecker's clean band (100) but above the
+    default floor (85), so they are ACCEPTED and merely down-ranked.
 
     Five-tuples, the shape the real scorer returns: the fifth is Logchecker's
-    own note about the log, which the rejection reason quotes."""
+    own note about the log, which the rejection reason quotes. `low_score` is
+    what 'low' grades to (50 by default, i.e. below any floor)."""
     def fake(paths, cfg):
         out = []
         for p in sorted(paths):
             b = os.path.basename(p)
-            score = None if b in unscored else (50 if b in low else 100)
+            score = (None if b in unscored else
+                     90 if b in mid else
+                     low_score if b in low else 100)
             out.append((p, score,
                         "invalid" if b in invalid else "ok", None,
                         why if b in low else ""))
@@ -1390,6 +1537,7 @@ def run_job(release, rows, cfg=None, scores=None, queries=None, stub_cls=AutoSls
         with Patch(soulseek, is_running=stub.is_running, web_up=stub.web_up,
                    server_state=stub.server_state, download_dir=stub.download_dir,
                    search=stub.search, search_results=stub.search_results,
+                   search_state=stub.search_state,
                    # A search the job drops ("that template was not waited out")
                    # goes through the module function, so the stub has to own it
                    # too — otherwise the DELETE is aimed at a real slskd and the
@@ -2118,6 +2266,49 @@ try:
 finally:
     shutil.rmtree(_verify_dir, ignore_errors=True)
 
+# ...and ONE exception to the CD rule: a folder with NO .log at all, when the
+# log floor is switched off (soulseek_auto_log_min_score = 0), is verified by a
+# clean decode — the same evidence digital media gets — instead of failing the
+# album for the log's absence. At any other floor the missing log still fails.
+_nolog_dir = tempfile.mkdtemp(prefix="mlo-nolog-")
+try:
+    open(os.path.join(_nolog_dir, "01 - A.flac"), "wb").close()
+    _flac_tools = {"flac": {"flac_exe": "flac"}}
+
+    class _CleanDecode:
+        returncode = 0
+        stderr = ""
+
+    with Patch(mlo_tools, detect_all_tools=lambda: _flac_tools), \
+         Patch(mlo_subproc, run_tool=lambda *a, **k: _CleanDecode()):
+        ok, problems = soulseek_auto._verify_album(
+            _nolog_dir, {"soulseek_auto_log_min_score": 0}, True)
+    assert ok is True and problems == [], (ok, problems)
+    # at the normal floor the same folder fails: there is no log to check the
+    # CRCs against, and the floor being on means that is a defect.
+    ok, problems = soulseek_auto._verify_album(_nolog_dir, {}, True)
+    assert ok is False and problems, (ok, problems)
+finally:
+    shutil.rmtree(_nolog_dir, ignore_errors=True)
+
+# The disc gate admits that no-log folder as a low-ranking CANDIDATE only with
+# the floor off: at any floor a CD folder with no .log is not a candidate (the
+# .log/.cue rule), and with the floor off a folder that DOES carry a log scores
+# above one that does not, so the no-log copy is the one that waits its turn.
+_nolog_rows = [row("nolog", "Music/NoLog/01 - Alpha.flac"),
+               row("nolog", "Music/NoLog/02 - Beta.flac", duration=210.0),
+               row("nolog", "Music/NoLog/Album.cue")]
+assert soulseek_auto.find_candidates(
+    _nolog_rows, JOB_RELEASE, {"soulseek_auto_log_min_score": 85}) == []
+_c0 = soulseek_auto.find_candidates(
+    _nolog_rows, JOB_RELEASE, {"soulseek_auto_log_min_score": 0})
+assert len(_c0) == 1 and _c0[0]["complete"] and _c0[0]["logs"] == [], _c0
+_c0_logged = soulseek_auto.find_candidates(
+    _nolog_rows + [row("nolog", "Music/NoLog/rip.log")], JOB_RELEASE,
+    {"soulseek_auto_log_min_score": 0})
+assert len(_c0_logged) == 1 and _c0_logged[0]["score"] > _c0[0]["score"], \
+    (_c0_logged, _c0)
+
 # --------------------------------------------------------------------------- #
 # The .log gate is EVIDENCE-FIRST: per-track CRCs are the requirement, and the
 # only things that reject are a checksum the log carries that does not verify,
@@ -2127,6 +2318,8 @@ finally:
 # rip.log/XLD.log is the disc's log when it is the only one. (spec R391-R393)
 # --------------------------------------------------------------------------- #
 from mlo import audit as _mlo_audit  # noqa: E402  (patched below)
+from mlo import config as _mlo_config  # noqa: E402
+mlo_config_defaults = _mlo_config.DEFAULT_CONFIG
 
 _EAC_AR_OK_LOG = """Exact Audio Copy V1.6 from 23. October 2018
 
@@ -2198,15 +2391,20 @@ assert mlo_discs.parse_log_accuraterip(
     "Log created by: whipper 0.7.4\n\nTracks:\n  1:\n    Status: Error, "
     "CRC mismatch\n") == (None, "")
 
-# (c) the score bar counts only when a score EXISTS; a log checksum that is
+# (c) the score floor counts only when a score EXISTS; a log checksum that is
 #     absent is never required, one that is present-and-wrong always rejects.
 assert soulseek_auto._log_passes(None, "ok", 100) is True          # unscored, clean
 assert soulseek_auto._log_passes(None, "unsupported", 100) is True  # XLD: no checksum
-assert soulseek_auto._log_passes(60, "ok", 100) is False           # below the bar
+assert soulseek_auto._log_passes(60, "ok", 100) is False           # below the floor
 assert soulseek_auto._log_passes(100, "ok", 100) is True
 assert soulseek_auto._log_passes(100, "missing", 100) is True      # absent checksum
 assert soulseek_auto._log_passes(100, "invalid", 100) is False     # present and wrong
 assert soulseek_auto._log_passes(None, "invalid", 100) is False    # wrong checksum still wins
+# ...and at the DEFAULT floor (85) a score below it rejects while a score above
+# it is accepted: the floor, not a perfect score, is what kills a candidate.
+assert soulseek_auto._LOG_FLOOR_DEFAULT == 85, soulseek_auto._LOG_FLOOR_DEFAULT
+assert mlo_config_defaults["soulseek_auto_log_min_score"] == 85, \
+    mlo_config_defaults["soulseek_auto_log_min_score"]
 
 # (d) end to end: a log that happens to STATE an AccurateRip failure rejects the
 #     candidate with AccurateRip's own words, and the album is never requested.
@@ -2215,7 +2413,8 @@ job = run_job(JOB_RELEASE, ONE_DISC_ROWS,
 assert not job.imported, job.job["result"]
 assert len(job.job["attempts"]) == 1, job.job["attempts"]
 _reason = job.job["attempts"][0]["reason"]
-assert "AccurateRip section" in _reason and "AccurateRip returned" in _reason, _reason
+assert "AccurateRip failure" in _reason and "AccurateRip returned" in _reason, _reason
+assert "EAC" not in _reason and "ripper" not in _reason, _reason   # never blames the program
 assert job.enqueued == [["Music/Album/rip 1.log"]], job.enqueued
 
 # ...a log whose AccurateRip results all verified is ACCEPTED (not over-tight).
@@ -2232,6 +2431,61 @@ job = run_job(JOB_RELEASE, ONE_DISC_ROWS, scores=score_logs(unscored=("rip 1.log
 assert job.imported and job.job["attempts"] == [], job.job
 assert any("Logchecker could not score it" in e["msg"] for e in job.job["log"]), \
     [e["msg"] for e in job.job["log"]][-6:]
+
+# (f) A dBpoweramp / foobar2000 / CUETools log is a dialect the toolchain does
+#     not NAME — that is not a defect, and a folder whose log Logchecker cannot
+#     score is still accepted on its per-track CRCs. The rejection never blames
+#     the program that wrote the log.
+_DPP_LOG = """dBpoweramp Release 17.3 Digital Audio Extraction Log from 2024
+
+Track 1
+     CRC32: AAAAAAAA
+Track 2
+     CRC32: BBBBBBBB
+"""
+assert mlo_discs.log_dialect(_DPP_LOG) == "", mlo_discs.log_dialect(_DPP_LOG)
+assert soulseek_auto._log_passes(None, "unsupported", 85) is True
+job = run_job(JOB_RELEASE, ONE_DISC_ROWS,
+              cfg=dict(JOB_CFG, soulseek_auto_log_min_score=85),
+              bodies={"Music/Album/rip 1.log": _DPP_LOG.encode()},
+              scores=score_logs(unscored=("rip 1.log",)))
+assert job.imported and job.job["attempts"] == [], job.job
+assert any("Logchecker could not score it (unrecognised log format)" in e["msg"]
+           for e in job.job["log"]), [e["msg"] for e in job.job["log"]][-6:]
+
+# (g) A score BELOW Logchecker's clean band (100) but at or above the floor (85)
+#     is ACCEPTED and DOWN-RANKED, never killed: `_log_rank` orders such a
+#     candidate behind one whose log is clean, and the job still imports it.
+assert soulseek_auto._log_passes(90, "ok", 85) is True
+assert soulseek_auto._log_rank(100) == 0
+assert soulseek_auto._log_rank(90) == 1
+assert soulseek_auto._log_rank(90) > soulseek_auto._log_rank(100)
+assert soulseek_auto._log_rank(None) == 0    # unscored ranks clean
+job = run_job(JOB_RELEASE, ONE_DISC_ROWS,
+              cfg=dict(JOB_CFG, soulseek_auto_log_min_score=85),
+              scores=score_logs(mid=("rip 1.log",)))
+assert job.imported and job.job["attempts"] == [], job.job
+assert any("score 90" in e["msg"] for e in job.job["log"]), \
+    [e["msg"] for e in job.job["log"]][-6:]
+
+# (h) A score BELOW the floor is real damage and rejects — with the score and
+#     the floor named in the reason, and never the ripper program.
+assert soulseek_auto._log_passes(62, "ok", 85) is False
+_reason = soulseek_auto._log_fail_reason("rip 1.log", 62, "ok", 85)
+assert "Logchecker 62/100 (below 85)" in _reason, _reason
+assert "EAC" not in _reason and "ripper" not in _reason, _reason
+job = run_job(JOB_RELEASE, ONE_DISC_ROWS,
+              cfg=dict(JOB_CFG, soulseek_auto_log_min_score=85),
+              scores=score_logs(low=("rip 1.log",), low_score=62))
+assert not job.imported and len(job.job["attempts"]) == 1, job.job
+assert "Logchecker 62/100 (below 85)" in job.job["attempts"][0]["reason"], \
+    job.job["attempts"][0]
+# ...and the old hard rejections still hold at the floor: a checksum that does
+# not verify, and a stated AccurateRip failure, reject whatever the score.
+assert soulseek_auto._log_passes(100, "invalid", 85) is False
+assert soulseek_auto._log_passes(100, "ok", 85, "fail") is False
+_reason = soulseek_auto._log_fail_reason("rip 1.log", 100, "invalid", 85)
+assert _reason == "rip 1.log — the log's checksum does not verify", _reason
 
 # --------------------------------------------------------------------------- #
 # R393: the disc's log is found by what it NAMES, not only by the pattern — and
@@ -3521,12 +3775,13 @@ _hits, _errs, _skip = soulseek_auto._search_queries(
 assert len(_hits) == 1 and _hits[0][1]["responses"] == _quiet_rows, _hits
 
 # --------------------------------------------------------------------------- #
-# 5. The sequential fallback query, and the `no_logs` prompt a CD release whose
-#    copies are WEB rips now gets instead of a dead end.
+# 5. The broad digital query folded into the ONE search batch, and the `no_logs`
+#    prompt a CD release whose copies are WEB rips now gets instead of a dead end.
 # --------------------------------------------------------------------------- #
 class PerQuerySlsk(AutoSlsk):
-    """AutoSlsk with one response script per search ISSUED, in order — the
-    job's configured template(s) first, then the single broader fallback."""
+    """AutoSlsk with one response script per search ISSUED, in order — the job's
+    configured template(s) first, then the broad digital query, all POSTed in
+    ONE batch."""
 
     def __init__(self, ddir, scripts):
         super().__init__(ddir, (scripts or [[]])[0])
@@ -3561,10 +3816,10 @@ def per_query(scripts):
     return lambda ddir, rows: PerQuerySlsk(ddir, scripts)
 
 
-# (a) NOTHING usable from the configured template on a DIGITAL release: exactly
-#     ONE broader `artist album year` query runs AFTER it (the job's own search
-#     journal shows one query, then the other — never two windows at once), and
-#     the copy it finds imports with no prompt at all.
+# (a) The broad `artist album year` query of a DIGITAL release is folded into
+#     the SINGLE batch: both templates are POSTed at once, one window answers
+#     them, and the copy the broad query finds imports with no prompt at all
+#     (there is no second, sequential window any more).
 run = run_job(DIGITAL_RELEASE, WEBRIP_ROWS,
               stub_cls=per_query([[], WEBRIP_ROWS]))
 assert run.imported, run.job["result"]
@@ -3572,35 +3827,41 @@ assert [q for q, _t, _l in run.stub.searches] == ["Job Album", BROAD_QUERY], run
 assert [t for _q, t, _l in run.stub.searches] == [5000, 5000], run.stub.searches
 assert [l for _q, _t, l in run.stub.searches] == [25, 25], run.stub.searches
 assert run.prompt is None, run.prompt
-# ...and both windows report how long they REALLY took (this double answers on
-# its first poll), not the ceiling the announcement line carries.
-assert any("search(es) in 0s" in e["msg"] for e in run.job["log"]), \
-    [e["msg"] for e in run.job["log"]]
-assert any("broader query: 2 result file(s) in 0s" in e["msg"] for e in run.job["log"]), \
+# ONE window: both templates are named in the SAME search announcement, and the
+# line reports how long the wait REALLY took (this double answers on its first
+# poll), not the ceiling the announcement carries.
+_searches = [e["msg"] for e in run.job["log"]
+             if e["msg"].startswith("Searching Soulseek")]
+assert len(_searches) == 1 and "2 query template(s)" in _searches[0], _searches
+assert "“Job Artist Job Album 1996”" in _searches[0], _searches[0]
+assert any("1 candidate folder(s) from 2 result file(s) across 2 search(es) in 0s"
+           in e["msg"] for e in run.job["log"]), [e["msg"] for e in run.job["log"]]
+assert not any("broader query:" in e["msg"] for e in run.job["log"]), \
     [e["msg"] for e in run.job["log"]]
 
-# (a2) ...and a PHYSICAL release never runs it ALL: the very same scripting that
-#      just rescued the digital release finds nothing here, because the broad
-#      query is never issued. "artist album year" asks the network for every
-#      other pressing of the same album, so a pressing is searched by what
-#      identifies THE PRESSING and by nothing else — a perfect copy the broad
-#      wording would have found is not the release this job was asked for.
+# (a2) ...and a PHYSICAL release never gets it at all: the very same scripting
+#      that just rescued the digital release finds nothing here, because the
+#      broad query is not part of a pressing's batch. "artist album year" asks
+#      the network for every other pressing of the same album, so a pressing is
+#      searched by what identifies THE PRESSING and by nothing else — a perfect
+#      copy the broad wording would have found is not the release this job was
+#      asked for.
 run = run_job(JOB_RELEASE, ONE_DISC_ROWS + WEBRIP_ROWS,
               stub_cls=per_query([[], ONE_DISC_ROWS]))
 assert [q for q, _t, _l in run.stub.searches] == ["Job Album"], run.stub.searches
 assert run.job["state"] == "error", run.job
 assert run.job["result"]["error"] == NO_RESULT_MSG, run.job["result"]
 assert (run.enqueued, run.imported) == ([], []), (run.enqueued, run.imported)
-assert not any("one broader" in e["msg"] for e in run.job["log"]), \
-    [e["msg"] for e in run.job["log"]]
 
-# (b) a candidate from the FIRST query means the fallback never runs: one
-#     search, no broader window, and no prompt — the release had a good copy,
-#     so the template it came from is the one that stands.
+# (b) The broad query rides along in the same batch, so the digital release's
+#     batch is always both queries — but a candidate the configured template
+#     already found ends the wait at once and imports (the broad query's own
+#     (empty) answer never changes the outcome).
 run = run_job(DIGITAL_RELEASE, WEBRIP_ROWS, stub_cls=per_query([WEBRIP_ROWS, []]))
 assert run.imported, run.job["result"]
-assert [q for q, _t, _l in run.stub.searches] == ["Job Album"], run.stub.searches
-assert not any("one broader" in e["msg"] for e in run.job["log"]), \
+assert [q for q, _t, _l in run.stub.searches] == ["Job Album", BROAD_QUERY], \
+    run.stub.searches
+assert not any("broader query:" in e["msg"] for e in run.job["log"]), \
     [e["msg"] for e in run.job["log"]]
 
 # (c) the configured query finds no CD rip, but a complete lossless WEB rip of
@@ -4489,6 +4750,7 @@ try:
                server_state=_two_stub.server_state,
                download_dir=_two_stub.download_dir, search=_two_stub.search,
                search_results=_two_stub.search_results,
+               search_state=_two_stub.search_state,
                cancel_search=_two_stub.cancel_search,
                enqueue_download=_two_stub.enqueue_download,
                downloads_state=_two_stub.downloads_state,
@@ -4533,11 +4795,12 @@ try:
         assert _events.index(("search", "fast")) \
             < _events.index(("enqueue", "fastpeer")), _events
         # The other release imported its OWN album, off the SAME fast window
-        # (5000 ms), and the held job never imported anything.
+        # (5000 ms) — the fast release's two queries (its configured template and
+        # the folded broad one) both went out in that one batch.
         assert _two_imported, _two_imported
         assert os.path.basename(_two_imported[-1]) == "Fast", _two_imported
         assert not any("Held" in p for p in _two_imported), _two_imported
-        assert [t for q, t, _l in _two_stub.searches if "fast" in q.lower()] == [5000], \
+        assert [t for q, t, _l in _two_stub.searches if "fast" in q.lower()] == [5000, 5000], \
             _two_stub.searches
         # The held job is standing down on its own cancel, not left spinning:
         # the test's own teardown must not outlive the patches.
@@ -4560,6 +4823,114 @@ finally:
         soulseek_auto._job.update(_two_saved_job)
     soulseek_auto.time = _two_saved_time
     shutil.rmtree(_two_dir, ignore_errors=True)
+
+# --------------------------------------------------------------------------- #
+# `_stamp_media` writes MEDIA, and clears SOURCE only on a CD and only when
+# the owner asked (`strip_source_on_cd`, OFF by default): an auto-import used
+# to strip a tag the download arrived with. Pinned on REAL containers, because
+# the removal is a DELETE — a `set_tag("SOURCE", "")` would leave a blank tag
+# on the file that reads as cleared only to this app. `_stamp_source` still
+# fills an EMPTY SOURCE and never overwrites a value the file already carries.
+# --------------------------------------------------------------------------- #
+import subprocess as _subprocess      # noqa: E402
+import wave as _wave                  # noqa: E402
+from mlo.config import DEFAULT_CONFIG as _SHIPPED_CFG  # noqa: E402
+from mutagen.flac import FLAC as _RealFLAC      # noqa: E402
+
+_STAMP_FLAC = None
+_stamp_deps = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                           ".dependencies")
+if os.path.isdir(_stamp_deps):
+    for _entry in os.listdir(_stamp_deps):
+        if _entry.lower().startswith("flac"):
+            _cand = os.path.join(_stamp_deps, _entry, "flac.exe")
+            if os.path.isfile(_cand):
+                _STAMP_FLAC = _cand
+                break
+assert _STAMP_FLAC, "flac.exe not found under .dependencies"
+
+
+def _stamp_one(path, tags):
+    """A real FLAC carrying *tags*, so the stamp's writes and deletes land on
+    disk the way a download's do."""
+    wav = path + ".wav"
+    with _wave.open(wav, "w") as w:
+        w.setnchannels(2)
+        w.setsampwidth(2)
+        w.setframerate(44100)
+        w.writeframes(b"\x00\x00\x00\x00" * 4410)
+    _subprocess.run([_STAMP_FLAC, "-s", "-f", "-8", "-o", path, wav],
+                    check=True, capture_output=True)
+    os.remove(wav)
+    f = _RealFLAC(path)
+    for k, v in tags.items():
+        f[k] = [v]
+    f.save()
+    return path
+
+
+def _stamp_album(root, name, files):
+    """A folder of real FLACs: {file name: SOURCE value or None}."""
+    d = os.path.join(root, name)
+    os.makedirs(d, exist_ok=True)
+    for fname, src in files.items():
+        _stamp_one(os.path.join(d, fname), {} if src is None else {"SOURCE": src})
+    return d
+
+
+_stamp_probe = tempfile.mkdtemp(prefix="mlo-stamp-media-")
+try:
+    assert _SHIPPED_CFG["strip_source_on_cd"] is False, \
+        "the shipped default keeps the switch off"
+
+    # (d) A CD download carrying SOURCE: MEDIA is stamped, SOURCE survives
+    # under the default config (the blank file gains no SOURCE either).
+    cd = _stamp_album(_stamp_probe, "CD",
+                      {"01 - A.flac": "Store X", "02 - B.flac": None})
+    _n, _probs = soulseek_auto._stamp_media(cd, "CD", _SHIPPED_CFG)
+    assert (_n, _probs) == (2, []), (_n, _probs)
+    for _fn, _src in (("01 - A.flac", ["Store X"]), ("02 - B.flac", None)):
+        _f = _RealFLAC(os.path.join(cd, _fn))
+        assert _f.get("MEDIA") == ["CD"], (_fn, _f.get("MEDIA"))
+        assert _f.get("SOURCE") == _src, (_fn, _f.get("SOURCE"))
+
+    # (d) ... and is DELETED (the key really gone, not written blank) when
+    # strip_source_on_cd asks for it — MEDIA is still stamped.
+    _n, _probs = soulseek_auto._stamp_media(
+        cd, "CD", dict(_SHIPPED_CFG, strip_source_on_cd=True))
+    assert (_n, _probs) == (2, []), (_n, _probs)
+    for _fn in ("01 - A.flac", "02 - B.flac"):
+        _f = _RealFLAC(os.path.join(cd, _fn))
+        assert _f.get("MEDIA") == ["CD"], (_fn, _f.get("MEDIA"))
+        assert _f.get("SOURCE") is None, \
+            f"the SOURCE is deleted, not blanked ({_fn}: {_f.get('SOURCE')!r})"
+
+    # (d) The delete is CD-only: every other medium keeps its SOURCE even with
+    # the switch on. ("Digital Media" is what a peer download is detected as;
+    # Vinyl stands for a medium the family rule must not fold into CDs.)
+    for _medium in ("Digital Media", "Vinyl"):
+        _d = _stamp_album(_stamp_probe, _medium, {"01 - A.flac": "Store X"})
+        _n, _probs = soulseek_auto._stamp_media(
+            _d, _medium, dict(_SHIPPED_CFG, strip_source_on_cd=True))
+        assert (_n, _probs) == (1, []), (_medium, _n, _probs)
+        _f = _RealFLAC(os.path.join(_d, "01 - A.flac"))
+        assert _f.get("MEDIA") == [_medium], (_medium, _f.get("MEDIA"))
+        assert _f.get("SOURCE") == ["Store X"], \
+            f"the strip is CD-only: a {_medium} album keeps its SOURCE " \
+            f"({_f.get('SOURCE')!r})"
+
+    # (e) The fill half is unchanged: `_stamp_source` writes only into an
+    # EMPTY slot, so the network's own word lands beside the user's.
+    origin = _stamp_album(_stamp_probe, "Origin",
+                          {"01 - A.flac": None, "02 - B.flac": "My Rip"})
+    _n, _probs = soulseek_auto._stamp_source(origin, "Soulseek")
+    assert (_n, _probs) == (2, []), (_n, _probs)
+    assert _RealFLAC(os.path.join(origin, "01 - A.flac")).get("SOURCE") \
+        == ["Soulseek"], _RealFLAC(os.path.join(origin, "01 - A.flac")).get("SOURCE")
+    assert _RealFLAC(os.path.join(origin, "02 - B.flac")).get("SOURCE") \
+        == ["My Rip"], "the user's own SOURCE is never overwritten"
+finally:
+    shutil.rmtree(_stamp_probe, ignore_errors=True)
 
 print("ok")
 

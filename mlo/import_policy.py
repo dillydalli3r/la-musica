@@ -150,6 +150,33 @@ FAMILIES = (
         ),
     },
     {
+        "id": "ratings",
+        "label": "Ratings",
+        "step": "Ratings",
+        # The public verdict — WEBRATING / ALBUMWEBRATING — is a per-track
+        # requirement (`mlo.grader` WEBRATING_MISSING), and script 24 is the
+        # chain's only writer of it: keeping this family for a decision drops
+        # 24 from the chain, and `web_ratings_enabled` is the "do not gather
+        # this for me" answer the family's own switch means.
+        "chain": (24,),
+        "off": {"web_ratings_enabled": False},
+        "codes": {"WEBRATING_MISSING": "web rating"},
+        "manual": (
+            # The button and the pipeline run ONE code path: the route's
+            # handler runs `mlo.web_ratings.run_web_ratings` — the very entry
+            # point script 24 runs — for the one album it is asked about.
+            {"id": "ratings-fetch",
+             "surface": ("wizard", "album-page", "tag-actions"),
+             "route": "/api/import/ratings",
+             "method": "POST",
+             "auto": "mlo.web_ratings:run_web_ratings",
+             "service": "server.api_imports:import_ratings",
+             "tags": ("WEBRATING", "WEBRATING_SOURCE",
+                      "ALBUMWEBRATING", "ALBUMWEBRATING_SOURCE"),
+             "files": ()},
+        ),
+    },
+    {
         "id": "lyrics",
         "label": "Lyrics",
         "step": "Lyrics",

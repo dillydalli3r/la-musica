@@ -56,6 +56,12 @@ _lib_refreshing = set()
 _lib_write_gen = 0
 _lib_drop_gen = 0
 _payload_cache = {}  # (kind, path, config key) -> (built_at, payload)
+# (kind, folder, config key) -> (signature, verdict): a verdict derived from
+# ONE folder's own files (the import wizard's scan-tracks grade — see
+# `cached_folder_verdict`). Keyed on the folder's signature rather than a TTL,
+# so the answer a caller gets is the one its files produce.
+_verdict_cache = OrderedDict()
+_VERDICT_MAX = 512
 _cover_cache = OrderedDict()
 _color_cache = OrderedDict()  # cover stat key -> "#rrggbb"
 # audio file stat key -> (bytes, ctype) of its embedded picture, or () for
@@ -176,6 +182,10 @@ def invalidate_path(path):
             del _tag_cache[k]
         for key in [k for k in _embedded_cache if k[0] == norm]:
             del _embedded_cache[key]
+        # A folder verdict is keyed on the folder, not the file: the write just
+        # made every verdict for a folder this path sits in stale.
+        for key in [k for k in _verdict_cache if _inside(path, k[1])]:
+            del _verdict_cache[key]
         _lib_dirty.update(_lib_cache)
         _lib_write_gen += 1
         _payload_cache.clear()
@@ -205,6 +215,7 @@ def invalidate_all():
         _cover_cache.clear()
         _color_cache.clear()
         _embedded_cache.clear()
+        _verdict_cache.clear()
         _lib_cache.clear()
         _lib_body.clear()
         _lib_dirty.clear()
@@ -288,6 +299,8 @@ def invalidate_album(*folders):
             del _embedded_cache[key]
         for key in [k for k in _color_cache if any(_inside(k[0], r) for r in roots)]:
             del _color_cache[key]
+        for key in [k for k in _verdict_cache if any(_inside(k[1], r) for r in roots)]:
+            del _verdict_cache[key]
         _lib_dirty.update(_lib_cache)
         _lib_write_gen += 1
         _payload_cache.clear()
@@ -481,6 +494,82 @@ def cached_payload(kind, path, cfg, builder, ttl=_PAYLOAD_TTL):
         while len(_payload_cache) > _PAYLOAD_MAX:
             _payload_cache.pop(next(iter(_payload_cache)))
     return payload
+
+
+def folder_signature(folder, files=None):
+    """The FILES' own signature for one folder: ``None`` when it cannot be taken.
+
+    The folder's directory mtime (so an added, removed or renamed entry is
+    seen) plus the ``(name, size, mtime_ns)`` of every audio file the caller
+    read in it (so a rewritten file is seen too). *files* is what the caller
+    already listed — a caller that walked the folder passes its own rows, so
+    this costs one stat per file and never a second walk; without it the audio
+    files directly inside *folder* are listed and stat'd.
+
+    A folder that cannot be stat'd, or a file that vanished between listing and
+    stat, answers ``None``: nothing is cached for it, and the next call
+    re-derives it (a verdict that cannot be keyed on the files is never served
+    from memory).
+    """
+    try:
+        sig = [os.stat(folder).st_mtime_ns]
+    except OSError:
+        return None
+    if files is None:
+        try:
+            files = [os.path.join(folder, n) for n in os.listdir(folder)
+                     if os.path.splitext(n)[1].lower() in LIB_AUDIO_EXTS]
+        except OSError:
+            return None
+    rows = []
+    for p in files:
+        try:
+            st = os.stat(p)
+        except OSError:
+            return None
+        rows.append((os.path.basename(str(p)).lower(), st.st_size,
+                     st.st_mtime_ns))
+    return tuple(sig + [tuple(sorted(set(rows)))])
+
+
+def cached_folder_verdict(kind, folder, cfg, builder, files=None):
+    """Memo for a verdict derived from ONE folder's own files.
+
+    The import wizard's scan (`GET /api/album/scan-tracks`) grades EVERY folder
+    of the album it lists, and it is called on every mount and after every
+    fetch — so the grader re-opened and re-read every track for an answer that
+    depends on nothing but those files. `kind` names the payload ("scan-grade"),
+    *folder* is the folder it is about, and the CONFIG rides the key, so a
+    settings change (a switch the grader reads) can never serve a verdict
+    computed under other settings.
+
+    Keyed on `folder_signature` — the folder's own directory mtime and the stat
+    of the files the caller read — so a file added, removed, retagged or
+    rewritten in the folder misses on the next call, whether the change came
+    from the app or from outside it. Every `invalidate_*` call drops it
+    outright, like the tag cache this sits beside: an in-app write hits the very
+    call that made it stale.
+    """
+    sig = folder_signature(folder, files)
+    if sig is None:
+        return builder()
+    try:
+        from server import tagindex
+        key = (kind, os.path.normcase(str(folder)), tagindex.config_key(cfg))
+    except Exception:
+        return builder()
+    with _lock:
+        hit = _verdict_cache.get(key)
+        if hit is not None and hit[0] == sig:
+            _verdict_cache.move_to_end(key)
+            return hit[1]
+    verdict = builder()
+    with _lock:
+        _verdict_cache[key] = (sig, verdict)
+        _verdict_cache.move_to_end(key)
+        while len(_verdict_cache) > _VERDICT_MAX:
+            _verdict_cache.popitem(last=False)
+    return verdict
 
 
 # The canonical album cover names, the order the folder's own art is picked in,

@@ -26,7 +26,7 @@ import type { IdentifyAlbum } from "../components/ImportIdentifyDialog";
 import type {
   AcoustidAlbumMatch, AcoustidMatch, AcoustidSubmitResult, AcoustidWrite, CoverResult,
   ImportBulkJob, ImportPrompt, ImportScriptsPreview, ImportSettleResult, LyricsAutoResult, MBRelease, MatchSuggestion,
-  ScriptRunResult, Track, UnpackedTree,
+  RatingsImportResult, ScriptRunResult, Track, UnpackedTree,
 } from "../types";
 import { DEFAULT_RUN_ALL, SCRIPT_LABEL } from "../lib/scripts";
 import { forceDict } from "../lib/force";
@@ -34,7 +34,7 @@ import { fmtCounts, fmtSteps } from "../lib/fmt";
 import { GENRE_COUNT_MAX, GENRE_FAMILIES, canonicalGenre, splitGenres } from "../lib/genres";
 import { dismiss as dismissNotification, importSessionNotificationId } from "../lib/notifications";
 
-const STEPS = ["Select & separate", "Links", "Match", "Covers", "Genres", "Lyrics", "Advisory", "Finish"];
+const STEPS = ["Select & separate", "Links", "Match", "Covers", "Genres", "Ratings", "Lyrics", "Advisory", "Finish"];
 
 /** THE row recipe of the wizard.
  *
@@ -63,6 +63,10 @@ const FAMILY_STEP: Record<string, string> = {
   source: "Match",
   cover: "Covers",
   genres: "Genres",
+  // WEBRATING / ALBUMWEBRATING (script 24, mlo.web_ratings) — the public
+  // verdict the grader requires per track, asked right after the album's own
+  // genres.
+  ratings: "Ratings",
   lyrics: "Lyrics",
   advisory: "Advisory",
 };
@@ -72,6 +76,7 @@ const FAMILY_LABEL: Record<string, string> = {
   source: "Source",
   cover: "Cover art",
   genres: "Genres",
+  ratings: "Ratings",
   lyrics: "Lyrics",
   advisory: "Advisory",
 };
@@ -524,6 +529,22 @@ export default function ImportWizard() {
   // Last MusicBrainz genre import failure — the 400 that names the missing
   // MBID, kept in the step instead of only in a toast.
   const [genreError, setGenreError] = useState<string | null>(null);
+  /** What the last web-rating import answered (the Ratings step): one row per
+   *  track — the value it now holds, the tag pair that carries it and the
+   *  source the writer left beside it — plus the run's counts and the switch
+   *  as the run read it. */
+  const [ratingRows, setRatingRows] = useState<RatingsImportResult | null>(null);
+  const [ratingError, setRatingError] = useState<string | null>(null);
+  /** The `album|release` pair this session has already recorded in the
+   *  folder's `.mb_expected` (see `syncExpectedTracks`), so every step advance
+   *  asks the disk and only a MISSING or STALE manifest costs a write. */
+  const expectedSynced = useRef("");
+  /** The release id the wizard's OWN latest fetch settled, and how many
+   *  fetches have started. A fetch that a newer one superseded (the user
+   *  re-points the album while the first is still in flight) must not write
+   *  the release it lost to over it — see `syncExpectedTracks`. */
+  const currentReleaseId = useRef("");
+  const releaseSeq = useRef(0);
   const [collapsedDiscs, setCollapsedDiscs] = useState<Set<number | null>>(new Set());
   const [advisory, setAdvisory] = useState<Record<string, string>>({});
   // Outcome of the Advisory step's own auto-import: the per-track value and
@@ -746,7 +767,11 @@ export default function ImportWizard() {
   const { data: albumDetail, refetch: refetchAlbumDetail } = useQuery({
     queryKey: ["album", albumPath],
     queryFn: () => api.album(albumPath!, staged),
-    enabled: !!albumPath && step === 3,
+    // Read from the Covers step on, not only there: every step the user walks
+    // out of with a release in hand checks the folder's own manifest against
+    // it (see `syncExpectedTracks`), and that check needs this payload's
+    // `expected_release_id` / `expected_tracks`.
+    enabled: !!albumPath && step >= 3,
   });
   const artistName =
     albumDetail?.album_artist ||
@@ -1004,6 +1029,10 @@ export default function ImportWizard() {
     setDetectedFromTags(false);
     setDetectStatus("idle");
     autoDetected.current = { path: null, done: false };
+    // The release the wizard last settled belongs to the album it was about: a
+    // new album has none yet, so a stale manifest write cannot fire for it.
+    currentReleaseId.current = "";
+    expectedSynced.current = "";
   }, []);
   useEffect(() => {
     resetAlbumRelease();
@@ -1874,6 +1903,10 @@ export default function ImportWizard() {
     // Already the loaded release: nothing to fetch and nothing to re-match, so
     // pressing Next again does not fire two more 1-req/s MusicBrainz calls.
     if (release && release.id === id) return release;
+    // Which fetch this is, so a newer one can supersede it (the user re-points
+    // the album while this is still in flight): the loser must not settle the
+    // album's release identity, here or on disk.
+    const seq = ++releaseSeq.current;
     setBusy(true);
     setFetchStatus("Fetching release from MusicBrainz…");
     try {
@@ -1882,6 +1915,8 @@ export default function ImportWizard() {
       // concrete release and it is what the id state and every writer below
       // use: a group id must never be written as MUSICBRAINZ_ALBUMID.
       const rel = await withRetry(() => api.mbRelease(id));
+      const newest = seq === releaseSeq.current;
+      if (newest) currentReleaseId.current = rel.id;
       setRelease(rel);
       setReleaseId(rel.id);
       setFetchStatus("Matching local tracks to the release…");
@@ -1892,6 +1927,13 @@ export default function ImportWizard() {
       } else {
         toast(`Matched ${matched.suggestions.filter((s) => s.matched).length}/${matched.suggestions.length} tracks`);
       }
+      // The release just became this album's — by a fetch from its tags, a
+      // manual fetch, an auto-match or an AcoustID accept: record its own
+      // tracklist on the folder NOW, the same way the Match save and the Links
+      // commit do, so leaving the wizard before the Match step cannot leave the
+      // folder's gaps describing another release. A superseded fetch writes
+      // nothing.
+      if (newest) await syncExpectedTracks(target ?? albumPath, rel);
       return rel;
     } catch (e) {
       toast.error(String(e));
@@ -1963,6 +2005,51 @@ export default function ImportWizard() {
     }
   };
 
+  /** ONE web-rating import for the album the step is on.
+
+   *  The route runs the chain's own entry point
+   *  (`mlo.web_ratings.run_web_ratings`) scoped to this ONE album, so
+   *  `web_ratings_enabled`, `web_ratings_sources` and `force_web_ratings`
+   *  decide exactly what script 24 would — and the write is FILL-ONLY, so a
+   *  second press can never replace a value the file already holds. The reply
+   *  is the per-track rows the step shows and the run's counts. */
+  const importRatings = async () => {
+    const target = albumPath ?? albumTargets()[0];
+    if (!target) {
+      toast("Nothing to import ratings for yet");
+      return;
+    }
+    // The step's ONE force: the shared one-shot Force, and only when the
+    // web-rating script is the ticked one — the same `force_web_ratings`
+    // script 24 and the Force menu read.
+    const forced = forceRun && !!forceSel["web_ratings"];
+    setBusy(true);
+    setRatingError(null);
+    setAct({ label: "Importing web ratings…" });
+    try {
+      const res = await api.ratingsImport(target, staged, forced);
+      setRatingRows(res);
+      // An unwritten run is not a failure: with the switch off there is
+      // nothing to gather, and with the sources answering nothing the existing
+      // values are kept (fill-only). The toast names which of the two it was.
+      toast(
+        !res.enabled
+          ? "Web ratings are off (web_ratings_enabled) — nothing was fetched"
+          : res.counts.written
+            ? `${res.counts.written} track(s) rated — ${res.counts.skipped} kept (fill-only)`
+            : `No new web rating written${res.counts.skipped ? ` — ${res.counts.skipped} kept (fill-only)` : ""}`
+      );
+      qc.invalidateQueries({ queryKey: ["library"] });
+      qc.invalidateQueries({ queryKey: ["album", target] });
+    } catch (e) {
+      setRatingError(String(e));
+      toast.error(String(e));
+    } finally {
+      setAct(null);
+      setBusy(false);
+    }
+  };
+
   /** Album paths the wizard's own actions act on: the staged batch when files
    *  were just imported, else the album the wizard was opened on (?album=). */
   const albumTargets = (): string[] =>
@@ -1997,7 +2084,7 @@ export default function ImportWizard() {
       // the album just left (the release changed, the tracklist did not).
       await recordExpectedTracks(albumPath, rel, "Links saved");
       toast("Links saved to album");
-      setStep(2);
+      advanceTo(2);
     } catch (e) {
       toast.error(String(e));
     } finally {
@@ -2349,6 +2436,12 @@ export default function ImportWizard() {
    *  A failure is reported and never fatal: the writes that just succeeded
    *  must not be lost with it. */
   const recordExpectedTracks = async (path: string, rel: MBRelease, savedLabel: string) => {
+    // Remember that THIS album's folder now describes THIS release, so a later
+    // step advance (or another settle of the same pair) does not write it
+    // again (see `syncExpectedTracks`). Marked before the write, on purpose: a
+    // write that failed is the caller's own toast, and repeating it silently
+    // would only hide that.
+    expectedSynced.current = `${path}|${rel?.id ?? ""}`;
     try {
       await api.importExpected(
         path,
@@ -2364,6 +2457,47 @@ export default function ImportWizard() {
     } catch (e) {
       toast(`${savedLabel}, but the release tracklist could not be recorded: ${e}`);
     }
+  };
+
+  /** Make sure the folder on disk describes the release the album now names.
+
+   *  EVERY moment the wizard settles an album's release identity goes through
+   *  here — a fetch from the tags, a manual fetch, an auto-match, an AcoustID
+   *  accept, a re-link, a step the user walks out of — so the `.mb_expected`
+   *  manifest is (re)written whenever the album's release moves, not only on
+   *  the Match step's own save. It writes NOTHING when no tracklist is known
+   *  (a release the app has not fetched), and it is a no-op for a pair already
+   *  recorded this session, or for a folder whose own manifest already names
+   *  this very release (or carries no release claim at all — a rip sheet is
+   *  evidence, not a stale claim to correct). The write itself is the SAME
+   *  `api.importExpected` call the Match save makes, through the ONE helper
+   *  `recordExpectedTracks`, so the two can never drift. */
+  const syncExpectedTracks = async (path: string | null | undefined, rel: MBRelease | null) => {
+    const rid = String(rel?.id ?? "").trim();
+    if (!path || !rid || !(rel?.media ?? []).length) return;
+    // A release a NEWER fetch superseded is not this album's any more: writing
+    // its tracklist would describe the release the album just left.
+    if (currentReleaseId.current && rid !== currentReleaseId.current) return;
+    const key = `${path}|${rid}`;
+    if (expectedSynced.current === key) return;
+    const diskId = albumDetail?.expected_release_id ?? null;
+    const rows = albumDetail?.expected_tracks ?? [];
+    if (rows.length && (diskId === rid || diskId === null)) {
+      // Already current: this release's own tracklist is on the folder, or the
+      // manifest names no release (a rip sheet — kept, not corrected).
+      expectedSynced.current = key;
+      return;
+    }
+    await recordExpectedTracks(path, rel!, "Release tracklist recorded");
+  };
+
+  /** The wizard's FORWARD move: settle the album's release identity on disk
+   *  first (a step the user walks out of with a release in hand must leave the
+   *  folder describing it — see `syncExpectedTracks`), then show the next
+   *  step. The manifest write is best-effort and never blocks the move. */
+  const advanceTo = (to: number) => {
+    void syncExpectedTracks(albumPath, release);
+    setStep(to);
   };
 
   /** Write the SOURCE this album's Digital Media release needs — the
@@ -2429,7 +2563,7 @@ export default function ImportWizard() {
         }
       }
       toast("MusicBrainz metadata written to files (titles, artists, album, dates, MBIDs)");
-      setStep(3);
+      advanceTo(3);
     } catch (e) {
       toast.error(String(e));
     } finally {
@@ -2587,7 +2721,7 @@ export default function ImportWizard() {
 
   const saveCovers = () => {
     setCoverNotice(null);
-    setStep(4); // Genres
+    advanceTo(4); // Genres
   };
 
   // ---------------- Step 4: genres ----------------
@@ -2678,6 +2812,26 @@ export default function ImportWizard() {
     [genreJobResult]
   );
 
+  /** The Ratings step's rows: what the last run answered, else what the files
+   *  already carry (so the step is not blank for an album rated by an earlier
+   *  import or script 24). One row per track in both cases, the value the file
+   *  holds, the tag pair that carries it and its source. */
+  const ratingDisplayRows = useMemo(() => {
+    if (ratingRows) return ratingRows.rows;
+    return stepTracks.map((t) => {
+      const web = String(t.tags?.WEBRATING ?? "").trim();
+      const albumWeb = String(t.tags?.ALBUMWEBRATING ?? "").trim();
+      const value = web || albumWeb;
+      return {
+        file: t.path,
+        title: t.tags?.TITLE ?? defaultTrackName(t.path),
+        value,
+        level: (web ? "track" : albumWeb ? "album" : null) as "track" | "album" | null,
+        source: String((web ? t.tags?.WEBRATING_SOURCE : t.tags?.ALBUMWEBRATING_SOURCE) ?? "").trim(),
+      };
+    });
+  }, [ratingRows, stepTracks]);
+
   const setGenreList = (path: string, list: string[]) =>
     setGenres((g) => ({ ...g, [path]: list }));
 
@@ -2746,7 +2900,7 @@ export default function ImportWizard() {
         writes[p] = { GENRE: list.length ? list : null };
       await api.mbAssign(writes, staged);
       toast("Genres saved");
-      setStep(5);
+      advanceTo(5);
     } catch (e) {
       toast.error(String(e));
     } finally {
@@ -3012,7 +3166,7 @@ export default function ImportWizard() {
         untimed ? `${untimed} track(s) have lyrics without timestamps — not saved as .lrc` : null
       );
       toast(`Lyrics format ${fmt}: ${embedded} Embedded, ${sidecars} .lrc — INSTRUMENTAL saved`);
-      setStep(6);
+      advanceTo(7);
     } catch (e) {
       toast.error(String(e));
     } finally {
@@ -3151,12 +3305,12 @@ export default function ImportWizard() {
       }
       if (!Object.keys(writes).length) {
         toast("No advisory changes — pick values or use Apply to all");
-        setStep(7);
+        advanceTo(8);
         return;
       }
       await api.mbAssign(writes, staged);
       toast("Advisory ratings saved");
-      setStep(7);
+      advanceTo(8);
     } catch (e) {
       toast.error(String(e));
     } finally {
@@ -3301,13 +3455,21 @@ const runTickedHere = async () => {
  *  the importing tab". Only the plain button (an import with no album to open)
  *  closes by clearing the params here.
  *
+ *  `runScripts` (default ON — what both Done controls do) is the whole chain
+ *  decision. The Close control beside Done passes it false: it runs the SAME
+ *  settle + organize + session/notification dismiss and closes exactly as Done
+ *  does, but NEVER calls `/api/run`, and its toast says the scripts were
+ *  skipped instead of reporting a graded album. It exists for the import a
+ *  user means to finish by hand — the steps already wrote what they were meant
+ *  to, and re-running the chain over the album is a separate decision.
+ *
  *  A claim refusal is NOT a failure: another job (an import, a bulk run, the
  *  organizer) is already finishing this album, so there is nothing for this
  *  press to run and the album is in the library either way. It is remembered
  *  and reported in the step's own words ("already being finished — <the
  *  refusal>") instead of being toasted as a failure; a real failure (a 500, a
  *  bad path) still is one. */
-const finish = async (closeByNavigation: boolean) => {
+const finish = async (closeByNavigation: boolean, runScripts = true) => {
   // Whether this Finish's ticked run went out forced — the completion toast
   // says so, the same "(forced)" the Optimization page uses.
   let forced = false;
@@ -3384,7 +3546,10 @@ const finish = async (closeByNavigation: boolean) => {
       }
     }
     const force = forceRun ? forceDict(forceSel) : undefined;
-    if (runAfterImportIds.length && targets.length) {
+    // Close (runScripts false) never reaches the runner: the steps have written
+    // what they were meant to, and the chain is Done's decision, not this
+    // press's.
+    if (runScripts && runAfterImportIds.length && targets.length) {
       forced = !!force;
       try {
         await api.run(runAfterImportIds, targets, force);
@@ -3420,8 +3585,10 @@ const finish = async (closeByNavigation: boolean) => {
   toast(
     alreadyFinishing
       ? `Album is already being finished by another job — ${alreadyFinishing}`
-      : (uploaded.length > 1 ? `Imported ${uploaded.length} albums — enrich each from its album page` : "Import complete — album graded") +
-        (forced ? " (scripts forced)" : "")
+      : runScripts
+        ? (uploaded.length > 1 ? `Imported ${uploaded.length} albums — enrich each from its album page` : "Import complete — album graded") +
+          (forced ? " (scripts forced)" : "")
+        : "Import closed — the scripts were skipped"
   );
 };
 
@@ -5108,8 +5275,96 @@ const finish = async (closeByNavigation: boolean) => {
         </div>
       )}
 
-      {/* ---------------- Step 5: lyrics ---------------- */}
+      {/* ---------------- Step 5: ratings ---------------- */}
       {step === 5 && (
+        <div className={minMode && missingHere ? "flex flex-col gap-4" : "space-y-4"}>
+          {minMode && !missingHere && <MinNothingMissing />}
+          <MinBlock min={minMode} here={missingHere} mine="ratings">
+            <div className="flex items-center gap-2 flex-wrap">
+              {/* ONE button: it asks the configured sources for this album's
+                  own score and each track's, and FILLS the tags — a value
+                  already on a file (and the source beside it) is never
+                  replaced, so a second press is never destructive. */}
+              <button
+                className="btn-ghost tap"
+                onClick={importRatings}
+                disabled={busy || !albumTargets().length}
+                title="Ask the configured sources for this album's and each track's public score and FILL WEBRATING / ALBUMWEBRATING — an existing value is never replaced"
+              >
+                <CloudDownloadIcon /> Import web ratings
+              </button>
+              {/* The same one-shot Force the Finish step uses: with it on and
+                  "24 · Web ratings re-fetch" ticked, this press re-asks and
+                  REPLACES the values it finds (script 24's own force key). */}
+              <ForceControl forceRun={forceRun} toggle={toggleForce} forceSel={forceSel} setSel={setSel} />
+            </div>
+            {ratingError && (
+              <div className="text-xs text-red-300" role="alert">{ratingError}</div>
+            )}
+            {ratingRows && (
+              <div className="panel px-3 py-2 space-y-1" role="status">
+                {!ratingRows.enabled ? (
+                  <div className="text-xs text-amber-200">
+                    Web ratings are off (web_ratings_enabled) — turn the switch on in
+                    Settings → Import pipeline to gather the public score.
+                  </div>
+                ) : (
+                  <div className="text-xs text-zinc-300">
+                    {ratingRows.counts.written} track(s) written · {ratingRows.counts.skipped} kept (fill-only)
+                    {Object.keys(ratingRows.counts.by_source).length > 0
+                      ? ` · ${Object.entries(ratingRows.counts.by_source).map(([src, n]) => `${src}: ${n}`).join(" · ")}`
+                      : ""}
+                  </div>
+                )}
+                {ratingRows.errors.length > 0 && (
+                  <ul className="text-[11px] text-amber-300/90 space-y-0.5">
+                    {ratingRows.errors.map((err, i) => (
+                      <li key={i}>{err}</li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
+            {/* One row per track — the value the file holds, whether it is the
+                track's OWN score or the album's, and the source the writer left
+                beside it — the same row recipe every other step's list uses. */}
+            {ratingDisplayRows.map((r) => (
+              <div key={r.file} className={ROW}>
+                <span className="flex-1 truncate text-sm">{r.title || defaultTrackName(r.file)}</span>
+                <div className="flex items-center gap-1.5 flex-wrap justify-end">
+                  {r.value ? (
+                    <span
+                      className="chip bg-accent/10 text-accent-soft border border-accent/25"
+                      title={r.level === "album"
+                        ? "The album's own score (ALBUMWEBRATING), written to every track"
+                        : "This track's own score (WEBRATING)"}
+                    >
+                      {r.value}
+                      <span className="text-zinc-500">{r.level === "album" ? " · album" : " · track"}</span>
+                    </span>
+                  ) : (
+                    <span className="text-[11px] text-zinc-500">no source stated a score</span>
+                  )}
+                  {r.source && (
+                    <span className="chip bg-raise border border-border text-zinc-400">{r.source}</span>
+                  )}
+                </div>
+              </div>
+            ))}
+            <span className="text-xs text-zinc-500 -mt-1 block">
+              Import web ratings asks the configured sources (Settings → Import, MusicBrainz by
+              default) for this album's score and each track's, and writes WEBRATING /
+              ALBUMWEBRATING beside your own RATING — FILL-ONLY, so a value already on a file (and
+              the source beside it) is never replaced. Turn Force on and tick "24 · Web ratings
+              re-fetch" to re-ask and replace. The chip says whether the number is this track's own
+              or the album's; a track nothing rated keeps no value rather than an invented one.
+            </span>
+          </MinBlock>
+        </div>
+      )}
+
+      {/* ---------------- Step 6: lyrics ---------------- */}
+      {step === 6 && (
         <div className={minMode && missingHere ? "flex flex-col gap-4" : "space-y-4"}>
           {minMode && !missingHere && <MinNothingMissing />}
           <MinBlock min={minMode} here={missingHere} mine="lyrics">
@@ -5283,8 +5538,8 @@ const finish = async (closeByNavigation: boolean) => {
         </div>
       )}
 
-      {/* ---------------- Step 6: advisory ---------------- */}
-      {step === 6 && (
+      {/* ---------------- Step 7: advisory ---------------- */}
+      {step === 7 && (
         <div className={minMode && missingHere ? "flex flex-col gap-4" : "space-y-4"}>
           {minMode && !missingHere && <MinNothingMissing />}
           <MinBlock min={minMode} here={missingHere} mine="">
@@ -5426,8 +5681,8 @@ const finish = async (closeByNavigation: boolean) => {
         </div>
       )}
 
-      {/* ---------------- Step 7: finish ---------------- */}
-      {step === 7 && (
+      {/* ---------------- Step 8: finish ---------------- */}
+      {step === 8 && (
         <div className="panel p-6">
           <div className="text-center">
             <Check className="h-10 w-10 text-emerald-400 mx-auto mb-3" />
@@ -5616,12 +5871,24 @@ const finish = async (closeByNavigation: boolean) => {
             ) : (
               <button className="btn-primary tap" onClick={() => finish(false)}>Done</button>
             )}
+            {/* Close: the SAME settle + organize + dismiss as Done, and the
+                same close, but it never runs the tacked-on script chain — the
+                steps have already written what they were meant to, and editing
+                the album from its page is what comes next. Its own toast says
+                the scripts were skipped rather than reporting a graded album. */}
+            <button
+              className="btn-ghost tap"
+              onClick={() => finish(false, false)}
+              title="Close the wizard without running the script chain — the release is settled and organized, the ticked scripts are skipped"
+            >
+              Close
+            </button>
           </div>
         </div>
       )}
 
       {/* nav buttons */}
-      {step > 0 && step < 7 && (
+      {step > 0 && step < 8 && (
         <div className="flex flex-wrap items-center justify-between gap-2 pt-2">
           <button className="btn-ghost tap" onClick={() => setStep(step - 1)}>
             <ChevronLeft className="h-4 w-4" /> Back
@@ -5641,11 +5908,17 @@ const finish = async (closeByNavigation: boolean) => {
                       : step === 4
                         ? saveGenres()
                         : step === 5
-                          ? saveLyricsStep()
-                          : saveAdvisory()
+                          // Ratings has nothing to SAVE — the fetch writes the
+                          // files itself, fill-only — so Continue just moves on
+                          // (through `advanceTo`, which records the release's
+                          // tracklist if the folder is still missing it).
+                          ? advanceTo(6)
+                          : step === 6
+                            ? saveLyricsStep()
+                            : saveAdvisory()
               }
             >
-              {step === 6 ? "Save & finish" : "Continue"} <ChevronRight className="h-4 w-4" />
+              {step === 7 ? "Save & finish" : "Continue"} <ChevronRight className="h-4 w-4" />
             </button>
           </div>
         </div>

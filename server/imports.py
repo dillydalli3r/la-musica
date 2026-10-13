@@ -2119,28 +2119,40 @@ def fetch_advisories(paths, cfg=None, force=False):
         folder = os.path.dirname(path)
         per_folder[folder] = per_folder.get(folder, 0) + 1
 
-    # ONE TRACK AT A TIME, deliberately. The pass was fanned out per file (the
-    # shape `drop_arrived_values` and `_stamp_release` use for their own
-    # per-file writes) and MEASURED slower on this album: Apple's interval is
-    # global, and the sources are asked in a fixed order whose album-level
-    # answers the first track warms for the rest. Eight lanes arriving at
-    # `_apple_json` together turned a spacing that the serial pass never even
-    # reached — it was already three seconds between calls — into 38 s of
-    # sleep for the same twelve tracks, and the pass went 24 s to 41 s. The
-    # concurrency that pays is one level up: the metadata/cover pair runs
-    # beside this pass (`_files_step`), and instrumentals fan out per file
-    # because LRCLIB's interval is 0.4 s, where overlap does win.
-    updated = 0
-    gated = 0
-    values = {}
-    sources = {}
-    answers = {}
-    status = {}
-    for path in targets:
+    # PER-TRACK LANES, the shape `fetch_instrumentals` (just below) and every
+    # other multi-file runner in this module uses. Each track's rating is its
+    # OWN question — the file's ISRCs and ids decide which sources are asked
+    # and what the ladder settles — so no row depends on another. What paces
+    # the lanes is HOST ETIQUETTE, not this loop: `server.integrations` spaces
+    # Apple's calls itself (`_APPLE_MIN_INTERVAL`, its lock held for the
+    # spacing alone) and every other source goes through `discovery._json`,
+    # whose per-host throttle + single-flight cache is shared process-wide, so
+    # two lanes asking the SAME host still queue one behind the other while a
+    # lane waiting on one host no longer holds up a track asking another.
+    # `mlo.advisory.decide_advisory` and the source caches are the same ones
+    # the serial pass used. Every write stays per file (one track, one handle)
+    # and the rows are booked in TARGET ORDER below, so the counters and the
+    # per-path rows are byte-identical to the serial pass's.
+    #
+    # honey: 8 lanes (every other multi-file runner's ceiling here) is the WRONG
+    # width for an album whose rating comes from Apple. Measured on a real
+    # 8-track album with real ISRCs: 36.8 s on one lane against 48.3 s on
+    # eight, because `integrations._APPLE_MIN_INTERVAL` is GLOBAL — the lanes
+    # queue on `_apple_lock`, the pass has no local (CPU) half to overlap, and
+    # 4 extra Apple questions were pressed. The same album with no ARTIST/ALBUM
+    # to ask Apple by (Deezer's ISRC route alone) went 1.96 s -> 1.35 s.
+    # Revisit when `resolve_advisory_route` stops asking Apple by name for
+    # every track — or keep this pass on one lane while it does.
+    def _one_track(path):
+        """One track's own row, or None when nobody stated anything.
+
+        `{"value", "source", "answers", "status", "updated"}`: the same
+        decisions, in the same order, the serial pass made inline.
+        """
         try:
             af = AudioFile(path)
             if af.audio is None:
-                continue
+                return None
             current = str(af.get_tag("ITUNESADVISORY") or "").strip()
             if current in ("0", "1", "2") and not force:
                 # Echo it, WITH its provenance: the value is the file's own
@@ -2149,14 +2161,12 @@ def fetch_advisories(paths, cfg=None, force=False):
                 # rendered as "source unknown" — which reads as "a source
                 # answered and we lost it" when the truth is "nobody was
                 # asked" (`force` is what asks).
-                values[path] = int(current)
-                sources[path] = EXISTING_TAG
-                status[path] = STATUS_EXISTING
-                continue
+                return {"value": int(current), "source": EXISTING_TAG,
+                        "answers": None, "status": STATUS_EXISTING,
+                        "updated": 0}
             if not should_write_audio_tag(cfg, "ITUNESADVISORY", filepath=path):
-                gated += 1
-                status[path] = STATUS_GATED
-                continue
+                return {"value": None, "source": None, "answers": None,
+                        "status": STATUS_GATED, "updated": 0}
             route = intg.resolve_advisory_route(
                 # The file's own tag, as stored: every ISRC on it is asked.
                 isrc=str(af.get_tag("ISRC") or ""),
@@ -2195,33 +2205,65 @@ def fetch_advisories(paths, cfg=None, force=False):
                 answers=track_answers, path=path, af=af)
             value = decision.get("value")
             if value is None:
-                continue
+                return None
             if decision.get("fallback") and current in ("0", "1", "2"):
                 # A re-rate (`force`) of a file that already carries a value,
                 # for which NOBODY stated anything: the ladder's answer is the
                 # INVENTED `advisory_fallback`, and an invented value must not
                 # overwrite a real one — the stored rating stands, reported as
                 # the file's own. Only evidence lowers a rating.
-                values[path] = int(current)
-                sources[path] = EXISTING_TAG
-                status[path] = STATUS_UNCHANGED
-                continue
-            values[path] = int(value)
-            if decision.get("source"):
-                sources[path] = decision["source"]
-            if track_answers:
-                answers[path] = track_answers
+                return {"value": int(current), "source": EXISTING_TAG,
+                        "answers": None, "status": STATUS_UNCHANGED,
+                        "updated": 0}
             if str(value) == current:
-                status[path] = STATUS_UNCHANGED
+                row_status, written = STATUS_UNCHANGED, 0
             elif af.set_tag("ITUNESADVISORY", str(value)):
-                updated += 1
-                status[path] = STATUS_WRITTEN
+                row_status, written = STATUS_WRITTEN, 1
             else:
                 # `set_tag` refused: the file still reads what it did, and a
                 # write that did not happen is not counted as one.
-                status[path] = STATUS_UNCHANGED
+                row_status, written = STATUS_UNCHANGED, 0
+            return {"value": int(value),
+                    "source": decision.get("source") or None,
+                    "answers": track_answers or None,
+                    "status": row_status, "updated": written}
         except Exception:
+            return None
+
+    # ONE TRACK AT A TIME — a MEASUREMENT, not a preference. Apple's advisory
+    # route spaces its calls through ONE PROCESS-WIDE interval
+    # (`server.integrations._APPLE_MIN_INTERVAL`), so lanes have no local wait
+    # to overlap: measured on a real 8-track album with real ISRCs, 36.8 s on
+    # one lane against 48.3 s on eight, because every lane queues on that gate
+    # and the interleaving presses a few extra Apple questions. A Deezer-only
+    # album is the other way round (1.96 s -> 1.35 s), which is why the lane
+    # code is kept ready beside this line: revisit the moment the Apple route
+    # stops deciding the wall (its gate becomes per-connection, or Apple leaves
+    # the advisory chain).
+    # honey: serial while one global 3 s gate is the wall; lane it if that goes.
+    outcomes = [_one_track(p) for p in targets]
+    # The rows are FOLDED below, in TARGET ORDER: the counts and the per-path
+    # maps are the serial pass's own, byte for byte.
+    updated = 0
+    gated = 0
+    values = {}
+    sources = {}
+    answers = {}
+    status = {}
+    for path, row in zip(targets, outcomes):
+        if row is None:
             continue
+        if row["status"] == STATUS_GATED:
+            gated += 1
+            status[path] = STATUS_GATED
+            continue
+        values[path] = row["value"]
+        if row["source"]:
+            sources[path] = row["source"]
+        if row["answers"]:
+            answers[path] = row["answers"]
+        status[path] = row["status"]
+        updated += row["updated"]
 
     if gated and not values:
         # Nothing at all was recorded because the write gate refused every file
@@ -4407,10 +4449,27 @@ def settle_digital_import(album_dir, cfg=None, *, release=None, provider="",
       pipeline runs that step in its own file pool, in parallel with the
       lookups above.
 
+    The description leg runs BESIDE the two tag legs here too (its own worker),
+    because it writes FILES while they write TAGS — the same split the pipeline
+    makes. The two tag legs stay sequential: they rewrite the same containers.
+
     Never raises: each half reports its own state.
     """
     cfg = cfg or {}
     out = {"path": os.path.normpath(str(album_dir))}
+    # The DESCRIPTION leg runs BESIDE the two tag legs, on its own worker: it
+    # writes FILES (the artist image, the artist/album description sidecars and
+    # the shared review record), never an audio tag, which is the same split
+    # the pipeline makes when it starts this step on its file worker next to
+    # the tag-writing chain steps (see `_finish_album`). The two TAG legs
+    # (SOURCE and the arrived lyrics) stay in their own order on this thread:
+    # both rewrite the SAME containers, so two lanes there would fight over one
+    # file's tags. Every key, every value and every state below is the serial
+    # call's own — only the wall clock changes.
+    meta = None
+    if metadata:
+        meta = ThreadPoolExecutor(max_workers=1).submit(
+            run_metadata_step, album_dir, cfg)
     try:
         out["source"] = stamp_album_source(album_dir, cfg, value=value,
                                            release=release, provider=provider,
@@ -4423,9 +4482,9 @@ def settle_digital_import(album_dir, cfg=None, *, release=None, provider="",
     except Exception:
         traceback.print_exc()
         out["lyrics"] = {"state": "failed"}
-    if metadata:
+    if meta is not None:
         try:
-            out["metadata"] = run_metadata_step(album_dir, cfg)
+            out["metadata"] = meta.result()
         except Exception:
             traceback.print_exc()
             out["metadata"] = {"staged": False, "applied": {}}
@@ -4475,6 +4534,40 @@ def _stamp_release_identity(album_dir, release, cfg):
     if not files:
         return {"written": 0, "skipped": 0, "failed": 0}
     return fill_release_identity(files, release, cfg)
+
+
+def _record_release_manifest(album_dir, release, force=False):
+    """Record the release's own tracklist as the album's `.mb_expected`.
+
+    ONE rule, in the one place that settles WHICH release an album is: the
+    manifest IS that release's tracklist, so it is written by whoever stamps
+    the identity — the wizard's match save, a PINNED bulk import (the Library's
+    Import dialog) and `finish_album`'s own stamp — and it is only ever
+    re-pointed when the release actually MOVED (a manifest naming another
+    release is stale by definition: script 15's own rule, see
+    `server.script_runners.run_release_tracklist`).
+
+    Why here and not only in script 15: an album whose release the user pinned
+    carries the ids the moment this stamp lands, so leaving the manifest to the
+    end of the chain made the album answer "expected tracklist missing" — and
+    its Library row show a gap — for as long as the chain took, and forever for
+    a chain that does not contain 15. It never invents one: a release with no
+    tracklist writes nothing (a fabricated list would fail the album forever).
+
+    Returns True when the file was written.
+    """
+    from mlo.paths import load_expected_tracks, save_expected_tracks
+
+    rows = (release or {}).get("media") or []
+    if not rows:
+        return False
+    rid = str((release or {}).get("id") or "").strip()
+    current = load_expected_tracks(album_dir)
+    recorded = str(current.get("release_id") or "").strip()
+    if (current["tracks"] and not force
+            and (not rid or recorded.lower() == rid.lower())):
+        return False
+    return save_expected_tracks(album_dir, rid or None, rows)
 
 
 def _stamp_release(album_dir, release, cfg, force_ids=False):
@@ -4556,6 +4649,13 @@ def _stamp_release(album_dir, release, cfg, force_ids=False):
         return (0, 0)
     try:
         _stamp_mb_tags(album_dir, rel, force_ids=force_ids)
+    except Exception:
+        traceback.print_exc()
+    # The release's OWN tracklist is recorded here, where the identity is
+    # settled — the rule and the fill/re-point conditions are in
+    # `_record_release_manifest`'s own docstring.
+    try:
+        _record_release_manifest(album_dir, rel, force=bool(force_ids))
     except Exception:
         traceback.print_exc()
     # The same per-track cap the other writers keep — the one helper reads

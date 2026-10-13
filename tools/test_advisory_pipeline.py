@@ -579,4 +579,138 @@ try:
 finally:
     mlo_main.load_config = _real_load_config
 
+# --------------------------------------------------------------------------- #
+# 8) The advisory pass asks its tracks ONE AT A TIME — and that is a pin, not
+#    an accident. Apple's advisory route spaces its calls through one
+#    PROCESS-WIDE interval (`server.integrations._APPLE_MIN_INTERVAL`), so
+#    lanes have no local wait to overlap and pay for it: measured on a real
+#    8-track album with real ISRCs, 36.8 s on one lane against 48.3 s on eight
+#    (the lanes queue on that gate and the interleaving presses extra Apple
+#    questions). The stub transport below is the instrument: it counts how many
+#    routes are inside it at once and RECORDS the answers in the order they
+#    arrive, so a future edit that lanes this pass again fails here with its
+#    own number. What the pass books is also pinned — same values, sources,
+#    answers, statuses, counts, in the same (target) order.
+# --------------------------------------------------------------------------- #
+import threading  # noqa: E402
+import time  # noqa: E402
+
+LANE_ALBUM = os.path.join(ROOT, "Lane Album")
+os.makedirs(LANE_ALBUM)
+LANE_FILES = []
+LANE_ISRCS = ["USSM10213501", "USSM10213502", "USSM10213503",
+              "USSM10213504", "USSM10213505", "USSM10213506"]
+for i, isrc in enumerate(LANE_ISRCS, 1):
+    path = os.path.join(LANE_ALBUM, f"1-{i:02d} - Lane {i}.flac")
+    with open(path, "wb") as fh:
+        fh.write(b"")
+    FakeAudio.written[path] = {"TITLE": f"Lane {i}", "ARTIST": "Lane Artist",
+                               "ALBUM": "Lane Album", "DISCNUMBER": "1",
+                               "TRACKNUMBER": str(i), "ISRC": isrc}
+    LANE_FILES.append(path)
+
+# Every track states its own rating, in ISRC order, so the merged rows can be
+# compared to a literal (Deezer's ISRC answer is explicit / not-explicit, so
+# the values here are 1s and 0s).
+LANE_ANSWERS = {LANE_FILES[0]: 1, LANE_FILES[1]: 0, LANE_FILES[2]: 1,
+                LANE_FILES[3]: 0, LANE_FILES[4]: 1, LANE_FILES[5]: 1}
+
+_probe = {"inside": 0, "peak": 0, "seen": []}
+_probe_lock = threading.Lock()
+# One answer per lane track's ISRC (its own rating), and Apple knows nothing.
+LANE_ROUTES = {"api.deezer.com/track/isrc:" + isrc: {
+    "explicit_lyrics": bool(LANE_ANSWERS[path]),
+    "explicit_content_lyrics": 1 if LANE_ANSWERS[path] else 0}
+    for path, isrc in zip(LANE_FILES, LANE_ISRCS)}
+LANE_ROUTES.update(dict(NO_APPLE))
+LANE_ROUTES["api.deezer.com"] = {"error": {"type": "DataException"}}
+
+
+def lane_transport():
+    """`intg._advisory_json`'s own shape, instrumented: every answer takes 0.05 s
+    inside this function, so `_probe["peak"]` counts how many questions were
+    being answered at once — 1 for a serial pass, up to the lane count."""
+    def _route(url, arg):
+        for key, payload in LANE_ROUTES.items():
+            if key in url:
+                return payload(arg) if callable(payload) else payload
+        return None
+
+    def fake_get(url, params=None, headers=None, timeout=None, host=None):
+        with _probe_lock:
+            _probe["inside"] += 1
+            _probe["peak"] = max(_probe["peak"], _probe["inside"])
+        try:
+            time.sleep(0.05)
+            payload = _route(url, params or {})
+            if "track/isrc:" in url and isinstance(payload, dict):
+                with _probe_lock:
+                    _probe["seen"].append(
+                        1 if payload.get("explicit_lyrics") else 0)
+            return payload
+        finally:
+            with _probe_lock:
+                _probe["inside"] -= 1
+
+    def fake_post(url, data=None, headers=None, timeout=None):
+        return _route(url, data or {}), ""
+
+    intg._advisory_json, intg._advisory_post = fake_get, fake_post
+
+
+def lane_run(lanes):
+    """One fetch over the lane album with a forced lane count."""
+    for path in LANE_FILES:
+        FakeAudio.written[path].pop("ITUNESADVISORY", None)
+        FakeAudio.written[path].pop("ALBUMITUNESADVISORY", None)
+    clear()
+    lane_transport()
+    _probe.update(inside=0, peak=0, seen=[])
+    real_wc = imports.worker_count
+    # The stand-in tag layer the sections above restored (`fetch_advisories`
+    # re-reads `mlo.audio.AudioFile` at every call, so this reaches it).
+    mlo_audio.AudioFile = FakeAudio
+    imports.worker_count = lambda *a, **k: lanes
+    try:
+        return imports.fetch_advisories(
+            [LANE_ALBUM], dict(CFG, advisory_auto_fetch=True))
+    finally:
+        imports.worker_count = real_wc
+        mlo_audio.AudioFile = _real_audiofile
+
+
+serial_out = lane_run(1)
+serial_seen = list(_probe["seen"])
+assert _probe["peak"] == 1, f"one lane must never overlap: {_probe}"
+assert len(serial_seen) == len(LANE_FILES), serial_seen
+
+laned_out = lane_run(8)
+# THE PIN: even asked for eight lanes, the pass stays SERIAL — Apple's global
+# 3 s gate makes lanes a measured 31 % SLOWER on an Apple-rated album (see the
+# section header). If that gate ever stops deciding the wall, this line is the
+# one to change, together with the `# honey:` comment in `fetch_advisories`.
+assert _probe["peak"] == 1, \
+    f"the advisory pass must stay serial (Apple's global gate): {_probe}"
+
+# THE CONTRACT: every reported line is the same one, including the ORDER of
+# the per-path maps (a pass that booked rows as they finished would reorder
+# `values`/`status` — and `mlo.import_policy`'s readout is built on that map).
+for field in ("updated", "gated", "album_updated", "albums", "skipped"):
+    assert laned_out.get(field) == serial_out.get(field), \
+        f"{field}: {laned_out.get(field)!r} != {serial_out.get(field)!r}"
+for field in ("values", "sources", "answers", "status"):
+    assert list(laned_out[field].items()) == list(serial_out[field].items()), \
+        f"{field} rows differ or moved: {laned_out[field]} != {serial_out[field]}"
+assert laned_out["values"] == LANE_ANSWERS, laned_out["values"]
+assert laned_out["status"] == {p: "written" for p in LANE_FILES}, laned_out["status"]
+assert laned_out["sources"] == {p: "deezer-isrc" for p in LANE_FILES}, \
+    laned_out["sources"]
+assert laned_out["albums"] == {LANE_ALBUM: 1}, laned_out["albums"]
+# …and every question really was asked once per track by both runs: one Deezer
+# ISRC answer per file (the Apple legs are asked too — the album route once,
+# out of `NO_APPLE`-style empty answers — but only the ISRC leg's answers are
+# recorded here).
+assert sorted(serial_seen) == sorted(LANE_ANSWERS.values()), serial_seen
+assert sorted(_probe["seen"]) == sorted(LANE_ANSWERS.values()), _probe["seen"]
+
 print("advisory pipeline: all assertions passed")

@@ -2234,6 +2234,82 @@ def recording_genres(recording_mbid):
         return []
 
 
+# --------------------------------------------------------------------------- #
+# The ONE album-level read: MusicBrainz's RECORDING BROWSE
+# --------------------------------------------------------------------------- #
+# A browse answers a whole RELEASE at once — every recording it holds, each with
+# its own `genres` and `rating` — where a lookup answers one recording. The
+# album's track count is what used to decide the price of a track's rating or
+# its genres' WORK fallback, because both were read per recording; they read
+# THIS instead, so an album costs one request (one page) however many tracks it
+# has.
+#
+# VERIFIED live (2026-10-12, The Dark Side of the Moon, release
+# 8d17f5db-b9d0-4e35-9a06-9e1bffebc5be), asked with the app's own User-Agent:
+# `GET recording?release=<id>&inc=genres+ratings+work-rels&limit=100&fmt=json`
+# answers `recording-count: 9` and 9 rows, each carrying
+# `genres[{name,id,count}]`, `rating{value,votes-count}` AND its
+# `relations[].work.id` — `inc=work-rels` IS accepted on the browse, so the work
+# ids ride along and no per-track identity request is needed to find them.
+# (Measured: 0.80 s for the 9 tracks.)
+_BROWSE_INC = "genres+ratings+work-rels"
+_BROWSE_PAGE = 100
+# honey: the browse walk stops after this many recordings of one release — a
+# bound on a broken `recording-count` (the loop is otherwise server-driven),
+# not a policy. Every real album is orders of magnitude below it (a 100-disc box
+# set is ~1000 rows); revisit if a release MusicBrainz reports beyond this ever
+# needs every row (a truncated index only costs the per-track fallback).
+_BROWSE_MAX_ROWS = 10000
+
+
+def release_recording_index(release_mbid):
+    """``{recording_mbid: recording node}`` for one RELEASE — ONE browse, paged.
+
+    The album-level reader both callers share: `web_rating_fetchers` (mlo
+    script 24's rating ladder) and `_genre_source_answers` (the genre chain's
+    track tier). Keyed by the RELEASE's own mbid — a release group is not
+    browsable this way, and one pressing's recording list is what the tags
+    name.
+
+    Paging follows MusicBrainz's own `recording-count`: the first page asks
+    `limit=100`, and further pages are read (same 1 req/s etiquette) only while
+    the rows served fall short of the count. Every page goes through
+    `mb_get_cached`, so the TTL, the single-flight join and the throttle are the
+    ones every other MusicBrainz read already obeys — a second album pass costs
+    no request, and two threads asking about one release share one flight.
+
+    A failure (transport, refusal, a page that will not parse) ends the walk and
+    returns what was read — never raises: a caller treats a missing recording as
+    "the browse did not answer for it" and falls back to its per-track read.
+    """
+    rid = str(release_mbid or "").strip()
+    if not rid:
+        return {}
+    out, offset = {}, 0
+    while True:
+        try:
+            data = mb_get_cached("recording", {"release": rid, "inc": _BROWSE_INC,
+                                               "limit": _BROWSE_PAGE,
+                                               "offset": offset, "fmt": "json"})
+        except Exception:
+            break
+        if not isinstance(data, dict):
+            break
+        rows = [r for r in (data.get("recordings") or []) if isinstance(r, dict)]
+        for row in rows:
+            rec_id = str(row.get("id") or "")
+            if rec_id:
+                out[rec_id] = row
+        offset += len(rows)
+        try:
+            count = int(data.get("recording-count") or 0)
+        except (TypeError, ValueError):
+            count = 0
+        if not rows or offset >= count or offset >= _BROWSE_MAX_ROWS:
+            break
+    return out
+
+
 def release_group_rating(rg_mbid):
     """The release GROUP's own rating node, or None.
 
@@ -2272,35 +2348,42 @@ def artist_rating(artist_mbid):
     return mb_get_cached(f"artist/{artist_mbid}", {"inc": "ratings", "fmt": "json"})
 
 
-def _recording_with_work(recording_mbid):
-    """``{"recording": node, "work": node|None}`` for one recording.
+def _recording_work_id(node):
+    """The WORK a recording NODE performs, or "" — from its own relations.
 
-    ONE request answers the recording's own rating, its genres and the WORK it
-    performs (``inc=ratings+genres+work-rels``, VERIFIED live: 4 of 4 Dark
-    Side of the Moon recordings came back rated AND with a work id). The work
-    is only fetched when the recording states NO rating of its own, because
-    that is the only case its answer matters in: measured on the same album,
-    the recording is rated 4/4 times and the work 1/4 (and no work stated any
-    genre), so asking every work up front would pay a second rate-limited
-    request per track for a fallback that almost never answers.
+    MusicBrainz states the performance relation on the recording; it rides
+    along both in the per-recording lookup (`inc=work-rels`) and in the album
+    BROWSE (`release_recording_index`), so the id is read here for either
+    shape.
+    """
+    for rel in (node or {}).get("relations") or []:
+        work_id = str((rel.get("work") or {}).get("id") or "")
+        if work_id:
+            return work_id
+    return ""
+
+
+def _recording_payload(node):
+    """``{"recording": node, "work": node|None}`` — the work only when needed.
+
+    The ONE rule both readers of a recording share: the work is fetched only
+    when the recording states NO rating of its own, because that is the only
+    case its answer matters in — measured on The Dark Side of the Moon, the
+    recording is rated 4/4 times and the work 1/4, so asking every work up
+    front would pay a rate-limited request for a fallback that almost never
+    answers. `node` comes from the per-recording lookup OR from the album
+    browse (`release_recording_index`), and the work id it carries is what
+    saves that lookup's own search for it.
 
     A recording that states no rating AND performs no work is a plain miss —
     both halves stay None and the source contributes nothing.
     """
-    if not recording_mbid:
-        return None
-    node = mb_get_cached(f"recording/{recording_mbid}",
-                         {"inc": "ratings+genres+work-rels", "fmt": "json"})
     payload = {"recording": node, "work": None}
     if not isinstance(node, dict):
         return payload
     if (node.get("rating") or {}).get("value") is not None:
         return payload
-    work_id = ""
-    for rel in node.get("relations") or []:
-        work_id = str((rel.get("work") or {}).get("id") or "")
-        if work_id:
-            break
+    work_id = _recording_work_id(node)
     if work_id:
         try:
             payload["work"] = mb_get_cached(f"work/{work_id}",
@@ -2308,6 +2391,24 @@ def _recording_with_work(recording_mbid):
         except Exception:
             payload["work"] = None
     return payload
+
+
+def _recording_with_work(recording_mbid):
+    """``{"recording": node, "work": node|None}`` for one recording.
+
+    ONE request answers the recording's own rating, its genres and the WORK it
+    performs (``inc=ratings+genres+work-rels``, VERIFIED live: 4 of 4 Dark
+    Side of the Moon recordings came back rated AND with a work id). This is the
+    PER-TRACK read — `web_rating_fetchers` reaches it when the album browse
+    (`release_recording_index`) did not answer for this recording, or when the
+    caller knows no release id at all — and the work handling is the shared one
+    (`_recording_payload`).
+    """
+    if not recording_mbid:
+        return None
+    node = mb_get_cached(f"recording/{recording_mbid}",
+                         {"inc": "ratings+genres+work-rels", "fmt": "json"})
+    return _recording_payload(node)
 
 
 def recording_work_genres(recording_mbid):
@@ -2340,8 +2441,23 @@ def recording_work_genres(recording_mbid):
     work = str(ids.get("work") or "")
     if not work:
         return []
+    return work_genres(work)
+
+
+def work_genres(work_mbid):
+    """The genres MusicBrainz states on a WORK, by its own id.
+
+    The second half of `recording_work_genres`, split out because the album
+    browse (`release_recording_index`) already carries each recording's work id
+    (`inc=work-rels` is accepted on the browse): a caller holding that id reaches
+    the work's genres in ONE cached request instead of the two the per-recording
+    route costs (an identity lookup for the id, then this one). Returns [] for a
+    work nobody classified, or one MusicBrainz will not answer about.
+    """
+    if not work_mbid:
+        return []
     try:
-        node = mb_get_cached(f"work/{work}", {"inc": "genres", "fmt": "json"})
+        node = mb_get_cached(f"work/{work_mbid}", {"inc": "genres", "fmt": "json"})
     except Exception:
         return []
     return _genres(node or {})
@@ -2428,6 +2544,14 @@ def web_rating_fetchers():
     documented API that needs no credential, so an identity with no MBID (the
     artist rung of a folder whose files name no artist id, say) answers None
     WITHOUT a request.
+
+    A TRACK ask also carries the RELEASE's mbid (``ident["release_mbid"]``,
+    from the file's own MUSICBRAINZ_ALBUMID) whenever the caller knows it: the
+    recording's rating then comes from the album's ONE browse
+    (`release_recording_index`) instead of a lookup per track, and only a
+    recording that browse did not answer for falls back to its own lookup. No
+    release id, no browse row, or a browse that failed = the per-track path,
+    exactly as it was.
     """
     def fetch(source, kind=None, ident=None, cfg=None):
         source = str(source or "").strip().lower()
@@ -2438,6 +2562,11 @@ def web_rating_fetchers():
             if not mbid:
                 return None
             if level == "track":
+                release_mbid = str(ident.get("release_mbid") or "").strip()
+                if release_mbid:
+                    node = release_recording_index(release_mbid).get(mbid)
+                    if node is not None:
+                        return _recording_payload(node)
                 return _recording_with_work(mbid)
             if level == "artist":
                 return artist_rating(mbid)
@@ -3266,6 +3395,36 @@ def _genre_source_answers(source, artist, album, release, cfg, tracks):
 
     if source == "musicbrainz":
         answers = {}
+        release_mbid = str((release or {}).get("id") or "").strip() if release else ""
+        nodes = None            # the album browse, read at most once (lazily)
+
+        def album_nodes():
+            """``{recording_mbid: node}`` for this RELEASE — one browse, cached.
+
+            Reached only for a track whose recording states no genre in the
+            release payload in hand (`track["genres"]` IS that recording's own
+            list, carried by the release lookup itself — VERIFIED live, nested
+            recordings answer `genres` with the release's `inc=recordings+
+            genres` — so an answered track needs no second read of the same
+            fact). What the browse adds is the WORK each SILENT recording
+            performs (`inc=work-rels` rides along on the browse, see
+            `release_recording_index`): its ids arrive for the whole album in
+            ONE request where the per-recording route paid an identity request
+            each, and only the work's own genres are then asked.
+
+            Through `_genre_cached`, like every other genre read — one browse
+            per release per 30 days, and a browse that did not answer is cached
+            as the miss it is (the per-track route below stays the fallback).
+            """
+            nonlocal nodes
+            if nodes is None:
+                nodes = {}
+                if release_mbid:
+                    nodes = _genre_cached(
+                        "album", f"musicbrainz|release_recordings|{release_mbid}",
+                        lambda r=release_mbid: release_recording_index(r) or None) or {}
+            return nodes
+
         for track in tracks:
             # The TRACK tier reads the RECORDING's own genres — the entity the
             # track IS (R360) — and the WORK's only when the recording states
@@ -3280,10 +3439,29 @@ def _genre_source_answers(source, artist, album, release, cfg, tracks):
             # composition's classification when the recording has none.
             recording = str(track.get("recording_mbid") or "").strip()
             names = list(track.get("genres") or [])
+            node = None
             if not names and recording:
-                names = _genre_cached(
-                    "recording", f"musicbrainz|work_genres|{recording}",
-                    lambda r=recording: recording_work_genres(r)) or []
+                # The recording is silent here: the album's browse is the read
+                # that carries this recording's own genres (when the release
+                # payload was the reduced one) AND the work id it performs.
+                node = album_nodes().get(recording)
+                if node is not None:
+                    names = _genres(node)
+            if not names and recording:
+                work = _recording_work_id(node) if node is not None else ""
+                if work:
+                    # The browse stated the work: its genres are ONE cached
+                    # request, with no second identity lookup to find it.
+                    names = _genre_cached(
+                        "recording", f"musicbrainz|work_genres|{work}",
+                        lambda w=work: work_genres(w)) or []
+                else:
+                    # No browse answer (or no release id): the per-recording
+                    # route, exactly as it was — the work is found by this
+                    # recording's own identity read.
+                    names = _genre_cached(
+                        "recording", f"musicbrainz|work_genres|{recording}",
+                        lambda r=recording: recording_work_genres(r)) or []
             row = _genre_row("track", names)
             if row:
                 answers[_genre_track_key(track.get("disc"), track.get("position"))] = row

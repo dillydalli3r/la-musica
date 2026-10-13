@@ -638,6 +638,63 @@ def check_cli_runners(check):
           str([sid for sid, (label, _r) in runners.items() if label != menu[sid]]))
 
 
+def check_wizard_close_and_expected(check):
+    """The Finish step's Close, and the ONE place `.mb_expected` is written.
+
+    Close runs the same settle + organize + dismiss as Done but NEVER the
+    chain: `runScripts` guards the only `/api/run` call `finish` makes, and the
+    Close control passes it false, so a press that means "finish by hand" cannot
+    re-run the scripts. And the release's tracklist has ONE writer —
+    `api.importExpected` is called from the `recordExpectedTracks` helper alone,
+    which a plain step advance (`advanceTo`) and every settle of a release
+    (`pickRelease`) both reach — so the folder's `.mb_expected` is (re)written
+    whenever the album's release moves, not only on the Match save."""
+    src = without_comments("web/src/pages/ImportWizard.tsx")
+    # Both Done controls keep running the chain (the flag defaults ON)…
+    check("Done keeps running the chain (a Link and a plain button)",
+          "onClick={() => finish(true)}" in src
+          and "onClick={() => finish(false)}" in src)
+    # …and Close is its own control that never does.
+    check("Close runs no script", "onClick={() => finish(false, false)}" in src)
+    sig = re.search(r"const finish = async \(([^)]*)\)", src)
+    check("finish takes a runScripts flag defaulting ON",
+          bool(sig) and "runScripts = true" in sig.group(1),
+          sig.group(1) if sig else "no finish signature")
+    check("the chain call is the flag's own to make",
+          "if (runScripts && runAfterImportIds.length" in src)
+    # ONE `.mb_expected` writer: the helper, and it is the only caller of
+    # `/api/import/expected` in the wizard.
+    check("the release tracklist has ONE writer (no copied call)",
+          src.count("api.importExpected(") == 1
+          and "const recordExpectedTracks = async" in src
+          and "const syncExpectedTracks = async" in src)
+    check("a step advance records the release's tracklist",
+          re.search(r"const advanceTo = \(to: number\) => \{\s*"
+                    r"void syncExpectedTracks\(", src) is not None)
+    check("settling a release (pickRelease) records it too",
+          "await syncExpectedTracks(target ?? albumPath, rel);" in src)
+    # The step list carries the family right after Genres, and the registry's
+    # step NAME is the one the list holds: a prompt's link resolves by name, so
+    # a renamed or shifted entry would land on a neighbour.
+    check("the step list carries Ratings right after Genres",
+          re.search(r'STEPS = \[[^\]]*"Genres", "Ratings",[^\]]*"Finish"\]', src) is not None)
+    check("FAMILY_STEP and FAMILY_LABEL name the ratings family's step",
+          src.count('ratings: "Ratings"') == 2)
+    # Close is the SECONDARY control beside Done (Done is the primary press),
+    # and its own toast says the scripts were skipped.
+    done_at = src.index("onClick={() => finish(true)}")
+    close_at = src.index("onClick={() => finish(false, false)}")
+    check("Close sits after Done and is the secondary (ghost) button",
+          close_at > done_at and "btn-ghost" in src[max(0, close_at - 300):close_at])
+    check("Close's toast says the scripts were skipped",
+          "Import closed — the scripts were skipped" in src)
+    # The Ratings step runs the chain's entry point with the shared one-shot
+    # Force, so a re-fetch can replace where the default fills only.
+    check("the Ratings step sends the shared Force to /api/import/ratings",
+          "ratingsImport(target, staged, forced)" in src
+          and 'forceSel["web_ratings"]' in src)
+
+
 def main():
     fail = 0
     canon = EXPECTED_SCRIPTS
@@ -745,6 +802,9 @@ def main():
 
     print("wizard finish list")
     check_wizard_finish_list(check)
+
+    print("wizard Close + release tracklist")
+    check_wizard_close_and_expected(check)
 
     print("terminal runners")
     check_cli_runners(check)

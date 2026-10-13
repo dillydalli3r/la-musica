@@ -7,6 +7,7 @@ import ConfirmButton from "../components/ConfirmButton";
 import CookieJarPanel from "../components/CookieJarPanel";
 import FolderPicker from "../components/FolderPicker";
 import SourcesPanel from "../components/SourcesPanel";
+import ScrobblePanel from "../components/ScrobblePanel";
 import SecurityPanel from "../components/SecurityPanel";
 
 import AiTestButton from "../components/AiTestButton";
@@ -1183,6 +1184,21 @@ export default function SettingsPage() {
       ],
     },
     {
+      title: "Scrobbling & submissions",
+      blurb:
+        "What the app writes BACK to the services it reads. Last.fm scrobbling sends a now-playing notice the moment a track starts and one scrobble under Last.fm's own rule (played 50 %, or 4 minutes, of a track at least 30 s long) — a scrobble that cannot be sent is queued and retried, never dropped. It needs the app's OWN Last.fm application: the API key from the Sources tab AND the shared secret issued beside it, then one authorization (the Connect button below). MusicBrainz submissions are rating writes only: the app registers an OAuth2 application once, the owner pastes its client id and secret here and authorizes once, and the refresh token that comes back is renewed automatically. Nothing is ever sent with a blank credential, and every failure is reported in the service's own words on Settings → Sources.",
+      fields: [
+        { k: "lastfm_scrobble_enabled", label: "Scrobble plays to Last.fm", type: "bool", help: "Off, nothing is announced or scrobbled and nothing is queued — the session key stays saved, so turning it back on resumes scrobbling without re-authorizing." },
+        { k: "lastfm_api_secret", label: "Last.fm shared secret", type: "password", help: "Issued beside the API key on the same page (last.fm/api/account/create). The API key alone cannot sign a scrobble — this is what authorizes the Connect flow and every scrobble after it." },
+        { k: "musicbrainz_client_id", label: "MusicBrainz OAuth2 client ID", type: "text", help: "Register an application at musicbrainz.org/account/applications (type: installed/public client; redirect URI: urn:ietf:wg:oauth:2.0:oob) and paste its Client ID. The `rating` scope is what lets the app submit your stars; reads need no login at all." },
+        { k: "musicbrainz_client_secret", label: "MusicBrainz OAuth2 client secret", type: "password", help: "The secret the same application page shows. Paste both, then press Connect on the MusicBrainz page (or Settings → Sources) and authorize once." },
+        { k: "musicbrainz_refresh_token", label: "MusicBrainz refresh token", type: "password", help: "Filled by Connect. A long-lived token — only a hand-made one needs pasting here." },
+        { k: "musicbrainz_access_token", label: "MusicBrainz access token (renewed automatically)", type: "password", help: "Short-lived, renewed from the refresh token whenever it is due (and on every submission attempt). Nothing to fill in by hand." },
+        { k: "musicbrainz_token_expires_at", label: "MusicBrainz access-token expiry (epoch seconds, 0 = unknown)", type: "number", min: 0, help: "When the access token stops being valid. The app renews it on demand, so a stale value here is corrected by the next call, not a failure." },
+        { k: "musicbrainz_submit_enabled", label: "Allow MusicBrainz rating submissions", type: "bool", help: "Off, the app never writes a rating back — the wizard's ratings step and the MusicBrainz page's Submit button both stop sending (they show this switch as the reason). The step still IMPORTS ratings; only the write-back is gated." },
+      ],
+    },
+    {
       title: "Artist images & descriptions",
       blurb:
         "Artwork and text that live next to the audio: artist photos stored with the artist, and descriptions stored in non-destructive tags. Grading can require them (see the Grading tab).",
@@ -1227,8 +1243,8 @@ export default function SettingsPage() {
         },
         {
           k: "import_review_families", label: "Decide by hand, even when automatic", type: "multi",
-          options: [["links", "Links"], ["cover", "Cover art"], ["genres", "Genres"], ["lyrics", "Lyrics"], ["advisory", "Advisory"]],
-          help: "Families an import must never decide for you, whatever the mode above. A cover kept here has its candidates staged instead of writing the first hit; the links and advisory fetches are skipped; lyrics drop out of the chain. The rest of the import stays automatic, and the album's prompt names that family as waiting for you rather than as unsourced.",
+          options: [["links", "Links"], ["cover", "Cover art"], ["genres", "Genres"], ["ratings", "Ratings"], ["lyrics", "Lyrics"], ["advisory", "Advisory"]],
+          help: "Families an import must never decide for you, whatever the mode above. A cover kept here has its candidates staged instead of writing the first hit; the links and advisory fetches are skipped; lyrics drop out of the chain and so does the ratings fetch (script 24). The rest of the import stays automatic, and the album's prompt names that family as waiting for you rather than as unsourced.",
         },
         {
           k: "import_keep_synced_lyrics", label: "Keep a synced lyric an import arrives with", type: "bool",
@@ -1559,6 +1575,7 @@ export default function SettingsPage() {
     { id: "artistwatch", label: "Artist watch", section: "Integrations" },
     { id: "deps", label: "Dependencies", section: "Integrations" },
     { id: "discovery", label: "Discovery", section: "Providers" },
+    { id: "scrobbling", label: "Scrobbling & submissions", section: "Providers" },
     { id: "sources", label: "Sources", section: "Providers" },
     { id: "artistimages", label: "Artist images", section: "Providers" },
     { id: "ai", label: "AI", section: "Providers" },
@@ -1774,7 +1791,7 @@ export default function SettingsPage() {
       ["releasechoice", "Release choice"], ["remote", "Server & remote access"],
       ["downloads", "Downloads & playback"],
       ["home", "Home"], ["deps", "Dependencies"],
-      ["discovery", "Discovery"], ["artistimages", "Artist images"], ["ai", "AI lyric transforms"], ["import", "Import pipeline"],
+      ["discovery", "Discovery"], ["scrobbling", "Scrobbling & submissions"], ["artistimages", "Artist images"], ["ai", "AI lyric transforms"], ["import", "Import pipeline"],
       ["importtags", "Import & tag cleanup"],
     ].map(([tab, prefix]) => [
       tab,
@@ -2621,6 +2638,9 @@ export default function SettingsPage() {
                   <CoverDefaults />
                 </div>
               )}
+              {/* Last.fm / MusicBrainz connection state, the one authorization
+                  flow and the queued count — the switch stays the field above. */}
+              {tab === "scrobbling" && <ScrobblePanel />}
               {tab === "videos" && <YoutubeCookieJar />}
               {tab === "beets" && (
                 <div className="pt-2 border-t border-border space-y-2">

@@ -19,6 +19,7 @@ import {
 } from "../lib/artistReleaseGroups";
 import { EmptyState, PageLoading } from "../components/Badges";
 import { MbIcon } from "../components/Links";
+import MbLoginPanel from "../components/MbLoginPanel";
 import PageHeader from "../components/PageHeader";
 import Popover from "../components/Popover";
 import ReleaseChoice from "../components/ReleaseChoice";
@@ -1276,6 +1277,9 @@ export function MBSearchPage() {
                 </div>
               </div>
             )}
+            {selectable && selIds.length > 0 && (
+              <MbLoginPanel ids={selIds} kind="album" className="mb-3" />
+            )}
             <div className={`rounded-lg border border-border overflow-hidden transition-opacity ${search.isPlaceholderData ? "opacity-50" : ""}`}>
               <div className="table-scroll">
                 <table className={`${TABLE_FIT} text-sm`}>
@@ -2094,6 +2098,7 @@ export function MBReleaseGroupPage() {
           onOverride={(mbid) => setEdition(mbid)}
         />
       </PageHeader>
+      <MbLoginPanel ids={[String(rg.id)]} kind="album" className="mb-1" />
       <CountryChips events={countries} units="edition" />
       <div>
         <div className="text-[11px] uppercase tracking-widest text-zinc-500 mb-1.5">
@@ -2371,6 +2376,11 @@ export function MBReleasePage() {
         }
       />
 
+      {/* The one WRITE this page offers: reads are anonymous, and the panel
+          resolves the release's own files so only a library that IS this
+          release can offer ratings to send. */}
+      <MbLoginPanel ids={[r.id, r.release_group_id]} kind="album" className="mb-1" />
+
       {/* Every country this pressing was released in, with its date — the
           header's single country code was only MusicBrainz's first event. */}
       <CountryChips events={r.countries} />
@@ -2512,6 +2522,7 @@ export function MBRecordingPage() {
           </>
         }
       />
+      <MbLoginPanel ids={[r.id]} kind="track" className="mb-1" />
       <div>
         <div className="text-[11px] uppercase tracking-widest text-zinc-500 mb-1.5">
           Appears on{releasesAll.length < relTotal ? ` · ${releasesAll.length} of ${relTotal} releases` : ` · ${relTotal} releases`}

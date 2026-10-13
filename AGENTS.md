@@ -291,6 +291,25 @@ When they do ask for one:
 - **Writers fill, they do not overwrite** — except the four families an import
   decides (lyrics, genre, advisory, embedded cover), which
   `server/imports.drop_arrived_values` clears first so the import's values land.
+- **An import never DELETES a tag it did not write.** The one tag this app used
+  to delete was `SOURCE` (script 1's MEDIA/SOURCE pass removed it from a CD with
+  a switch that shipped ON, from **every other medium with no switch at all**,
+  and `server.soulseek_auto._stamp_media` removed it from a CD unconditionally
+  before verification) — so a hand-imported vinyl rip lost the store the user
+  had recorded, and the owner's report was "make sure that auto-importing /
+  importing doesn't strip tags already present in files like SOURCE". All three
+  now read ONE switch, `strip_source_on_cd`, which ships **OFF**; the grade's
+  "SOURCE present but MEDIA is not Digital Media" issue is gated on the same
+  switch (with it off, a kept SOURCE is not a defect), and the digital fill
+  (R262) and the Soulseek stamp stay fill-only. Spec R398.
+- **`fetch_advisories` is SERIAL on purpose.** Apple's advisory route spaces its
+  calls through ONE process-wide interval, so lanes have no local wait to
+  overlap: measured on a real 8-track album with real ISRCs, 36.8 s on one lane
+  against 48.3 s on eight. `tools/test_advisory_pipeline.py:8` pins the serial
+  pass with its own number, and the lane code sits beside the serial call with
+  the trigger to revisit (`_apple_json`'s gate becoming per-connection, or Apple
+  leaving the chain). The same rule generalises: a pass that depends on one
+  GLOBAL interval must not be laned (spec R404).
 - **A behaviour change gets a rule.** `docs/OPTIMIZATION-GRADING-SPEC.md` is the
   contract users check the app against; `README.md` and the GitHub description
   follow it.

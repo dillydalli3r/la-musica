@@ -79,6 +79,14 @@ type RgMode = "track" | "album" | "off";
  *  turn every pause/play into another play. See PlayerBar's `countPlay`. */
 const PLAY_START_SECONDS = 1;
 
+/** Last.fm's own scrobble rule, as numbers — the same ones the server states
+ *  in `server/lastfm.py` (this is only the client's own trigger; the server
+ *  re-checks the rule against the FILE's duration, so a client cannot smuggle
+ *  a play past it). A track must be at least this long, and a play reaches
+ *  `min(50 % of the track, 4 minutes)` — whichever comes FIRST. */
+const SCROBBLE_MIN_SECONDS = 30;
+const SCROBBLE_MAX_SECONDS = 240;
+
 /** A jump shorter than this is not worth an undo entry: a drag on the seek bar
  *  emits a seek per pointermove, and a one-second nudge is not the misclick the
  *  stack exists for (it would push the real jump out of the handful kept). */
@@ -634,6 +642,15 @@ export default function PlayerBar() {
   const counted = useRef<{ el: HTMLMediaElement | null; path: string | null }>({
     el: null, path: null,
   });
+  /** The Last.fm half of the same play identity: when THIS play started (the
+   *  scrobble's timestamp — the moment the play began, not when it qualified)
+   *  and whether its scrobble has already been sent. Both are keyed by
+   *  element+path exactly like `counted`, so pause/resume and seek never send
+   *  a second one and a repeat still gets its own. */
+  const playStartedAt = useRef(0);
+  const scrobbled = useRef<{ el: HTMLMediaElement | null; path: string | null }>({
+    el: null, path: null,
+  });
   const countPlay = (el: HTMLMediaElement) => {
     const path = el === videoRef.current
       ? current?.path ?? null
@@ -641,10 +658,50 @@ export default function PlayerBar() {
     if (!path || el.currentTime > PLAY_START_SECONDS) return;
     if (counted.current.el === el && counted.current.path === path) return;
     counted.current = { el, path };
+    // The same identity keys the Last.fm writes: a new play means a new
+    // now-playing notice, a fresh scrobble budget, and the play's own START
+    // (the timestamp Last.fm counts the scrobble against).
+    playStartedAt.current = Math.floor(Date.now() / 1000);
+    scrobbled.current = { el: null, path: null };
     // Fire and forget: a play is a statistic, and playback never waits on one.
     // A server that is away — or older than this build, with no route at all —
     // costs the play and nothing else.
     void api.recordPlay(path).catch(() => {});
+    // Now-playing, at exactly the same moment and for exactly the same reason.
+    // The server refuses it politely unless a session is saved and scrobbling
+    // is on, so nothing here has to know.
+    void api.lastfmNowPlaying(path).catch(() => {});
+  };
+
+  /** ONE scrobble per play, when Last.fm's own rule is met.
+   *
+   *  Keyed by the same element+path `countPlay` records, and marked sent so a
+   *  pause/resume, a seek back across the bar, or the next `timeupdate` tick
+   *  can never send a second one for the same play — while a REPEAT (which
+   *  clears the counter in `handleEnded`) gets its own, because it is a new
+   *  play. The client's threshold is its own best guess; the server re-checks
+   *  it against the file's real duration before anything leaves for Last.fm.
+   *  Called from `timeupdate` AND from `ended`, because a short track's last
+   *  tick can fall just short of the bar the file itself would have met. */
+  const maybeScrobble = (el: HTMLMediaElement | null) => {
+    if (!el) return;
+    const path = el === videoRef.current
+      ? current?.path ?? null
+      : (el === aRef.current ? pathOnA.current : pathOnB.current);
+    if (!path) return;
+    if (counted.current.el !== el || counted.current.path !== path) return;
+    if (scrobbled.current.el === el && scrobbled.current.path === path) return;
+    const dur = el.duration;
+    if (!Number.isFinite(dur) || dur < SCROBBLE_MIN_SECONDS) return;
+    const need = Math.min(dur / 2, SCROBBLE_MAX_SECONDS);
+    const played = el.ended ? dur : el.currentTime;
+    if (played < need) return;
+    scrobbled.current = { el, path };
+    void api.lastfmScrobble({
+      path,
+      played_at: playStartedAt.current || Math.floor(Date.now() / 1000) - Math.round(played),
+      played_seconds: played,
+    }).catch(() => {});
   };
 
   /** Put a reloaded session back where it was, on the track it was on.
@@ -2080,6 +2137,11 @@ export default function PlayerBar() {
     // the platform.
     const endEl = e?.currentTarget ?? media();
     note("ended", elFacts(endEl, pathOf(endEl)));
+    // The last chance for a play that reached the bar but whose final tick
+    // fell short of it: an element ends AT its duration, which is the value
+    // the rule is judged on. Runs before the repeat branch below resets the
+    // play identity, so a looping track's first pass is scrobbled.
+    maybeScrobble(endEl);
     // Only the ACTIVE decoder may advance the queue: one of the audio pair,
     // or the music-video popout (which never matches audio(), so it needs
     // its own check — without it videos would end and play nothing next).
@@ -2167,7 +2229,10 @@ export default function PlayerBar() {
   // the UI (the idle element's preloaded metadata must not touch the bar).
   // The video popout drives the same state when a music video is playing.
   const onTime = (e: SyntheticEvent<HTMLAudioElement>) => {
-    if (e.currentTarget === audio()) setTime(e.currentTarget.currentTime);
+    if (e.currentTarget === audio()) {
+      setTime(e.currentTarget.currentTime);
+      maybeScrobble(e.currentTarget);
+    }
   };
   const onMeta = (e: SyntheticEvent<HTMLAudioElement>) => {
     const d = e.currentTarget.duration;
@@ -2180,6 +2245,7 @@ export default function PlayerBar() {
   };
   const onVideoTime = (e: SyntheticEvent<HTMLVideoElement>) => {
     setTime(e.currentTarget.currentTime);
+    maybeScrobble(e.currentTarget);
   };
   const onVideoMeta = (e: SyntheticEvent<HTMLVideoElement>) => {
     // Fragmented-MP4 live transcodes report Infinity — 0 lets the probed

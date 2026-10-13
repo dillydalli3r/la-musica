@@ -1339,6 +1339,198 @@ def check_cover_before_chain():
 
 check_cover_before_chain()
 
+# --------------------------------------------------------------------------- #
+# (j) a PINNED bulk release records its own tracklist
+#
+# The Library's Import dialog pins a release per album and the bulk item
+# carries it into the queue. The moment that stamp lands, WHICH release the
+# album is has been settled — so the release's own tracklist is recorded THEN
+# (`.mb_expected`), not only by script 15 at the end of a chain that a
+# configured-off import never runs. The five states of the recorder
+# (`imports._record_release_manifest`, reached through the real
+# `imports.bulk_import` → `_stamp_release`) are driven here, one case each:
+#
+#   1. the pin WRITES the manifest — the pinned release's id, one row per track
+#      the release's own media states;
+#   2. a rerun that settles the SAME release — this time from the album's own
+#      MBID, i.e. the app's own resolution and no pin — leaves the file
+#      byte-for-byte (mtime_ns AND bytes, both compared);
+#   3. a manifest naming ANOTHER release is re-pointed: its id and its rows
+#      become the pinned release's (a manifest of another release is stale by
+#      definition);
+#   4. a pinned item (force_ids — the user's explicit choice) REWRITES even
+#      though the manifest already names that very release;
+#   5. a pinned release whose media states nothing writes NO manifest at all,
+#      and leaves an existing one exactly alone (a fabricated tracklist would
+#      fail the album forever).
+#
+# Nothing here is mocked: bulk_import, _finish_album, _stamp_release and
+# _record_release_manifest are the real ones, and the manifest is read off the
+# filesystem (mtime_ns + bytes) rather than through a helper that could agree
+# with a bug. Two seams are stubbed at the module the pipeline calls them
+# through — the genre chain (its sources are the network, and every earlier
+# section's albums carry no release identity, so this is the first section it
+# would be asked from) and MusicBrainz's release resolver (case 2's rerun asks
+# for the release the album's own tags name).
+print("\n(j) a pinned bulk release records its own tracklist")
+
+
+def manifest_state(folder):
+    """(mtime_ns, bytes) of the album's manifest: a rewrite of the identical
+    text is still a rewrite, and only the filesystem can say which it was."""
+    path = os.path.join(folder, pathmod.EXPECTED_TRACKS_FILE)
+    st = os.stat(path)
+    with open(path, "rb") as fh:
+        return st.st_mtime_ns, fh.read()
+
+
+def manifest_rows(rel):
+    """The rows a manifest records for a release (`mlo.paths._clean_expected`'s
+    own shape): ONE per track the release's media states, `file` empty (only a
+    rip's own sheets name files)."""
+    return [{"disc": int(t.get("disc") or 1),
+             "position": int(t["position"]),
+             "title": str(t.get("title") or ""),
+             "recording_mbid": str(t.get("recording_mbid") or "") or None,
+             "file": ""} for t in rel["media"]]
+
+
+def row_folder(row):
+    return norm(str(row["album_path"]).replace("/", os.sep))
+
+
+def check_pinned_manifest():
+    from server import integrations as intg
+
+    rel = release(21, "Pinned Manifest")
+    # a release nobody has its tracklist for: the case that must write nothing
+    # (a fabricated list would leave the album failing forever)
+    no_tracks = release(32, "No Tracklist Album")
+    no_tracks["media"] = []
+    known = {rel["id"].lower(): rel, no_tracks["id"].lower(): no_tracks}
+    resolved = []
+    keeps = {name: getattr(intg, name) for name in
+             ("genre_chain", "resolve_release")}
+
+    def fake_genre_chain(*a, **kw):
+        # the genre sources are the network; the manifest is written by the
+        # same stamp before this is asked, which is what the section reads
+        return {"per_track": {}, "genres": []}
+
+    def fake_resolve(mbid):
+        rid = str(mbid or "").strip().lower()
+        resolved.append(rid)
+        return known.get(rid), str(mbid or "")
+
+    intg.genre_chain = fake_genre_chain
+    intg.resolve_release = fake_resolve
+    try:
+        # -- (1) the pin writes the release's own tracklist ----------------
+        src = album_of("Pinned Manifest Album")
+        out1 = imports.bulk_import([{"path": src, "release": rel}], CFG)
+        row1 = out1["items"][0]
+        eq(row1["status"], "imported", "a pinned bulk item imports its album")
+        folder = row_folder(row1)
+        ok(os.path.isdir(folder), "…and reports the folder it ended in", folder)
+        ok(os.path.isfile(os.path.join(folder, pathmod.EXPECTED_TRACKS_FILE)),
+           "the PINNED release's tracklist is recorded for it (.mb_expected)")
+        got1 = pathmod.load_expected_tracks(folder)
+        eq(got1["release_id"], rel["id"],
+           "…under the release the item pinned (its id is the album's now)")
+        eq(got1["tracks"], manifest_rows(rel),
+           "…with one row per track the pinned release's media states")
+        after_pin = manifest_state(folder)
+
+        # -- (2) a rerun settling the SAME release leaves it alone ----------
+        # The rerun's own organizer may fold the release's MEDIUM into the
+        # folder name (the first run's stamp lands in `_finish_album`, after
+        # its organize), so the folder is read off the row — the manifest
+        # travels with it either way, and the question here is only whether
+        # the RERUN wrote it.
+        resolved.clear()
+        out2 = imports.bulk_import([{"path": folder}], CFG)
+        row2 = out2["items"][0]
+        eq(row2["status"], "imported",
+           "a rerun of the album (no pin) imports it again")
+        folder = row_folder(row2)
+        ok(os.path.isfile(os.path.join(folder, pathmod.EXPECTED_TRACKS_FILE)),
+           "…with the manifest still on the album (the folder may be re-named)",
+           folder)
+        ok(bool(resolved) and set(resolved) == {rel["id"].lower()},
+           "…settling the SAME release out of the album's own MBID", resolved)
+        eq(manifest_state(folder), after_pin,
+           "and the manifest is untouched: same mtime_ns, same bytes")
+
+        # -- (3) a manifest naming ANOTHER release is re-pointed ------------
+        stale = release(31, "Stale Manifest")
+        pathmod.save_expected_tracks(folder, stale["id"],
+                                     [{"disc": 1, "position": 1,
+                                       "title": "A Different Track"}])
+        eq(pathmod.load_expected_tracks(folder)["release_id"], stale["id"],
+           "the case starts from a manifest naming another release")
+        out3 = imports.bulk_import([{"path": folder, "release": rel}], CFG)
+        row3 = out3["items"][0]
+        eq(row3["status"], "imported", "the pinned rerun imports the album")
+        folder = row_folder(row3)
+        got3 = pathmod.load_expected_tracks(folder)
+        eq(got3["release_id"], rel["id"],
+           "a manifest naming another release is re-pointed to the pinned one")
+        eq(got3["tracks"], manifest_rows(rel),
+           "…and its rows are that release's tracklist, not the stale ones")
+
+        # -- (4) force_ids rewrites even on the same release ----------------
+        time.sleep(0.05)        # clear the clock tick case 3 wrote in
+        before4 = manifest_state(folder)
+        out4 = imports.bulk_import([{"path": folder, "release": rel}], CFG)
+        row4 = out4["items"][0]
+        eq(row4["status"], "imported", "the pinned rerun imports the album")
+        folder = row_folder(row4)
+        after4 = manifest_state(folder)
+        ok(after4[0] > before4[0],
+           "a pinned item (force_ids) REWRITES the manifest even though it "
+           "already names that release — the file is new (mtime_ns moved)")
+        eq(after4[1], after_pin[1],
+           "…and what it wrote is still the pinned release's own tracklist")
+
+        # -- (5) a release with no tracklist writes nothing -----------------
+        src5 = album_of("Empty Media Album")
+        out5 = imports.bulk_import([{"path": src5, "release": no_tracks}], CFG)
+        row5 = out5["items"][0]
+        eq(row5["status"], "imported",
+           "a pin whose release states no tracklist still imports its album")
+        folder5 = row_folder(row5)
+        ok(not os.path.exists(os.path.join(folder5,
+                                           pathmod.EXPECTED_TRACKS_FILE)),
+           "…and writes NO manifest at all (it cannot back one with a tracklist)")
+        ok(bool(row5.get("chained")),
+           "…while the run is a normal one (the chain still ran)", row5.get("note"))
+
+        # and an album that HAS a manifest keeps it, whatever a later empty
+        # pin says about its release
+        out6 = imports.bulk_import([{"path": folder5, "release": rel}], CFG)
+        folder5 = row_folder(out6["items"][0])
+        got6 = pathmod.load_expected_tracks(folder5)
+        eq((got6["release_id"], got6["tracks"]),
+           (rel["id"], manifest_rows(rel)),
+           "a pin WITH a tracklist records one on that album too")
+        keep = manifest_state(folder5)
+        out7 = imports.bulk_import([{"path": folder5, "release": no_tracks}],
+                                   CFG)
+        row7 = out7["items"][0]
+        eq(row7["status"], "imported",
+           "the tracklist-less pin's rerun imports the album again")
+        folder5 = row_folder(row7)
+        eq(manifest_state(folder5), keep,
+           "…and leaves the existing manifest exactly alone (mtime_ns + bytes)")
+        eq(pathmod.load_expected_tracks(folder5)["release_id"], rel["id"],
+           "…still naming the release that had one")
+    finally:
+        for name, fn in keeps.items():
+            setattr(intg, name, fn)
+
+
+check_pinned_manifest()
+
 if FAILED:
     print(f"chain after acquire: {len(FAILED)} FAILED")
     for label in FAILED:

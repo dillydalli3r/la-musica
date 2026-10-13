@@ -78,6 +78,11 @@ CFG = {
     "grade_check_lyrics": True,
     "grade_check_mood": False,
     "grade_check_energy": False,
+    # The public web rating (script 24, the Ratings family) is its own
+    # default-on presence check; these fixtures carry none, so it is stood down
+    # here exactly like mood/energy above (the family is still reviewable
+    # through its own switch, `web_ratings_enabled`).
+    "grade_check_web_rating": False,
     "grade_check_key_bpm": False,
     "grade_check_instrumental": False,
     "grade_check_naming": False,
