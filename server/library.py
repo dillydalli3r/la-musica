@@ -14,7 +14,7 @@ from mlo.grader import (_empty_folder_result, _find_empty_folders, _grade_album,
                         grade_artist, printed_pct)
 from mlo.audio import AudioFile
 from mlo.artistdata import has_image, strip_mbid_suffix
-from mlo.paths import (expected_tracks_state, LIB_VIDEO_EXTS,
+from mlo.paths import (expected_tracks_state, extra_tracks, LIB_VIDEO_EXTS,
                        load_expected_tracks, load_pending,
                        load_track_covers, _album_file, SIDECAR_COVER_EXTS,
                        library_root)
@@ -707,7 +707,9 @@ def _add_expected_tracks(res, album_dir):
     The diff itself lives in mlo.paths.expected_tracks_state, because the
     grader asks the same question (a partial CD must not be graded on a full
     disc's evidence) and two readings of "is this album complete" would
-    eventually disagree."""
+    eventually disagree. The REVERSE question — which of the album's own files
+    the release does not name — rides out beside it as `expected_extras`, read
+    by mlo.paths.extra_tracks from the same rule."""
     res.setdefault("expected_tracks", [])
     res.setdefault("partial", False)
     try:
@@ -735,10 +737,19 @@ def _add_expected_tracks(res, album_dir):
     # manifest numbered 1-13 read as "not imported" for the whole second disc.
     rows_on_disk = [{"disc": int(tr.get("discnumber") or 1),
                      "position": tr.get("tracknumber"),
-                     "title": str((tr.get("tags") or {}).get("TITLE") or "").strip()}
+                     "title": str((tr.get("tags") or {}).get("TITLE") or "").strip(),
+                     "file": os.path.basename(str(tr.get("file") or ""))}
                     for tr in res.get("tracks", [])]
     rows = expected_tracks_state(tracks, on_disk, names, rows_on_disk)
     res["expected_tracks"] = rows
+    # The REVERSE diff, read from the same rule (mlo.paths.extra_tracks): the
+    # album's own audio the release's tracklist does not name — the files a
+    # fuller folder holds beyond this release. Claimed ONLY when a tracklist
+    # exists: without a release there is nothing for a file to be extra TO, so
+    # a manifest-less album states no extras at all rather than an empty list
+    # that would read as "this album has exactly the right files".
+    res["expected_extras"] = extra_tracks(tracks, rows_on_disk)
+    res["extras_count"] = len(res["expected_extras"])
     res["expected_release_id"] = exp.get("release_id")
     present = sum(1 for r in rows if not r["missing"])
     res["partial"] = present < len(rows)

@@ -40,7 +40,7 @@ import { useI18n } from "../lib/i18n";
 import { toast, useStore } from "../store";
 import { fmtTech, albumTech } from "../lib/fmt";
 import { fmtDuration } from "../lib/fmt";
-import type { CoverResult, ExpectedTrack, Track } from "../types";
+import type { CoverResult, ExpectedExtra, ExpectedTrack, Track } from "../types";
 
 /** Provider id → the name a reader knows ("wikipedia" → Wikipedia). */
 const SOURCE_NAMES: Record<string, string> = {
@@ -1709,6 +1709,14 @@ export default function AlbumPage() {
         </table>
       </div>
 
+      {/* The other half of the release diff. The greyed "not imported" rows
+          above are release tracks this folder does not have; these are files
+          this folder holds that the release's tracklist does not name. Both
+          are evidence, neither is a finding — the files stay exactly as they
+          are and no grade charges for them — so this says which files, in the
+          same neutral register, right under the tracklist it belongs to. */}
+      <ExtraTracksNote extras={data.expected_extras ?? []} />
+
       {coverSearch && (
         <CoverSearchModal
           albumPath={data.path}
@@ -1771,8 +1779,51 @@ function MissingTrackRow({ e }: { e: ExpectedTrack }) {
   );
 }
 
+/** Audio this folder holds that the release's tracklist does NOT name — a
+ *  bonus track, a stray rip, a second copy. The mirror of MissingTrackRow
+ *  above: those are release tracks with no file, these are files with no
+ *  release track. EVIDENCE, never a fault — the files are kept exactly as
+ *  they are and nothing is charged for them — so it wears the neutral chip
+ *  register, not the red one. The file names ride in the tooltip and open on
+ *  click. */
+function ExtraTracksNote({ extras }: { extras: ExpectedExtra[] }) {
+  const [open, setOpen] = useState(false);
+  if (!extras.length) return null;
+  const one = extras.length === 1;
+  const names = extras.map((e) => e.file);
+  return (
+    <div className="text-[11px] text-zinc-500">
+      <button
+        className="tap inline-flex items-center gap-1.5 text-left text-zinc-500 hover:text-zinc-300"
+        title={`The release's tracklist does not name ${one ? "this file" : "these files"}:\n${names.join("\n")}`}
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <InfoIcon className="h-3 w-3 shrink-0" />
+        <span>
+          {one
+            ? "1 file is not in this release — kept as it is"
+            : `${extras.length} files are not in this release — kept as they are`}
+        </span>
+        <span className="chip text-[9px] bg-raise border border-border text-zinc-500">
+          {open ? "hide" : "show files"}
+        </span>
+      </button>
+      {open && (
+        <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-0.5 pl-[18px] text-[10px] text-zinc-500">
+          {extras.map((e) => (
+            <span key={e.file} className="truncate" title={e.title || e.file}>
+              {e.file}
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /** Cover info dialog: resolution, aspect ratio, format and byte size of the
- * album's cover art (the "Cover info" item in the cover's … menu). */
+ *  album's cover art (the "Cover info" item in the cover's … menu). */
 function CoverInfoModal({ albumPath, coverFile, onClose }: {
   albumPath: string;
   coverFile: string | null;

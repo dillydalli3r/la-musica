@@ -3410,7 +3410,8 @@ def home(request: Request, refresh: int = Query(0)):
 def naming_preview(req: dict):
     """Evaluate a naming script against a sample track so Settings can show
     what the folder structure would look like before running Organize."""
-    from server.naming import DEFAULT_NAMING_SCRIPT, eval_script, track_variables
+    from server.naming import (DEFAULT_NAMING_SCRIPT, eval_script,
+                              shared_album_tags, track_variables)
     script = str(req.get("script") or "").strip() or DEFAULT_NAMING_SCRIPT
     shorter = bool(req.get("short_folder_names"))
     sample = req.get("sample") or {}
@@ -6407,7 +6408,8 @@ def organize_albums(req: OrganizeRequest, cfg: Optional[dict] = None):
     import that already holds the album calls it under its own job, which
     `job_locks` treats as a reference rather than a second claim.
     """
-    from server.naming import DEFAULT_NAMING_SCRIPT, eval_script, track_variables
+    from server.naming import (DEFAULT_NAMING_SCRIPT, eval_script,
+                              shared_album_tags, track_variables)
 
     cfg = cfg or load_config()
     folder = cfg.get("music_folder") or ""
@@ -6441,13 +6443,19 @@ def organize_albums(req: OrganizeRequest, cfg: Optional[dict] = None):
             except Exception:
                 release_type = None
 
+        # The album's OWN album-level values (ALBUM_LEVEL_TAGS): the folder is
+        # a fact about the RELEASE, so one file's copy of MEDIA / DATE /
+        # RELEASECOUNTRY / LABEL / the ids must not name a second folder
+        # beside this album's own (mlo.naming.shared_album_tags — the same
+        # rule the grade and beets' path plugin use).
+        shared = shared_album_tags([t["tags"] for t in tracks])
         moves = []  # (src, dst)
         dst_dirs = []  # target dir of every track (moved or in place)
         errors = []
         for t in tracks:
             try:
                 vars_ = track_variables(t["tags"], release_type=release_type,
-                                        path=t["path"])
+                                        path=t["path"], album=shared)
                 rel = eval_script(script, vars_, shorter_ids=shorter)
             except Exception as e:
                 errors.append(f"{t['file']}: script error: {e}")

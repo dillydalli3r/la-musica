@@ -1575,7 +1575,7 @@ def _release_type_candidates(value):
     return out or [""]
 
 
-def _naming_mismatch(ap, folder, script, release_type, tags):
+def _naming_mismatch(ap, folder, script, release_type, tags, album=None):
     """Expected-relative-path comparison for grade_check_naming.
 
     *folder* is the MUSIC folder; the paths are compared against the library
@@ -1601,7 +1601,7 @@ def _naming_mismatch(ap, folder, script, release_type, tags):
     everything the tags DO say; the missing tag is reported separately, so
     this stays a visible defect rather than a silent pass.
     """
-    from mlo.naming import eval_script, track_variables
+    from mlo.naming import eval_script, shared_album_tags, track_variables
 
     base = library_root(folder) if folder else folder
     actual = os.path.relpath(ap, base)
@@ -1613,7 +1613,7 @@ def _naming_mismatch(ap, folder, script, release_type, tags):
         return str(p).replace("/", os.sep).replace("\\", os.sep)
 
     def _match(value):
-        variables = track_variables(tags or {}, release_type=value)
+        variables = track_variables(tags or {}, release_type=value, album=album)
         full = eval_script(script, variables, shorter_ids=False) + ext
         # The 8-char-truncated spelling only differs when the path carries a
         # MusicBrainz id, and it is only ever CONSULTED after the full one has
@@ -1949,6 +1949,9 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
     except ValueError:
         naming_check = False
     album_release_type = None
+    # (basename, tags_map, track) per file whose PATH/PATH_CASE is compared
+    # after the loop — one album-wide album-level tag set answers for all.
+    naming_rows = []
 
     # Grade the case the DISK stores, not the case this caller spelled: on a
     # case-insensitive filesystem a canonically-spelled path for a folder
@@ -2567,25 +2570,11 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                     failed_checks += 1
                     add_issue("Missing RELEASETYPE tag (the naming script "
                               "writes it into the path)", basename)
-            kind, expected = _naming_mismatch(
-                os.path.join(naming_dir, basename),
-                music_folder, naming_script, album_release_type, tags_map)
-            if kind == "path" and cfg.get("grade_check_naming", True):
-                total_checks += 1
-                failed_checks += 1
-                # The same pointer the case-only twin below carries: the
-                # expected path above IS the current naming script's own
-                # evaluation of this file's tags (see _naming_mismatch), so
-                # the way to satisfy it is the album's own Organize action —
-                # never a hand rename, which would drift again the next time
-                # MusicBrainz sharpens a date.
-                add_issue(f"PATH: expected '{expected}' (run organize)", basename)
-                track["issues"].append("PATH")
-            elif kind == "case" and cfg.get("grade_check_filename_case", True):
-                total_checks += 1
-                failed_checks += 1
-                add_issue(f"PATH CASE: expected '{expected}' (run organize)", basename)
-                track["issues"].append("PATH_CASE")
+            # DEFERRED to the end of the loop: the expected folder is the
+            # ALBUM's own (see `album_shared_naming` below), so every file's
+            # album-level values must be read before the first path is
+            # compared. The comparison itself is unchanged.
+            naming_rows.append((basename, tags_map, track))
 
         # Additional check for *all* tags in the file (including TITLE, ALBUM, etc.) for leading/trailing spaces and blank lines
         if cfg.get("grade_check_tag_spaces", True) or cfg.get("grade_check_tag_blank_lines", True):
@@ -3254,6 +3243,44 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
             track["sidecar_cover_file"] = None
 
         tracks.append(track)
+
+    # The album's own ALBUM-LEVEL values, ONE set for every file: the folder
+    # the naming script names is a fact about the RELEASE, so a file whose own
+    # copy of MEDIA / DATE / RELEASECOUNTRY / LABEL / an id disagrees with its
+    # album's must not be compared against a second folder this album does not
+    # live in — that comparison is what reported every file of an album whose
+    # tags disagreed, and the organizer now names such an album ONCE
+    # (mlo.naming.shared_album_tags; the owner's "they can split into different
+    # albums / releases in the library"). Computed only when the check runs and
+    # from the tag maps the loop already read — no file is opened twice.
+    if naming_rows:
+        from mlo.naming import shared_album_tags
+
+        album_shared = shared_album_tags([tags_map for _, tags_map, _ in naming_rows])
+    for basename, tags_map, track in naming_rows:
+        try:
+            kind, expected = _naming_mismatch(
+                os.path.join(naming_dir, basename),
+                music_folder, naming_script, album_release_type, tags_map,
+                album=album_shared)
+        except Exception as e:
+            unavailable("Naming-script path check", e, basename)
+            continue
+        if kind == "path" and cfg.get("grade_check_naming", True):
+            total_checks += 1
+            failed_checks += 1
+            # The same pointer the case-only twin below carries: the
+            # expected path above IS the current naming script's own
+            # evaluation of this file's tags, so the way to satisfy it is the
+            # album's own Organize action — never a hand rename, which would
+            # drift again the next time MusicBrainz sharpens a date.
+            add_issue(f"PATH: expected '{expected}' (run organize)", basename)
+            track["issues"].append("PATH")
+        elif kind == "case" and cfg.get("grade_check_filename_case", True):
+            total_checks += 1
+            failed_checks += 1
+            add_issue(f"PATH CASE: expected '{expected}' (run organize)", basename)
+            track["issues"].append("PATH_CASE")
 
     # CD passes below look a track up by its full path; build the index once
     # instead of scanning the track list per file.

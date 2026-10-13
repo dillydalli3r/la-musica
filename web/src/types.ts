@@ -260,6 +260,13 @@ issues?: Record<string, string[]>;
    *  which the album page renders greyed out. */
   expected_tracks?: ExpectedTrack[];
   expected_release_id?: string | null;
+  /** Audio this folder HOLDS that the release's own tracklist does not name —
+   *  a bonus track, a stray rip, a second copy. The mirror of
+   *  `expected_tracks`' `missing` rows: those are release tracks with no file,
+   *  these are files with no release track. Album-level EVIDENCE, never a
+   *  fault — the files are kept exactly as they are, and the album page names
+   *  them in the same neutral register as its partial mark. */
+  expected_extras?: ExpectedExtra[];
   /** True when at least one expected track is absent. */
   partial?: boolean;
   /** A FRAMEWORK album: "Add to library" created this folder before its audio
@@ -308,6 +315,18 @@ export interface ExpectedTrack {
   recording_mbid?: string | null;
   /** Not present on disk — greyed out on the album page. */
   missing: boolean;
+}
+
+/** One audio file in the folder that the release's tracklist does NOT name —
+ *  the album page's answer to "which files are extra". Kept as they are: this
+ *  is evidence of what the import found, not a failure, and no grade charges
+ *  for it. `disc` / `position` / `title` are the identity the file would have
+ *  had if the release named it, absent for a file nothing can place. */
+export interface ExpectedExtra {
+  file: string;
+  disc?: number | null;
+  position?: number | null;
+  title?: string | null;
 }
 
 /** One entry of <music>/.mlo/downloads — slskd's staging area. */
@@ -1616,6 +1635,15 @@ export interface ImportBulkItem {
   error?: string;
   /** Per-script results of the import chain for this item. */
   scripts?: { id: number; name?: string; error?: string }[];
+  /** Whether the configured chain ran over this album (`chained`), or there
+   *  was none to run (`chain_off` — `import_auto_scripts` off, or every id
+   *  held for review). A row that imported with neither is unfinished, and
+   *  `note` is the server's own line saying which of the two it was —
+   *  "stopped for review at Genres — the script chain has not run", "the
+   *  script chain is off". */
+  chained?: boolean;
+  chain_off?: boolean;
+  note?: string;
 }
 
 /** An archive the server unpacked for an import, before anything is committed

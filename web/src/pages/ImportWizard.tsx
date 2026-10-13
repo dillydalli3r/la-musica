@@ -20,6 +20,7 @@ import CoverImg, { TrackCover } from "../components/CoverImg";
 import PageHeader from "../components/PageHeader";
 import { ForceControl, useForceRun } from "../components/ForceRun";
 import { useI18n } from "../lib/i18n";
+import { discDirNumber, isDiscParent } from "../lib/discs";
 import MetadataReviewModal from "../components/MetadataReviewModal";
 import ImportIdentifyDialog from "../components/ImportIdentifyDialog";
 import type { IdentifyAlbum } from "../components/ImportIdentifyDialog";
@@ -185,7 +186,6 @@ const QUEUE_STATE_LABEL: Record<string, string> = {
 // sidecar the optimizer understands (.lrc, .cue, .log, .accurip).
 const ALLOWED = /\.(flac|mp3|m4a|mp4|ogg|opus|wav|aac|wv|ape|alac|aiff|aif|dsf|dff|mka)$|\.(jpg|jpeg|png|webp|bmp|gif|tiff|tif|avif|heic|heif|jxl|svg)$|\.(lrc|cue|log|accurip)$/i;
 const AUDIO_RE = /\.(flac|mp3|m4a|mp4|ogg|opus|wav|aac|wv|ape|alac|aiff|aif|dsf|dff|mka)$/i;
-const DISC_RE = /^(cd|disc|disk)\s*\d+$/i;
 
 /** The archive formats the server unpacks for an import — the same table as
  *  `mlo.archives.ARCHIVE_FORMATS`, so the drop and the picker offer exactly
@@ -428,7 +428,16 @@ function trackOrder<T>(
 /** Detect album boundaries inside an import set.
  *  An album = any dir with immediate audio children (disc-like dirs such as
  *  CD1/Disc 2 merge into their parent). Group names fall back to
- *  "Parent - Album" when albums sit inside artist folders. */
+ *  "Parent - Album" when albums sit inside artist folders.
+ *
+ *  The disc-folder vocabulary is the LIBRARY's own (mlo.discs, mirrored in
+ *  web/src/lib/discs.ts): the wizard used to test each folder against its own
+ *  narrow regex (`/^(cd|disc|disk)\s*\d+$/i`), so a rip spelled "Disc 1
+ *  [FLAC]", "Volume 2", "DVD 1" or as bare "1"/"2" folders MERGED in the
+ *  library but SPLIT here into two albums — the owner's "multi-disc releases
+ *  … can split into different albums / releases in the library". One
+ *  vocabulary, and a stray album-bearing child rides along exactly as
+ *  mlo.discs.is_disc_parent says it does. */
 function detectAlbums(imports: ImportFile[], fallbackName: string): AlbumGroup[] {
   const audio = imports.filter((f) => AUDIO_RE.test(f.relPath));
   if (!audio.length) {
@@ -436,7 +445,7 @@ function detectAlbums(imports: ImportFile[], fallbackName: string): AlbumGroup[]
   }
   const dirsWithAudio = new Set(audio.map((f) => dirOf(f.relPath)));
 
-  const isDiscDir = (d: string) => d !== "" && DISC_RE.test(baseName(d));
+  const isDiscDir = (d: string) => d !== "" && discDirNumber(baseName(d)) !== null;
   const roots = new Set<string>();
   for (const d of dirsWithAudio) {
     if (!d) {
@@ -446,7 +455,7 @@ function detectAlbums(imports: ImportFile[], fallbackName: string): AlbumGroup[]
     if (isDiscDir(d)) {
       const parent = dirOf(d);
       const siblings = [...dirsWithAudio].filter((x) => x && dirOf(x) === parent);
-      if (siblings.length && siblings.every((s) => isDiscDir(s))) {
+      if (isDiscParent(siblings.map((s) => baseName(s)))) {
         roots.add(parent || "");
       } else {
         roots.add(d);
@@ -1506,9 +1515,19 @@ export default function ImportWizard() {
         continue;
       }
       folders += 1;
+      // Each file carries its OWN path on the server (`native`): the folder
+      // can then be staged as a WHOLE (one ingest call) or, when the user
+      // excludes / moves some of its files, as exactly the kept FILES — the
+      // same per-file path an OS drop of single files takes.
+      const root = scan.root.replace(/\\/g, "/");
       for (const f of scan.files) {
         if (ALLOWED.test(f.relPath)) {
-          out.push({ file: null, relPath: f.relPath, nativeRoot: scan.root });
+          out.push({
+            file: null,
+            relPath: f.relPath,
+            nativeRoot: scan.root,
+            native: scan.file ? root : `${root.replace(/\/+$/, "")}/${f.relPath}`,
+          });
         }
       }
     }
@@ -1579,9 +1598,15 @@ export default function ImportWizard() {
       setSource("native");
       setNativeRoot(picked);
       setUnpacked([]);
+      const root = scan.root.replace(/\\/g, "/");
       const list: ImportFile[] = scan.files
         .filter((f) => ALLOWED.test(f.relPath))
-        .map((f) => ({ file: null, relPath: f.relPath, nativeRoot: scan.root }));
+        .map((f) => ({
+          file: null,
+          relPath: f.relPath,
+          nativeRoot: scan.root,
+          native: scan.file ? root : `${root.replace(/\/+$/, "")}/${f.relPath}`,
+        }));
       adoptImports(list, picked.split(/[\\/]/).pop() ?? "");
     } catch (e) {
       toast.error(String(e));
@@ -1732,8 +1757,24 @@ export default function ImportWizard() {
         // places one by one (an upload, an unpacked archive, a file the shell
         // handed over).
         const excludedHere = new Set(batch.excluded);
+        // How many files this batch holds per native root: a group is the
+        // WHOLE folder only while it still holds every one of them.
+        const rootCounts = new Map<string, number>();
+        for (const g of batch.albums) {
+          for (const f of g.files) {
+            if (f.nativeRoot) rootCounts.set(f.nativeRoot, (rootCounts.get(f.nativeRoot) ?? 0) + 1);
+          }
+        }
+        // A native/folder group is committed AS-IS — one ingest call copying
+        // the folder — only while it is WHOLE and UNTOUCHED. The moment the
+        // user excludes one of its files, or moves some to another album (the
+        // folder split into two albums), the group is staged by its FILES
+        // instead: the whole-folder call would copy everything and quietly
+        // undo the split the user just made.
         const asIs = (g: AlbumGroup) =>
-          !g.files.some((f) => f.file || f.staged || f.native) && g.files.some((f) => f.nativeRoot);
+          g.files.length > 0
+          && g.files.every((f) => f.nativeRoot && !excludedHere.has(f.relPath))
+          && g.files.every((f) => (rootCounts.get(f.nativeRoot!) ?? 0) === g.files.length);
         const included = (g: AlbumGroup) =>
           asIs(g) ? g.files : g.files.filter((f) => !excludedHere.has(f.relPath));
         const groups = batch.albums.filter((g) => g.name.trim() && included(g).length);
@@ -1769,16 +1810,25 @@ export default function ImportWizard() {
                 );
               }
               results.push({ name: landed, path: res.album_path });
-            } else if (onDisk.length === keep.length) {
-              // Every file here is a path on this server's disk (an OS drop of
-              // single files): the one-file case of the ingest, once per file.
+            } else if (onDisk.length && onDisk.length === keep.length) {
+              // Every kept file is a path on this server's disk — an OS drop
+              // of single files, or the KEPT files of a folder the user split
+              // or excluded from: the one-file case of the ingest, once per
+              // file, landing them together in the album this group names.
               let last: { album_name?: string; path: string } | null = null;
               for (const p of onDisk) last = await api.importIngest(p, name);
               if (last) results.push({ name: last.album_name || name, path: last.path });
-            } else if (folder) {
+            } else if (asIs(g) && folder) {
               const src = g.root ? `${folder}/${g.root}` : folder;
               const res = await api.importIngest(src, name);
               results.push({ name: res.album_name || name, path: res.path });
+            } else {
+              // A subset of a folder with no per-file paths to stage: nothing
+              // can be committed without copying the WHOLE folder (which would
+              // undo the split), so the group says so instead of doing that.
+              throw new Error(
+                `“${name}”: this selection holds part of a folder but no file paths — re-add the folder and split it again`
+              );
             }
           } catch (e) {
             failed.push({ name, error: e });
@@ -1851,39 +1901,38 @@ export default function ImportWizard() {
     }
   };
 
-  /** Auto-import: ask about the albums that name no release, then queue them.
+  /** Auto-import: ask about EVERY staged album before it is queued.
    *
    *  Reading each staged album's release id costs one `/api/album` per album
-   *  (the same payload the library tree already caches), and the ones that
-   *  name a release are NOT asked about — exactly the Library's "Run
-   *  importing" rule. The dialog's own release-URL/MBID field, AcoustID
-   *  fingerprint and catalogue search are the ways a person pins a release. */
+   *  (the same payload the library tree already caches), and EVERY album gets a
+   *  row — an album whose files already name a release opens on it, so a wrong
+   *  or stale id is visible and correctable before the queue runs; a row left
+   *  alone sends no pin, so pressing through imports exactly what the files say.
+   *  This used to ask only about albums that named NO release, which is how a
+   *  wrong tag-named id was never seen by the one press that would re-point it.
+   *  The dialog's own release-URL/MBID field, AcoustID fingerprint and
+   *  catalogue search are the ways a person pins a release. */
   const beginAutoImport = async (staged: { name: string; path: string }[]) => {
-    const unknown: IdentifyAlbum[] = [];
+    const rows: IdentifyAlbum[] = [];
     await Promise.all(staged.map(async (r) => {
       try {
         const al = await api.album(r.path);
         const pin = al?.meta?.MUSICBRAINZ_ALBUMID
           ?? al?.album_values?.MUSICBRAINZ_ALBUMID ?? "";
-        if (!pin) {
-          unknown.push({
-            path: r.path,
-            artist: al?.album_artist ?? "",
-            album: al?.meta?.ALBUM || r.name,
-          });
-        }
+        rows.push({
+          path: r.path,
+          artist: al?.album_artist ?? "",
+          album: al?.meta?.ALBUM || r.name,
+          current: pin,
+        });
       } catch {
         // Unreadable payload: ask rather than silently import a guess.
-        unknown.push({ path: r.path, artist: "", album: r.name });
+        rows.push({ path: r.path, artist: "", album: r.name });
       }
     }));
-    if (!unknown.length) {
-      await startAutoImport(staged, {});
-      return;
-    }
     setIdentify({
       staged,
-      albums: unknown.sort((a, b) => a.path.localeCompare(b.path)),
+      albums: rows.sort((a, b) => a.path.localeCompare(b.path)),
     });
   };
 
@@ -4344,10 +4393,26 @@ const finish = async (closeByNavigation: boolean, runScripts = true) => {
                       {row.error}
                     </span>
                   )}
+                  {/* What the chain DID, per row — the server's own line. A row
+                      that imported with no chain is not an ordinary success,
+                      and without this the user's only evidence was that nothing
+                      seemed to have happened (R418). */}
+                  {row?.note && !row?.error && (
+                    <span
+                      className={`text-[10px] truncate max-w-[40%] sm:max-w-[20rem] ${
+                        row.chained === false ? "text-amber-300/90" : "text-zinc-500"
+                      }`}
+                      title={row.note}
+                    >
+                      {row.note}
+                    </span>
+                  )}
                   <span
                     className={`chip bg-raise border border-border shrink-0 ${
                       state === "imported"
-                        ? "text-emerald-300"
+                        ? row?.chained === false
+                          ? "text-amber-300"
+                          : "text-emerald-300"
                         : state === "failed"
                           ? "text-red-300"
                           : state === "skipped"
@@ -4355,7 +4420,9 @@ const finish = async (closeByNavigation: boolean, runScripts = true) => {
                             : "text-zinc-500"
                     }`}
                   >
-                    {QUEUE_STATE_LABEL[state] ?? state}
+                    {state === "imported" && row?.chained === false
+                      ? "Imported — no chain"
+                      : (QUEUE_STATE_LABEL[state] ?? state)}
                   </span>
                 </div>
               );
@@ -4586,7 +4653,7 @@ const finish = async (closeByNavigation: boolean, runScripts = true) => {
                         gi={gi}
                         albums={albums}
                         groupFiles={g.files}
-                        selectable={!!(f.file || f.staged || f.native)}
+                        selectable={!!(f.file || f.staged || f.native || f.nativeRoot)}
                         excluded={excluded.has(f.relPath)}
                         onToggleExcluded={() =>
                           setExcluded((s) => {
@@ -4636,7 +4703,7 @@ const finish = async (closeByNavigation: boolean, runScripts = true) => {
                   className="btn-ghost tap"
                   onClick={() => void doImport(true)}
                   disabled={uploading || autoBusy || !pendingAlbums}
-                  title="Stage every batch, then run the whole import for each album automatically — the app decides everything a source can answer and only asks about albums whose files name no release"
+                  title="Stage every batch, then run the whole import for each album automatically — the app decides everything a source can answer, and every album is asked about first: its release row opens on the one its files name, so you can correct it before the queue runs"
                 >
                   {autoBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Wand2 className="h-4 w-4" />}
                   Auto-import {pendingAlbums} album(s){pendingBatchCount > 1 ? ` from ${pendingBatchCount} batches` : ""} — decide everything and queue
@@ -4648,7 +4715,15 @@ const finish = async (closeByNavigation: boolean, runScripts = true) => {
                 as its own album(s), in order, through the one queue below. Auto-import runs the full pipeline
                 for each album without the 8 steps: releases, links, metadata, covers, genres and lyrics are
                 fetched and written, and whatever nothing can supply comes back as a prompt to answer later.
+                Every album is asked about before the queue starts — its row opens on the release its files
+                name, so a wrong one is corrected here rather than discovered later.
               </p>
+              {cfg?.import_autonomy === "review" && (
+                <p className="text-[11px] text-amber-300/90">
+                  Review mode is on (Settings → Import): each album stops at the first family it cannot decide
+                  and the script chain does not run until you answer the prompt in the queue.
+                </p>
+              )}
             </div>
           )}
         </div>

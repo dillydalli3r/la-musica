@@ -767,6 +767,50 @@ def check_wizard_step_jumps(check):
           "saveCovers(null)" not in src and "ratingsImport(null" not in src)
 
 
+def check_wizard_import_prompts(check):
+    """R418/R421: the auto-import asks about every album, the queue says what
+    the chain did, and a folder can be staged as the files the user kept.
+
+    `tools/check_import_minimum.mjs` drives the first two on the real page;
+    this pins the wiring that makes them possible, and the one thing a page
+    check cannot reach (a native folder split into two albums)."""
+    src = read("web/src/pages/ImportWizard.tsx")
+    begin = re.search(r"const beginAutoImport = async \((.*?)\n  \};", src, re.S)
+    check("the auto-import builds a row for EVERY staged album",
+          bool(begin) and "rows.push({" in begin.group(1)
+          and "current: pin," in begin.group(1)
+          and "unknown.push" not in begin.group(1),
+          begin.group(1)[:200] if begin else "no beginAutoImport")
+    check("…and always raises the dialog (no early import without it)",
+          bool(begin) and "setIdentify({" in begin.group(1)
+          and "startAutoImport(staged, {})" not in begin.group(1))
+    check("a row left on the release it names sends no pin",
+          "if (v && v.toLowerCase() !== current.toLowerCase()) pinsOut[path] = v;" in
+          read("web/src/components/ImportIdentifyDialog.tsx"))
+    # The queue row carries the chain's own verdict.
+    check("the queue row prints the server's line about the chain",
+          "row?.note" in src and "Imported — no chain" in src)
+    check("…and only a row whose chain RAN reads as a plain success",
+          "state === \"imported\" && row?.chained === false" in src)
+    # R421: a native folder's files are selectable and carry their own paths.
+    check("a picked folder's files carry their own server paths",
+          src.count("native: scan.file ? root :") == 2)
+    check("…and are selectable like an upload's",
+          "selectable={!!(f.file || f.staged || f.native || f.nativeRoot)}" in src)
+    check("a native group is committed as-is only while it is WHOLE",
+          "rootCounts.get(f.nativeRoot!) ?? 0) === g.files.length" in src)
+    check("a subset is staged by its FILES (one ingest per file)",
+          "onDisk.length && onDisk.length === keep.length" in src)
+    check("…and a folder ingest happens only for an as-is group",
+          "} else if (asIs(g) && folder) {" in src
+          and "undo the split" in src)
+    check("the wizard's album detection uses the library's disc vocabulary",
+          "discDirNumber(baseName(d)) !== null" in src
+          and "isDiscParent(siblings.map((s) => baseName(s)))" in src
+          and "from \"../lib/discs\"" in src
+          and "DISC_RE" not in src)
+
+
 def main():
     fail = 0
     canon = EXPECTED_SCRIPTS
@@ -880,6 +924,9 @@ def main():
 
     print("wizard step jumps (R417)")
     check_wizard_step_jumps(check)
+
+    print("wizard import prompts + folder splits (R418/R421)")
+    check_wizard_import_prompts(check)
 
     print("terminal runners")
     check_cli_runners(check)

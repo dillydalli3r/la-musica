@@ -664,6 +664,80 @@ def _first_part(value):
     return s
 
 
+# The tags that describe the RELEASE, not one track of it: the artist/album
+# identity, the release's dates, its medium, country, label and catalogue
+# number, the id of the release itself. A file's own copy of one of these is
+# not a second release — and when an album's files DISAGREE on one, letting
+# each file answer for itself named the album TWICE: a rip whose track 1 said
+# MEDIA "Digital Media" while its neighbours said nothing came out as "… -
+# Album {Digital Media}" BESIDE "… - Album" — one album split into two library
+# albums (measured on tools/make_test_library.py's own fixture; the owner's
+# report is "sometimes they can split into different albums / releases in the
+# library"). The folder is a fact about the release, so the whole album answers
+# with ONE value per name — `shared_album_tags` below — everywhere it is named
+# or verified (the organizer, the beets path plugin, the grade).
+ALBUM_LEVEL_TAGS = (
+    "ALBUM", "ALBUMARTIST", "ALBUMARTISTSORT",
+    "MUSICBRAINZ_ALBUMID", "MUSICBRAINZ_RELEASEGROUPID",
+    "MUSICBRAINZ_ALBUMARTISTID",
+    "RELEASETYPE", "DATE", "ORIGINALDATE", "RELEASECOUNTRY", "COUNTRY",
+    "MEDIA", "LABEL", "CATALOGNUMBER", "DISCTOTAL", "TOTALDISCS",
+)
+
+
+def _album_value(value):
+    """One album-level tag as the naming variables read it: a list joined the
+    way the tag layer joins one, everything stripped."""
+    if isinstance(value, (list, tuple)):
+        try:
+            from .tagtext import join_list
+            value = join_list(value)
+        except Exception:
+            value = "; ".join(str(v) for v in value if str(v or "").strip())
+    return str(value or "").strip()
+
+
+def shared_album_tags(tag_dicts):
+    """The album's OWN value per ALBUM-LEVEL tag.
+
+    The value MOST of the album's tracks state; a tie goes to the earliest
+    track that states one (a deterministic answer whatever order the files are
+    read in); "" when no track states the name at all. Every name in
+    ALBUM_LEVEL_TAGS is present in the answer, "" included — an album none of
+    whose files state a medium must not let one of them invent a second
+    folder."""
+    counts = {}
+    for index, tags in enumerate(tag_dicts or ()):
+        for name in ALBUM_LEVEL_TAGS:
+            value = _album_value((tags or {}).get(name))
+            if not value:
+                continue
+            slot = counts.setdefault(name, {})
+            entry = slot.get(value)
+            if entry is None:
+                slot[value] = [1, index]
+            else:
+                entry[0] += 1
+    out = {name: "" for name in ALBUM_LEVEL_TAGS}
+    for name, slot in counts.items():
+        out[name] = max(slot.items(), key=lambda kv: (kv[1][0], -kv[1][1]))[0]
+    return out
+
+
+def _with_album_tags(tags, album):
+    """*tags* with every ALBUM-LEVEL name replaced by the album's OWN value.
+
+    "" wins over a track's own copy on purpose: the album's files disagreeing
+    is exactly the case this exists for, and the album's answer — never one
+    track's — is what names the folder."""
+    if album is None:
+        return tags or {}
+    out = dict(tags or {})
+    for name in ALBUM_LEVEL_TAGS:
+        out[name] = _album_value(album.get(name))
+    return out
+
+
 def folder_disc(tags, path):
     """The disc a file's own name/folder states, when its DISCNUMBER tag states
     nothing — else None.
@@ -693,7 +767,7 @@ def folder_disc(tags, path):
         return None
 
 
-def track_variables(tags, release_type=None, path=None):
+def track_variables(tags, release_type=None, path=None, album=None):
     """Build the variable map for one track from its tag dict.
 
     Multi-valued tags are reduced to their FIRST entry (_first_multi) so a
@@ -713,8 +787,14 @@ def track_variables(tags, release_type=None, path=None):
     DISCNUMBER tag states nothing — see :func:`folder_disc`. Callers that hand
     in tags alone keep the old behaviour (disc 1), which is why the organizer,
     the one caller that MOVES files onto those names, is the one that passes it.
+
+    *album* is the album's OWN album-level values (`shared_album_tags` over the
+    album's files) — the one thing that keeps an album whose files disagree
+    (a lone MEDIA=Digital Media track beside untagged neighbours) from being
+    named into TWO folders. A caller that names ONE file, or whose album is not
+    known, passes nothing and keeps the file's own tags. See ALBUM_LEVEL_TAGS.
     """
-    tags = tags or {}
+    tags = _with_album_tags(tags, album)
     date = tags.get("DATE") or ""
     return {
         "albumartist": tags.get("ALBUMARTIST") or tags.get("ARTIST") or "",

@@ -310,7 +310,6 @@ def _item_track_file(item):
 # opened twice per track for a value that cannot have changed in between.
 _genre_cache = {}
 
-
 def _item_genre(item):
     """%genre% for one item: the file's own GENRE list, as the organizer reads it.
 
@@ -357,6 +356,100 @@ def _item_genre(item):
     return genre
 
 
+# The album's own album-level values, keyed by ITEM id, stashed when beets
+# hands the plugin the album it is importing (`on_import_task_start`). The
+# values come from the ITEMS, not from the files: beets' items carry the
+# release it matched (the files may still hold whatever the peer tagged them
+# with), so a matched import — every item stating the same release — is
+# untouched, and only a real disagreement (a file the peer tagged differently,
+# an album imported as-is) moves to the album's own answer.
+_item_album_tags = {}
+
+
+def album_tags_for_item(item):
+    """The album's own album-level values IF THIS ALBUM (the stash the task
+    hook filled), or None for an item that arrived outside an import task —
+    its own values answer then, exactly as before."""
+    return _item_album_tags.get(id(item))
+
+
+def _item_album_tag_values(item):
+    """The album-level TAGS one beets item states, in mlo's own spelling.
+
+    Reduced exactly the way the naming variables reduce them (`_multi`,
+    `_multi_first`, `_date_str`, the release-type capitalization), so the
+    consensus `shared_album_tags` takes over these is the same value the
+    variable would have held — only a DISAGREEMENT can change anything."""
+    return {
+        "ALBUM": _first(item.album) or "",
+        "ALBUMARTIST": _multi(item.albumartist),
+        "ALBUMARTISTSORT": _multi(getattr(item, "albumartist_sort", None)),
+        "MUSICBRAINZ_ALBUMID": _first(getattr(item, "mb_albumid", None)) or "",
+        "MUSICBRAINZ_RELEASEGROUPID": _first(getattr(item, "mb_releasegroupid", None)) or "",
+        "MUSICBRAINZ_ALBUMARTISTID": _first(getattr(item, "mb_albumartistid", None)) or "",
+        "RELEASETYPE": join_list(
+            _cap_releasetypes(getattr(item, "albumtypes", None)
+                              or getattr(item, "releasetype", None))),
+        "DATE": _date_str(item.year, item.month, item.day),
+        "ORIGINALDATE": _date_str(getattr(item, "original_year", None),
+                                  getattr(item, "original_month", None),
+                                  getattr(item, "original_day", None)),
+        "RELEASECOUNTRY": _multi_first(getattr(item, "country", None)),
+        "COUNTRY": _multi_first(getattr(item, "country", None)),
+        "MEDIA": _first(item.media) or "",
+        "LABEL": _multi_first(getattr(item, "label", None)),
+        "CATALOGNUMBER": _first(getattr(item, "catalognum", None)) or "",
+        "DISCTOTAL": str(getattr(item, "disctotal", None) or ""),
+        "TOTALDISCS": str(getattr(item, "disctotal", None) or ""),
+    }
+
+
+def stash_album_tags(items):
+    """The album's own values for every item beets is about to import.
+
+    `mlo.naming.shared_album_tags` over the items' own album-level fields —
+    the same rule the organizer and the grade use, so beets names the album
+    into the folder the organizer would. An album whose files disagree on one
+    of these (a lone MEDIA=Digital Media beside untagged neighbours) used to
+    be written as TWO album folders, the owner's "they can split into
+    different albums / releases in the library"."""
+    from mlo.naming import shared_album_tags
+
+    items = list(items or ())
+    if not items:
+        return None
+    shared = shared_album_tags([_item_album_tag_values(it) for it in items])
+    for it in items:
+        _item_album_tags[id(it)] = shared
+    return shared
+
+
+# Which naming VARIABLE each album-level tag feeds, and how its value is
+# reduced (mlo.naming.ALBUM_LEVEL_TAGS is the list of tags; this table is the
+# plugin's half of that one rule — `tools/test_naming_album_tags.py` pins that
+# every name in the rule appears here, so a tag added there cannot silently
+# stop overriding here). "multi" = join_list, "first" = _multi_first,
+# "" = the value as stored.
+_ALBUM_SHARED_VARS = {
+    "ALBUM": ("album", ""),
+    "ALBUMARTIST": ("albumartist", "multi"),
+    "ALBUMARTISTSORT": ("albumartistsort", "multi"),
+    "MUSICBRAINZ_ALBUMID": ("musicbrainz_albumid", ""),
+    "MUSICBRAINZ_RELEASEGROUPID": ("musicbrainz_releasegroupid", ""),
+    "MUSICBRAINZ_ALBUMARTISTID": ("musicbrainz_albumartistid", ""),
+    "RELEASETYPE": ("releasetype", "multi"),
+    "DATE": ("date", ""),
+    "ORIGINALDATE": ("originaldate", ""),
+    "RELEASECOUNTRY": ("releasecountry", "first"),
+    "COUNTRY": ("releasecountry", "first"),
+    "MEDIA": ("media", ""),
+    "LABEL": ("label", "first"),
+    "CATALOGNUMBER": ("catalognumber", ""),
+    "DISCTOTAL": ("disctotal", ""),
+    "TOTALDISCS": ("disctotal", ""),
+}
+
+
 def _item_naming_vars(item):
     """MLO naming-script variables from a beets item's (denormalized) tags.
 
@@ -365,8 +458,16 @@ def _item_naming_vars(item):
     against the same naming script and must agree on every variable. GENRE is
     the one variable beets cannot state in full (see _item_genre), so it is
     read off the file the item routes.
-    """
-    return {
+
+    The ALBUM-LEVEL variables (album/artist identity, dates, medium, country,
+    label, catalogue number, ids, disc total) are taken from the ALBUM's own
+    values — `stash_album_tags`' answer for the items beets is importing —
+    never from this one item's copy: the folder is a fact about the release,
+    and letting each item answer for itself is what split an album whose files
+    disagreed. An item imported OUTSIDE a task (no stash) keeps its own
+    values, which is the old behaviour, and a MATCHED import is untouched
+    either way: beets' items then all state the one release it matched."""
+    vars_ = {
         "albumartist": _multi(item.albumartist),
         "artist": _multi(item.artist),
         "albumartistsort": _multi(item.albumartist_sort),
@@ -411,6 +512,20 @@ def _item_naming_vars(item):
         # and the organizer disagree).
         "genre": _item_genre(item),
     }
+    shared = album_tags_for_item(item)
+    if shared:
+        for tag, (name, how) in _ALBUM_SHARED_VARS.items():
+            value = str(shared.get(tag) or "")
+            if how == "multi":
+                value = join_list([p for p in value.split("; ") if p])
+            elif how == "first":
+                value = _multi_first(value)
+            vars_[name] = value
+        # %year% / %originalyear% are the year of the (album-level) date.
+        vars_["year"] = vars_["date"].split("-")[0] if vars_["date"] else ""
+        vars_["originalyear"] = (vars_["originaldate"].split("-")[0]
+                                 if vars_["originaldate"] else "")
+    return vars_
 
 
 def _item_mlo_path(item):
@@ -505,6 +620,10 @@ class MloPlugin(BeetsPlugin):
         self.template_fields["mlo_file"] = _mlo_file_field
         self.template_funcs["mlo_dir"] = _mlo_dir_func
         self.register_listener("album_imported", self.on_album_imported)
+        # The album's own album-level values, captured while its files are
+        # still at their source paths — beets asks the path template per item
+        # DURING the move, when `item.path` is already the destination.
+        self.register_listener("import_task_start", self.on_import_task_start)
 
     def get_import_stages(self):
         return [self._translate_stage]
@@ -538,6 +657,15 @@ class MloPlugin(BeetsPlugin):
                 self._log.error("alias lookup failed for {0}: {1}", item.path, e)
 
     # ------------------------------------------------------------------
+    def on_import_task_start(self, session=None, task=None):
+        """Stash the album's own album-level values for the items about to be
+        imported (see `stash_album_tags`). Never fatal: a stash that cannot be
+        built leaves the item's own tags answering, exactly as before."""
+        try:
+            stash_album_tags(getattr(task, "items", None))
+        except Exception as e:      # noqa: BLE001 - never break an import
+            print(f"[mloplugin] album-level capture failed: {e}", file=sys.stderr)
+
     def on_album_imported(self, lib, album):
         do_work = bool(self.config["work_movement"].get(True))
         do_caps = bool(self.config["release_type_caps"].get(True))

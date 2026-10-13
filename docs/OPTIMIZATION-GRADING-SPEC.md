@@ -8281,6 +8281,124 @@ when the log itself says something is wrong.** Pinned in
   `tools/test_script_menus.py` (every jump surface routes through `goTo`, and
   the dispatch is dirty-gated).
 
+- **R418 — the auto-import always asks which release, and the queue says what
+  the chain did.** The owner's ask, 2026-10-13: *"Make sure auto-importing
+  always atleast prompts for the MBID of imports … it can break in the
+  importing menu on the sidebar when i try to auto-import (no scripts ever
+  run)"*. Two halves:
+
+  * the wizard's Auto-import press now raises the release dialog for EVERY
+    staged album — the rule the Library's own Import menu already followed —
+    with each row opened on the release its files name (`current`). A row left
+    alone sends NO pin (the import is exactly the one it would have been), and
+    a row the user re-points is sent as that album's `mbid`, which
+    `server.imports._bulk_one` stamps with `force_ids` — so a wrong or stale
+    tag-named id is visible and correctable at the one press that would
+    re-point it. Asking only about albums that named nothing is what hid the
+    wrong ones. When review mode is on, the step says so before the press
+    ("each album stops at the first family it cannot decide and the script
+    chain does not run until you answer the prompt").
+  * the queue's per-album row now carries the server's own line about the
+    chain: `chained` / `chain_off` / `note` (`ImportBulkItem`), rendered beside
+    the state chip, and a row that imported with `chained === false` reads
+    "Imported — no chain" instead of a plain success. `finish_album` has
+    always known and said why (the review stop, `import_auto_scripts` off,
+    every id held for review) — nothing on screen showed it, which is what
+    "no scripts ever run" is. Pinned by `tools/check_import_minimum.mjs`,
+    which drives the real page: the dialog appears for an album whose files
+    name a release, its row arrives prefilled, a row left alone reaches
+    `/api/import/bulk` with NO `mbid`, and a row filled with another id
+    reaches it as that pin.
+
+- **R419 — one album, ONE folder: the album-level tags name the RELEASE, not a
+  file.** The owner's report, 2026-10-13: *"ensure that multi-disc releases
+  being imported work properly (sometimes they can split into different albums
+  / releases in the library)"*. Measured on this repo's own fixture
+  (`tools/make_test_library.py`): the album's first track states
+  `MEDIA=Digital Media` while its neighbours state nothing, and the naming
+  script's album folder carries the medium (`%album% {country - media - label -
+  catalog}`) — so BOTH movers, each evaluating the script from that FILE's own
+  tags, wrote one album as two library albums: `… - First Album {Digital
+  Media}` beside `… - First Album`. The rule now, once for the whole app
+  (`mlo.naming.ALBUM_LEVEL_TAGS` / `shared_album_tags`):
+
+  * the folder a naming script produces is a fact about the RELEASE, so the
+    album-level names (the artist/album identity, `MUSICBRAINZ_ALBUMID` /
+    `_RELEASEGROUPID` / `_ALBUMARTISTID`, `RELEASETYPE`, `DATE`,
+    `ORIGINALDATE`, `RELEASECOUNTRY`/`COUNTRY`, `MEDIA`, `LABEL`,
+    `CATALOGNUMBER`, `DISCTOTAL`/`TOTALDISCS`) all take ONE value per album:
+    the one MOST of its files state (a tie goes to the earliest that states
+    one, "" when none does — every name is answered, so an album none of whose
+    files state a medium cannot have one of them invent a second folder);
+  * the per-track names (`ARTIST`, `TITLE`, `TRACKNUMBER`, `DISCNUMBER`,
+    `TRACKTOTAL`, the recording/release-track ids, `GENRE`) stay the file's
+    own — the FILE name still answers for its track;
+  * it is applied in every place that NAMES or VERIFIES the folder: the
+    organizer (`server.main.organize_albums`), beets' `%mlo_dir`
+    (`server/beets/mloplugin.py`, whose values are captured while the album's
+    files are still at their source paths — beets asks the path template per
+    item DURING its move), and the grade's PATH check
+    (`mlo.grader._naming_mismatch`, deferred to after the album's track loop so
+    one album-wide tag set answers for every file).
+
+  Pinned by `tools/test_naming_album_tags.py` (the consensus, the tie, the ""
+  rule, the one-folder/one-file-name evaluation, the plugin's table covering
+  every name in the rule, and that both call sites pass the album's values) and
+  measured end to end: the fixture album now imports as ONE folder holding all
+  three files (see the commit's own evidence).
+
+- **R420 — ONE disc vocabulary, shared by the wizard and the library.** The
+  wizard's step-0 album detection used its own narrow regex
+  (`/^(cd|disc|disk)\s*\d+$/i`), a strict subset of `mlo.discs`' vocabulary, so
+  disc folders the LIBRARY folds into one album were SPLIT by the wizard into
+  two — a rip spelled "Disc 2 [FLAC]", "Volume 1", "DVD 1", "CD_2" or as bare
+  "1"/"2" folders (a numbered set) merged on disk and split on the way in,
+  which is the same owner report R419 answers from the tags' side.
+  `web/src/lib/discs.ts` now mirrors `mlo.discs` exactly (`stripDecoration`,
+  `discDirNumber`, `bareDiscIndex`, `isDiscParent`, `discNumberPathOf`) and
+  `detectAlbums` uses it — including `is_disc_parent`'s rule that one
+  album-bearing child which names a disc makes the parent the album and lets a
+  stray bonus/artwork child ride along. Pinned by `tools/test_disc_vocab.py`,
+  which runs BOTH engines over one case list (55 cases) and fails on any
+  disagreement.
+
+- **R421 — extra tracks are NAMED, and a folder can be split.** The owner's
+  ask, 2026-10-13: *"Add fallback behavior for when extra tracks exist in an
+  album importing … the importing menu / process have a way of select specific
+  files / groups and assigning them to different batches for importing /
+  albums"*. A file the release's tracklist does not name was invisible: the
+  completeness diff is one-directional (`expected_tracks_state` walks the
+  manifest's rows and flags them missing), so an extra neither failed nor was
+  named anywhere.
+
+  * `mlo.paths.extra_tracks(rows, disk_rows)` is the REVERSE diff, applying the
+    same three tests that make a row count as present (its `(disc, position)`,
+    a file a row names, and the by-order-aligned disc of a renumbered
+    convention) — so a file of an album numbered 1-13 per disc against a
+    continuous 14-26 manifest is never called extra. `server/library.py`'s
+    `_add_expected_tracks` attaches it as `expected_extras` + `extras_count`,
+    ONLY when a manifest exists (no release ⇒ no "extra" claim at all);
+    `partial`/`partial_reason` are untouched, and the GRADE still charges
+    nothing for an extra (a folder that holds its whole release and more is
+    complete, not partial). The album page says it in the same neutral register
+    as the partial strip ("N files are not in this release — kept as they
+    are", with the names behind a click).
+  * the wizard's step 0 assigns FILES to albums and batches: an uploaded or
+    unpacked set always could (per-file checkboxes, move-to-album, "Add as
+    another batch"); a natively picked or OS-dropped FOLDER now can too — every
+    file carries its own path (`native`), is selectable, and a folder is
+    committed AS-IS (one ingest call) only while it is WHOLE and untouched. The
+    moment a file of it is excluded or moved to another album, the group is
+    staged by its FILES (one ingest call per file, landing together in the
+    album the group names), so a split is never silently undone by a
+    whole-folder copy — and a subset with no file paths says so instead of
+    copying the folder anyway.
+
+  Pinned by `tools/test_single_song_import.py` (the reverse diff: extras named
+  with their positions, a row-named file not extra, the by-order disc not
+  extra, the payload fields, and that a manifest-less album carries neither
+  key) and by the album page's own render.
+
 ---
 
 ## 10. Honest limits of this spec

@@ -949,6 +949,142 @@ def expected_tracks_state(tracks, disk_keys=(), disk_names=(), disk_rows=()):
     return rows
 
 
+def _track_fields(e):
+    """One row as (disc, position, title, file), or None.
+
+    Read from EITHER shape the two sides of `extra_tracks` come in: the
+    release's recorded rows ``{disc, position, title, file}`` (what
+    `_clean_expected` writes and `expected_tracks_state` diffs) or an album
+    payload's own track rows ``{discnumber, tracknumber, file, tags: {TITLE}}``
+    (what `server.library` assembles). The keys do not collide, so one reader
+    serves both — which is what lets the function tell the release's rows from
+    the album's own."
+    """
+    if not isinstance(e, dict):
+        return None
+    disc = e.get("disc")
+    if disc is None:
+        disc = e.get("discnumber")
+    pos = e.get("position")
+    if pos is None:
+        pos = e.get("tracknumber")
+    title = e.get("title")
+    if title is None:
+        title = (e.get("tags") or {}).get("TITLE")
+    file = str(e.get("file") or "").replace("\\", "/").split("/")[-1]
+    return disc, pos, str(title or ""), file
+
+
+def _payload_shaped(rows):
+    """Whether a row list is an album payload's own track rows rather than a
+    release tracklist: only the payload carries `discnumber`/`tracknumber`/`tags`."""
+    return any(isinstance(r, dict) and ("tags" in r or "discnumber" in r
+                                        or "tracknumber" in r)
+               for r in rows or [])
+
+
+def _as_int(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def extra_tracks(rows, disk_rows):
+    """The album's own audio that the release's tracklist does NOT name.
+
+    The reverse of `expected_tracks_state`, and read from the same rule: a
+    file belongs to the release when it meets any one of the three tests that
+    make a manifest row count as present, applied to the file instead of the
+    row. (a) Its ``(disc, position)`` is a release row's key. (b) It is the
+    file a release row names (a `.cue`/`.log` reference, matched by leaf name
+    the way `_same_name` does). (c) It sits on a disc whose release rows were
+    aligned BY ORDER to the files — the renumbered-convention case, where the
+    disc's tracklist IS this set of files and so none of them can be extra.
+
+    *rows* are the release's recorded tracklist rows (the same list
+    `expected_tracks_state` takes); *disk_rows* are the album's own rows, one
+    per audio file (``mlo.discs.disk_rows``). Either side is accepted in either
+    shape — the payload's ``{discnumber, tracknumber, file, tags: {TITLE}}`` or
+    the recorded ``{disc, position, title, file}`` — and the two are told apart
+    by the payload-only keys, so a caller that passes the album's own rows
+    first still gets them diffed against the release rather than against
+    themselves.
+
+    Returns ``[{"file", "disc", "position", "title"}]`` for every file no
+    release row accounts for, deduplicated by file, in disk order. A pure
+    function: it opens nothing, and with no release there is nothing for a file
+    to be extra TO, so the caller does not call it at all in that case.
+    """
+    rows = list(rows or [])
+    disk_rows = list(disk_rows or [])
+    if _payload_shaped(rows) and not _payload_shaped(disk_rows):
+        rows, disk_rows = disk_rows, rows
+
+    keys = set()
+    names = []
+    row_positions = {}                       # disc -> [(position, title)]
+    for e in rows:
+        fields = _track_fields(e)
+        if fields is None:
+            continue
+        disc, pos, title, file = fields
+        if file:
+            names.append(file)
+        p = _as_int(pos)
+        if p is None or p <= 0:
+            continue
+        d = max(1, _as_int(disc) or 1)
+        keys.add((d, p))
+        row_positions.setdefault(d, []).append((p, title))
+
+    # Which discs `expected_tracks_state` would align BY ORDER — same count on
+    # both sides, nothing to disagree with — read here so that disc's files are
+    # never called extra.
+    file_positions = {}                      # disc -> [(position, title)]
+    for e in disk_rows:
+        fields = _track_fields(e)
+        if fields is None:
+            continue
+        disc, pos, title, _file = fields
+        p = _as_int(pos)
+        if p is None:
+            continue
+        file_positions.setdefault(max(1, _as_int(disc) or 1), []).append((p, title))
+    aligned = set()
+    for disc, files in file_positions.items():
+        manifest = row_positions.get(disc) or []
+        if not manifest or len(manifest) != len(files):
+            continue
+        if {p for p, _ in manifest} & {p for p, _ in files}:
+            continue                         # the conventions agree: nothing to align
+        agreed = True
+        for (_, title), (_, file_title) in zip(sorted(manifest), sorted(files)):
+            want = _title_identity(title)
+            if want and file_title and want != _title_identity(file_title):
+                agreed = False
+                break
+        if agreed:
+            aligned.add(disc)
+
+    out = []
+    seen = []
+    for e in disk_rows:
+        fields = _track_fields(e)
+        if fields is None or not fields[3]:
+            continue
+        disc, pos, title, file = fields
+        if any(_same_name(file, s) for s in seen):
+            continue
+        d, p = max(1, _as_int(disc) or 1), _as_int(pos)
+        if ((p is not None and (d, p) in keys) or d in aligned
+                or any(_same_name(file, n) for n in names)):
+            continue
+        seen.append(file)
+        out.append({"file": file, "disc": d, "position": p, "title": title})
+    return out
+
+
 def load_expected_tracks(album_dir):
     """The recorded release tracklist as {"release_id", "tracks"}; empty when
     the album has no manifest or it is malformed."""

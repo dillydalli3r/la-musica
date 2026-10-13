@@ -408,10 +408,87 @@ for r in bent:
 eq(sum(1 for r in pathmod.expected_tracks_state(bent, cont_keys, cont_disk_names, cont_rows)
        if r["missing"]), 2,
    "a row whose title disagrees is NOT matched by order")
+eq(pathmod.extra_tracks(cont_manifest, cont_rows), [],
+   "REVERSE DIFF: a folder holding exactly the release has NO extras — the "
+   "disc whose rows were aligned by order included, every file accounted for")
 # The fixture goes: later sections sweep this same scratch library (a forced
 # AccurateRip run walks every album in it), and a complete album left behind
 # would be written for by a run that is asserting nothing was written.
 shutil.rmtree(cont, ignore_errors=True)
+
+# --------------------------------------------------------------------------- #
+# 1c. the REVERSE diff: which of the album's OWN files the release's tracklist
+#     does not name. A folder holding files beyond the release (a fuller
+#     rip, a bonus track, a second copy) had no way to say so — the manifest
+#     rows all read present and the extras were invisible.
+# --------------------------------------------------------------------------- #
+print("== the album's own files the release does not name ==")
+extra_dir = os.path.join(pathmod.library_root(MF), "Extra Files")
+shutil.rmtree(extra_dir, ignore_errors=True)
+os.makedirs(extra_dir, exist_ok=True)
+EXTRA_TITLES = ["One", "Two", "Three", "Four"]
+extra_names = []
+for _i, _title in enumerate(EXTRA_TITLES, 1):
+    _name = f"{_i:02d} - {_title}.flac"
+    make_track(os.path.join(extra_dir, _name), 1.0, _i, _title)
+    extra_names.append(_name)
+extra_manifest = [
+    {"disc": 1, "position": 1, "title": "One", "file": ""},
+    {"disc": 1, "position": 2, "title": "Two", "file": ""},
+]
+pathmod.save_expected_tracks(extra_dir, None, extra_manifest)
+extra_rows = discs.disk_rows(extra_dir)
+extra_keys = {(r["disc"], int(r["position"])) for r in extra_rows
+              if r["position"] is not None}
+extra_disk_names = [r["file"] for r in extra_rows]
+extra_state = pathmod.expected_tracks_state(extra_manifest, extra_keys,
+                                            extra_disk_names, extra_rows)
+eq(sum(1 for r in extra_state if r["missing"]), 0,
+   "the release's own two rows are both present in the folder — nothing missing")
+found = pathmod.extra_tracks(extra_manifest, extra_rows)
+eq(sorted(e["file"] for e in found), sorted(extra_names[2:]),
+   "the two files beyond the release are BOTH returned as extras")
+eq(sorted(e["position"] for e in found), [3, 4],
+   "…each carrying the position it occupies on disk")
+eq([e["disc"] for e in found], [1, 1], "…and the disc it sits on")
+
+# A file the release NAMES by name (a rip's own .cue/.log reference) is part of
+# the release even when no row's key covers the position it occupies.
+named_manifest = [dict(r) for r in extra_manifest]
+named_manifest.append({"disc": 1, "position": 9, "title": "Nine",
+                       "file": extra_names[2]})
+named = pathmod.extra_tracks(named_manifest, extra_rows)
+eq([e["file"] for e in named], [extra_names[3]],
+   "a file a row names by name is NOT extra; the one no row names still is")
+
+print("== the album payload carries the extras on the album being viewed ==")
+payload = {"tracks": [
+    {"discnumber": 1, "tracknumber": i, "file": name, "tags": {"TITLE": title}}
+    for i, (name, title) in enumerate(zip(extra_names, EXTRA_TITLES), 1)]}
+lib_mod._add_expected_tracks(payload, extra_dir)
+eq(payload.get("extras_count"), 2, "the payload counts the two extras")
+eq(sorted(e["file"] for e in payload.get("expected_extras") or []),
+   sorted(extra_names[2:]),
+   "…and names them, straight off the album the user is looking at")
+eq(sum(1 for r in payload["expected_tracks"] if r["missing"]), 0,
+   "no release row is read as missing because of the extras")
+eq(payload["partial"], False,
+   "and the album is not partial: its whole tracklist is on disk")
+
+# A folder with NO manifest states no extras at all — without a release there
+# is nothing for a file to be extra TO, so the keys are ABSENT, not empty.
+no_manifest = os.path.join(pathmod.library_root(MF), "No Manifest Album")
+shutil.rmtree(no_manifest, ignore_errors=True)
+os.makedirs(no_manifest, exist_ok=True)
+bare = {"tracks": [{"discnumber": 1, "tracknumber": 1, "file": "01 - Solo.flac",
+                    "tags": {"TITLE": "Solo"}}]}
+lib_mod._add_expected_tracks(bare, no_manifest)
+check("expected_extras" not in bare and "extras_count" not in bare,
+      "no manifest ⇒ no extras claim at all (not an empty list)")
+
+# The scratch albums go too: the later sweep walks every album in this library.
+shutil.rmtree(extra_dir, ignore_errors=True)
+shutil.rmtree(no_manifest, ignore_errors=True)
 
 # --------------------------------------------------------------------------- #
 # 2. grading: partial, said in those words, with the per-track AccurateRip

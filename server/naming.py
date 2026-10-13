@@ -6,5 +6,6 @@ from mlo.naming import (  # noqa: F401
     DEFAULT_NAMING_SCRIPT,
     eval_script,
     sanitize_path,
+    shared_album_tags,
     track_variables,
 )

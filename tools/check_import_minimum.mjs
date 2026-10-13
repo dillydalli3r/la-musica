@@ -770,6 +770,25 @@ try {
   const waitForBulk = async (page) => {
     for (let i = 0; i < 120 && !bulkBodies.length; i++) await page.waitForTimeout(50);
   };
+  /** The release dialog the auto-import ALWAYS raises now (R418): the album's
+   *  row opens on the release its files name. Press its own Import button —
+   *  the count in the label is how many rows the user re-pointed. */
+  const dialogsSeen = [];
+  const pressDialog = async (page, expectRows) => {
+    // The dialog is a Modal with role="dialog" — the wizard's own press has a
+    // similar label ("Import N album(s) into library"), so scope to the modal.
+    const dlg = page.locator('[role="dialog"]', { hasText: /Which release is this\?|Releases — / }).first();
+    await dlg.waitFor({ timeout: 20000 });
+    const title = await dlg.innerText();
+    dialogsSeen.push(title.split("\n")[0].trim());
+    if (expectRows !== undefined) {
+      const rows = await dlg.locator('input[placeholder^="MusicBrainz release"]').count();
+      check(`the dialog asks about every staged album (${expectRows})`,
+            rows === expectRows, `${rows} rows: ${title.slice(0, 120)}`);
+    }
+    await dlg.locator("button", { hasText: /^Import \d+ album/ }).first().click();
+    await waitForBulk(page);
+  };
 
   // (a) Two discs of ONE rip, added back-to-back: a new selection BANKS the
   // previous batch (auto-bank) instead of replacing it, so neither disc is
@@ -785,7 +804,18 @@ try {
   check("…and both discs are staged (the second drop is the batch being built)",
         await page.getByRole("button", { name: /Add as another batch/ }).count() === 1);
   await page.getByRole("button", { name: /Auto-import \d+ album\(s\) from 2 batches/ }).click();
-  await waitForBulk(page);
+  // …and the press ASKS first: every album gets a row, opened on the release
+  // its own files name (A_MBID is stubbed for /api/album).
+  const firstInput = page.locator('[role="dialog"] input[placeholder^="MusicBrainz release"]').first();
+  await firstInput.waitFor({ timeout: 20000 });
+  check("the auto-import asks about an album whose files ALREADY name a release",
+        (await firstInput.inputValue()).trim().length > 0,
+        await firstInput.inputValue());
+  await pressDialog(page);
+  check("a row left on the release it names sends NO pin (import as it always was)",
+        bulkBodies.length === 1
+        && bulkBodies[0].items.every((r) => !r.mbid),
+        JSON.stringify(bulkBodies));
   check("both discs reach the queue as their own album — the second cd is not lost",
         bulkBodies.length === 1 && bulkBodies[0].items.length === 2
         && bulkBodies[0].items.some((r) => /Disc One/.test(r.path))
@@ -810,7 +840,15 @@ try {
   check("the removed batch leaves one row",
         await batchRows(page).count() === 1, `${await batchRows(page).count()} rows`);
   await page.getByRole("button", { name: /Auto-import \d+ album\(s\)/ }).click();
+  const pinRow = page.locator('[role="dialog"] input[placeholder^="MusicBrainz release"]').first();
+  await pinRow.waitFor({ timeout: 20000 });
+  await pinRow.fill("https://musicbrainz.org/release/" + C_MBID);
+  await page.locator('[role="dialog"] button', { hasText: /^Import \d+ album/ }).first().click();
   await waitForBulk(page);
+  check("a row the user RE-POINTS reaches the queue as that album's pin",
+        bulkBodies.length === 1
+        && String(bulkBodies[0].items[0]?.mbid || "").includes(C_MBID),
+        JSON.stringify(bulkBodies));
   check("the start press queues the remaining batch, and only it",
         bulkBodies.length === 1 && bulkBodies[0].items.length === 1
         && /Batch One/.test(bulkBodies[0].items[0].path),
@@ -1246,4 +1284,7 @@ console.log(`ok  the wizard's minimum entry mode shows the missing family's cont
   `files name, sends an edited row as its pin and sends nothing for a row ` +
   `left alone; and a step JUMP saves the step being left — an untouched step ` +
   `writes nothing, an edited one writes exactly its own edit and is clean ` +
-  `afterwards (${checks} checks)`);
+  `afterwards; and the auto-import ASKS about every staged album — the ` +
+  `dialog's row opens on the release its files name, a row left alone sends ` +
+  `no pin, and a row the user re-points reaches the queue as that pin ` +
+  `(${checks} checks)`);
