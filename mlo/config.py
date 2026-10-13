@@ -191,14 +191,6 @@ LEGACY_DEFAULT_MEDIUM_ORDER = (
     ["CD", "Vinyl", "Cassette", "Other", "Digital Media"],
 )
 
-# The log floor the acquisition settings shipped with before R402 moved it to
-# 85 (see DEFAULT_CONFIG / soulseek_auto_log_min_score). 100 is Logchecker's
-# PERFECT band — a good EAC rip with a gap-handling note, or one cut by an EAC
-# older than 0.99, scores below it — so a config still holding 100 is not a
-# choice an install made: it never changes, and an untouched install follows
-# the current default instead.
-LEGACY_DEFAULT_LOG_MIN_SCORE = 100
-
 # Run All order — PATH-CHANGING SCRIPTS FIRST (11 videos → 3 FLACs → 14
 # beets, whose generated config sets `move: yes`), then the sidecar namers
 # that must see final audio names (15 manifest → 2 CUEs → 1 lyrics format),
@@ -1379,21 +1371,22 @@ DEFAULT_CONFIG = {
     # asking the network one question per track of a thirty-track box set.
     "soulseek_auto_mbid_tracks": 4,
     # Every disc's .log must score at least this (Logchecker 0-100) before
-    # the full album is downloaded — the FLOOR below which a score means real
-    # damage. 85 by default: Logchecker's own band for a log with minor
-    # complaints is 90+, so a score between 85 and 100 is accepted and only
-    # DOWN-RANKS the candidate behind a cleaner log instead of rejecting it.
-    # The log's PROGRAM never decides on its own (an EAC, XLD, whipper,
-    # dBpoweramp, foobar2000 or CUETools log is read the same way), and a log
-    # Logchecker cannot score (an unrecognised format, or no scorer installed)
-    # is not rejected for the missing score — the importer still checks its
-    # per-track CRCs against the decoded audio. A log whose own checksum does
-    # not verify, or whose AccurateRip section reports a track it could not
-    # verify, is rejected whatever the score (spec R391). Setting this to 0
-    # switches the requirement off entirely: a candidate whose folder has NO
-    # log at all is then offered as a low-ranking candidate (verified by a
-    # clean decode) instead of nothing.
-    "soulseek_auto_log_min_score": 85,
+    # the full album is downloaded. **100 by default — a PERFECT log is the
+    # owner's rule, for importing and grading alike** (`grade_log_score_
+    # threshold` and `audit_log_score_threshold` are the same 100 on the
+    # grading side). A scored log below it is rejected; the FLOOR is what
+    # leaves a lower score meaning real damage. The log's PROGRAM never
+    # decides on its own (an EAC, XLD, whipper, dBpoweramp, foobar2000 or
+    # CUETools log is read the same way), and a log Logchecker cannot score
+    # (an unrecognised format, or no scorer installed) is not rejected for
+    # the missing score — the importer still checks its per-track CRCs
+    # against the decoded audio. A log whose own checksum does not verify, or
+    # whose AccurateRip section reports a track it could not verify, is
+    # rejected whatever the score (spec R391). Setting this to 0 switches the
+    # requirement off entirely: a candidate whose folder has NO log at all is
+    # then offered as a low-ranking candidate (verified by a clean decode)
+    # instead of nothing.
+    "soulseek_auto_log_min_score": 100,
     # Fraction of the release track list a candidate folder must contain.
     "soulseek_auto_complete_ratio": 1.0,
     # Every candidate the search turns up is tried in score order (there is no
@@ -2366,21 +2359,6 @@ def normalize_config(user=None) -> dict:
     # and finally gets the disc numbers its label promised.
     if str(cfg.get("export_structure") or "").strip() in ("artist_album", "artist_album_disc"):
         cfg["export_structure"] = "albumartist_album_disc"
-
-    # The download gate's log floor shipped at 100 for a while (Settings writes
-    # the whole schema, so every install made then holds a copy of it), and 100
-    # is Logchecker's PERFECT band: a good EAC rip with a gap-handling note, or
-    # one made by an EAC older than 0.99, scores below it, so such an install
-    # rejected practically every CD candidate (the owner's report). R402 moved
-    # the shipped default to 85; an install still holding the OLD default never
-    # chose 100, so it follows the new one — exactly as the medium order above
-    # does. Any other value is the user's own and is kept as saved.
-    try:
-        _log_floor = int(cfg.get("soulseek_auto_log_min_score"))
-    except (TypeError, ValueError):
-        _log_floor = None
-    if _log_floor == LEGACY_DEFAULT_LOG_MIN_SCORE:
-        cfg["soulseek_auto_log_min_score"] = DEFAULT_CONFIG["soulseek_auto_log_min_score"]
 
     for key in _BOOL_KEYS:
         cfg[key] = _as_bool(cfg.get(key), DEFAULT_CONFIG.get(key, False))

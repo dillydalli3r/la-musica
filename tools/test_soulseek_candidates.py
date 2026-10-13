@@ -1387,8 +1387,8 @@ def score_logs(*, low=(), invalid=(), unscored=(), mid=(), low_score=50,
     """A _score_logs stand-in: 'low'/'invalid' name the logs to grade badly,
     'unscored' the ones Logchecker could not score (score None — which is NOT
     a rejection on its own; the per-track CRCs still decide), and 'mid' the
-    ones that score 90 — below Logchecker's clean band (100) but above the
-    default floor (85), so they are ACCEPTED and merely down-ranked.
+    ones that score 90 — below a PERFECT log, so REJECTED at the shipped floor
+    (100) and merely down-ranked when the user lowers the floor.
 
     Five-tuples, the shape the real scorer returns: the fifth is Logchecker's
     own note about the log, which the rejection reason quotes. `low_score` is
@@ -2448,25 +2448,21 @@ assert soulseek_auto._log_passes(100, "ok", 100) is True
 assert soulseek_auto._log_passes(100, "missing", 100) is True      # absent checksum
 assert soulseek_auto._log_passes(100, "invalid", 100) is False     # present and wrong
 assert soulseek_auto._log_passes(None, "invalid", 100) is False    # wrong checksum still wins
-# ...and at the DEFAULT floor (85) a score below it rejects while a score above
-# it is accepted: the floor, not a perfect score, is what kills a candidate.
-assert soulseek_auto._LOG_FLOOR_DEFAULT == 85, soulseek_auto._LOG_FLOOR_DEFAULT
-assert mlo_config_defaults["soulseek_auto_log_min_score"] == 85, \
+# ...and the shipped floor is a PERFECT log (100) — the owner's rule for
+# importing and grading alike — so a scored log below it rejects, and the
+# value is never migrated (a saved floor is the user's own).
+assert soulseek_auto._LOG_FLOOR_DEFAULT == 100, soulseek_auto._LOG_FLOOR_DEFAULT
+assert mlo_config_defaults["soulseek_auto_log_min_score"] == 100, \
     mlo_config_defaults["soulseek_auto_log_min_score"]
-# an install that still holds the OLD shipped default (100) follows the new one:
-# 100 is Logchecker's PERFECT band, so a copy of it is not a choice, and keeping
-# it rejected practically every CD candidate (the owner's report). Any other
-# value is the user's own and stands untouched.
-assert _mlo_config.LEGACY_DEFAULT_LOG_MIN_SCORE == 100, \
-    _mlo_config.LEGACY_DEFAULT_LOG_MIN_SCORE
+assert mlo_config_defaults["grade_log_score_threshold"] == 100, \
+    mlo_config_defaults["grade_log_score_threshold"]
+assert mlo_config_defaults["audit_log_score_threshold"] == 100, \
+    mlo_config_defaults["audit_log_score_threshold"]
 assert _mlo_config.normalize_config(
-    {"soulseek_auto_log_min_score": 100})["soulseek_auto_log_min_score"] == 85
+    {"soulseek_auto_log_min_score": 85})["soulseek_auto_log_min_score"] == 85, \
+    "a saved floor (a lowered one) is the user's own and stands"
 assert _mlo_config.normalize_config(
-    {"soulseek_auto_log_min_score": 90})["soulseek_auto_log_min_score"] == 90
-assert _mlo_config.normalize_config(
-    {"soulseek_auto_log_min_score": 0})["soulseek_auto_log_min_score"] == 0
-assert _mlo_config.normalize_config(
-    {"soulseek_auto_log_min_score": 85})["soulseek_auto_log_min_score"] == 85
+    {"soulseek_auto_log_min_score": 100})["soulseek_auto_log_min_score"] == 100
 
 # (d) end to end: a log that happens to STATE an AccurateRip failure rejects the
 #     candidate with AccurateRip's own words, and the album is never requested.
@@ -2500,7 +2496,7 @@ assert any("Logchecker could not score it" in e["msg"] for e in job.job["log"]),
 #     and never blames it for a rejection: the phar answers such a log with
 #     "Ripper : unknown" and a Score of 0 that is NOT a grade (see
 #     mlo.discs.log_score_state), so the gate sees NO score at all — reading
-#     that 0 as one killed every dBpoweramp candidate on the 85 floor.
+#     that 0 as one killed every dBpoweramp candidate on the shipped floor.
 _DPP_LOG = """dBpoweramp Release 17.3 Digital Audio Extraction Log from 2024
 
 Track 1
@@ -2511,23 +2507,28 @@ Track 2
 assert mlo_discs.log_dialect(_DPP_LOG) == "dbpoweramp", mlo_discs.log_dialect(_DPP_LOG)
 assert mlo_discs.log_program("dbpoweramp") == ("dBpoweramp", False), \
     mlo_discs.log_program("dbpoweramp")
-assert soulseek_auto._log_passes(None, "unsupported", 85) is True
+assert soulseek_auto._log_passes(None, "unsupported", 100) is True
 job = run_job(JOB_RELEASE, ONE_DISC_ROWS,
-              cfg=dict(JOB_CFG, soulseek_auto_log_min_score=85),
               bodies={"Music/Album/rip 1.log": _DPP_LOG.encode()},
               scores=score_logs(unscored=("rip 1.log",)))
 assert job.imported and job.job["attempts"] == [], job.job
 assert any("Logchecker could not score it (dBpoweramp)" in e["msg"]
            for e in job.job["log"]), [e["msg"] for e in job.job["log"]][-6:]
 
-# (g) A score BELOW Logchecker's clean band (100) but at or above the floor (85)
-#     is ACCEPTED and DOWN-RANKED, never killed: `_log_rank` orders such a
-#     candidate behind one whose log is clean, and the job still imports it.
-assert soulseek_auto._log_passes(90, "ok", 85) is True
+# (g) At the SHIPPED floor (100) a 90 rejects — a perfect log is the rule. At a
+#     floor the user LOWERED (85 here) the same 90 is ACCEPTED and DOWN-RANKED,
+#     never killed: `_log_rank` orders such a candidate behind one whose log is
+#     clean, and the job still imports it.
+assert soulseek_auto._log_passes(90, "ok", 100) is False   # the shipped floor
+assert soulseek_auto._log_passes(90, "ok", 85) is True     # a lowered floor
 assert soulseek_auto._log_rank(100) == 0
 assert soulseek_auto._log_rank(90) == 1
 assert soulseek_auto._log_rank(90) > soulseek_auto._log_rank(100)
 assert soulseek_auto._log_rank(None) == 0    # unscored ranks clean
+job = run_job(JOB_RELEASE, ONE_DISC_ROWS,
+              scores=score_logs(mid=("rip 1.log",)))
+assert not job.imported, job.job      # a perfect log is required by default
+assert "below 100" in job.job["attempts"][0]["reason"], job.job["attempts"][0]
 job = run_job(JOB_RELEASE, ONE_DISC_ROWS,
               cfg=dict(JOB_CFG, soulseek_auto_log_min_score=85),
               scores=score_logs(mid=("rip 1.log",)))

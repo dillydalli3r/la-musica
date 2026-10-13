@@ -13,9 +13,9 @@ whole pipeline a careful human would do by hand:
      disc, lossless, free slot),
   3. queue the whole folder in ONE pass but grade the .log file(s) first with
      Logchecker; a disc whose log is below the configured score
-     (`soulseek_auto_log_min_score`, 85 by default) — or whose own checksum
-     does not verify, or whose AccurateRip section reports a track that
-     mismatched — drops the
+     (`soulseek_auto_log_min_score`, 100 by default: a PERFECT log) — or whose
+     own checksum does not verify, or whose AccurateRip section reports a track
+     that mismatched — drops the
      transfers again and moves on to the next candidate without waiting for
      the album,
   4. wait for the album (a file counts as arrived only once slskd itself says
@@ -3265,10 +3265,11 @@ def _log_fail_reason(name, score, state, min_score, why="",
                      ar_state=None, ar_detail=""):
     """Why one rip log did not clear the floor, with Logchecker's own words.
 
-    The floor is `soulseek_auto_log_min_score` (Settings → Auto-import), 85 by
-    default: Logchecker marks a log down for reasons of its own (-30 for an EAC
-    older than 0.99, -10 for gap handling), and a log only fails on its SCORE
-    when that score means real damage rather than an opinion. The log's PROGRAM
+    The floor is `soulseek_auto_log_min_score` (Settings → Auto-import), 100 by
+    default — a PERFECT log, the owner's rule for importing and grading alike:
+    Logchecker marks a log down for reasons of its own (-30 for an EAC older
+    than 0.99, -10 for gap handling), and a scored log below the floor is
+    rejected. The log's PROGRAM
     is never the reason — a dBpoweramp, foobar2000, CUETools or eac3 log is read
     exactly like EAC's — so the message names the three things that really
     reject: a checksum that does not verify, an AccurateRip section that reports
@@ -3520,21 +3521,22 @@ def _wait_for_files(slsk, ddir, username, wanted, timeout_s, cancel_check=None,
 # Verification helpers
 # --------------------------------------------------------------------------- #
 # The floor a rip log's Logchecker score must reach before its candidate is
-# REJECTED. 85 by default: Logchecker's own band for a log with minor complaints
-# is 90+, so a score between the floor and 100 is not damage — it only
-# DOWN-RANKS the candidate (see `_log_rank`), and a folder whose audio verifies
-# is never thrown away over a score.
-_LOG_FLOOR_DEFAULT = 85
+# REJECTED. 100 by default — a PERFECT log is the owner's rule, matching the
+# grading side (`grade_log_score_threshold` / `audit_log_score_threshold`). A
+# user who lowers the floor accepts-and-down-ranks a score between it and 100
+# (see `_log_rank`); a folder whose audio verifies is never thrown away over a
+# score.
+_LOG_FLOOR_DEFAULT = 100
 
 
 def _log_min_score(cfg):
     """The floor `soulseek_auto_log_min_score` sets on a rip log's Logchecker
-    score — 85 when unset.
+    score — 100 when unset (a perfect log).
 
-    A score only REJECTS below this floor, and the floor means real damage; the
-    deductions that describe an opinion rather than damage (an EAC older than
-    0.99, gap handling) leave a score at or above it and only rank the candidate
-    lower. 0 is a real value, not "unset": it is the switch that treats a
+    A score only REJECTS below this floor; a user who lowers it accepts-and-
+    ranks the scores between it and 100 instead (the deductions that describe an
+    opinion rather than damage — an EAC older than 0.99, gap handling — only
+    down-rank then). 0 is a real value, not "unset": it is the switch that treats a
     MISSING log as an acceptable (low-ranking) candidate rather than nothing
     (see `find_candidates` / `_verify_album`), so it is honoured as given."""
     try:
@@ -3552,8 +3554,8 @@ def _log_passes(score, state, min_score, ar_state=None):
     checksum is not required and costs nothing); (2) the log must not report a
     failed AccurateRip track (ar_state 'fail'; no AccurateRip section is not a
     penalty); (3) only when Logchecker COULD score it, the score must be at or
-    above `min_score`, the FLOOR below which a log means real damage (85 by
-    default — Logchecker's own band for a log with minor complaints is 90+).
+    above `min_score`, the FLOOR below which the log is rejected (100 by
+    default — a perfect log; a user who lowers it admits-and-down-ranks).
 
     The log's PROGRAM never decides on its own: EAC, XLD, whipper, dBpoweramp,
     foobar2000 or CUETools are all read the same way, and a dialect Logchecker

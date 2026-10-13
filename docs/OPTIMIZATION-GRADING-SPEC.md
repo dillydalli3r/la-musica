@@ -5015,40 +5015,38 @@ used to be a second ffprobe on a file this pipeline had just produced; a
       reason names it so the way out (lower it, or pick another release) is one
       screen away.
 
-- **R402 — the log's PROGRAM is never the reason a candidate dies.**
-  The owner's report: "ensure that the app doesn't reject good candidates with
-  logs from different programs". `soulseek_auto_log_min_score` ships **85**
-  (was 100): a log Logchecker cannot score (`None`) was already accepted and
-  still is, an unrecognised dialect (dBpoweramp, foobar, CUETools, anything
-  newer than the scorer) passes — R425 is where that promise is kept: the
-  scorer answers such a log with a Score of 0 that is not a grade, and the gate
-  must read it as NO score, not as a 0 below the floor — and a score BELOW the
-  bar now **down-ranks**
-  a candidate (`_log_rank` orders the batch's waits: accepted-but-under-100
-  last) instead of killing it. Three things still reject, and every message
-  names the value rather than the ripper: the log's own checksum does not
-  verify, the log reports an AccurateRip failure, or Logchecker scores it
-  below the floor ("Logchecker 62/100 (below 85)"). A CD folder with NO log at
-  all is admitted as a LOW-RANKING candidate only when the floor is set to 0
-  (its `.cue` is still required) and is verified by a clean decode — the
-  switch is documented in the setting's own help. The GRADE keeps its own bar:
-  `grade_log_score_threshold` 100 (R174) is a verdict about a file already in
+- **R402 — the log's PROGRAM is never the reason a candidate dies, and the
+  floor is a PERFECT log.** The owner's report: "ensure that the app doesn't
+  reject good candidates with logs from different programs".
+  `soulseek_auto_log_min_score` ships **100** — a perfect Logchecker score is
+  the owner's rule (2026-10-13) for importing and grading alike
+  (`grade_log_score_threshold` and `audit_log_score_threshold` are the same
+  100). An earlier revision of this rule shipped 85 for a day; it is reverted,
+  and NO value is migrated — a saved floor is the user's own and stands
+  (`mlo.config.LEGACY_DEFAULT_MEDIUM_ORDER`'s "a copy of the default is not a
+  choice" does not apply here: the owner asked for 100 outright, and the
+  floor is exactly the kind of number a user sets on purpose). Two promises
+  hold at that bar: a log Logchecker cannot score (`None`) is accepted, and an
+  unrecognised dialect (dBpoweramp, foobar, CUETools, anything newer than the
+  scorer) passes — R425 is where that promise is kept: the scorer answers such
+  a log with a Score of 0 that is not a grade, and the gate must read it as NO
+  score, not as a 0 below the floor. A SCORED log below the floor rejects, and
+  every message names the value rather than the ripper; a user who lowers the
+  floor admits-and-down-ranks the scores between it and 100 (`_log_rank`
+  orders the batch's waits) instead of killing them. Three things always
+  reject: the log's own checksum does not verify, the log reports an
+  AccurateRip failure, or Logchecker scores it below the floor ("Logchecker
+  62/100 (below 100)"). A CD folder with NO log at all is admitted as a
+  LOW-RANKING candidate only when the floor is set to 0 (its `.cue` is still
+  required) and is verified by a clean decode — the switch is documented in
+  the setting's own help. The GRADE's own bar is the same 100
+  (`grade_log_score_threshold` 100, R174) — a verdict about a file already in
   the library, never the download gate. Pinned in
-  `tools/test_soulseek_candidates.py` (dBpoweramp accepted, 90 accepted and
-  ranked below 100, 62 rejected naming the score, invalid/AR-fail still
-  rejected, the logless floor-0 case).
-
-  The change from 100 to 85 also MIGRATES an install that still holds the old
-  value: Settings writes the whole schema, so every install made while 100 was
-  the default carries a copy of it, and no later save moves it. `100` is
-  Logchecker's PERFECT band — one gap-handling note or an EAC older than 0.99
-  scores a good rip below it — so such an install rejected practically every
-  CD candidate while its setting looked deliberate. `mlo.config.LEGACY_
-  DEFAULT_LOG_MIN_SCORE` is the old value, and `normalize_config` maps a saved
-  copy of it to the shipped default exactly as it does the medium order (R246):
-  a copy of the default is not a choice. Any other value — `0` included — is
-  the user's own and stands. Pinned in `tools/test_soulseek_candidates.py`
-  (`normalize_config({log_min_score: 100}) == 85`, `90`/`0`/`85` untouched).
+  `tools/test_soulseek_candidates.py` (a perfect log passes; a 90 is REJECTED
+  at the shipped floor and, at a floor the user lowered, accepted and ranked
+  below 100; a 62 is rejected naming the score; a dBpoweramp log is accepted on
+  its per-track CRCs; invalid/AR-fail still rejected; the logless floor-0
+  case).
 
 ### 7.37 The library page says what is failing, and the tools install themselves
 
@@ -7877,7 +7875,7 @@ checks see or how they judge it.
 | `audit_check_cd_format` | ON | whether a `CD_FORMAT` failure turns the album audit FAKE |
 | `audit_verify_cd_checksums` / `audit_integrity` / `audit_cd_require_both` | ON | what script 6 verifies on a CD rip |
 | `audit_log_score_threshold` | 100 | the log score the audit accepts |
-| `soulseek_auto_log_min_score` | 85 | the Logchecker score a candidate's `.log` must reach before its album is downloaded — judged only when Logchecker COULD score it, so an unscored log's album is still tried and judged on its per-track CRCs (R391). 100 is Logchecker's PERFECT band, so the value this key shipped with at first (100) is migrated to 85 rather than kept: an untouched install holds a copy of the old default, and keeping it rejected nearly every CD candidate (R402) |
+| `soulseek_auto_log_min_score` | 100 | the Logchecker score a candidate's `.log` must reach before its album is downloaded — judged only when Logchecker COULD score it, so an unscored log's album is still tried and judged on its per-track CRCs (R391). A PERFECT log is the owner's rule (2026-10-13), for importing and grading alike; a saved value is never migrated (R402) |
 | `audit_fail_on_unscorable_log` | ON | whether an unscorable log fails where a scorer exists |
 | `audit_thorough`, `audit_clipping`, `audit_scaled_clipping`, `audit_mqa`, `audit_ai`, `audit_fake_stereo`, `audit_silence`, `audit_dynamic_range`, `audit_true_peak`, `audit_lufs`, `audit_bpm`, `audit_cutoff_allow` | ON (`0` for the cutoff) | which AudioAuditor detectors run — they decide the verdict, not the grade directly |
 | `write_audit_tag` / `write_log_grade` / `write_replaygain_tags` / `write_dynamic_range_tags` | ON | whether the scripts write the tags the checks require |
@@ -8606,7 +8604,7 @@ when the log itself says something is wrong.** Pinned in
   a real CUERipper v2.2.2 log (both `Score 0`, "Unknown log file, could not
   determine ripper.") while the same disc's EAC log scored 70. Read as a
   score, that 0 killed every such candidate at the auto-import floor
-  (`Logchecker 0/100 (below 85)` — so R402's promise that the program is never
+  (`Logchecker 0/100 (below 100)` — so R402's promise that the program is never
   the reason was true of the gate's code and false in practice), wrote
   `LOG_GRADE=0` onto library tracks, and failed those albums twice over (the
   grader's score check and the audit's "unscorable .log → FAKE" rule).
