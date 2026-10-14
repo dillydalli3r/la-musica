@@ -156,22 +156,43 @@ eq(lastfm.sign({"b": "2", "a": "1", "format": "json", "callback": "cb",
    "format, callback and api_sig are excluded from the signature")
 
 # --------------------------------------------------------------------------- #
-print("\nthe scrobble rule — half the track OR four minutes, whichever comes first")
+print("\nthe scrobble rule — a percentage of the track, 70 % by default")
 # --------------------------------------------------------------------------- #
+# The owner's call: "scrobbling to last.fm should only occur if a certain
+# amount of the song is listened to" — a PERCENTAGE, so a 2-minute track and a
+# 10-minute one are judged by the same share of the listen. The floor stays
+# Last.fm's own 50 % (it discards a scrobble below half the track), and the
+# shipped default is 70.
+eq(lastfm.scrobble_percent(), 70.0, "the shipped default is 70 %")
 eq(lastfm.scrobble_threshold(29), None, "a 29 s track is never scrobbled")
 eq(lastfm.meets_rule(29, 29), False, "…not even played to the end")
-eq(lastfm.scrobble_threshold(30), 15.0, "a 30 s track needs 50 % (15 s)")
-eq(lastfm.meets_rule(30, 15), True, "…which it reaches at 15 s")
-eq(lastfm.meets_rule(30, 14.9), False, "…but not a tenth of a second earlier")
-eq(lastfm.scrobble_threshold(600), 240.0, "a 10-minute track caps at 4 minutes")
-eq(lastfm.meets_rule(600, 240), True, "…counted at 4:00")
-eq(lastfm.meets_rule(600, 239), False, "…not at 3:59")
-eq(lastfm.scrobble_threshold(599), 240.0, "9:59 also caps at 4 minutes")
-eq(lastfm.meets_rule(599, 239), False, "9:59 at 3:59 does not count")
-eq(lastfm.meets_rule(599, 240), True, "9:59 at 4:00 counts")
-eq(lastfm.meets_rule(301, 150.5), True, "half of 5:01 (150.5 s) is the bar")
+eq(lastfm.scrobble_threshold(100, {"lastfm_scrobble_percent": 70}), 70.0,
+   "a 100 s track needs 70 s")
+eq(lastfm.meets_rule(100, 70, {"lastfm_scrobble_percent": 70}), True,
+   "…which it reaches at 70 s")
+eq(lastfm.meets_rule(100, 69.9, {"lastfm_scrobble_percent": 70}), False,
+   "…but not a tenth of a second earlier")
+eq(lastfm.scrobble_threshold(600, {"lastfm_scrobble_percent": 70}), 420.0,
+   "a 10-minute track needs 7 minutes — no 4-minute cap")
+eq(lastfm.meets_rule(600, 420, {"lastfm_scrobble_percent": 70}), True, "…at 7:00")
+eq(lastfm.meets_rule(600, 419, {"lastfm_scrobble_percent": 70}), False, "…not at 6:59")
+eq(lastfm.scrobble_percent({"lastfm_scrobble_percent": 50}), 50.0,
+   "the config is honoured down to Last.fm's own 50 %")
+eq(lastfm.scrobble_threshold(100, {"lastfm_scrobble_percent": 50}), 50.0,
+   "…a 100 s track then needs 50 s")
+eq(lastfm.scrobble_percent({"lastfm_scrobble_percent": 30}), 50.0,
+   "below 50 % is clamped: Last.fm would discard the scrobble")
+eq(lastfm.scrobble_percent({"lastfm_scrobble_percent": 100}), 100.0,
+   "100 % means only a play that reached the end counts")
+eq(lastfm.meets_rule(100, 100, {"lastfm_scrobble_percent": 100}), True, "…at the end")
+eq(lastfm.meets_rule(100, 99, {"lastfm_scrobble_percent": 100}), False, "…not before it")
+eq(lastfm.scrobble_percent({"lastfm_scrobble_percent": "junk"}), 70.0,
+   "junk reads as the shipped default")
+eq(lastfm.scrobble_percent({}), 70.0, "a config without the key reads as the default")
 eq(lastfm.scrobble_threshold("junk"), None, "junk duration is no threshold")
 eq(lastfm.meets_rule(600, "junk"), False, "junk played seconds never count")
+eq(lastfm.meets_rule(600, "junk", {"lastfm_scrobble_percent": "junk"}), False,
+   "junk on both sides still never counts")
 
 # --------------------------------------------------------------------------- #
 print("\nthe track's own metadata — read from the file, never invented")
@@ -346,13 +367,38 @@ try:
     fake.calls.clear()
     fake.queue.append(Resp(200, {"session": {"name": "listener",
                                              "key": "sk-1"}}))
-    session, err = lastfm.get_session(connected_cfg(), "tok-1")
-    eq((session, err), ({"name": "listener", "key": "sk-1"}, ""),
+    out = lastfm.get_session(connected_cfg(), "tok-1")
+    eq((out["ok"], out["name"], out["key"], out["code"], out["reason"]),
+       (True, "listener", "sk-1", "", ""),
        "auth.getSession exchanges the token for a session key")
     data = fake.calls[0]["data"]
     eq(data["token"], "tok-1", "the token is what the call carries")
     eq(data.get("sk"), None, "and NOT a session key — none exists yet")
     eq(data["api_sig"], lastfm.sign(data, SECRET), "the call is signed")
+
+    # The ONE refusal the connect UI must WAIT OUT: error 14 is
+    # distinguishable, in Last.fm's own words, and never raises.
+    fake.calls.clear()
+    fake.queue.append(Resp(200, {"error": 14,
+                                 "message": "This token has not been authorized"}))
+    out = lastfm.get_session(connected_cfg(), "tok-1")
+    eq((out["ok"], out["code"], out["key"]), (False, "NOT_AUTHORIZED", ""),
+       "an unauthorized token is a NOT_AUTHORIZED outcome, not an error")
+    ok("This token has not been authorized" in out["reason"],
+       "carrying Last.fm's own sentence")
+
+    # Any OTHER refusal is not the wait case.
+    fake.calls.clear()
+    fake.queue.append(Resp(200, {"error": 4, "message": "Invalid method signature"}))
+    out = lastfm.get_session(connected_cfg(), "tok-1")
+    eq((out["ok"], out["code"]), (False, ""),
+       "a different refusal is not NOT_AUTHORIZED")
+
+    # A blank token never touches the network.
+    fake.calls.clear()
+    out = lastfm.get_session(connected_cfg(), "")
+    eq((out["ok"], out["code"], fake.calls), (False, "", []),
+       "a blank token answers not-ok without a request")
 finally:
     lastfm._http_post = REAL_POST
 
@@ -525,6 +571,26 @@ if server.started:
     eq(body.get("token"), "tok-1", "the request token itself")
     ok(body.get("url", "").endswith("token=tok-1"), "plus the authorization URL")
 
+    # A not-yet-authorized token: wait=true is a 200 "keep polling" answer...
+    fake.queue.append(Resp(200, {"error": 14,
+                                 "message": "This token has not been authorized"}))
+    status_code, body = _request(PORT, "POST", "/api/lastfm/connect/finish",
+                                 {"token": "tok-1", "wait": True})
+    eq(status_code, 200, "connect/finish while unauthorized still answers 200")
+    eq((body.get("ok"), body.get("waiting")), (False, True),
+       "…with waiting:true, not an error")
+    ok("not been authorized" in body.get("reason", ""),
+       "and Last.fm's own words for the reason")
+    # ...while every other refusal keeps today's error shape.
+    fake.queue.append(Resp(200, {"error": 14,
+                                 "message": "This token has not been authorized"}))
+    status_code, body = _request(PORT, "POST", "/api/lastfm/connect/finish",
+                                 {"token": "tok-1"})
+    eq(status_code, 200, "connect/finish without wait answers 200")
+    eq((body.get("ok"), body.get("waiting")), (False, None),
+       "and an unauthorized token is a plain error there")
+    ok("error" in body, "with the error key a UI already handles")
+
     fake.queue.append(Resp(200, {"session": {"name": "listener", "key": "sk-1"}}))
     status_code, body = _request(PORT, "POST", "/api/lastfm/connect/finish",
                                  {"token": "tok-1"})
@@ -556,7 +622,8 @@ if server.started:
     eq(status_code, 200, "a play under the rule answers 200")
     eq(body.get("scrobbled"), False, "it is not scrobbled")
     eq(body.get("queued"), False, "and not queued either")
-    ok("Last.fm needs" in body.get("reason", ""), "with the rule stated back")
+    ok("waits for" in body.get("reason", "") and "70 %" in body.get("reason", ""),
+       "with the rule stated back")
     eq(fake.calls, [], "and no request for it")
 
     status_code, body = _request(PORT, "POST", "/api/lastfm/disconnect")

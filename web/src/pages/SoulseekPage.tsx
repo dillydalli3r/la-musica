@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  ArrowDownUp, ArrowDown, ArrowDownToLine, Disc3, Eye, EyeOff, FolderInput, FolderOpen, Loader2, Play, Power, RefreshCw, Search,
+  ArrowDownUp, ArrowDown, ArrowDownToLine, Eye, EyeOff, FolderInput, FolderOpen, Loader2, Play, Power, RefreshCw, Search,
   User, Zap, Square, FileCheck2, FileVideo, Music2, Save, Tag, Trash2, PackageOpen,
   Star, Plus, CheckCircle2, CircleDashed, Clock, CheckSquare, AlertTriangle, ExternalLink, RotateCw, ChevronDown, ChevronRight, Link2,
   MessageSquare, X, Wand2, CheckCheck, MessageCircleQuestion, Layers,
@@ -16,6 +16,7 @@ import { EmptyState, PageLoading } from "../components/Badges";
 import PageHeader from "../components/PageHeader";
 import Modal from "../components/Modal";
 import ImportIdentifyDialog, { type IdentifyAlbum } from "../components/ImportIdentifyDialog";
+import DownloadPicker, { type DownloadPick } from "../components/DownloadPicker";
 import ConfirmButton from "../components/ConfirmButton";
 import Segmented from "../components/Segmented";
 import type { DownloadEntry, ImportBulkJob, SlskReleaseIdentity } from "../types";
@@ -5943,30 +5944,38 @@ function UploadsPanel({ running }: { running: boolean }) {
   );
 }
 
-/** `<music>/.mlo/downloads` — slskd's staging area as a triage list: pick the
- *  entries worth keeping and import them (moving each into the library and
- *  running the configured import chain on it), or delete them.
+/** `<music>/.mlo/downloads` — slskd's staging area as a triage list: open an
+ *  entry, tick the files worth keeping, and import them (moving just those
+ *  into the library and running the configured import chain on them), or
+ *  delete the whole entry.
  *
  *  Everything Soulseek pulls down lands here and stays until one of those two
- *  happens; entries are folders (usually one album each) or loose files, and
- *  selecting several acts on all of them at once. The same bytes also show up
- *  under "Staging on disk" below — that one clears the in-flight leftovers,
+ *  happens; entries are folders (usually one album each) or loose files. The
+ *  checkboxes are per FILE (see DownloadPicker) — an entry often holds a take
+ *  nobody wants, a video or a scan alongside the tracks — but DELETE stays
+ *  per entry: it removes the whole download from disk. The same bytes also show
+ *  up under "Staging on disk" below — that one clears the in-flight leftovers,
  *  this one is where a finished album goes into the library. */
 function StagingImportPanel() {
   const qc = useQueryClient();
-  const [sel, setSel] = useState<Set<string>>(new Set());
+  /** The picked FILE paths, grouped by their top-level downloads entry — what
+   *  the picker hands up, and the one press the import runs on. */
+  const [picks, setPicks] = useState<DownloadPick[]>([]);
   const [busy, setBusy] = useState(false);
-  const [confirmDelete, setConfirmDelete] = useState(false);
+  /** Bumped after every import/delete so the picker drops its selection and
+   *  its cached file lists (the listing behind them just changed). */
+  const [resetSignal, setResetSignal] = useState(0);
   /** The bulk job an import of 2+ entries runs (null = none). */
   const [bulkJob, setBulkJob] = useState<ImportBulkJob | null>(null);
   /** The release-identification dialog, open before the import is queued.
    *  A finished download already carries whatever the uploader tagged — often
    *  another pressing's MusicBrainz id, sometimes none — and the dialog opens
-   *  a row per entry, on the release its files name now, so the one press that
-   *  queues the import is also where a wrong id is seen and corrected. Same
-   *  component the Library's Import menu and the wizard's Auto-import use. */
+   *  a row per PICKED GROUP, on the release its files name now (the picker read
+   *  their tags already), so the one press that queues the import is also where
+   *  a wrong id is seen and corrected. Same component the Library's Import menu
+   *  and the wizard's Auto-import use. */
   const [identify, setIdentify] = useState<{
-    entries: { name: string; path: string }[];
+    picks: DownloadPick[];
     albums: IdentifyAlbum[];
   } | null>(null);
 
@@ -6002,51 +6011,46 @@ function StagingImportPanel() {
     [entries]
   );
 
-  const toggle = (name: string) =>
-    setSel((s) => {
-      const next = new Set(s);
-      if (next.has(name)) next.delete(name);
-      else next.add(name);
-      return next;
-    });
-
-  const selected = [...sel];
-  /** Entries that exist in the current listing — a stale selection (a file
-   *  that vanished between renders) must never be sent to the server. */
-  const liveSelection = selected.filter((n) => entries.some((e) => e.name === n));
-
   const after = (msg: string) => {
-    setSel(new Set());
-    setConfirmDelete(false);
+    setResetSignal((n) => n + 1);
     qc.invalidateQueries({ queryKey: ["downloads"] });
     qc.invalidateQueries({ queryKey: ["library"] });
     toast(msg);
   };
 
-  /** The entries the press will act on, as (name, path) rows — the same
-   *  selection the index uses, resolved against the CURRENT listing. */
-  const importRows = () =>
-    liveSelection.map((name) => ({ name, path: `${data?.folder ?? ""}/${name}` }));
+  /** The picked groups that still exist in the current listing — a group whose
+   *  entry vanished between renders (a file that left the folder) must never be
+   *  sent to the server. A root group is keyed by the downloads root itself. */
+  const livePicks = picks.filter((p) =>
+    entries.some((e) => (e.dir ? e.name === p.entry : data?.folder === p.entry)));
 
-  /** Queue the entries through the import chain. `pins` maps an entry's path to
-   *  the release id the user named in the dialog; a row left alone sends none,
-   *  so the import is exactly the one the files already asked for. */
+  /** Queue the picked files through the import chain. ONE item per group: the
+   *  group's box (`path` — the entry folder, or the downloads root for loose
+   *  files) with the picked files inside it, so the server imports exactly
+   *  those as one album named `name` and leaves the rest of the folder where
+   *  it is. `pins` maps a group's box to the release id the user named; a row
+   *  left alone sends none, so an untouched group imports as it always did. */
   const startImport = async (pins: Record<string, string>) => {
-    const rows = identify?.entries ?? importRows();
+    const groups = identify?.picks ?? livePicks;
     setIdentify(null);
-    if (!rows.length) return;
+    if (!groups.length) return;
     setBusy(true);
     try {
-      // ONE entry or several: same route. The bulk queue moves each entry into
-      // the library AND runs the configured import chain on it — a single
-      // entry used to take the move-only route and silently skip the chain.
+      // ONE group or several: same route. The bulk queue moves the picked
+      // files into the library AND runs the configured import chain on them,
+      // naming each album after its entry (or the name the picker derived).
       const job = await api.importBulk(
-        rows.map((r) => ({ path: r.path, move: true, mbid: pins[r.path] || undefined }))
+        groups.map((p) => ({
+          path: p.path,
+          move: true,
+          mbid: pins[p.path] || undefined,
+          files: p.files,
+          name: p.name,
+        }))
       );
       if (job.ok && job.job) {
         setBulkJob(job.job);
-        setSel(new Set());
-        toast(`Importing ${rows.length} entr${rows.length === 1 ? "y" : "ies"} — progress below`);
+        after(`Importing ${groups.length} group${groups.length === 1 ? "" : "s"} — progress below`);
       } else {
         toast(`Queue import: ${job.error ?? "could not start"}`);
       }
@@ -6057,53 +6061,33 @@ function StagingImportPanel() {
     }
   };
 
-  /** The Import press: ASK which release first, then queue. Reading each
-   *  entry's own release id costs one `/api/album` per entry (the same payload
-   *  the album page shows), and EVERY entry gets a row — one that already
-   *  names a release opens on it, so a wrong or stale uploader tag is visible
-   *  and correctable before a single byte is moved. The rows are read here
-   *  (not at press time from cache) because the download folder is not in the
-   *  library tree. */
-  const doImport = async () => {
-    if (!liveSelection.length || !data?.folder) return;
-    const rows = importRows();
-    setBusy(true);
-    try {
-      const albums: IdentifyAlbum[] = await Promise.all(rows.map(async (r) => {
-        try {
-          const al = await api.album(r.path, true);
-          const pin = al?.meta?.MUSICBRAINZ_ALBUMID
-            ?? al?.album_values?.MUSICBRAINZ_ALBUMID ?? "";
-          return {
-            path: r.path,
-            artist: al?.album_artist ?? "",
-            album: al?.meta?.ALBUM || r.name,
-            current: pin,
-            staged: true,
-          };
-        } catch {
-          // Unreadable payload: ask rather than silently import a guess.
-          return { path: r.path, artist: "", album: r.name, staged: true };
-        }
-      }));
-      setIdentify({
-        entries: rows,
-        albums: albums.sort((a, b) => a.path.localeCompare(b.path)),
-      });
-    } catch (e) {
-      toast.error(String(e));
-    } finally {
-      setBusy(false);
-    }
+  /** The Import press: ASK which release first, then queue. The picker already
+   *  read each file's own tags (that is what its rows showed), so every group's
+   *  release identity comes from its FILES — no `/api/album` round-trip. A row
+   *  opens on the release the files name; a wrong or stale uploader tag is thus
+   *  visible and correctable before a byte is moved. */
+  const doImport = () => {
+    if (!livePicks.length) return;
+    const albums: IdentifyAlbum[] = livePicks.map((p) => ({
+      path: p.path,
+      artist: (p.tags.ALBUMARTIST || p.tags.ARTIST || "").trim(),
+      album: (p.tags.ALBUM || "").trim() || p.name,
+      current: (p.tags.MUSICBRAINZ_ALBUMID || "").trim(),
+      staged: true,
+      fileCount: p.files.length,
+      fileTotal: p.total,
+      tags: p.tags,
+    }));
+    setIdentify({ picks: livePicks, albums });
   };
 
   const bulkFailed = (bulkJob?.items ?? []).filter((r) => r.status === "failed");
 
-  const doDelete = async () => {
-    if (!liveSelection.length) return;
+  const doDelete = async (names: string[]) => {
+    if (!names.length) return;
     setBusy(true);
     try {
-      const res = await api.downloadsDelete(liveSelection);
+      const res = await api.downloadsDelete(names);
       after(
         res.failed.length
           ? `Deleted ${res.deleted.length} (${fmtSize(res.freed)}) — ${res.failed.length} failed: ${res.failed.map((f) => f.name).join(", ")}`
@@ -6115,8 +6099,6 @@ function StagingImportPanel() {
       setBusy(false);
     }
   };
-
-  const allSelected = entries.length > 0 && liveSelection.length === entries.length;
 
   return (
     <div className="panel">
@@ -6197,107 +6179,16 @@ function StagingImportPanel() {
           />
         )}
 
-        {entries.length > 0 && (
-          <div className="flex items-center gap-2 flex-wrap">
-            <button
-              className="btn-ghost !py-1 text-xs tap"
-              onClick={() => setSel(allSelected ? new Set() : new Set(entries.map((e) => e.name)))}
-            >
-              {allSelected ? "Select none" : "Select all"}
-            </button>
-            {liveSelection.length > 0 && (
-              <span className="text-xs text-zinc-400">{liveSelection.length} selected</span>
-            )}
-            <div className="flex flex-wrap items-center gap-2 ml-auto justify-end">
-              <button
-                className="btn-primary !py-1 text-xs tap"
-                onClick={doImport}
-                disabled={busy || !liveSelection.length}
-                title={
-                  liveSelection.length > 1
-                    ? "Ask which release each selected entry is (its row opens on the release its files name), then move them into the library and run the import chain on each"
-                    : "Ask which release this entry is (its row opens on the release its files name), then move it into the library and run the import chain on it"
-                }
-              >
-                <FolderInput className="h-3.5 w-3.5" />{" "}
-                {liveSelection.length > 1 ? `Import ${liveSelection.length} (queue)` : "Import to library"}
-              </button>
-              {confirmDelete ? (
-                <>
-                  <span className="text-xs text-amber-300">Delete permanently?</span>
-                  <button className="btn-danger !py-1 text-xs tap" onClick={doDelete} disabled={busy}>
-                    <Trash2 className="h-3.5 w-3.5" /> Yes, delete
-                  </button>
-                  <button className="btn-ghost !py-1 text-xs tap" onClick={() => setConfirmDelete(false)} disabled={busy}>
-                    <X className="h-3.5 w-3.5" /> Cancel
-                  </button>
-                </>
-              ) : (
-                <button
-                  className="btn-danger !py-1 text-xs tap"
-                  onClick={() => setConfirmDelete(true)}
-                  disabled={busy || !liveSelection.length}
-                  title="Delete the selected entries from disk — this cannot be undone"
-                >
-                  <Trash2 className="h-3.5 w-3.5" /> Delete
-                </button>
-              )}
-            </div>
-          </div>
-        )}
-
-        <div className="space-y-1.5">
-          {entries.map((e) => {
-            const on = sel.has(e.name);
-            return (
-              <label
-                key={e.name}
-                className={`flex items-center gap-3 bg-card rounded-lg border px-3 py-2 cursor-pointer ${
-                  on ? "border-accent/60" : "border-border"
-                } ${e.partial ? "opacity-60" : ""}`}
-                title={e.partial ? "Still downloading or a scratch file — leave it alone" : e.name}
-              >
-                <input type="checkbox" checked={on} onChange={() => toggle(e.name)} />
-                {e.dir ? (
-                  <Disc3 className="h-4 w-4 text-zinc-500 shrink-0" />
-                ) : (
-                  <FolderOpen className="h-4 w-4 text-zinc-500 shrink-0" />
-                )}
-                <span className="flex-1 min-w-0">
-                  <span className="block truncate text-sm text-zinc-200">{e.name}</span>
-                  <span className="block text-[11px] text-zinc-500">
-                    {fmtSize(e.bytes)}
-                    {e.dir && ` · ${e.files} file(s)`}
-                    {e.audio > 0 && ` · ${e.audio} audio`}
-                    {e.images > 0 && ` · ${e.images} image(s)`}
-                    {!e.album && e.audio === 0 && " · no audio"}
-                  </span>
-                </span>
-                {e.partial && (
-                  <span className="chip bg-amber-950/40 text-amber-300 border border-amber-900 shrink-0">
-                    <AlertTriangle className="h-3 w-3" /> in-flight
-                  </span>
-                )}
-                {!e.partial && e.album && (
-                  <span className="chip bg-emerald-900/50 text-emerald-300 border border-emerald-800 shrink-0">
-                    importable
-                  </span>
-                )}
-                {!e.partial && !e.album && (
-                  <span className="chip bg-raise border border-border text-zinc-500 shrink-0">no audio</span>
-                )}
-              </label>
-            );
-          })}
-        </div>
-
-        {entries.length > 0 && (
-          <div className="text-[10px] text-zinc-600">
-            Import asks which release each entry is — its row opens on the release the files already name —
-            then moves it into the library as its own album named after the folder and runs the configured
-            import chain on it (Settings → Import); several entries are just a queue of that. Delete removes
-            it from disk for good — nothing here is copied to the trash bin first.
-          </div>
+        {entries.length > 0 && data?.folder && (
+          <DownloadPicker
+            folder={data.folder}
+            entries={entries}
+            busy={busy}
+            resetSignal={resetSignal}
+            onPicksChange={setPicks}
+            onImport={doImport}
+            onDelete={doDelete}
+          />
         )}
       </div>
 

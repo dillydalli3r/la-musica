@@ -6027,7 +6027,8 @@ module with `AssertionError: 20` on the track shelf) and by
   session key and the account name, then `track.updateNowPlaying` and
   `track.scrobble` (batched up to Last.fm's own 50 per call when the spool is
   flushed). The **rule is Last.fm's own**: a track must be longer than 30 s and
-  the play must reach max(50 % of its duration, 240 s); the client fires
+  the play must reach `lastfm_scrobble_percent` % of its duration (70 by
+  default, clamped to Last.fm's own 50 % floor — R436); the client fires
   now-playing at the SAME moment `POST /api/plays` records the play (`PlayerBar`'s
   `countPlay`) and ONE scrobble per play, once, keyed element+path, on
   `timeupdate`/`ended` — the server re-checks the rule and the length so a
@@ -6041,7 +6042,7 @@ module with `AssertionError: 20` on the track shelf) and by
   `verify_session` is what the Settings credential row asks (an AUTHENTICATED
   read, so "not connected" is never mistaken for "working"), and the panel
   offers Connect/Disconnect plus the queued count. Pinned by
-  `tools/test_lastfm.py` (128 checks: the signature against the docs' own
+  `tools/test_lastfm.py` (144 checks: the signature against the docs' own
   example with reference digests computed outside the code under test, the
   threshold table, one-scrobble-per-play, the spool across a restart, and the
   no-credential refusal paths; `tools/test_sources_health.py` and
@@ -8890,6 +8891,130 @@ when the log itself says something is wrong.** Pinned in
   yields its track queries; a nested-disc one yields the same; the two
   end-to-end job tests assert the per-track queries reach slskd in the one
   batch).
+
+---
+
+### 7.79 A manual download is imported file by file, named before it moves
+
+The owner's report: "if I try to manually download tracks, it's hard to select
+the files I want to import, and to what MBID in a neat manner". The staging
+list on the Soulseek page's downloads tab used to deal in whole top-level
+entries — a folder or a loose file — so picking 9 of a peer's 12 tracks, or
+naming the release those picks belong to, was not a thing the app could do.
+The picker and the identify dialog now do exactly that, and the pieces are
+one mechanism:
+
+- **R433 — a downloads import may pick FILES, and a picked set is ONE album.**
+  `GET /api/downloads/entry?name=…` (`server.main.downloads_entry`) lists one
+  top-level staging entry file by file — the same name rule the delete route
+  uses, dot-directories and dot-files skipped like the review walk, `AUDIO_EXTS
+  ∪ LIB_VIDEO_EXTS` only, capped at 500 rows with `truncated` saying so — and
+  each row carries the tags a release can be recognised from, the MusicBrainz
+  id family included (`_RELEASE_TAG_KEYS`; the review panel's own narrow
+  `_review_file_info` output is untouched). `POST /api/import/bulk` items gain
+  `files` and `name`: with `files`, `_bulk_one` imports ONLY those files as ONE
+  album — validated first (every path inside the item's own folder, a real
+  audio file; anything invalid fails the row and moves NOTHING), the album
+  folder created as `unique_dir(root, name or the folder's name)`, each picked
+  file moved into it, and the unselected files left where they were — then the
+  row runs the normal pin → organize → chain path (`row.picked` says how many
+  files moved). Picking needs a STAGED folder: an item whose path is already in
+  the library, or `move: false`, is refused with that sentence. Absent/empty
+  `files` is the whole-folder import, unchanged. The identify dialog opens each
+  row on the release the files name (`current`) as before, and when nothing is
+  named but the files' own tags state `MUSICBRAINZ_RELEASEGROUPID`/
+  `MUSICBRAINZ_ALBUMID`, the MBID input opens on THAT — so the prompt is
+  already filled in with what the files say, and only a row the user actually
+  changes is sent as a pin. Pinned in `tools/test_import_pipeline.py` (subset
+  move, name override, empty-`files` byte-for-byte, invalid picks move nothing,
+  a pinned mbid on a picked set still stamps and chains) and
+  `tools/test_downloads_layout.py` (the entry route's shape, guard refusals,
+  the tag filter, the 500-file cap).
+
+### 7.80 A rating reaches MusicBrainz by itself, and one press uploads the lot
+
+R408 built the login and the per-album submission; what it left out is the
+owner's actual ask — "when logged in to musicbrainz, for all applicable files,
+ratings should be uploaded". So the write side is now a queue:
+
+- **R434 — a rating write queues its album, and "Upload all ratings" queues
+  every album that has one.** `server.mb_ratings_sync` owns one daemon worker
+  and one deduplicated pending set: `server.ratings` calls `enqueue(folder)`
+  after a successful write (a track scope's folder is its dirname; artist
+  scope is not submitted — MusicBrainz ratings here are per recording and per
+  release group), `POST /api/mb/ratings/submit-all` enqueues every folder the
+  ratings store has a value for, and the worker coalesces a burst (~5 s of
+  quiet), builds each folder's items through the SAME helper the
+  per-album route uses (so the two can never drift), submits ONE request per
+  album, and records a bounded newest-first result list. It never raises, never
+  sends while `musicbrainz_submit_enabled` is off or no login is stored, and
+  answers `GET /api/mb/ratings/queue` with `{connected, enabled, pending,
+  running, recent}`. The login flow itself got easier in the same pass: the
+  PKCE verifier and state are kept server-side (`connect` stores them), so
+  `POST /api/mb/auth/finish` takes either a bare code or the whole redirect
+  URL and needs no verifier from the client; a public client with no secret
+  works (the token body omits `client_secret` when it is blank); and Last.fm's
+  finish gains `wait: true`, which answers `{ok: false, waiting: true}` (HTTP
+  200) while Last.fm's own error 14 says the token is not authorized yet — so
+  the panel polls while the user approves in the browser instead of asking for
+  a second press. Pinned in `tools/test_mb_submit.py` and
+  `tools/test_lastfm.py`.
+
+### 7.81 Settings are eight tabs of rows, and the wizard asks five things
+
+The owner's report: the settings pages "seem very convoluted, and hard to
+browse"; the ask was a monochrome.samidy.com/settings-shaped layout — a title,
+one search box, a short row of tabs, and settings drawn as rows (name, one-line
+explanation, control on the right). Same shape for the first-run wizard, which
+also had to get shorter.
+
+- **R435 — one field renderer, eight tabs, and the old `?tab=` links still
+  land.** `web/src/components/CfgFields.tsx` is the ONE renderer of a
+  `CfgField` (bool/number/select/text/password/list/multi/csv/matrix) plus the
+  `CfgSection`/`CfgRow` frames, imported by both the Settings page and the
+  wizard — the two surfaces cannot drift in the control a setting is edited
+  with. Settings is eight horizontal tabs (General, Appearance, Library,
+  Import, Downloads, Grading, Optimization, Connections), each a column of
+  section cards in the monochrome order (title, blurb, rows), replacing the
+  36-item rail and the three-column grid of label-above-control boxes; the
+  search stays and now jumps to the SECTION that owns a hit and flashes the
+  field (`data-cfg-key`), and every legacy `?tab=` name (`videos`, `security`,
+  `downloads`, `sources`, …) resolves through an alias table to its new tab and
+  section, because links and checks drive those URLs. The wizard is five steps
+  — Library (folder), Account (password), Connections (source credentials +
+  Last.fm + MusicBrainz + Soulseek, all optional), Tools, Done — drawing the
+  same rows as Settings through the same renderer; `configMeta.ts`'s
+  CONFIG_GROUPS/SETUP_STEPS stay the single registry, and
+  `tools/test_setup_coverage.py` still holds every key to a rendered control.
+  The rows owe the phone tap floor the whole app is swept for
+  (`tools/check_responsive.cjs`): the compact selects carry `min-h-8`, and the
+  switch keeps its 18px shape with an invisible 32px hit area at phone width
+  (`.switch-hit`, index.css) — the same move `.tap-hit` makes for icon
+  buttons, sized 32 rather than 44 because switches stack 10px apart in these
+  rows.
+
+### 7.82 The scrobble waits for the listen, as a share of the track
+
+- **R436 — a play is scrobbled at a PERCENTAGE of the track, 70 by default.**
+  The owner's call: "scrobbling to last.fm should only occur if a certain
+  amount of the song is listened to, i think this behavior would be more
+  accurate. Choose a percentage for the default like ~70 %". Last.fm's own bar
+  (half the track OR 4 minutes, whichever comes first) is a floor for what the
+  service ACCEPTS, not what a reader means by "listened": it scrobbled a
+  2-minute track at one minute and a 10-minute one at four. `server.lastfm`'s
+  rule is now `played ≥ lastfm_scrobble_percent % of the file's own duration`
+  (and still nothing under 30 s), with the percentage clamped to **50–100** —
+  the 4-minute ceiling is gone — because a value below half the track is a
+  submission Last.fm discards and a value of 100 means only a play that
+  reached the end counts. `scrobble_percent()`/`scrobble_threshold()`/
+  `meets_rule()` take the config, the refused-play reason states the bar it
+  missed in the library's own words ("played 42 s of the 150 s this library
+  waits for (70 % of the track)"), and the client's own trigger
+  (`PlayerBar.maybeScrobble`) reads the SAME configured percentage so its
+  single request per play is never looser than the server's bar. Pinned in
+  `tools/test_lastfm.py` (the default, the clamp at both ends, 70 % of a
+  100 s and of a 600 s track, the exact tenth-of-a-second boundary, junk
+  values, and the route's stated reason).
 
 ---
 

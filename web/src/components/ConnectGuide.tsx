@@ -24,10 +24,10 @@ const GUIDES = {
       url: "https://www.last.fm/api/account/create",
     },
     {
-      text: "Paste the API key into the Last.fm row on the Sources step (later: Settings → Sources) and the shared secret into the “Last.fm shared secret” field.",
+      text: "Paste the API key into the Last.fm row of the Sources panel (Settings → Connections) and the shared secret into the “Last.fm shared secret” field.",
     },
     {
-      text: "Press Connect to open Last.fm's authorization page, allow the app there, then paste the token Last.fm shows into the box and press Finish.",
+      text: "Press Connect to open Last.fm's authorization page, allow the app there, then press Finish — the panel waits for Last.fm to confirm the approval, and the paste-a-token box stays as a fallback.",
     },
   ] as ConnectStep[],
   musicbrainz: [
@@ -40,7 +40,7 @@ const GUIDES = {
       text: "Paste its Client ID and Client secret into the “MusicBrainz OAuth2 client” fields.",
     },
     {
-      text: "Press Connect, authorize the app in the browser that opens, then paste the code MusicBrainz shows into the box and press Finish.",
+      text: "Press Connect and authorize the app in the browser that opens, then paste back what MusicBrainz shows — the code, or the whole redirect URL it sends you to — and press Finish.",
     },
   ] as ConnectStep[],
 } satisfies Record<string, ConnectStep[]>;

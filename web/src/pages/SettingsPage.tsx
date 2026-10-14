@@ -1,10 +1,15 @@
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Bell, Save, RotateCcw, LayoutGrid, Settings as SettingsIcon, Check, Eye, EyeOff, ChevronDown, ChevronUp, Wand2, X, FolderOpen, Loader2, Copy, Trash2 } from "lucide-react";
+import { Bell, Save, RotateCcw, LayoutGrid, Settings as SettingsIcon, Check, Wand2, FolderOpen, Loader2, Copy, Trash2 } from "lucide-react";
 import { api, deviceUnavailable, unavailableFeatures } from "../api";
 import ConfirmButton from "../components/ConfirmButton";
 import CookieJarPanel from "../components/CookieJarPanel";
+// The ONE field renderer + its section/row frames (components/CfgFields.tsx):
+// the first-run wizard draws the same groups from lib/configMeta, so a setting
+// looks the same wherever the reader meets it.
+import CfgFields, { CfgRow, CfgSection, type FieldCatalog } from "../components/CfgFields";
+import MbLoginPanel from "../components/MbLoginPanel";
 import FolderPicker from "../components/FolderPicker";
 import SourcesPanel from "../components/SourcesPanel";
 import ScrobblePanel from "../components/ScrobblePanel";
@@ -19,6 +24,9 @@ import { ACCENT_PRESETS, DEFAULT_ACCENT, accentHex, normalizeHex, parseHexColor,
 import { DEFAULT_RUN_ALL, OPT_IN_SCRIPTS, SCRIPT_LABEL, isScriptId } from "../lib/scripts";
 import { LOCALES, applyConfigLocale, setLocale, useI18n, type MessageKey } from "../lib/i18n";
 import { CODEC_CHOICES } from "../lib/codecMeta";
+// The field/group shapes and the ONE registry of matrix fields (the per-
+// filetype tag writes this page draws through the shared renderer).
+import { cfgGroup, type CfgField, type CfgGroup } from "../lib/configMeta";
 import { notificationState, requestNotifications, type NotifyState } from "../lib/notify";
 import { pbDiagClear, pbDiagEvents, pbDiagVersion, subscribe, type DiagEvent } from "../lib/pbDiag";
 import { iosShellState } from "../lib/iosState";
@@ -54,6 +62,112 @@ const ACCENT_LABEL: Record<string, MessageKey> = {
   rose: "settings.accent_rose",
   mono: "settings.accent_mono",
 };
+
+/** The eight tabs, in order: the horizontal strip that replaced the 36-item
+ *  rail. Each tab gathers the config groups and the bespoke cards that belong
+ *  together, and a group is listed under exactly one of them (GROUP_TAB). */
+const TABS: { id: string; label: string }[] = [
+  { id: "general", label: "General" },
+  { id: "appearance", label: "Appearance" },
+  { id: "library", label: "Library" },
+  { id: "import", label: "Import" },
+  { id: "downloads", label: "Downloads" },
+  { id: "grading", label: "Grading" },
+  { id: "optimization", label: "Optimization" },
+  { id: "connections", label: "Connections" },
+];
+
+/** Which tab owns each config group. Keyed by TITLE, not position, so
+ *  reordering CFG_GROUPS cannot silently move a group to another tab. */
+const GROUP_TAB: Record<string, string> = {
+  "Server & remote access": "general",
+  Home: "general",
+  "Storage & cleanup": "library",
+  "Tag writes (global switches)": "library",
+  "Embedded covers": "library",
+  "Images (script 5)": "library",
+  "Library codec (script 3)": "library",
+  "Beets tagging (script 14)": "library",
+  "Import & tag cleanup": "library",
+  "Import pipeline": "import",
+  "Release choice": "import",
+  "Release tracklist (script 15)": "import",
+  "Auto-import (MusicBrainz → Soulseek)": "import",
+  "Wishes (auto-fill)": "import",
+  "Artist watch": "import",
+  "Downloads & playback": "downloads",
+  "Soulseek (managed slskd)": "downloads",
+  "Videos (script 11)": "downloads",
+  "Grading (script 4)": "grading",
+  "Audit (script 6)": "grading",
+  "Lyrics & CUEs (scripts 1, 2 & 18)": "optimization",
+  "DR / ReplayGain (script 7)": "optimization",
+  "Key & BPM (script 12)": "optimization",
+  "AutoTag (script 8)": "optimization",
+  "AccurateRip (script 9)": "optimization",
+  "CD Rips (scripts 2/6/9/10)": "optimization",
+  "Artist images & descriptions": "optimization",
+  "AI — lyric transforms & genre ranking": "optimization",
+  "Scrobbling & submissions": "connections",
+  Discovery: "connections",
+  Dependencies: "connections",
+};
+
+/** The tab names a link may still carry (every id the old rail had), mapped to
+ *  the tab — and the section to scroll to — that carries them now. A name
+ *  absent here is DROPPED: an unknown tab must never render an empty column,
+ *  and `?tab=security` / `?tab=downloads` (driven by the check scripts) must
+ *  land on their content in the DOM at once, not behind a second press. */
+const TAB_ALIAS: Record<string, { tab: string; section?: string }> = {
+  general: { tab: "general" },
+  appearance: { tab: "appearance" },
+  security: { tab: "general", section: "Security" },
+  notifications: { tab: "general", section: "Notifications" },
+  remote: { tab: "general", section: "Server & remote access" },
+  home: { tab: "general", section: "Home" },
+  naming: { tab: "library", section: "Naming" },
+  storage: { tab: "library", section: "Storage & cleanup" },
+  tagwrites: { tab: "library", section: "Tag writes (global switches)" },
+  beets: { tab: "library", section: "Beets tagging (script 14)" },
+  flac: { tab: "library", section: "Library codec (script 3)" },
+  embedcovers: { tab: "library", section: "Embedded covers" },
+  images: { tab: "library", section: "Images (script 5)" },
+  importtags: { tab: "library", section: "Import & tag cleanup" },
+  import: { tab: "import", section: "Import pipeline" },
+  releasechoice: { tab: "import", section: "Release choice" },
+  autoimport: { tab: "import", section: "Auto-import (MusicBrainz → Soulseek)" },
+  wishes: { tab: "import", section: "Wishes (auto-fill)" },
+  artistwatch: { tab: "import", section: "Artist watch" },
+  downloads: { tab: "downloads", section: "Downloads & playback" },
+  soulseek: { tab: "downloads", section: "Soulseek (managed slskd)" },
+  videos: { tab: "downloads", section: "Videos (script 11)" },
+  grading: { tab: "grading", section: "Grading (script 4)" },
+  audit: { tab: "grading", section: "Audit (script 6)" },
+  lyrics: { tab: "optimization", section: "Lyrics & CUEs (scripts 1, 2 & 18)" },
+  dr: { tab: "optimization", section: "DR / ReplayGain (script 7)" },
+  audiometa: { tab: "optimization", section: "Key & BPM (script 12)" },
+  autotag: { tab: "optimization", section: "AutoTag (script 8)" },
+  accurip: { tab: "optimization", section: "AccurateRip (script 9)" },
+  cdrips: { tab: "optimization", section: "CD Rips (scripts 2/6/9/10)" },
+  artistimages: { tab: "optimization", section: "Artist images & descriptions" },
+  ai: { tab: "optimization", section: "AI — lyric transforms & genre ranking" },
+  deps: { tab: "connections", section: "Dependencies" },
+  discovery: { tab: "connections", section: "Discovery" },
+  scrobbling: { tab: "connections", section: "Scrobbling & submissions" },
+  sources: { tab: "connections", section: "Sources" },
+};
+
+/** The anchor id a jump scrolls to: the section title, slugged. */
+const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+
+const TAG_WRITES_TITLE = "Tag writes (global switches)";
+
+/** The two per-filetype matrices the shared renderer draws (config holds
+ *  `{ filetype: { row: bool } }`). They are NOT entries of the page's own
+ *  group table — that table is what the coverage test reads — so they are
+ *  taken from configMeta's copy of the same group: one definition of the rows
+ *  and columns, and no second hand-maintained list. */
+const TAG_WRITE_MATRIX: CfgField[] = cfgGroup(TAG_WRITES_TITLE).fields.filter((f) => f.type === "matrix");
 
 const ENCODER_FORMATS = ["flac", "jpeg", "png", "jxl"] as const;
 const ENCODER_FIELDS = ["ENCODER_PROGRAM", "ENCODER_QUALITY", "ENCODER_VERSION"] as const;
@@ -99,119 +213,12 @@ const CFG_DEFAULTS: Record<string, unknown> = {
   cover_review: false,
 };
 
-type ProviderOption = { id: string; label: string; notes?: string; rank?: number };
-
 /** How each genre source answers, in the picker's own words: the level it
  *  files its answer under when it has nothing per track (the picker says
  *  "per track" for anything absent here). */
 const GENRE_LEVEL: Record<string, string> = {
   musicbrainz: "per track, then release group, then artist",
 };
-
-/** Ordered provider picker for a `list` config key: the listed providers are
- *  tried in order (first one with an answer wins). An empty list means the
- *  built-in order, shown as a placeholder. */
-function ProviderOrder({
-  options, builtin, order, onChange, help,
-}: {
-  options: ProviderOption[];
-  builtin: string[];
-  order: string[];
-  onChange: (next: string[]) => void;
-  help?: string;
-}) {
-  const move = (i: number, d: number) => {
-    const next = order.slice();
-    [next[i], next[i + d]] = [next[i + d], next[i]];
-    onChange(next);
-  };
-  return (
-    <div className="space-y-1.5">
-      {order.length === 0 ? (
-        <div className="rounded-md border border-dashed border-border px-2 py-1.5 text-[11px] text-zinc-500">
-          <span className="text-zinc-400">Built-in order: </span>
-          {builtin.map((id) => options.find((o) => o.id === id)?.label ?? id).join(" → ")}
-        </div>
-      ) : (
-        <div className="rounded-md border border-border divide-y divide-border/60">
-          {order.map((id, i) => {
-            const opt = options.find((o) => o.id === id);
-            return (
-              <div key={id} className="flex items-start gap-2 px-2 py-1">
-                <span className="w-4 pt-0.5 text-[10px] text-zinc-600">{i + 1}</span>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-1.5">
-                    <span className="text-[12px] text-zinc-200 truncate">{opt?.label ?? id}</span>
-                    {opt?.rank !== undefined && (
-                      <span
-                        className="chip border border-accent/25 bg-accent/10 text-accent-soft shrink-0"
-                        title="Rank in the BUILT-IN chain — this list replaces the order, it does not change the rank"
-                      >
-                        #{opt.rank} preferred
-                      </span>
-                    )}
-                  </div>
-                  {opt?.notes && <div className="text-[10px] text-zinc-600">{opt.notes}</div>}
-                </div>
-                <button
-                  type="button"
-                  className="min-h-8 min-w-8 md:min-h-0 md:min-w-0 flex items-center justify-center text-zinc-500 hover:text-white disabled:opacity-30"
-                  title="Move up"
-                  disabled={i === 0}
-                  onClick={() => move(i, -1)}
-                >
-                  <ChevronUp className="h-3.5 w-3.5" />
-                </button>
-                <button
-                  type="button"
-                  className="min-h-8 min-w-8 md:min-h-0 md:min-w-0 flex items-center justify-center text-zinc-500 hover:text-white disabled:opacity-30"
-                  title="Move down"
-                  disabled={i === order.length - 1}
-                  onClick={() => move(i, 1)}
-                >
-                  <ChevronDown className="h-3.5 w-3.5" />
-                </button>
-                <button
-                  type="button"
-                  className="min-h-8 min-w-8 md:min-h-0 md:min-w-0 flex items-center justify-center text-zinc-500 hover:text-red-300"
-                  title="Remove from the list (unlisted providers are not used)"
-                  onClick={() => onChange(order.filter((x) => x !== id))}
-                >
-                  <X className="h-3.5 w-3.5" />
-                </button>
-              </div>
-            );
-          })}
-        </div>
-      )}
-      {options.some((o) => !order.includes(o.id)) && (
-        <div className="flex flex-wrap gap-1.5">
-          {options.filter((o) => !order.includes(o.id)).map((o) => (
-            <button
-              key={o.id}
-              type="button"
-              className="chip border border-white/15 bg-white/5 text-[10px] text-zinc-400 hover:text-white tap"
-              title={o.notes}
-              onClick={() => onChange([...order, o.id])}
-            >
-              + {o.label}
-            </button>
-          ))}
-        </div>
-      )}
-      {order.length > 0 && (
-        <button
-          type="button"
-          className="text-[10px] text-zinc-500 hover:text-white underline tap"
-          onClick={() => onChange([])}
-        >
-          Reset to the built-in order
-        </button>
-      )}
-      {help && <div className="text-[10px] text-zinc-600">{help}</div>}
-    </div>
-  );
-}
 
 /** Cover-art defaults (Settings → Images): the region and source list a cover
  *  search starts from. These are the SAVED values (`cover_country`,
@@ -337,7 +344,7 @@ function CoverDefaults() {
 /** The YouTube cookie jar (Settings → Videos).
  *
  *  The panel itself is `components/CookieJarPanel.tsx` — ONE implementation,
- *  shared with Settings → Sources and the wizard's Keys step, so the import box
+ *  shared with Settings → Connections and the wizard's Connections step, so the import box
  *  (and the per-cookie comment list it shows) cannot drift apart. This wrapper
  *  is only where the Videos tab renders it, exactly as before.
  */
@@ -547,6 +554,9 @@ export default function SettingsPage() {
   // Provider catalogues behind the order editors (Discovery / Lyrics lists).
   const { data: discoveryCat } = useQuery({ queryKey: ["discoverySources"], queryFn: api.discoverySources });
   const { data: lyricsCat } = useQuery({ queryKey: ["lyricsProviders"], queryFn: api.lyricsProviders });
+  // Behind the `covers` catalogue and the `coverCountries` option list — the
+  // same cache entry the Cover art panel below reads, so no extra request.
+  const { data: coverCat } = useQuery({ queryKey: ["coverSources"], queryFn: api.coverSources });
 
   // The genre picker offers EXACTLY the chain's own genre sources (the genre
   // rows of /api/sources/health are integrations.GENRE_SOURCES), so a chain
@@ -562,23 +572,10 @@ export default function SettingsPage() {
     .map((s): [string, string] => [s.id, `${s.label} — ${GENRE_LEVEL[s.id] ?? "per track"}`]);
 
   // ---- script options (persisted to config; /api/run uses them as defaults) ----
-  type CfgField =
-    | { k: string; label: string; type: "bool"; help?: string }
-    | { k: string; label: string; type: "number"; min?: number; max?: number; step?: number; help?: string }
-    | { k: string; label: string; type: "select"; options: [string, string][]; help?: string }
-    | { k: string; label: string; type: "text"; help?: string }
-    | { k: string; label: string; type: "password"; help?: string }
-    /** Ordered provider preference list; an empty list means the built-in order. */
-    | { k: string; label: string; type: "list"; catalog: "discovery" | "lyrics"; help?: string }
-    /** Unordered set of values (a string list in config) shown as checkboxes. */
-    | { k: string; label: string; type: "multi"; options: [string, string][]; help?: string }
-    /** Comma-separated list in one text input; kept in config as a string list. */
-    | { k: string; label: string; type: "csv"; help?: string };
-  interface CfgGroup {
-    title: string;
-    blurb?: string;
-    fields: CfgField[];
-  }
+  // The field/group shapes come from lib/configMeta (the ONE registry the
+  // wizard reads too); this array is the page's own copy of its groups, and
+  // the coverage test reads its keys and titles as text — so it stays here
+  // verbatim while the RENDERING goes through the shared renderer.
   const CFG_GROUPS: CfgGroup[] = [
     {
       title: "AI — lyric transforms & genre ranking",
@@ -1186,12 +1183,13 @@ export default function SettingsPage() {
     {
       title: "Scrobbling & submissions",
       blurb:
-        "What the app writes BACK to the services it reads. Last.fm scrobbling sends a now-playing notice the moment a track starts and one scrobble under Last.fm's own rule (played 50 %, or 4 minutes, of a track at least 30 s long) — a scrobble that cannot be sent is queued and retried, never dropped. It needs the app's OWN Last.fm application: the API key from the Sources tab AND the shared secret issued beside it, then one authorization (the Connect button below). MusicBrainz submissions are rating writes only: the app registers an OAuth2 application once, the owner pastes its client id and secret here and authorizes once, and the refresh token that comes back is renewed automatically. Nothing is ever sent with a blank credential, and every failure is reported in the service's own words on Settings → Sources.",
+        "What the app writes BACK to the services it reads. Last.fm scrobbling sends a now-playing notice the moment a track starts and one scrobble once the play reaches the percentage below of a track at least 30 s long — a scrobble that cannot be sent is queued and retried, never dropped. It needs the app's OWN Last.fm application: the API key from the Sources panel AND the shared secret issued beside it, then one authorization (the Connect button below). MusicBrainz submissions are rating writes only: the app registers an OAuth2 application once, the owner pastes its client id and secret here and authorizes once, and the refresh token that comes back is renewed automatically — while logged in, a rating is uploaded for its album by itself, and the panel's Upload all ratings queues every album the library has a rating for. Nothing is ever sent with a blank credential, and every failure is reported in the service's own words.",
       fields: [
         { k: "lastfm_scrobble_enabled", label: "Scrobble plays to Last.fm", type: "bool", help: "Off, nothing is announced or scrobbled and nothing is queued — the session key stays saved, so turning it back on resumes scrobbling without re-authorizing." },
+        { k: "lastfm_scrobble_percent", label: "Scrobble at this much of a track (%)", type: "number", min: 50, max: 100, help: "How far into a track a play must get before it is scrobbled — 70 by default. The floor is 50 % because Last.fm discards a scrobble below half the track; 100 means only a play that reached the end counts. A track shorter than 30 s is never scrobbled." },
         { k: "lastfm_api_secret", label: "Last.fm shared secret", type: "password", help: "Issued beside the API key on the same page (last.fm/api/account/create). The API key alone cannot sign a scrobble — this is what authorizes the Connect flow and every scrobble after it." },
         { k: "musicbrainz_client_id", label: "MusicBrainz OAuth2 client ID", type: "text", help: "Register an application at musicbrainz.org/account/applications (type: installed/public client; redirect URI: urn:ietf:wg:oauth:2.0:oob) and paste its Client ID. The `rating` scope is what lets the app submit your stars; reads need no login at all." },
-        { k: "musicbrainz_client_secret", label: "MusicBrainz OAuth2 client secret", type: "password", help: "The secret the same application page shows. Paste both, then press Connect on the MusicBrainz page (or Settings → Sources) and authorize once." },
+        { k: "musicbrainz_client_secret", label: "MusicBrainz OAuth2 client secret", type: "password", help: "The secret the same application page shows. Paste both, then press Connect on the MusicBrainz page (or Settings → Connections) and authorize once." },
         { k: "musicbrainz_refresh_token", label: "MusicBrainz refresh token", type: "password", help: "Filled by Connect. A long-lived token — only a hand-made one needs pasting here." },
         { k: "musicbrainz_access_token", label: "MusicBrainz access token (renewed automatically)", type: "password", help: "Short-lived, renewed from the refresh token whenever it is due (and on every submission attempt). Nothing to fill in by hand." },
         { k: "musicbrainz_token_expires_at", label: "MusicBrainz access-token expiry (epoch seconds, 0 = unknown)", type: "number", min: 0, help: "When the access token stops being valid. The app renews it on demand, so a stale value here is corrected by the next call, not a failure." },
@@ -1262,7 +1260,7 @@ export default function SettingsPage() {
         },
         {
           k: "acoustid_user_key", label: "AcoustID user key (submissions only; your acoustid.org account)", type: "password",
-          help: "The USER key of your own acoustid.org account (AcoustID → your account → API keys) — the other half of AcoustID's pair, and a different key from the application one. It is needed ONLY to submit fingerprints: a submission gives AcoustID one fingerprint TOGETHER WITH the MusicBrainz recording id it is (MusicBrainz itself never receives a fingerprint), and it comes from the wizard's AcoustID step, the details menus' 'Submit fingerprints (AcoustID)' entry or Run All once you tick it. A pair AcoustID already links — or one this app already sent — is never re-sent, and a blank or refused key comes back in AcoustID's own words. Looking a release up never uses it — the application key alone can do that. The Test button in Settings → Sources proves the key with one probe submission.",
+          help: "The USER key of your own acoustid.org account (AcoustID → your account → API keys) — the other half of AcoustID's pair, and a different key from the application one. It is needed ONLY to submit fingerprints: a submission gives AcoustID one fingerprint TOGETHER WITH the MusicBrainz recording id it is (MusicBrainz itself never receives a fingerprint), and it comes from the wizard's AcoustID step, the details menus' 'Submit fingerprints (AcoustID)' entry or Run All once you tick it. A pair AcoustID already links — or one this app already sent — is never re-sent, and a blank or refused key comes back in AcoustID's own words. Looking a release up never uses it — the application key alone can do that. The Test button in Settings → Connections proves the key with one probe submission.",
         },
         {
           k: "acoustid_fpcalc_path", label: "fpcalc path (blank = bundled/next to the app)", type: "text",
@@ -1450,11 +1448,11 @@ export default function SettingsPage() {
   const [rawConfig, setRawConfig] = useState("{}");
   const [tab, setTab] = useState("general");
   // A link can name the tab it wants: `/settings?tab=videos` is how the
-  // Sources panel's YouTube row reaches that tab's cookie import box.
-  // Every pick goes through here and drops the parameter again (the effect
-  // under NAV adopts whatever the URL names), so the rail and the URL cannot
-  // disagree — and the NEXT click on that link still moves, where navigating
-  // to an already-current URL would not.
+  // Sources panel's YouTube row reaches that tab's cookie import box. Every
+  // pick goes through here and drops the parameter again (the effect below
+  // adopts whatever the URL names through TAB_ALIAS), so the strip and the URL
+  // cannot disagree — and the NEXT click on that link still moves, where
+  // navigating to an already-current URL would not.
   const [params, setParams] = useSearchParams();
   const pickTab = (id: string) => {
     setTab(id);
@@ -1463,6 +1461,23 @@ export default function SettingsPage() {
     next.delete("tab");
     setParams(next, { replace: true });
   };
+  // A jump that needs its tab RENDERED first: a search hit and a `?tab=` name
+  // both leave one here, and the effect below runs it once that tab is in the
+  // DOM (scrolling synchronously inside the click finds nothing, because the
+  // section does not exist yet).
+  const [pending, setPending] = useState<{ tab: string; section: string; key?: string } | null>(null);
+  // The one field (or section) a jump flashes, cleared after a beat — so the
+  // reader sees WHICH of the four controls on screen answered.
+  const [flash, setFlash] = useState<{ key?: string; section?: string } | null>(null);
+  const flashTimer = useRef<number | null>(null);
+  useEffect(() => {
+    if (!pending || pending.tab !== tab) return;
+    document.getElementById("sec-" + slug(pending.section))?.scrollIntoView({ block: "start" });
+    setFlash(pending.key ? { key: pending.key } : { section: pending.section });
+    if (flashTimer.current) window.clearTimeout(flashTimer.current);
+    flashTimer.current = window.setTimeout(() => setFlash(null), 2500);
+    setPending(null);
+  }, [pending, tab]);
   // This browser's own notification permission, re-read on mount so the
   // panel shows the truth even when it was granted in another tab.
   const [notifyState, setNotifyState] = useState<NotifyState>(() => notificationState());
@@ -1471,7 +1486,8 @@ export default function SettingsPage() {
   const { data: beetsStatus, refetch: refetchBeets } = useQuery({
     queryKey: ["beetsStatus"],
     queryFn: api.beetsStatus,
-    enabled: tab === "beets",
+    // The Beets group lives on the Library tab now.
+    enabled: tab === "library",
   });
   const installBeets = async () => {
     setBeetsBusy(true);
@@ -1546,63 +1562,26 @@ export default function SettingsPage() {
   /** The server-side notification switches — one per event kind the backend
    *  publishes (server/events.py). These decide what is published at all; each
    *  client still asks for its own OS permission below. */
-  const NOTIFY_KEYS = [
-    { k: "notify_wish_found", label: "Wish found on Soulseek" },
-    { k: "notify_download_done", label: "Download finished" },
-    { k: "notify_import_ready", label: "Album ready to import" },
-    { k: "notify_import_start", label: "Import started (moving in, then the chain)" },
-    { k: "notify_import_done", label: "Import finished (with the chain's summary)" },
-    { k: "notify_soulseek_download_start", label: "Soulseek download started" },
-    { k: "notify_soulseek_upload_start", label: "A peer started downloading from you" },
+  const NOTIFY_KEYS: CfgField[] = [
+    { k: "notify_wish_found", label: "Wish found on Soulseek", type: "bool" },
+    { k: "notify_download_done", label: "Download finished", type: "bool" },
+    { k: "notify_import_ready", label: "Album ready to import", type: "bool" },
+    { k: "notify_import_start", label: "Import started (moving in, then the chain)", type: "bool" },
+    { k: "notify_import_done", label: "Import finished (with the chain's summary)", type: "bool" },
+    { k: "notify_soulseek_download_start", label: "Soulseek download started", type: "bool" },
+    { k: "notify_soulseek_upload_start", label: "A peer started downloading from you", type: "bool" },
   ];
 
-  const NAV: { id: string; label: string; section?: string }[] = [
-    { id: "general", label: "General" },
-    { id: "appearance", label: "Appearance" },
-    { id: "security", label: t("settings.security") },
-    { id: "notifications", label: t("settings.notifications") },
-    { id: "remote", label: "Remote access" },
-    { id: "downloads", label: "Downloads & playback" },
-    { id: "home", label: "Home" },
-    { id: "naming", label: "Naming" },
-    { id: "storage", label: "Storage" },
-    { id: "tagwrites", label: "Tagging" },
-    { id: "grading", label: "Grading" },
-    { id: "beets", label: "Beets", section: "Integrations" },
-    { id: "releasechoice", label: "Release choice", section: "Integrations" },
-    { id: "soulseek", label: "Soulseek", section: "Integrations" },
-    { id: "autoimport", label: "Auto-import", section: "Integrations" },
-    { id: "wishes", label: "Wishes", section: "Integrations" },
-    { id: "artistwatch", label: "Artist watch", section: "Integrations" },
-    { id: "deps", label: "Dependencies", section: "Integrations" },
-    { id: "discovery", label: "Discovery", section: "Providers" },
-    { id: "scrobbling", label: "Scrobbling & submissions", section: "Providers" },
-    { id: "sources", label: "Sources", section: "Providers" },
-    { id: "artistimages", label: "Artist images", section: "Providers" },
-    { id: "ai", label: "AI", section: "Providers" },
-    { id: "import", label: "Import", section: "Providers" },
-    { id: "flac", label: "FLACs & lossless", section: "Scripts" },
-    { id: "embedcovers", label: "Embedded covers", section: "Scripts" },
-    { id: "images", label: "Images", section: "Scripts" },
-    { id: "lyrics", label: "Lyrics & CUEs", section: "Scripts" },
-    { id: "dr", label: "DR / ReplayGain", section: "Scripts" },
-    { id: "audit", label: "Audit", section: "Scripts" },
-    { id: "autotag", label: "AutoTag", section: "Scripts" },
-    { id: "accurip", label: "AccurateRip", section: "Scripts" },
-    { id: "cdrips", label: "CD Rips", section: "Scripts" },
-    { id: "videos", label: "Videos", section: "Scripts" },
-    { id: "audiometa", label: "Key & BPM", section: "Scripts" },
-    { id: "importtags", label: "Import & tags", section: "Scripts" },
-  ];
-
-  // The other half of `pickTab` above: adopt the tab the URL names, on mount
-  // and on every later change, so a link into a tab works however the page was
-  // reached. A name the rail does not have is dropped — an unknown tab would
-  // render an empty column — which is why this reads NAV, declared just above
-  // and usable here because the effect runs after the render that built it.
+  // The other half of `pickTab`: adopt the tab the URL names — through the
+  // alias table, since every id the old 36-item rail had still ships in links
+  // (the setup wizard, a notification, another page's "go to Settings") — and
+  // scroll/flash the section it names. A name the alias table does not carry
+  // is DROPPED: an unknown tab would render an empty column.
   useEffect(() => {
-    const want = params.get("tab") ?? "";
-    if (want && NAV.some((n) => n.id === want)) setTab(want);
+    const target = TAB_ALIAS[params.get("tab") ?? ""];
+    if (!target) return;
+    setTab(target.tab);
+    if (target.section) setPending({ tab: target.tab, section: target.section });
   }, [params]);
 
   const runPreview = async () => {
@@ -1778,62 +1757,44 @@ export default function SettingsPage() {
     }
   };
 
-  // Tab → group, matched by title (robust against group reordering).
-  const GROUP_BY_TAB: Record<string, CfgGroup> = Object.fromEntries(
-    [
-      ["flac", "FLACs"], ["embedcovers", "Embedded covers"], ["images", "Images"], ["lyrics", "Lyrics & CUEs"],
-      ["dr", "DR / ReplayGain"], ["audit", "Audit"], ["autotag", "AutoTag"],
-      ["accurip", "AccurateRip"], ["tagwrites", "Tag writes"],
-      ["grading", "Grading"], ["cdrips", "CD Rips"], ["videos", "Videos"],
-      ["audiometa", "Key & BPM"], ["beets", "Beets tagging"],
-      ["storage", "Storage & cleanup"],
-      ["soulseek", "Soulseek (managed slskd)"], ["autoimport", "Auto-import"],
-      ["wishes", "Wishes"], ["artistwatch", "Artist watch"],
-      ["releasechoice", "Release choice"], ["remote", "Server & remote access"],
-      ["downloads", "Downloads & playback"],
-      ["home", "Home"], ["deps", "Dependencies"],
-      ["discovery", "Discovery"], ["scrobbling", "Scrobbling & submissions"], ["artistimages", "Artist images"], ["ai", "AI lyric transforms"], ["import", "Import pipeline"],
-      ["importtags", "Import & tag cleanup"],
-    ].map(([tab, prefix]) => [
-      tab,
-      CFG_GROUPS.find((g) => g.title.toLowerCase().startsWith(String(prefix).toLowerCase())),
-    ])
-  ) as Record<string, CfgGroup>;
+  // The groups by title (rebuilt from the array above, so a group cannot be
+  // addressed by a stale index) — what a section renders and a search hit
+  // resolves against.
+  const GROUP_BY_TITLE: Record<string, CfgGroup> = Object.fromEntries(CFG_GROUPS.map((g) => [g.title, g]));
 
-  const searchHits = (() => {
-    if (!searching) return [] as { tab: string; group: string; field: string }[];
+  /** Settings search: matches every field label/key on every tab, plus the two
+   *  sets the page renders by hand (the grading checks and the General
+   *  toggles). A hit carries the TAB and the SECTION it lands in — picking one
+   *  moves the strip and scrolls that section to the top, flashing the field. */
+  const searchHits: { tab: string; section: string; key: string; label: string }[] = (() => {
+    if (!searching) return [];
     const needle = q.trim().toLowerCase();
-    const hits: { tab: string; group: string; field: string }[] = [];
-    const tabFor = (title: string) =>
-      Object.entries(GROUP_BY_TAB).find(([, g]) => g?.title === title)?.[0] ?? "";
+    const hits: { tab: string; section: string; key: string; label: string }[] = [];
     for (const g of CFG_GROUPS) {
-      const tab = tabFor(g.title);
-      for (const f of g.fields) {
+      const tab = GROUP_TAB[g.title];
+      if (!tab) continue;
+      const fields = g.title === TAG_WRITES_TITLE ? [...g.fields, ...TAG_WRITE_MATRIX] : g.fields;
+      for (const f of fields) {
         if (f.label.toLowerCase().includes(needle) || f.k.toLowerCase().includes(needle)) {
-          hits.push({ tab, group: g.title, field: f.label });
+          hits.push({ tab, section: g.title, key: f.k, label: f.label });
         }
       }
     }
     for (const c of GRADE_CHECK_KEYS) {
       if (c.label.toLowerCase().includes(needle) || c.k.toLowerCase().includes(needle)) {
-        hits.push({ tab: "grading", group: "Grading checks", field: c.label });
+        hits.push({ tab: "grading", section: "Grading (script 4)", key: c.k, label: c.label });
       }
     }
     for (const f of GENERAL_TOGGLES) {
       if (f.label.toLowerCase().includes(needle) || f.k.toLowerCase().includes(needle)) {
-        hits.push({ tab: "general", group: "General", field: f.label });
+        hits.push({ tab: "general", section: "Library", key: f.k, label: f.label });
       }
     }
     return hits.slice(0, 24);
   })();
 
   const [encoderTags, setEncoderTags] = useState<Record<string, Record<string, boolean>>>({});
-  const toggleEncoder = (fmt: string, field: string, on: boolean) =>
-    setEncoderTags((e) => ({ ...e, [fmt]: { ...e[fmt], [field]: on } }));
-
   const [audioTagWrites, setAudioTagWrites] = useState<Record<string, Record<string, boolean>>>({});
-  const toggleTagWrite = (ftype: string, fam: string, on: boolean) =>
-    setAudioTagWrites((a) => ({ ...a, [ftype]: { ...a[ftype], [fam]: on } }));
 
   const { data: deps, refetch: refetchDeps } = useQuery({
     queryKey: ["dependencies"],
@@ -1896,9 +1857,10 @@ export default function SettingsPage() {
     enabled: tab === "import",
   });
 
-  // Catalogues behind the `list` fields: pickable providers plus the built-in
-  // order, shown as the placeholder while a list is empty.
-  const listCatalogs: Record<"discovery" | "lyrics", { options: ProviderOption[]; builtin: (k: string) => string[] }> = {
+  // ---- the shared renderer, bound to this page's own state ----------------
+  /** Catalogues behind the `list` fields: pickable providers plus the built-in
+   *  order, shown as the placeholder while a list is empty. */
+  const catalogs: Record<string, FieldCatalog> = {
     discovery: { options: discoveryCat?.sources ?? [], builtin: (k) => discoveryCat?.defaults?.[k] ?? [] },
     // Only time-synced providers are pickable: a plain-lyrics-only entry has
     // no place in the chain (the `synced` flag comes from the endpoint).
@@ -1906,745 +1868,569 @@ export default function SettingsPage() {
       options: (lyricsCat?.sources ?? []).filter((s) => s.synced !== false),
       builtin: () => lyricsCat?.default_order ?? [],
     },
+    // No field on this page names `covers` (the cover FINDER keeps its own
+    // per-search picker and the Cover art panel its own), but the map is keyed
+    // by catalogue name and a `list` field that names one must find it here.
+    covers: {
+      options: (coverCat?.sources ?? []).map((s) => ({ id: s.id, label: s.name })),
+      builtin: () => coverCat?.default_sources ?? [],
+    },
   };
 
-  const renderFields = (fields: CfgField[]) => (
-    <div className="stagger grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-x-6 gap-y-2.5 mt-2">
-      {fields.map((f) => {
-        if (f.type === "list") {
-          const raw = scriptCfg[f.k];
-          const order = Array.isArray(raw)
-            ? raw.map(String)
-            : typeof raw === "string"
-              ? raw.split(/[,;\s]+/).filter(Boolean)
-              : [];
-          return (
-            <div key={f.k} className="md:col-span-2 xl:col-span-3">
-              <div className="text-[11px] text-zinc-400 mb-1">{f.label}</div>
-              <ProviderOrder
-                options={listCatalogs[f.catalog].options}
-                builtin={listCatalogs[f.catalog].builtin(f.k)}
-                order={order}
-                onChange={(next) => setCfg(f.k, next)}
-                help={f.help}
-              />
-            </div>
-          );
-        }
-        if (f.type === "multi") {
-          const on = Array.isArray(scriptCfg[f.k]) ? (scriptCfg[f.k] as unknown[]).map(String) : [];
-          // An id the catalogue does not list (a source the chain dropped, or
-          // the health payload not arrived yet) still has to be visible, or a
-          // saved value would silently disappear from the picker.
-          const opts: [string, string][] = [
-            ...f.options,
-            ...on.filter((v) => !f.options.some(([o]) => o === v)).map((v): [string, string] => [v, v]),
-          ];
-          return (
-            <div key={f.k} className="md:col-span-2 xl:col-span-3">
-              <div className="text-[11px] text-zinc-400 mb-1">{f.label}</div>
-              <div className="flex flex-wrap gap-x-4 gap-y-1">
-                {opts.map(([v, l]) => (
-                  <label key={v} className="flex items-center gap-2 text-[13px] text-zinc-300 cursor-pointer select-none">
-                    <input
-                      type="checkbox"
-                      checked={on.includes(v)}
-                      onChange={(e) => setCfg(f.k, e.target.checked ? [...on, v] : on.filter((x) => x !== v))}
-                    />
-                    {l}
-                  </label>
-                ))}
-              </div>
-              {f.help && <div className="text-[10px] text-zinc-600 mt-1">{f.help}</div>}
-            </div>
-          );
-        }
-        if (f.type === "csv") {
-          // Edited as text, stored as the string list the config expects;
-          // blank entries are dropped by the backend's own normalization.
-          const parts = Array.isArray(scriptCfg[f.k]) ? (scriptCfg[f.k] as unknown[]).map(String) : [];
-          return (
-            <div key={f.k} className="md:col-span-2 xl:col-span-3">
-              <div className="text-[11px] text-zinc-400 mb-1">{f.label}</div>
-              <input
-                className="input !py-1 text-xs w-full tap"
-                value={parts.join(", ")}
-                onChange={(e) => setCfg(f.k, e.target.value.split(",").map((s) => s.trim()))}
-              />
-              {f.help && <div className="text-[10px] text-zinc-600 mt-1">{f.help}</div>}
-            </div>
-          );
-        }
-        return (
-        <label key={f.k} className="flex items-center gap-2 text-[13px] text-zinc-300 cursor-pointer select-none">
-          {f.type === "bool" ? (
-            <div className="w-full">
-              <div className="flex items-center gap-2 w-full">
-                <span className="flex-1 min-w-0">{f.label}</span>
-                <Switch checked={!!scriptCfg[f.k]} onCheckedChange={(v) => setCfg(f.k, v)} />
-              </div>
-              {f.help && <div className="text-[10px] text-zinc-600 mt-0.5">{f.help}</div>}
-            </div>
-          ) : f.type === "select" ? (
-            <div className="w-full">
-              <div className="flex items-center gap-2 w-full">
-                <span className="flex-1 min-w-0">{f.label}</span>
-                <select
-                  className="input !w-32 !py-0.5 text-[11px] shrink-0 tap"
-                  value={String(scriptCfg[f.k] ?? "")}
-                  onChange={(e) => setCfg(f.k, e.target.value)}
-                >
-                  {f.options.map(([v, l]) => (
-                    <option key={v} value={v}>{l}</option>
-                  ))}
-                </select>
-              </div>
-              {f.help && <div className="text-[10px] text-zinc-600 mt-0.5">{f.help}</div>}
-            </div>
-          ) : f.type === "text" ? (
-            <div className="w-full">
-              <div className="flex items-center gap-2 w-full">
-                <span className="flex-1 min-w-0">{f.label}</span>
-                <input
-                  className="input !w-32 !py-0.5 text-[11px] shrink-0 tap"
-                  value={
-                    Array.isArray(scriptCfg[f.k])
-                      ? (scriptCfg[f.k] as unknown[]).join("; ")
-                      : String(scriptCfg[f.k] ?? "")
-                  }
-                  onChange={(e) => setCfg(f.k, e.target.value)}
-                />
-              </div>
-              {f.help && <div className="text-[10px] text-zinc-600 mt-0.5">{f.help}</div>}
-            </div>
-          ) : f.type === "password" ? (
-            <div className="w-full">
-              <div className="flex items-center gap-2 w-full">
-                <span className="flex-1 min-w-0">{f.label}</span>
-                <div className="relative shrink-0">
-                  <input
-                    className="input !w-32 !py-0.5 !pr-7 text-[11px] tap"
-                    type={showPasswords.has(f.k) ? "text" : "password"}
-                    value={String(scriptCfg[f.k] ?? "")}
-                    onChange={(e) => setCfg(f.k, e.target.value)}
-                  />
-                  <button
-                    type="button"
-                    className="absolute right-1.5 top-1/2 -translate-y-1/2 p-[9px] -mx-[9px] text-zinc-500 hover:text-zinc-200"
-                    title={showPasswords.has(f.k) ? "Hide password" : "Show password"}
-                    onClick={() =>
-                      setShowPasswords((prev) => {
-                        const next = new Set(prev);
-                        if (next.has(f.k)) next.delete(f.k);
-                        else next.add(f.k);
-                        return next;
-                      })
-                    }
-                  >
-                    {showPasswords.has(f.k) ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
-                  </button>
-                </div>
-              </div>
-              {f.help && <div className="text-[10px] text-zinc-600 mt-0.5">{f.help}</div>}
-            </div>
-          ) : (
-            <div className="w-full">
-              <div className="flex items-center gap-2 w-full">
-                <span className="flex-1 min-w-0">{f.label}</span>
-                <input
-                  className="input !w-20 !py-0.5 text-[11px] shrink-0 text-right tap"
-                  type="number"
-                  min={f.min}
-                  max={f.max}
-                  step={f.step ?? 1}
-                  value={String(scriptCfg[f.k] ?? "")}
-                  onChange={(e) => setCfg(f.k, Number(e.target.value))}
-                />
-              </div>
-              {f.help && <div className="text-[10px] text-zinc-600 mt-0.5">{f.help}</div>}
-            </div>
-          )}
-        </label>
-        );
-      })}
-    </div>
+  /** The option list a select/multi field names instead of carrying. */
+  const optionsFor = (from: string): [string, string][] => {
+    if (from === "locales") return LOCALES.map((l): [string, string] => [l.code, l.label]);
+    if (from === "coverCountries") return (coverCat?.countries ?? []).map((c): [string, string] => [c, c.toUpperCase()]);
+    if (from === "genres") return genreOptions;
+    return [];
+  };
+
+  /** The password fields' reveal — one Set for the whole page. */
+  const reveal = {
+    has: (k: string) => showPasswords.has(k),
+    toggle: (k: string) =>
+      setShowPasswords((prev) => {
+        const next = new Set(prev);
+        if (next.has(k)) next.delete(k);
+        else next.add(k);
+        return next;
+      }),
+  };
+
+  /** The renderer's value accessors: every key is the page's draft, except the
+   *  two per-filetype matrices, which live in their own state — the same state
+   *  `save` posts and the load / raw-apply effects fill. */
+  const cfgGet = (k: string): unknown => {
+    if (k === "encoder_tags") return encoderTags;
+    if (k === "audio_tag_writes") return audioTagWrites;
+    return scriptCfg[k];
+  };
+  const cfgSet = (k: string, v: unknown) => {
+    if (k === "encoder_tags") setEncoderTags(v as Record<string, Record<string, boolean>>);
+    else if (k === "audio_tag_writes") setAudioTagWrites(v as Record<string, Record<string, boolean>>);
+    else setCfg(k, v);
+  };
+  // ONE binding for every section below, so a section cannot become the odd
+  // one out (its own get/set, its own reveal, its own flash).
+  const fieldsProps = {
+    get: cfgGet,
+    set: cfgSet,
+    catalogs,
+    optionsFor,
+    reveal,
+    highlight: flash?.key ?? null,
+  };
+
+  /** A section frame carrying the jump flash: CfgSection has no highlight of
+   *  its own, so a `?tab=` link that names a section rings it from out here. */
+  const wrapSection = (title: string, node: ReactNode) => (
+    <div className={flash?.section === title ? "rounded-lg ring-1 ring-accent/60" : undefined}>{node}</div>
   );
+
+  /** One config-group section: the shared renderer draws every row, the
+   *  group's own title/blurb frame it (its slugged title is the jump anchor),
+   *  and `extra` is the bespoke block that belongs above this group's fields. */
+  const groupSection = (title: string, extra?: ReactNode) => {
+    const g = GROUP_BY_TITLE[title];
+    if (!g) return null;
+    return wrapSection(
+      g.title,
+      <CfgSection title={g.title} blurb={g.blurb} id={"sec-" + slug(g.title)}>
+        {extra}
+        <CfgFields
+          fields={g.title === TAG_WRITES_TITLE ? [...g.fields, ...TAG_WRITE_MATRIX] : g.fields}
+          {...fieldsProps}
+        />
+      </CfgSection>
+    );
+  };
 
   return (
     <div className="p-6 space-y-5 mx-auto max-w-[1600px]">
-      <PageHeader icon={SettingsIcon} title="Settings">
-        <div className="relative w-full max-w-md">
-          <input
-            className="input !py-1.5 text-sm w-full"
-            placeholder="Search settings… (e.g. cover, lyrics, catalog)"
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-          />
-          {searching && (
-            <div className="absolute z-30 left-0 right-0 top-full mt-1 rounded-lg bg-zinc-950 border border-border shadow-2xl max-h-80 overflow-auto p-1.5">
-              {searchHits.length === 0 && (
-                <div className="px-2.5 py-2 text-xs text-zinc-500">No settings match “{q.trim()}”.</div>
-              )}
-              {searchHits.map((h, i) => (
-                <button
-                  key={i}
-                  className="w-full text-left px-2.5 py-1.5 rounded-md hover:bg-white/10 tap"
-                  onClick={() => {
-                    if (h.tab) pickTab(h.tab);
-                    setQ("");
-                  }}
-                >
-                  <div className="text-xs text-zinc-200">{h.field}</div>
-                  <div className="text-[10px] text-zinc-500">{h.group}</div>
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-      </PageHeader>
+      <PageHeader icon={SettingsIcon} title="Settings" />
 
-      {/* One column below md: the tab rail becomes a horizontal, scrollable
-          strip ABOVE the panels instead of a 176px column beside them, which
-          would leave the fields about eight characters wide on a phone. */}
-      <div className="flex flex-col gap-4 md:flex-row md:gap-6">
-        <nav className="flex shrink-0 gap-1.5 overflow-x-auto pb-1 md:sticky md:top-20 md:self-start md:block md:max-h-[calc(100vh-120px)] md:w-44 md:space-y-0.5 md:overflow-y-auto md:pb-0 md:pr-1">
-          {NAV.map((n, i) => (
-            <div key={n.id} className="shrink-0">
-              {n.section && (i === 0 || NAV[i - 1].section !== n.section) && (
-                <div className="hidden md:block px-3 pt-3 pb-1 text-[10px] uppercase tracking-wider text-zinc-600 first:pt-0">{n.section}</div>
-              )}
+      {/* The search sits directly under the title: it is the way IN to a
+          setting now, rather than one of 36 rail entries. Two characters is
+          where a match becomes worth offering, and picking one moves the strip
+          and scrolls that section to the top. */}
+      <div className="relative w-full max-w-md">
+        <input
+          className="input !py-1.5 text-sm w-full"
+          placeholder="Search settings… (e.g. cover, lyrics, catalog)"
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+        />
+        {searching && (
+          <div className="absolute z-30 left-0 right-0 top-full mt-1 rounded-lg bg-zinc-950 border border-border shadow-2xl max-h-80 overflow-auto p-1.5">
+            {searchHits.length === 0 && (
+              <div className="px-2.5 py-2 text-xs text-zinc-500">No settings match “{q.trim()}”.</div>
+            )}
+            {searchHits.map((h) => (
               <button
-                onClick={() => pickTab(n.id)}
-                className={`w-full whitespace-nowrap text-left px-3 py-2 rounded-md text-xs transition-colors md:py-1.5 ${
-                  tab === n.id ? "bg-accent on-accent font-medium" : "text-zinc-400 hover:text-white hover:bg-panel border border-transparent"
-                } tap`}
+                key={`${h.tab}:${h.key}`}
+                className="w-full text-left px-2.5 py-1.5 rounded-md hover:bg-white/10 tap"
+                onClick={() => {
+                  pickTab(h.tab);
+                  setPending(h);
+                  setQ("");
+                }}
               >
-                {n.label}
+                <div className="text-xs text-zinc-200">{h.label}</div>
+                <div className="text-[10px] text-zinc-500">{h.section}</div>
               </button>
-            </div>
-          ))}
-        </nav>
+            ))}
+          </div>
+        )}
+      </div>
 
-        <div className="flex-1 min-w-0 space-y-5 pb-10">
+      {/* The eight tabs: ONE horizontal, scrollable strip in place of the old
+          rail — a phone keeps the whole set in a swipe instead of a column
+          that would leave the fields about eight characters wide. */}
+      <div className="overflow-x-auto border-b border-border">
+        <div className="flex min-w-max">
+          {TABS.map((tb) => (
+            <button
+              key={tb.id}
+              type="button"
+              onClick={() => pickTab(tb.id)}
+              className={`px-3 py-2 text-sm whitespace-nowrap border-b-2 tap ${
+                tab === tb.id
+                  ? "border-accent text-zinc-100 font-medium"
+                  : "border-transparent text-zinc-400 hover:text-zinc-100"
+              }`}
+            >
+              {tb.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="space-y-5 pb-10">
           {tab === "general" && (
-            <div className="panel space-y-3">
-              <div className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Library</div>
-              <div className="rounded-md border border-border bg-zinc-950/40 px-3 py-2">
-                <div className="flex items-center justify-between gap-2">
-                  <div className="text-xs text-zinc-500 uppercase">Music folder</div>
-                  <button className="btn-ghost !py-1 text-xs tap" onClick={() => setPicker(true)}>
-                    <FolderOpen className="h-3 w-3" /> Change…
-                  </button>
-                </div>
-                <div className="font-mono text-xs text-zinc-200 break-all mt-1">
-                  {musicFolder.trim() || "not configured yet"}
-                </div>
-                <div className="text-[11px] text-zinc-600 mt-1 leading-relaxed">
-                  Pick any folder this machine can open — the picker browses it and the choice is saved at once. The
-                  app's own state moves into <code>&lt;music&gt;/.mlo</code> with it. <code>MLO_MUSIC_FOLDER</code> (Docker
-                  / compose) or <code>music_folder</code> in config.json still work for a first start.
-                </div>
-              </div>
-              <label className="block">
-                <span className="text-xs text-zinc-500 uppercase">Lyrics format</span>
-                <select className="input mt-1" value={lyricsFormat} onChange={(e) => setLyricsFormat(e.target.value)}>
-                  <option value="EMBEDDED">Embedded</option>
-                  <option value="LRC">LRC sidecar</option>
-                  <option value="BOTH">Both</option>
-                </select>
-              </label>
-              <label className="block">
-                <span className="text-xs text-zinc-500 uppercase">Worker threads (0 = every core)</span>
-                <input className="input mt-1" type="number" min={0} max={64} value={workerLimit} onChange={(e) => setWorkerLimit(Number(e.target.value))} />
-                <span className="text-[11px] text-zinc-600 mt-1 block">
-                  How many files the scripts work on at once, and how many CPU threads each of those gets. 0 uses
-                  every core this machine has (each script may keep a lower safe ceiling of its own); 1 runs each
-                  script one file at a time.
-                </span>
-              </label>
-              <label className="block">
-                <span className="text-xs text-zinc-500 uppercase">{t("settings.language")}</span>
-                <select className="input mt-1" value={localeValue} onChange={(e) => pickLocale(e.target.value)}>
-                  {LOCALES.map((l) => (
-                    <option key={l.code} value={l.code}>{l.label}</option>
-                  ))}
-                </select>
-                <span className="text-[11px] text-zinc-600 mt-1 block">{t("settings.language_help")}</span>
-              </label>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-2">
-                {GENERAL_TOGGLES.map((f) => (
-                  <label key={f.k} className="flex items-center gap-2 text-xs text-zinc-300 cursor-pointer select-none">
-                    <span className="flex-1 min-w-0">{f.label}</span>
-                    <Switch checked={!!scriptCfg[f.k]} onCheckedChange={(v) => setCfg(f.k, v)} />
-                  </label>
-                ))}
-              </div>
-              <details className="bg-zinc-950/40 rounded-lg border border-border px-3 py-2">
-                <summary className="text-xs font-medium cursor-pointer text-zinc-400 select-none">
-                  Run All — scripts in order ({runAll.length} enabled)
-                </summary>
-                <div className="grid grid-cols-2 md:grid-cols-3 gap-x-4 gap-y-1.5 mt-2">
-                  {runAllScripts.map((s) => (
-                    <label key={s.id} className="flex items-center gap-2 text-xs text-zinc-300 cursor-pointer select-none">
-                      <input
-                        type="checkbox"
-                        checked={runAll.includes(s.id)}
-                        onChange={(e) => toggleRunAllScript(s.id, e.target.checked)}
-                      />
-                      <span className="text-zinc-600 w-4">{s.id}</span>
-                      {s.label}
-                    </label>
-                  ))}
-                </div>
-                <div className="text-[10px] text-zinc-600 mt-1">The Run All button executes them in this order.</div>
-              </details>
-              <div className="rounded-md border border-border bg-zinc-950/40 px-3 py-2 space-y-1.5">
-                <div className="text-xs text-zinc-400">Setup wizard</div>
-                <div className="text-[11px] text-zinc-600 leading-relaxed">
-                  Re-runs the first-run walkthrough — music folder, dependencies, sources, AI &amp;
-                  artwork. Every step is skippable, and nothing on this page is
-                  reset by it: it only writes what you enter there.
-                </div>
-                <button
-                  className="btn-ghost !py-1 text-xs tap"
-                  onClick={() => navigate("/setup")}
+            <>
+              {wrapSection(
+                "Library",
+                <CfgSection
+                  title="Library"
+                  id={"sec-" + slug("Library")}
+                  blurb="Where the music lives and how the scripts treat it: the folder, the lyric format the library is written in, the worker pool, and this app's language."
                 >
-                  <Wand2 className="h-3 w-3" /> Run the setup wizard again
-                </button>
-              </div>
-              <details className="bg-zinc-950/40 rounded-lg border border-border px-3 py-2">
-                <summary className="text-xs font-medium cursor-pointer text-zinc-400 select-none">
-                  Force options — re-run scripts even when up to date
-                </summary>
-                <label className="flex items-center gap-2 text-xs text-zinc-300 cursor-pointer select-none mt-2 font-medium">
-                  <input
-                    type="checkbox"
-                    checked={FORCE_KEYS.every((f) => !!scriptCfg[f.k])}
-                    onChange={(e) =>
-                      setScriptCfg((c) => {
-                        const next = { ...c };
-                        for (const f of FORCE_KEYS) next[f.k] = e.target.checked;
-                        return next;
-                      })
-                    }
-                  />
-                  Force every script (ignore all &ldquo;already done&rdquo; skips)
-                </label>
-                <div className="grid grid-cols-2 md:grid-cols-3 gap-x-4 gap-y-1.5 mt-1.5">
-                  {FORCE_KEYS.map((f) => (
-                    <label key={f.k} className="flex items-center gap-2 text-xs text-zinc-300 cursor-pointer select-none">
-                      <input
-                        type="checkbox"
-                        checked={!!scriptCfg[f.k]}
-                        onChange={(e) => setCfg(f.k, e.target.checked)}
-                      />
-                      {f.label}
-                    </label>
-                  ))}
-                </div>
-                <div className="text-[10px] text-zinc-600 mt-1">
-                  Forced scripts redo work even when output already looks up to date. Each toggle also appears in its script tab; the Run All button has its own one-shot Force switch.
-                </div>
-              </details>
-            </div>
+                  <div className="divide-y divide-border/50">
+                    <CfgRow
+                      stacked
+                      label="Music folder"
+                      help={<>Pick any folder this machine can open — the picker browses it and the choice is saved at once. The app's own state moves into <code>&lt;music&gt;/.mlo</code> with it. <code>MLO_MUSIC_FOLDER</code> (Docker / compose) or <code>music_folder</code> in config.json still work for a first start.</>}
+                      control={
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="font-mono text-xs text-zinc-200 break-all flex-1 min-w-0">
+                            {musicFolder.trim() || "not configured yet"}
+                          </span>
+                          <button className="btn-ghost !py-1 text-xs tap shrink-0" onClick={() => setPicker(true)}>
+                            <FolderOpen className="h-3 w-3" /> Change…
+                          </button>
+                        </div>
+                      }
+                    />
+                  </div>
+                  <CfgFields fields={GENERAL_TOGGLES} {...fieldsProps} />
+                  <div className="divide-y divide-border/50">
+                    <CfgRow
+                      label="Lyrics format"
+                      help="Where the library's lyrics are stored: embedded in the audio, an .lrc sidecar, or both."
+                      control={
+                        <select className="input !py-1 text-xs w-full sm:w-56 min-h-8" value={lyricsFormat} onChange={(e) => setLyricsFormat(e.target.value)}>
+                          <option value="EMBEDDED">Embedded</option>
+                          <option value="LRC">LRC sidecar</option>
+                          <option value="BOTH">Both</option>
+                        </select>
+                      }
+                    />
+                    <CfgRow
+                      label="Worker threads (0 = every core)"
+                      help="How many files the scripts work on at once, and how many CPU threads each of those gets. 0 uses every core this machine has (each script may keep a lower safe ceiling of its own); 1 runs each script one file at a time."
+                      control={<input className="input !py-1 text-xs w-full sm:w-28 text-right" type="number" min={0} max={64} value={workerLimit} onChange={(e) => setWorkerLimit(Number(e.target.value))} />}
+                    />
+                    <CfgRow
+                      label={t("settings.language")}
+                      help={t("settings.language_help")}
+                      control={
+                        <select className="input !py-1 text-xs w-full sm:w-56 min-h-8" value={localeValue} onChange={(e) => pickLocale(e.target.value)}>
+                          {LOCALES.map((l) => (
+                            <option key={l.code} value={l.code}>{l.label}</option>
+                          ))}
+                        </select>
+                      }
+                    />
+                  </div>
+                  <CfgFields fields={GENERAL_TOGGLES} {...fieldsProps} />
+                </CfgSection>
+              )}
+
+              {wrapSection(
+                "Setup wizard",
+                <CfgSection
+                  title="Setup wizard"
+                  id={"sec-" + slug("Setup wizard")}
+                  blurb="Re-runs the first-run walkthrough — music folder, dependencies, sources, AI & artwork. Every step is skippable, and nothing on this page is reset by it: it only writes what you enter there."
+                >
+                  <button className="btn-ghost !py-1 text-xs tap" onClick={() => navigate("/setup")}>
+                    <Wand2 className="h-3 w-3" /> Run the setup wizard again
+                  </button>
+                </CfgSection>
+              )}
+
+              {groupSection("Server & remote access")}
+              {groupSection("Home")}
+
+              {wrapSection(
+                "Notifications",
+                <CfgSection title={t("settings.notifications")} id={"sec-" + slug("Notifications")} blurb={t("settings.notifications_help")}>
+                  <div className="divide-y divide-border/50">
+                    {/* The two switches that own the whole feature come first,
+                        ahead of the per-kind ones: the master silences every
+                        "nice to know" kind at once, and the outcome switch is
+                        the only one that can silence the loud outcome kinds
+                        (it ships on). */}
+                    <CfgRow
+                      label={t("settings.notify_master")}
+                      control={<Switch checked={!!scriptCfg.notify_enabled} onCheckedChange={(v) => setCfg("notify_enabled", v)} />}
+                    />
+                    <CfgRow
+                      label={t("settings.notify_outcomes")}
+                      control={<Switch checked={!!scriptCfg.notify_outcomes} onCheckedChange={(v) => setCfg("notify_outcomes", v)} />}
+                    />
+                    <CfgRow
+                      label="Browser notifications on this device"
+                      help="The switches above decide what the server publishes; this asks THIS browser for the permission to show it."
+                      control={
+                        <div className="flex items-center gap-2 flex-wrap justify-end">
+                          <button
+                            className="btn-ghost !py-1.5 text-xs tap"
+                            onClick={async () => {
+                              const state = await requestNotifications();
+                              setNotifyState(state);
+                              if (state === "granted") toast.success(t("notify.enabled"));
+                              else if (state === "denied") toast.error(t("notify.blocked_help"));
+                            }}
+                          >
+                            <Bell className="h-3.5 w-3.5" /> {t("notify.enable")}
+                          </button>
+                          {/* Only a real answer is worth a line: the default
+                              states ("prompt"/"unsupported") already read as
+                              the button's own label, so echoing them was the
+                              duplicate the owner saw. */}
+                          {notifyState !== "prompt" && notifyState !== "unsupported" && (
+                            <span className="text-[11px] text-zinc-500">
+                              {notifyState === "granted" ? t("notify.title_granted") : t("notify.blocked")}
+                            </span>
+                          )}
+                        </div>
+                      }
+                    />
+                  </div>
+                  <CfgFields fields={NOTIFY_KEYS} {...fieldsProps} />
+                </CfgSection>
+              )}
+
+              {wrapSection(
+                "Security",
+                <CfgSection
+                  title="Security"
+                  id={"sec-" + slug("Security")}
+                  blurb="The login gate and session handling for a server other machines can reach — the listen address above is what turns the gate on."
+                >
+                  <SecurityPanel />
+                </CfgSection>
+              )}
+            </>
           )}
 
           {tab === "appearance" && (
-            <div className="panel space-y-3">
-              <div className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Appearance</div>
-              {/* Zoom comes first on purpose: index.html turns pinch-zoom OFF,
-                  so this is the only way to scale the app on a phone. */}
-              <label className="flex items-center justify-between gap-3 text-xs text-zinc-300 tap">
-                <span>
-                  Interface zoom <span className="text-zinc-600">(80–150%, default 100%)</span>
-                </span>
-                <span className="flex items-center gap-2">
-                  <input
-                    type="range"
-                    min={80}
-                    max={150}
-                    step={5}
-                    value={zoom}
-                    onChange={(e) => {
-                      const percent = Number(e.target.value);
-                      setZoom(percent);
-                      try {
-                        localStorage.setItem(ZOOM_KEY, String(percent));
-                      } catch {
-                        /* private mode: the zoom applies now and is gone on the next load */
-                      }
-                      // The root font size this scales is main.tsx's (the
-                      // shell's file), so tell it rather than setting a style
-                      // from here — a second source of truth would drift the
-                      // moment the shell reloads on its own.
-                      window.dispatchEvent(new CustomEvent<number>("mlo:zoom", { detail: percent }));
-                    }}
-                    className="w-40 accent-[var(--accent)]"
-                  />
-                  <span className="w-9 text-right tabular-nums">{zoom}%</span>
-                </span>
-              </label>
-              <div>
-                <span className="text-xs text-zinc-500 uppercase">{t("settings.accent")}</span>
-                <div className="flex flex-wrap gap-2 mt-1.5">
-                  {ACCENT_OPTIONS.map((a) => (
-                    <button
-                      key={a.id}
-                      // The tick's OWN ink comes from the swatch's colour, so it
-                      // stays visible on a light preset (the old hardcoded black
-                      // vanished on every dark one).
-                      style={{
-                        backgroundColor: a.hex,
-                        borderColor: accent === a.id ? "#fff" : "#3f3f46",
-                        color: `rgb(${a.fg})`,
-                      }}
-                      title={t(ACCENT_LABEL[a.id])}
-                      aria-label={t(ACCENT_LABEL[a.id])}
-                      aria-pressed={accent === a.id}
-                      onClick={() => pickAccent(a.id)}
-                      className="h-8 w-8 rounded-lg border-2 flex items-center justify-center transition-transform hover:scale-110 tap"
-                    >
-                      {accent === a.id && <Check className="h-4 w-4" />}
-                    </button>
-                  ))}
-                </div>
-                {/* Custom colour: the native picker and the text field are two
-                    views of one value, and the field takes #rgb / #rrggbb with
-                    or without the hash — whichever form is to hand. */}
-                <div className="flex flex-wrap items-center gap-2 mt-2">
-                  <input
-                    type="color"
-                    value={customHex}
-                    title={t("settings.accent_custom")}
-                    aria-label={t("settings.accent_custom")}
-                    onChange={(e) => {
-                      setCustomHex(e.target.value);
-                      setCustomText(e.target.value);
-                    }}
-                    className="h-8 w-10 shrink-0 cursor-pointer rounded-lg border border-border bg-transparent p-0.5"
-                  />
-                  <input
-                    value={customText}
-                    spellCheck={false}
-                    placeholder="#ff7a18"
-                    title={t("settings.accent_hex")}
-                    aria-label={t("settings.accent_hex")}
-                    onChange={(e) => {
-                      setCustomText(e.target.value);
-                      // Only a WHOLE colour moves the swatch, so the field can be
-                      // typed through "#ff7", "#ff7a18" without the picker
-                      // jumping to a colour that was never meant.
-                      const next = normalizeHex(e.target.value);
-                      if (next) setCustomHex(next);
-                    }}
-                    className="input !w-28 !py-1 font-mono text-xs"
-                  />
-                  <button
-                    className="btn !py-1 text-xs tap"
-                    disabled={!typedHex}
-                    onClick={() => typedHex && pickAccent(typedHex)}
-                  >
-                    {t("settings.accent_use")}
-                  </button>
-                  {customText.trim() !== "" && !typedHex && (
-                    <span className="text-[10px] text-red-400">{t("settings.accent_invalid")}</span>
-                  )}
-                  {/* The presets are always one tap above; this is the way back
-                      for a colour that REPLACED the preset that was in force. */}
-                  {customActive && (
-                    <button className="btn-ghost !py-1 text-xs tap" onClick={() => pickAccent(lastPreset.current)}>
-                      {t("settings.accent_back")}
-                    </button>
-                  )}
-                </div>
-                <div className="text-[10px] text-zinc-600 mt-1">{t("settings.accent_help")}</div>
-              </div>
-              <label className="block">
-                <span className="text-xs text-zinc-500 uppercase">Default library view</span>
-                <select className="input mt-1" value={defaultView} onChange={(e) => pickDefaultView(e.target.value)}>
-                  <option value="grid">Grid (cover browse)</option>
-                  <option value="compact">Compact (grading status)</option>
-                  <option value="albums">Albums table</option>
-                  <option value="artists">Artists</option>
-                  <option value="tracks">Tracks</option>
-                </select>
-              </label>
-
-              <div className="pt-2 border-t border-border">
-                <span className="text-xs text-zinc-500 uppercase">Player &amp; lyrics display</span>
-                <div className="space-y-2.5 mt-2">
-                  <label className="flex items-center justify-between gap-3 text-xs text-zinc-300">
-                    <span>Fullscreen lyrics size</span>
-                    <select
-                      className="input !w-28 !py-1 tap"
-                      value={localStorage.getItem("mlo.np.size") ?? "md"}
-                      onChange={(e) => localStorage.setItem("mlo.np.size", e.target.value)}
-                    >
-                      <option value="sm">Small</option>
-                      <option value="md">Medium</option>
-                      <option value="lg">Large</option>
-                    </select>
-                  </label>
-                  <label className="flex items-center justify-between gap-3 text-xs text-zinc-300 cursor-pointer">
-                    <span>Karaoke word highlight (vs. whole-line)</span>
-                    <input
-                      type="checkbox"
-                      defaultChecked={localStorage.getItem("mlo.np.karaoke") === "1"}
-                      onChange={(e) => localStorage.setItem("mlo.np.karaoke", e.target.checked ? "1" : "0")}
-                    />
-                  </label>
-                  <label className="flex items-center justify-between gap-3 text-xs text-zinc-300 cursor-pointer">
-                    <span>Animated background in fullscreen player</span>
-                    <input
-                      type="checkbox"
-                      defaultChecked={localStorage.getItem("mlo.np.orbs") !== "0"}
-                      onChange={(e) => localStorage.setItem("mlo.np.orbs", e.target.checked ? "1" : "0")}
-                    />
-                  </label>
-                  <label className="flex items-center justify-between gap-3 text-xs text-zinc-300">
-                    <span>Default lyrics save target</span>
-                    <select
-                      className="input !w-40 !py-1 tap"
-                      value={localStorage.getItem("mlo.lyricsSaveTarget") ?? "embedded"}
-                      onChange={(e) => localStorage.setItem("mlo.lyricsSaveTarget", e.target.value)}
-                    >
-                      <option value="embedded">Embedded tag</option>
-                      <option value="sidecar">.lrc sidecar</option>
-                      <option value="both">Tag + .lrc</option>
-                    </select>
-                  </label>
-                </div>
-                <div className="text-[10px] text-zinc-600 mt-2">Stored per browser, like the accent color.</div>
-              </div>
-            </div>
-          )}
-
-          {tab === "naming" && (
-            <div className="panel space-y-3">
-              <div className="text-xs font-semibold uppercase tracking-wider text-zinc-500">File naming (Picard-style script)</div>
-              <textarea
-                className="input font-mono text-xs min-h-[110px]"
-                value={namingScript}
-                onChange={(e) => setNamingScript(e.target.value)}
-                spellCheck={false}
-              />
-              <div className="text-[11px] text-zinc-600 leading-relaxed">
-                Variables: <code>%albumartist% %musicbrainz_albumartistid% %album% %musicbrainz_albumid% %title% %musicbrainz_trackid% %releasetype% %year% %originaldate% %date% %label% %releasecountry% %media% %catalognumber% %discnumber% %tracknumber%</code> ·
-                Functions: <code>$if(a,b,c) $left(s,n) $right(s,n) $num(s,n) $lower $upper $replace $eq $ne $not $and $or</code> · <code>/</code> creates folders.
-                Applied from the album page or the bulk selection toolbar; Grading compares every path against this script.
-              </div>
-              <div className="flex items-center gap-4 flex-wrap">
-                <label className="flex items-center gap-2 text-xs text-zinc-400 cursor-pointer select-none">
-                  <Switch checked={shortFolderNames} onCheckedChange={setShortFolderNames} />
-                  Shorter folder names (truncate MusicBrainz IDs to 8 chars)
-                </label>
-                <button
-                  className="btn-ghost !py-1 text-xs tap"
-                  onClick={() =>
-                    setNamingScript(
-                      String((configDefaults as Record<string, unknown> | undefined)?.naming_script ?? "")
-                    )
-                  }
+            <>
+              {wrapSection(
+                "Theme & colour",
+                <CfgSection
+                  title="Theme & colour"
+                  id={"sec-" + slug("Theme & colour")}
+                  blurb="Interface zoom and the accent colour — both stored per browser, like the player's own picks."
                 >
-                  <RotateCcw className="h-3.5 w-3.5" /> Reset to default
-                </button>
-                <button className="btn-ghost !py-1 text-xs tap" onClick={runPreview} disabled={previewing}>
-                  Preview
-                </button>
-              </div>
-              {previewPath && (
-                <div className="rounded-md border border-border bg-panel px-3 py-2 font-mono text-xs text-accent-soft break-all">
-                  <span className="text-zinc-500">sample album → </span>
-                  {previewPath}
-                </div>
-              )}
-              {previewError && (
-                <div className="rounded-md border border-red-900 bg-red-950/40 px-3 py-2 font-mono text-xs text-red-300 break-all">
-                  {previewError}
-                </div>
-              )}
-            </div>
-          )}
-
-          {tab === "sources" && (
-            <div className="panel space-y-3">
-              <SourcesPanel />
-            </div>
-          )}
-
-          {tab === "deps" && (
-            <div className="panel space-y-3">
-              <div className="flex items-center justify-between flex-wrap gap-2">
-                <div>
-                  <div className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Dependencies</div>
-                  <div className="text-[11px] text-zinc-600 mt-0.5">
-                    Tools the scripts need. Installed from <code className="font-mono break-all">{deps?.deps_dir ?? ".dependencies"}</code> or found on PATH.
-                  </div>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  <button className="btn-ghost !py-1 text-xs tap" onClick={() => refetchDeps()} disabled={depsBusy}>
-                    Refresh
-                  </button>
-                  {/* ONE page-level button, and the same words as the
-                      Dependencies page: the press installs what is missing AND
-                      takes the newest release for what is behind, so an update
-                      waiting makes it "Update all". The counts are in the
-                      title/aria-label — the label has no room for them. */}
-                  <button
-                    className="btn-primary !py-1 text-xs min-h-10 md:min-h-0"
-                    onClick={() => installDeps()}
-                    disabled={depsBusy || !!deviceReason || (depMissing.length === 0 && depUpdates.length === 0)}
-                    title={
-                      deviceReason ??
-                      `Installs the ${depMissing.length} missing tool(s) and updates the ${depUpdates.length} behind; an installed tool takes the newest release upstream has, and one already at it is left alone`
-                    }
-                    aria-label={`${depUpdates.length ? "Update all" : "Install all"}: ${depMissing.length} missing, ${depUpdates.length} update(s)`}
-                  >
-                    {depsBusy && !depBusyKey ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
-                    {depsBusy && !depBusyKey ? "Installing…" : depUpdates.length ? "Update all" : "Install all"}
-                  </button>
-                </div>
-              </div>
-              {/* One honest line about what THIS build can do, from the
-                  backend's own capability report. A tool that is missing on a
-                  device that can run one is a download; a device that cannot
-                  start a program at all is never fixed by one, and the table
-                  below says which of the two it is looking at. */}
-              {caps && deviceReason && (
-                <div className="rounded-md border border-border bg-bg/60 px-3 py-2 text-[11px] text-zinc-400 leading-relaxed">
-                  <span className="text-amber-400">Unavailable on this device</span> — {deviceReason}. Browsing,
-                  tagging, playing, playlists and lyrics work here; the {unavailable.length} other feature
-                  {unavailable.length === 1 ? "" : "s"} need a tool this device can start.
-                </div>
-              )}
-              {/* `table-scroll` alone: the utility `overflow-hidden` used to sit
-                  beside it and, living in the utilities layer, won — the table
-                  was clipped instead of scrolled at a phone width. */}
-              <div className="rounded-md border border-border table-scroll">
-                <table className="w-full text-sm">
-                  <thead className="bg-panel/60">
-                    <tr>
-                      <th className="th">Tool</th>
-                      <th className="th">Status</th>
-                      <th className="th">Installed</th>
-                      <th className="th">Latest</th>
-                      <th className="th" title="Newest release upstream has published. An installed tool takes exactly that one when you press Update — the reviewed pin in Latest is what a FIRST install fetches.">
-                        Available
-                      </th>
-                      <th className="th">Path</th>
-                      <th className="th">Action</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {depTools.map((t) => (
-                      <tr key={t.key} className="table-row cursor-default">
-                        <td className="td font-medium">{t.name}</td>
-                        <td className="td">
-                          {t.state === "ok" && <span className="chip bg-emerald-900/50 text-emerald-300 border border-emerald-800">Ready</span>}
-                          {t.state === "update" && (
-                            <span
-                              className="chip bg-amber-900/50 text-amber-300 border border-amber-900"
-                              title={t.note ?? (t.upstream_version ? `Upstream: ${t.upstream_version}` : undefined)}
-                            >
-                              Update
-                            </span>
-                          )}
-                          {t.state === "missing" && (
-                            <span
-                              className={`chip border ${deviceReason || t.installable === false
-                                ? "bg-zinc-800 text-zinc-400 border-zinc-700"
-                                : "bg-red-900/50 text-red-300 border-red-900"}`}
-                              title={deviceReason ?? t.install_note ?? undefined}
-                            >
-                              {deviceReason
-                                ? "Unavailable here"
-                                : t.installable === false
-                                  ? t.install_kind === "system" ? "System package" : "No build here"
-                                  : "Missing"}
-                            </span>
-                          )}
-                          {t.state === "error" && (
-                            <span className="chip bg-zinc-800 text-zinc-400 border border-zinc-700" title={t.note ?? undefined}>
-                              Check failed
-                            </span>
-                          )}
-                        </td>
-                        <td className="td text-zinc-500">{t.installed_version ?? t.detected_version ?? "—"}</td>
-                        <td className="td text-zinc-500">{t.latest_version ?? "—"}</td>
-                        <td className="td text-zinc-500" title={t.note ?? ""}>
-                          {t.upstream_version ?? (deps?.checking ? "checking…" : "—")}
-                        </td>
-                        <td className="td text-zinc-500 truncate max-w-[280px]">{t.path ?? "—"}</td>
-                        {/* The row's own Install/Update, mirroring the chip
-                            beside it: a tool this device cannot install gets no
-                            button, and the row's own note/install_note is the
-                            hover text, so the button cannot promise more than
-                            the row it belongs to. */}
-                        <td className="td">
-                          {(t.state === "missing" || t.state === "update") && (
-                            <button
-                              className="btn-ghost !py-0.5 text-[11px] tap"
-                              onClick={() => installDeps([t.key], t.key)}
-                              disabled={depsBusy || !!deviceReason || t.installable === false}
-                              title={
-                                deviceReason ??
-                                (t.state === "update"
-                                  ? t.note ?? (t.upstream_version ? `Upstream: ${t.upstream_version}` : undefined)
-                                  : t.install_note ?? t.note ?? undefined)
+                  <div className="divide-y divide-border/50">
+                    <CfgRow
+                      label={<>Interface zoom <span className="text-zinc-600">(80–150%, default 100%)</span></>}
+                      help="index.html turns pinch-zoom OFF, so this is the only way to scale the app on a phone."
+                      control={
+                        <span className="flex items-center gap-2">
+                          <input
+                            type="range"
+                            min={80}
+                            max={150}
+                            step={5}
+                            value={zoom}
+                            onChange={(e) => {
+                              const percent = Number(e.target.value);
+                              setZoom(percent);
+                              try {
+                                localStorage.setItem(ZOOM_KEY, String(percent));
+                              } catch {
+                                /* private mode: the zoom applies now and is gone on the next load */
                               }
+                              // The root font size this scales is main.tsx's
+                              // (the shell's file), so tell it rather than
+                              // setting a style from here — a second source of
+                              // truth would drift the moment the shell reloads
+                              // on its own.
+                              window.dispatchEvent(new CustomEvent<number>("mlo:zoom", { detail: percent }));
+                            }}
+                            className="w-40 accent-[var(--accent)]"
+                          />
+                          <span className="w-9 text-right tabular-nums text-xs">{zoom}%</span>
+                        </span>
+                      }
+                    />
+                    <CfgRow
+                      stacked
+                      label={t("settings.accent")}
+                      help={t("settings.accent_help")}
+                      control={
+                        <div>
+                          <div className="flex flex-wrap gap-2">
+                            {ACCENT_OPTIONS.map((a) => (
+                              <button
+                                key={a.id}
+                                // The tick's OWN ink comes from the swatch's
+                                // colour, so it stays visible on a light preset
+                                // (the old hardcoded black vanished on every
+                                // dark one).
+                                style={{
+                                  backgroundColor: a.hex,
+                                  borderColor: accent === a.id ? "#fff" : "#3f3f46",
+                                  color: `rgb(${a.fg})`,
+                                }}
+                                title={t(ACCENT_LABEL[a.id])}
+                                aria-label={t(ACCENT_LABEL[a.id])}
+                                aria-pressed={accent === a.id}
+                                onClick={() => pickAccent(a.id)}
+                                className="h-8 w-8 rounded-lg border-2 flex items-center justify-center transition-transform hover:scale-110 tap"
+                              >
+                                {accent === a.id && <Check className="h-4 w-4" />}
+                              </button>
+                            ))}
+                          </div>
+                          {/* Custom colour: the native picker and the text field
+                              are two views of one value, and the field takes
+                              #rgb / #rrggbb with or without the hash — whichever
+                              form is to hand. */}
+                          <div className="flex flex-wrap items-center gap-2 mt-2">
+                            <input
+                              type="color"
+                              value={customHex}
+                              title={t("settings.accent_custom")}
+                              aria-label={t("settings.accent_custom")}
+                              onChange={(e) => {
+                                setCustomHex(e.target.value);
+                                setCustomText(e.target.value);
+                              }}
+                              className="h-8 w-10 shrink-0 cursor-pointer rounded-lg border border-border bg-transparent p-0.5"
+                            />
+                            <input
+                              value={customText}
+                              spellCheck={false}
+                              placeholder="#ff7a18"
+                              title={t("settings.accent_hex")}
+                              aria-label={t("settings.accent_hex")}
+                              onChange={(e) => {
+                                setCustomText(e.target.value);
+                                // Only a WHOLE colour moves the swatch, so the
+                                // field can be typed through "#ff7", "#ff7a18"
+                                // without the picker jumping to a colour that
+                                // was never meant.
+                                const next = normalizeHex(e.target.value);
+                                if (next) setCustomHex(next);
+                              }}
+                              className="input !w-28 !py-1 font-mono text-xs"
+                            />
+                            <button
+                              className="btn !py-1 text-xs tap"
+                              disabled={!typedHex}
+                              onClick={() => typedHex && pickAccent(typedHex)}
                             >
-                              {depBusyKey === t.key ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
-                              {t.state === "update" ? "Update" : "Install"}
+                              {t("settings.accent_use")}
                             </button>
-                          )}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-              <div className="text-[10px] text-zinc-600">
-                Install downloads from the tool's GitHub releases into the dependencies folder; PATH-installed
-                tools (scoop etc.) are shown as ready. An INSTALLED tool takes the newest release{" "}
-                <span className="text-zinc-500">Available</span> names, and a row already at that version is a
-                no-op — nothing is downloaded. Only a FIRST install takes the reviewed pinned version in{" "}
-                <span className="text-zinc-500">Latest</span>.
-                {deps?.note && <span className="text-amber-500"> Upstream check: {deps.note}</span>}
-              </div>
-            </div>
+                            {customText.trim() !== "" && !typedHex && (
+                              <span className="text-[10px] text-red-400">{t("settings.accent_invalid")}</span>
+                            )}
+                            {/* The presets are always one tap above; this is
+                                the way back for a colour that REPLACED the
+                                preset that was in force. */}
+                            {customActive && (
+                              <button className="btn-ghost !py-1 text-xs tap" onClick={() => pickAccent(lastPreset.current)}>
+                                {t("settings.accent_back")}
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      }
+                    />
+                  </div>
+                </CfgSection>
+              )}
+
+              {wrapSection(
+                "Library display",
+                <CfgSection
+                  title="Library display"
+                  id={"sec-" + slug("Library display")}
+                  blurb="The view the Library opens in on this browser."
+                >
+                  <CfgRow
+                    label="Default library view"
+                    control={
+                      <select className="input !py-1 text-xs w-full sm:w-56 min-h-8" value={defaultView} onChange={(e) => pickDefaultView(e.target.value)}>
+                        <option value="grid">Grid (cover browse)</option>
+                        <option value="compact">Compact (grading status)</option>
+                        <option value="albums">Albums table</option>
+                        <option value="artists">Artists</option>
+                        <option value="tracks">Tracks</option>
+                      </select>
+                    }
+                  />
+                </CfgSection>
+              )}
+
+              {wrapSection(
+                "Player & lyrics display",
+                <CfgSection
+                  title="Player & lyrics display"
+                  id={"sec-" + slug("Player & lyrics display")}
+                  blurb="Fullscreen player and lyrics-editor preferences, stored per browser like the accent colour."
+                >
+                  <div className="divide-y divide-border/50">
+                    <CfgRow
+                      label="Fullscreen lyrics size"
+                      control={
+                        <select
+                          className="input !py-1 text-xs w-full sm:w-56 min-h-8 tap"
+                          value={localStorage.getItem("mlo.np.size") ?? "md"}
+                          onChange={(e) => localStorage.setItem("mlo.np.size", e.target.value)}
+                        >
+                          <option value="sm">Small</option>
+                          <option value="md">Medium</option>
+                          <option value="lg">Large</option>
+                        </select>
+                      }
+                    />
+                    <CfgRow
+                      label="Karaoke word highlight (vs. whole-line)"
+                      control={
+                        <input
+                          type="checkbox"
+                          defaultChecked={localStorage.getItem("mlo.np.karaoke") === "1"}
+                          onChange={(e) => localStorage.setItem("mlo.np.karaoke", e.target.checked ? "1" : "0")}
+                        />
+                      }
+                    />
+                    <CfgRow
+                      label="Animated background in fullscreen player"
+                      control={
+                        <input
+                          type="checkbox"
+                          defaultChecked={localStorage.getItem("mlo.np.orbs") !== "0"}
+                          onChange={(e) => localStorage.setItem("mlo.np.orbs", e.target.checked ? "1" : "0")}
+                        />
+                      }
+                    />
+                    <CfgRow
+                      label="Default lyrics save target"
+                      control={
+                        <select
+                          className="input !py-1 text-xs w-full sm:w-56 min-h-8 tap"
+                          value={localStorage.getItem("mlo.lyricsSaveTarget") ?? "embedded"}
+                          onChange={(e) => localStorage.setItem("mlo.lyricsSaveTarget", e.target.value)}
+                        >
+                          <option value="embedded">Embedded tag</option>
+                          <option value="sidecar">.lrc sidecar</option>
+                          <option value="both">Tag + .lrc</option>
+                        </select>
+                      }
+                    />
+                  </div>
+                </CfgSection>
+              )}
+            </>
           )}
 
-          {GROUP_BY_TAB[tab] && (
-            <div className="panel space-y-3">
-              <div className="text-xs font-bold text-zinc-300">{GROUP_BY_TAB[tab].title}</div>
-              {GROUP_BY_TAB[tab].blurb && <div className="text-[10px] text-zinc-600">{GROUP_BY_TAB[tab].blurb}</div>}
-              {renderFields(GROUP_BY_TAB[tab].fields)}
-              {/* The on-device playback report belongs beside the playback
-                  settings it explains: this is the block the owner opens on the
-                  phone that misbehaves (lib/pbDiag holds the black box, and the
-                  panel is deliberately collapsible so Settings stays readable
-                  for everyone else). */}
-              {tab === "downloads" && <PlaybackDiag />}
-              {tab === "ai" && (
-                <div className="pt-2 border-t border-border space-y-1">
-                  <AiTestButton value={scriptCfg} />
-                  <div className="text-[10px] text-zinc-600">
-                    Tests the values on screen — save first if you want them to stick. Script 17 runs from the
-                    Optimization page, the library selection menu, or as part of Run All.
+          {tab === "library" && (
+            <>
+              {wrapSection(
+                "Naming",
+                <CfgSection
+                  title="Naming"
+                  id={"sec-" + slug("Naming")}
+                  blurb="File naming — a Picard-style script. It is applied from the album page or the bulk selection toolbar, and Grading compares every path against it."
+                >
+                  <textarea
+                    className="input font-mono text-xs min-h-[110px]"
+                    value={namingScript}
+                    onChange={(e) => setNamingScript(e.target.value)}
+                    spellCheck={false}
+                  />
+                  <div className="text-[11px] text-zinc-600 leading-relaxed mt-2">
+                    Variables: <code>%albumartist% %musicbrainz_albumartistid% %album% %musicbrainz_albumid% %title% %musicbrainz_trackid% %releasetype% %year% %originaldate% %date% %label% %releasecountry% %media% %catalognumber% %discnumber% %tracknumber%</code> ·
+                    Functions: <code>$if(a,b,c) $left(s,n) $right(s,n) $num(s,n) $lower $upper $replace $eq $ne $not $and $or</code> · <code>/</code> creates folders.
                   </div>
-                </div>
+                  <div className="flex items-center gap-4 flex-wrap mt-3">
+                    <label className="flex items-center gap-2 text-xs text-zinc-400 cursor-pointer select-none">
+                      <Switch checked={shortFolderNames} onCheckedChange={setShortFolderNames} />
+                      Shorter folder names (truncate MusicBrainz IDs to 8 chars)
+                    </label>
+                    <button
+                      className="btn-ghost !py-1 text-xs tap"
+                      onClick={() =>
+                        setNamingScript(
+                          String((configDefaults as Record<string, unknown> | undefined)?.naming_script ?? "")
+                        )
+                      }
+                    >
+                      <RotateCcw className="h-3.5 w-3.5" /> Reset to default
+                    </button>
+                    <button className="btn-ghost !py-1 text-xs tap" onClick={runPreview} disabled={previewing}>
+                      Preview
+                    </button>
+                  </div>
+                  {previewPath && (
+                    <div className="rounded-md border border-border bg-panel px-3 py-2 font-mono text-xs text-accent-soft break-all mt-2">
+                      <span className="text-zinc-500">sample album → </span>
+                      {previewPath}
+                    </div>
+                  )}
+                  {previewError && (
+                    <div className="rounded-md border border-red-900 bg-red-950/40 px-3 py-2 font-mono text-xs text-red-300 break-all mt-2">
+                      {previewError}
+                    </div>
+                  )}
+                </CfgSection>
               )}
-              {tab === "images" && (
-                <div className="pt-2 border-t border-border">
+
+              {groupSection("Storage & cleanup")}
+              {groupSection("Tag writes (global switches)")}
+              {groupSection("Embedded covers")}
+              {groupSection(
+                "Images (script 5)",
+                /* The cover FINDER's own defaults (region + source list) are
+                   per-search elsewhere; this panel is the saved pair a search
+                   with no overrides uses. */
+                <div className="pb-3 mb-1 border-b border-border/60">
                   <CoverDefaults />
                 </div>
               )}
-              {/* Last.fm / MusicBrainz connection state, the one authorization
-                  flow and the queued count — the switch stays the field above. */}
-              {tab === "scrobbling" && <ScrobblePanel />}
-              {tab === "videos" && <YoutubeCookieJar />}
-              {tab === "beets" && (
-                <div className="pt-2 border-t border-border space-y-2">
+              {groupSection("Library codec (script 3)")}
+
+              {/* The Beets section's own install state, pressed status and
+                  generated config — the switches above decide what an import
+                  writes, this is the tool that runs it. */}
+              {groupSection(
+                "Beets tagging (script 14)",
+                <div className="pb-3 mb-1 border-b border-border/60 space-y-2">
                   <div className="flex items-center gap-2 flex-wrap">
                     <span className="text-xs text-zinc-400">
                       {beetsStatus?.installed
@@ -2663,13 +2449,24 @@ export default function SettingsPage() {
                   )}
                   <div className="text-[10px] text-zinc-600">
                     Run "Tag with beets" from an album page to import it: beets matches against MusicBrainz, writes tags
-                    (translations / work &amp; movement / release-type caps per the settings above) and organizes files with
+                    (translations / work &amp; movement / release-type caps per the settings below) and organizes files with
                     your naming script.
                   </div>
                 </div>
               )}
-              {tab === "import" && (
-                <div className="pt-2 border-t border-border space-y-1">
+
+              {groupSection("Import & tag cleanup")}
+            </>
+          )}
+
+          {tab === "import" && (
+            <>
+              {groupSection(
+                "Import pipeline",
+                /* The chain the SAVED config actually runs, read from the
+                   preview endpoint — a blank or freshly edited field shows here
+                   as what it is, not as what the form hopes. */
+                <div className="pb-3 mb-1 border-b border-border/60 space-y-1">
                   <div className="text-[11px] text-zinc-400">
                     Chain after saving ({chainPreview?.count ?? 0}{" "}
                     {(chainPreview?.count ?? 0) === 1 ? "script" : "scripts"}):{" "}
@@ -2688,142 +2485,299 @@ export default function SettingsPage() {
                   </div>
                 </div>
               )}
-              {tab === "tagwrites" && (
-                <>
-                  <div className="pt-2 border-t border-border">
-                    <div className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Per-filetype tag writes</div>
-                    <div className="text-[10px] text-zinc-600 mt-0.5 mb-1.5">
-                      Which tag families each audio container receives (ANDed with the global switches above).
-                    </div>
-                    <div className="table-scroll">
-                      <table className="w-full text-xs">
-                        <thead>
-                          <tr>
-                            <th className="text-left text-zinc-500 font-medium py-1">Type</th>
-                            {TAG_FAMILIES.map((fam) => (
-                              <th key={fam} className="text-zinc-500 font-medium py-1">{fam}</th>
-                            ))}
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {AUDIO_TYPES.map((t) => (
-                            <tr key={t}>
-                              <td className="py-0.5 text-zinc-300">{t}</td>
-                              {TAG_FAMILIES.map((fam) => (
-                                <td key={fam} className="py-0.5">
-                                  <input
-                                    type="checkbox"
-                                    className="accent-[var(--accent)]"
-                                    checked={!!audioTagWrites[t]?.[fam]}
-                                    onChange={(e) => toggleTagWrite(t, fam, e.target.checked)}
-                                  />
-                                </td>
-                              ))}
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-                  <div className="pt-2 border-t border-border">
-                    <div className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Encoder marker tags</div>
-                    <div className="text-[10px] text-zinc-600 mt-0.5 mb-1.5">
-                      Written to files when re-encoded. QUALITY/VERSION gate re-optimization; PROGRAM is informational.
-                    </div>
-                    <div className="table-scroll">
-                      <table className="w-full text-xs">
-                        <thead>
-                          <tr>
-                            <th className="text-left text-zinc-500 font-medium py-1">Format</th>
-                            {ENCODER_FIELDS.map((f) => (
-                              <th key={f} className="text-zinc-500 font-medium py-1">{f}</th>
-                            ))}
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {ENCODER_FORMATS.map((fmt) => (
-                            <tr key={fmt}>
-                              <td className="py-0.5 text-zinc-300">{fmt}</td>
-                              {ENCODER_FIELDS.map((f) => (
-                                <td key={f} className="py-0.5">
-                                  <input
-                                    type="checkbox"
-                                    className="accent-[var(--accent)]"
-                                    checked={!!encoderTags[fmt]?.[f]}
-                                    onChange={(e) => toggleEncoder(fmt, f, e.target.checked)}
-                                  />
-                                </td>
-                              ))}
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-                </>
-              )}
-            </div>
+              {groupSection("Release choice")}
+              {groupSection("Release tracklist (script 15)")}
+              {groupSection("Auto-import (MusicBrainz → Soulseek)")}
+              {groupSection("Wishes (auto-fill)")}
+              {groupSection("Artist watch")}
+            </>
+          )}
+
+          {tab === "downloads" && (
+            <>
+              {/* The on-device playback report belongs beside the playback
+                  settings it explains: this is the block the owner opens on the
+                  phone that misbehaves (lib/pbDiag holds the black box, and the
+                  panel is deliberately collapsible so Settings stays readable
+                  for everyone else). */}
+              {groupSection("Downloads & playback", <PlaybackDiag />)}
+              {groupSection("Soulseek (managed slskd)")}
+              {groupSection("Videos (script 11)", <YoutubeCookieJar />)}
+            </>
           )}
 
           {tab === "grading" && (
-            <details className="panel" open>
-              <summary className="text-sm font-semibold cursor-pointer">Individual grading checks ({GRADE_CHECK_KEYS.length})</summary>
-              <div className="mt-2">{renderFields(GRADE_CHECK_KEYS)}</div>
-            </details>
+            <>
+              {groupSection(
+                "Grading (script 4)",
+                /* The 57 individual checks stay folded: they are the detail of
+                   the same verdict, and the four switches above are the ones
+                   that change it day to day. */
+                <details className="pb-3 mb-1 border-b border-border/60">
+                  <summary className="text-xs font-medium cursor-pointer text-zinc-400 select-none">
+                    Individual grading checks ({GRADE_CHECK_KEYS.length})
+                  </summary>
+                  <div className="mt-2">
+                    <CfgFields fields={GRADE_CHECK_KEYS} {...fieldsProps} />
+                  </div>
+                </details>
+              )}
+              {groupSection("Audit (script 6)")}
+            </>
           )}
 
-          {tab === "security" && <SecurityPanel />}
-
-          {tab === "notifications" && (
-            <div className="panel space-y-3">
-              <div className="text-xs font-semibold uppercase tracking-wider text-zinc-500">
-                {t("settings.notifications")}
-              </div>
-              <p className="text-[11px] text-zinc-600 leading-relaxed">{t("settings.notifications_help")}</p>
-              {/* The two switches that own the whole feature come first, ahead
-                  of the per-kind ones: the master silences every "nice to
-                  know" kind at once, and the outcome switch is the only one
-                  that can silence the loud outcome kinds (it ships on). */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-2">
-                <label className="flex items-center gap-2 text-xs text-zinc-200 cursor-pointer select-none">
-                  <span className="flex-1 min-w-0">{t("settings.notify_master")}</span>
-                  <Switch checked={!!scriptCfg.notify_enabled} onCheckedChange={(v) => setCfg("notify_enabled", v)} />
-                </label>
-                <label className="flex items-center gap-2 text-xs text-zinc-300 cursor-pointer select-none">
-                  <span className="flex-1 min-w-0">{t("settings.notify_outcomes")}</span>
-                  <Switch checked={!!scriptCfg.notify_outcomes} onCheckedChange={(v) => setCfg("notify_outcomes", v)} />
-                </label>
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                <button
-                  className="btn-ghost !py-1.5 text-xs tap"
-                  onClick={async () => {
-                    const state = await requestNotifications();
-                    setNotifyState(state);
-                    if (state === "granted") toast.success(t("notify.enabled"));
-                    else if (state === "denied") toast.error(t("notify.blocked_help"));
-                  }}
+          {tab === "optimization" && (
+            <>
+              {wrapSection(
+                "Run All",
+                <CfgSection
+                  title="Run All"
+                  id={"sec-" + slug("Run All")}
+                  blurb={`The Run All button executes these scripts in this order — ${runAll.length} enabled. A script the shipped chain does not carry (an opt-in one) stays listed after the enabled ones.`}
                 >
-                  <Bell className="h-3.5 w-3.5" /> {t("notify.enable")}
-                </button>
-                {/* Only a real answer is worth a line: the default states
-                    ("prompt"/"unsupported") already read as the button's own
-                    label, so echoing it here was the duplicate the owner saw. */}
-                {notifyState !== "prompt" && notifyState !== "unsupported" && (
-                  <span className="text-[11px] text-zinc-500">
-                    {notifyState === "granted" ? t("notify.title_granted") : t("notify.blocked")}
-                  </span>
-                )}
-              </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-2">
-                {NOTIFY_KEYS.map((f) => (
-                  <label key={f.k} className="flex items-center gap-2 text-xs text-zinc-300 cursor-pointer select-none">
-                    <span className="flex-1 min-w-0">{f.label}</span>
-                    <Switch checked={!!scriptCfg[f.k]} onCheckedChange={(v) => setCfg(f.k, v)} />
+                  <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-x-4 gap-y-1.5">
+                    {runAllScripts.map((s) => (
+                      <label key={s.id} className="flex items-center gap-2 text-xs text-zinc-300 cursor-pointer select-none">
+                        <input
+                          type="checkbox"
+                          checked={runAll.includes(s.id)}
+                          onChange={(e) => toggleRunAllScript(s.id, e.target.checked)}
+                        />
+                        <span className="text-zinc-600 w-4">{s.id}</span>
+                        {s.label}
+                      </label>
+                    ))}
+                  </div>
+                  <label className="flex items-center gap-2 text-xs text-zinc-300 cursor-pointer select-none mt-3 font-medium">
+                    <input
+                      type="checkbox"
+                      checked={FORCE_KEYS.every((f) => !!scriptCfg[f.k])}
+                      onChange={(e) =>
+                        setScriptCfg((c) => {
+                          const next = { ...c };
+                          for (const f of FORCE_KEYS) next[f.k] = e.target.checked;
+                          return next;
+                        })
+                      }
+                    />
+                    Force every script (ignore all &ldquo;already done&rdquo; skips)
                   </label>
-                ))}
-              </div>
-            </div>
+                  <div className="text-[10px] text-zinc-600 mt-1">
+                    The master force switch for the per-script toggles below; the Run All button has its own one-shot Force switch.
+                  </div>
+                </CfgSection>
+              )}
+
+              {wrapSection(
+                "Force options",
+                <CfgSection
+                  title="Force options"
+                  id={"sec-" + slug("Force options")}
+                  blurb="Forced scripts redo work even when output already looks up to date. Each toggle also appears in its own section, and the Run All section above forces them all at once."
+                >
+                  <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-x-4 gap-y-1.5">
+                    {FORCE_KEYS.map((f) => (
+                      <label key={f.k} className="flex items-center gap-2 text-xs text-zinc-300 cursor-pointer select-none">
+                        <input
+                          type="checkbox"
+                          checked={!!scriptCfg[f.k]}
+                          onChange={(e) => setCfg(f.k, e.target.checked)}
+                        />
+                        {f.label}
+                      </label>
+                    ))}
+                  </div>
+                </CfgSection>
+              )}
+
+              {groupSection("Lyrics & CUEs (scripts 1, 2 & 18)")}
+              {groupSection("DR / ReplayGain (script 7)")}
+              {groupSection("Key & BPM (script 12)")}
+              {groupSection("AutoTag (script 8)")}
+              {groupSection("AccurateRip (script 9)")}
+              {groupSection("CD Rips (scripts 2/6/9/10)")}
+              {groupSection("Artist images & descriptions")}
+              {groupSection(
+                "AI — lyric transforms & genre ranking",
+                <div className="pb-3 mb-1 border-b border-border/60 space-y-1">
+                  <AiTestButton value={scriptCfg} />
+                  <div className="text-[10px] text-zinc-600">
+                    Tests the values on screen — save first if you want them to stick. Script 17 runs from the
+                    Optimization page, the library selection menu, or as part of Run All.
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+
+          {tab === "connections" && (
+            <>
+              {groupSection(
+                "Scrobbling & submissions",
+                /* Last.fm's now-playing/scrobble state, the one authorization
+                   flow, the queued count, and the MusicBrainz rating write-back
+                   — the switches that turn them on stay the fields below. */
+                <div className="pb-3 mb-1 border-b border-border/60 space-y-2">
+                  <ScrobblePanel />
+                  <MbLoginPanel ids={[]} kind="album" />
+                </div>
+              )}
+
+              {wrapSection(
+                "Sources",
+                <CfgSection
+                  title="Sources"
+                  id={"sec-" + slug("Sources")}
+                  blurb="The API keys and endpoint overrides behind every provider the app asks — each row names the service's own state."
+                >
+                  <SourcesPanel />
+                </CfgSection>
+              )}
+
+              {groupSection("Discovery")}
+
+              {groupSection(
+                "Dependencies",
+                /* The pinned tool table with its own per-row install, moved
+                   whole from the old Dependencies tab. */
+                <div className="pb-3 mb-1 border-b border-border/60 space-y-2">
+                  <div className="flex items-center justify-between flex-wrap gap-2">
+                    <div className="text-[11px] text-zinc-600">
+                      Tools the scripts need. Installed from <code className="font-mono break-all">{deps?.deps_dir ?? ".dependencies"}</code> or found on PATH.
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <button className="btn-ghost !py-1 text-xs tap" onClick={() => refetchDeps()} disabled={depsBusy}>
+                        Refresh
+                      </button>
+                      {/* ONE page-level button, and the same words as the
+                          Dependencies page: the press installs what is missing AND
+                          takes the newest release for what is behind, so an update
+                          waiting makes it "Update all". The counts are in the
+                          title/aria-label — the label has no room for them. */}
+                      <button
+                        className="btn-primary !py-1 text-xs min-h-10 md:min-h-0"
+                        onClick={() => installDeps()}
+                        disabled={depsBusy || !!deviceReason || (depMissing.length === 0 && depUpdates.length === 0)}
+                        title={
+                          deviceReason ??
+                          `Installs the ${depMissing.length} missing tool(s) and updates the ${depUpdates.length} behind; an installed tool takes the newest release upstream has, and one already at it is left alone`
+                        }
+                        aria-label={`${depUpdates.length ? "Update all" : "Install all"}: ${depMissing.length} missing, ${depUpdates.length} update(s)`}
+                      >
+                        {depsBusy && !depBusyKey ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+                        {depsBusy && !depBusyKey ? "Installing…" : depUpdates.length ? "Update all" : "Install all"}
+                      </button>
+                    </div>
+                  </div>
+                  {/* One honest line about what THIS build can do, from the
+                      backend's own capability report. A tool that is missing on a
+                      device that can run one is a download; a device that cannot
+                      start a program at all is never fixed by one, and the table
+                      below says which of the two it is looking at. */}
+                  {caps && deviceReason && (
+                    <div className="rounded-md border border-border bg-bg/60 px-3 py-2 text-[11px] text-zinc-400 leading-relaxed">
+                      <span className="text-amber-400">Unavailable on this device</span> — {deviceReason}. Browsing,
+                      tagging, playing, playlists and lyrics work here; the {unavailable.length} other feature
+                      {unavailable.length === 1 ? "" : "s"} need a tool this device can start.
+                    </div>
+                  )}
+                  {/* `table-scroll` alone: the utility `overflow-hidden` used to sit
+                      beside it and, living in the utilities layer, won — the table
+                      was clipped instead of scrolled at a phone width. */}
+                  <div className="rounded-md border border-border table-scroll">
+                    <table className="w-full text-sm">
+                      <thead className="bg-panel/60">
+                        <tr>
+                          <th className="th">Tool</th>
+                          <th className="th">Status</th>
+                          <th className="th">Installed</th>
+                          <th className="th">Latest</th>
+                          <th className="th" title="Newest release upstream has published. An installed tool takes exactly that one when you press Update — the reviewed pin in Latest is what a FIRST install fetches.">
+                            Available
+                          </th>
+                          <th className="th">Path</th>
+                          <th className="th">Action</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {depTools.map((t) => (
+                          <tr key={t.key} className="table-row cursor-default">
+                            <td className="td font-medium">{t.name}</td>
+                            <td className="td">
+                              {t.state === "ok" && <span className="chip bg-emerald-900/50 text-emerald-300 border border-emerald-800">Ready</span>}
+                              {t.state === "update" && (
+                                <span
+                                  className="chip bg-amber-900/50 text-amber-300 border border-amber-900"
+                                  title={t.note ?? (t.upstream_version ? `Upstream: ${t.upstream_version}` : undefined)}
+                                >
+                                  Update
+                                </span>
+                              )}
+                              {t.state === "missing" && (
+                                <span
+                                  className={`chip border ${deviceReason || t.installable === false
+                                    ? "bg-zinc-800 text-zinc-400 border-zinc-700"
+                                    : "bg-red-900/50 text-red-300 border-red-900"}`}
+                                  title={deviceReason ?? t.install_note ?? undefined}
+                                >
+                                  {deviceReason
+                                    ? "Unavailable here"
+                                    : t.installable === false
+                                      ? t.install_kind === "system" ? "System package" : "No build here"
+                                      : "Missing"}
+                                </span>
+                              )}
+                              {t.state === "error" && (
+                                <span className="chip bg-zinc-800 text-zinc-400 border border-zinc-700" title={t.note ?? undefined}>
+                                  Check failed
+                                </span>
+                              )}
+                            </td>
+                            <td className="td text-zinc-500">{t.installed_version ?? t.detected_version ?? "—"}</td>
+                            <td className="td text-zinc-500">{t.latest_version ?? "—"}</td>
+                            <td className="td text-zinc-500" title={t.note ?? ""}>
+                              {t.upstream_version ?? (deps?.checking ? "checking…" : "—")}
+                            </td>
+                            <td className="td text-zinc-500 truncate max-w-[280px]">{t.path ?? "—"}</td>
+                            {/* The row's own Install/Update, mirroring the chip
+                                beside it: a tool this device cannot install gets no
+                                button, and the row's own note/install_note is the
+                                hover text, so the button cannot promise more than
+                                the row it belongs to. */}
+                            <td className="td">
+                              {(t.state === "missing" || t.state === "update") && (
+                                <button
+                                  className="btn-ghost !py-0.5 text-[11px] tap"
+                                  onClick={() => installDeps([t.key], t.key)}
+                                  disabled={depsBusy || !!deviceReason || t.installable === false}
+                                  title={
+                                    deviceReason ??
+                                    (t.state === "update"
+                                      ? t.note ?? (t.upstream_version ? `Upstream: ${t.upstream_version}` : undefined)
+                                      : t.install_note ?? t.note ?? undefined)
+                                  }
+                                >
+                                  {depBusyKey === t.key ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
+                                  {t.state === "update" ? "Update" : "Install"}
+                                </button>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  <div className="text-[10px] text-zinc-600">
+                    Install downloads from the tool's GitHub releases into the dependencies folder; PATH-installed
+                    tools (scoop etc.) are shown as ready. An INSTALLED tool takes the newest release{" "}
+                    <span className="text-zinc-500">Available</span> names, and a row already at that version is a
+                    no-op — nothing is downloaded. Only a FIRST install takes the reviewed pinned version in{" "}
+                    <span className="text-zinc-500">Latest</span>.
+                    {deps?.note && <span className="text-amber-500"> Upstream check: {deps.note}</span>}
+                  </div>
+                </div>
+              )}
+            </>
           )}
 
           <details className="panel">
@@ -2916,7 +2870,6 @@ export default function SettingsPage() {
               </span>
             )}
           </div>
-        </div>
       </div>
       {picker && (
         <FolderPicker

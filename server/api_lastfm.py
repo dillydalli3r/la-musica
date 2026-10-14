@@ -3,8 +3,11 @@
     GET  /api/lastfm/status          the one shape the panel reads (no network)
     POST /api/lastfm/connect         -> {url} the user authorizes, using the
                                      app's own key + secret from config
-    POST /api/lastfm/connect/finish  {token} -> stores the session key and the
-                                     username Last.fm reports
+    POST /api/lastfm/connect/finish  {token, wait?} -> stores the session key
+                                     and the username Last.fm reports; with
+                                     `wait`, a not-yet-authorized token is a
+                                     200 {ok:false, waiting:true} instead of an
+                                     error, so a UI can poll
     POST /api/lastfm/disconnect      forget the session (the key/secret stay)
     POST /api/lastfm/now-playing     {path} — fire-and-forget from the player
     POST /api/lastfm/scrobble        {path, played_at, played_seconds}
@@ -39,6 +42,7 @@ router = APIRouter(tags=["lastfm"])
 
 class TokenPost(BaseModel):
     token: str = ""
+    wait: bool = False
 
 
 class PathPost(BaseModel):
@@ -95,15 +99,22 @@ def connect_finish_post(req: TokenPost):
     """Exchange the authorized token for a session and store it.
 
     The token is consumed once, so a stale one is Last.fm's own refusal back.
+    With ``wait=true`` the ONE refusal a user causes by not having finished in
+    the browser yet — Last.fm error 14, NOT_AUTHORIZED — answers 200
+    ``{ok: false, waiting: true, reason: …}`` so a polling UI need not read it
+    as a failure; every other refusal keeps today's shape, and success is
+    unchanged. The route never blocks: one upstream call per request.
     """
     cfg = load_config()
-    session, err = lastfm.get_session(cfg, req.token)
-    if err:
-        return {"ok": False, "error": err}
-    cfg["lastfm_session_key"] = session["key"]
-    cfg["lastfm_username"] = session.get("name") or ""
+    out = lastfm.get_session(cfg, req.token)
+    if not out.get("ok"):
+        if req.wait and out.get("code") == "NOT_AUTHORIZED":
+            return {"ok": False, "waiting": True, "reason": out.get("reason") or ""}
+        return {"ok": False, "error": out.get("reason") or ""}
+    cfg["lastfm_session_key"] = out["key"]
+    cfg["lastfm_username"] = out.get("name") or ""
     _save(cfg)
-    return {"ok": True, "username": session.get("name") or "",
+    return {"ok": True, "username": out.get("name") or "",
             "status": lastfm.status(load_config())}
 
 
@@ -155,11 +166,12 @@ def scrobble_post(req: ScrobblePost):
                 "queued_count": lastfm.queued_count(cfg),
                 "error": meta["error"]}
     played = req.played_seconds or 0.0
-    if not lastfm.meets_rule(meta["duration"], played):
-        need = lastfm.scrobble_threshold(meta["duration"])
+    if not lastfm.meets_rule(meta["duration"], played, cfg):
+        need = lastfm.scrobble_threshold(meta["duration"], cfg)
         reason = ("the track is shorter than 30 s, so it is never scrobbled"
                   if need is None else
-                  f"played {int(played)} s of the {int(need)} s Last.fm needs")
+                  f"played {int(played)} s of the {int(need)} s this library "
+                  f"waits for ({int(lastfm.scrobble_percent(cfg))} % of the track)")
         return {"ok": False, "scrobbled": False, "queued": False,
                 "queued_count": lastfm.queued_count(cfg),
                 "error": "", "reason": reason}

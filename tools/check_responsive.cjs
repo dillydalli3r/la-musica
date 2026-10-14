@@ -139,6 +139,10 @@ const settleBox = async (el) => {
  * its class list, whichever identifies it; `h` is the measured painted height
  * (px) at 390 wide. */
 const SMALL_AT_PHONE = {
+  "/settings": [
+    { match: "relative inline-flex h-[18px] w-[32px]", h: 18,
+      why: "a config switch: 18px tall by design (a toggle reads as a toggle), with a 32px hit area at phone width (`.switch-hit`, index.css). At the default scroll position the page's sticky save bar overlays the first rows, which is what leaves the CENTRE probe short — scrolling the row into the open gives the thumb the whole 32px" },
+  ],
   "/artist": [
     { match: "look for one or upload your own", h: 16,
       why: "prose action inside the 'No artist image yet — …' sentence: a 44px box would re-flow the paragraph it is a word of" },

@@ -68,6 +68,12 @@ ACCESS_KEY = "musicbrainz_access_token"
 EXPIRES_KEY = "musicbrainz_token_expires_at"
 USERNAME_KEY = "musicbrainz_username"
 SUBMIT_KEY = "musicbrainz_submit_enabled"
+# The in-flight PKCE halves of a Connect that has not finished yet: `connect_url`
+# writes them so a client may hand back NOTHING but the code, and finish/
+# disconnect clear them. They are never shown in Settings (like the app's other
+# PKCE state, they are a single-use handshake value).
+PKCE_VERIFIER_KEY = "musicbrainz_pkce_verifier"
+PKCE_STATE_KEY = "musicbrainz_pkce_state"
 
 # An access token is renewed this long BEFORE it expires, so a request built a
 # moment before the deadline never races it.
@@ -217,7 +223,9 @@ def access_token(cfg, force=False):
     anyone."""
     cid, secret = _client(cfg)
     refresh = str((cfg or {}).get(REFRESH_KEY) or "").strip()
-    if not (cid and secret and refresh):
+    # The secret is OPTIONAL: a PKCE public client registers none, and a blank
+    # one must not veto a login that otherwise has everything it needs.
+    if not (cid and refresh):
         return "", "", ""
     token = str((cfg or {}).get(ACCESS_KEY) or "").strip()
     try:
@@ -227,9 +235,11 @@ def access_token(cfg, force=False):
     if token and not force and expires > time.time() + _EXPIRY_SKEW:
         return token, "", ""
     where = "POST /oauth2/token (refresh_token)"
-    body, err = _post_form(TOKEN_URL, {
-        "grant_type": "refresh_token", "refresh_token": refresh,
-        "client_id": cid, "client_secret": secret})
+    data = {"grant_type": "refresh_token", "refresh_token": refresh,
+            "client_id": cid}
+    if secret:                      # omitted ENTIRELY for a public client
+        data["client_secret"] = secret
+    body, err = _post_form(TOKEN_URL, data)
     fresh = _tokens(body, fallback_refresh=refresh)
     if not fresh[ACCESS_KEY]:
         return "", (err or f"{where} answered no access_token"), where
@@ -243,24 +253,26 @@ def access_token(cfg, force=False):
 def status(cfg=None):
     """What the settings/panel shows: is a login saved, WHO, and is it live."""
     cfg = cfg or {}
-    cid, secret = _client(cfg)
+    cid, _ = _client(cfg)
     refresh = str(cfg.get(REFRESH_KEY) or "").strip()
     username = str(cfg.get(USERNAME_KEY) or "").strip()
     try:
         expires = float(cfg.get(EXPIRES_KEY) or 0)
     except (TypeError, ValueError):
         expires = 0.0
-    connected = bool(cid and secret and refresh)
+    # The secret is deliberately NOT part of "connected": a PKCE public client
+    # has none, and requiring it would call a valid login disconnected.
+    connected = bool(cid and refresh)
     if connected and username:
         detail = f"connected as {username}"
     elif connected:
         detail = "connected to MusicBrainz"
-    elif cid and secret:
+    elif cid:
         detail = ("the MusicBrainz client id/secret are saved, but no account "
                   "is connected yet")
     else:
         detail = "no MusicBrainz login is saved"
-    return {
+    out = {
         "connected": connected,
         "username": username,
         "client_id_set": bool(cid),
@@ -269,6 +281,14 @@ def status(cfg=None):
         "expires_at": int(expires),
         "detail": detail,
     }
+    # How many folders the background upload queue is holding — read lazily so
+    # status stays answerable even if the sync module cannot be imported.
+    try:
+        from server import mb_ratings_sync
+        out["pending"] = int(mb_ratings_sync.state().get("pending") or 0)
+    except Exception:
+        out["pending"] = 0
+    return out
 
 
 def whoami(cfg=None):
@@ -279,9 +299,9 @@ def whoami(cfg=None):
     reports as `skipped`, never a pass) and `detail` is either the account the
     login belongs to or MusicBrainz's own refusal. Never raises."""
     cfg = cfg or {}
-    cid, secret = _client(cfg)
+    cid, _ = _client(cfg)
     refresh = str(cfg.get(REFRESH_KEY) or "").strip()
-    if not (cid and secret and refresh):
+    if not (cid and refresh):
         return {"ok": False, "checked": "",
                 "detail": ("no MusicBrainz login is saved — connect the app to "
                            "the account whose ratings it should submit "
@@ -312,10 +332,11 @@ def connect_url(cfg=None):
     """The MusicBrainz authorize URL to open, plus the PKCE verifier to keep.
 
     -> ``{ok, url, verifier, detail}``. The verifier is the secret half of
-    PKCE; it must come back with the code to ``finish_connect``, so the caller
-    (the panel) holds it in component state, never in the config. Without a
-    saved client id there is no URL to build and `ok` is False with a sentence
-    saying what to paste first."""
+    PKCE and ``state`` is the CSRF nonce the URL carries; BOTH are persisted in
+    config here, so a client may finish the login with the CODE ALONE (the
+    panel's own copy of the verifier is still returned, and still wins if it
+    sends one). Without a saved client id there is no URL to build and `ok` is
+    False with a sentence saying what to paste first."""
     cid, _ = _client(cfg)
     if not cid:
         return {"ok": False, "url": "", "verifier": "",
@@ -325,6 +346,7 @@ def connect_url(cfg=None):
                            "its id and secret in Settings → Scrobbling & "
                            "submissions first")}
     verifier = secrets.token_urlsafe(64)          # 86 URL-safe chars, in PKCE's range
+    state = secrets.token_urlsafe(16)
     challenge = base64.urlsafe_b64encode(
         hashlib.sha256(verifier.encode("ascii")).digest()).rstrip(b"=").decode("ascii")
     params = {
@@ -332,10 +354,11 @@ def connect_url(cfg=None):
         "client_id": cid,
         "redirect_uri": REDIRECT_URI,
         "scope": SCOPE,
-        "state": secrets.token_urlsafe(16),
+        "state": state,
         "code_challenge": challenge,
         "code_challenge_method": "S256",
     }
+    _store(cfg, **{PKCE_VERIFIER_KEY: verifier, PKCE_STATE_KEY: state})
     return {"ok": True,
             "url": AUTHORIZE_URL + "?" + urllib.parse.urlencode(params),
             "verifier": verifier,
@@ -343,37 +366,75 @@ def connect_url(cfg=None):
                        "code MusicBrainz shows")}
 
 
-def finish_connect(code, verifier, cfg=None):
-    """Exchange the pasted authorization code + PKCE verifier for a login.
+def _split_code(raw):
+    """(code, error) from what the user handed back.
 
-    -> ``{ok, detail, checked, username, status}``. Tokens are stored through
-    the app's own config writer and the account name is read from
+    MusicBrainz lands the browser on the redirect URI carrying either
+    ``?code=…`` or ``?error=…&error_description=…``; a user may therefore paste
+    the BARE code or the WHOLE URL. A refusal travels back in MusicBrainz's own
+    words (preferring ``error_description``, the human sentence)."""
+    text = str(raw or "").strip()
+    if not text:
+        return "", ""
+    if "?" not in text:
+        return text, ""                       # already a bare code
+    params = urllib.parse.parse_qs(urllib.parse.urlparse(text).query)
+    err = (params.get("error_description") or params.get("error") or [""])[0].strip()
+    if err:
+        return "", err
+    return (params.get("code") or [""])[0].strip(), ""
+
+
+def finish_connect(code, verifier, cfg=None):
+    """Exchange the pasted authorization code (+ PKCE verifier) for a login.
+
+    -> ``{ok, detail, checked, username, status}``. ``code`` may be the bare
+    code OR the full redirect URL (``?code=`` is extracted; a ``?error=``
+    comes back in MusicBrainz's own words). ``verifier`` is still accepted —
+    a body that carries one wins — but a blank one falls back to the verifier
+    ``connect_url`` saved, so the client may send nothing back. A blank client
+    SECRET is legal (public PKCE client) and is then omitted from the token
+    request entirely; the client id is still required. Tokens are stored
+    through the app's own config writer and the account name is read from
     ``/oauth2/userinfo`` (a userinfo that fails does not fail the connect —
     the token exchange is what authorized us). A refusal is MusicBrainz's own
     text, returned, never raised."""
+    cfg = cfg or {}
     cid, secret = _client(cfg)
-    if not (cid and secret):
+    if not cid:
         return {"ok": False, "checked": "",
-                "detail": ("no MusicBrainz client id/secret is saved — paste "
-                           "them in Settings → Scrobbling & submissions first")}
-    code = str(code or "").strip()
+                "detail": ("no MusicBrainz client id is saved — paste it in "
+                           "Settings → Scrobbling & submissions first")}
+    code, oauth_error = _split_code(code)
+    if oauth_error:
+        return {"ok": False, "checked": "",
+                "detail": "MusicBrainz refused the authorization — " + oauth_error}
     if not code:
         return {"ok": False, "checked": "", "detail": "no authorization code was given"}
+    use_verifier = (str(verifier or "").strip()
+                    or str(cfg.get(PKCE_VERIFIER_KEY) or "").strip())
+    if not use_verifier:
+        return {"ok": False, "checked": "",
+                "detail": ("no PKCE verifier was given and none is saved — "
+                           "start the connect again")}
     where = "POST /oauth2/token (authorization_code)"
-    body, err = _post_form(TOKEN_URL, {
+    data = {
         "grant_type": "authorization_code",
         "code": code,
         "client_id": cid,
-        "client_secret": secret,
         "redirect_uri": REDIRECT_URI,
-        "code_verifier": str(verifier or "").strip(),
-    })
+        "code_verifier": use_verifier,
+    }
+    if secret:                      # omitted ENTIRELY for a public client
+        data["client_secret"] = secret
+    body, err = _post_form(TOKEN_URL, data)
     fresh = _tokens(body)
     if not fresh[ACCESS_KEY]:
         return {"ok": False, "checked": where,
                 "detail": "MusicBrainz refused the authorization code — "
                           + (err or "no access_token in the answer")}
-    _store(cfg, **fresh)
+    # Consumed: the single-use handshake halves go away with the code.
+    _store(cfg, **fresh, **{PKCE_VERIFIER_KEY: "", PKCE_STATE_KEY: ""})
     name, checked = "", where
     got, uerr = _get_userinfo(fresh[ACCESS_KEY])
     if got:
@@ -393,7 +454,7 @@ def disconnect(cfg=None):
     registration: the saved client id/secret stay, because they are the app's
     own registration and reconnecting needs them again."""
     _store(cfg, **{REFRESH_KEY: "", ACCESS_KEY: "", EXPIRES_KEY: 0,
-                   USERNAME_KEY: ""})
+                   USERNAME_KEY: "", PKCE_VERIFIER_KEY: "", PKCE_STATE_KEY: ""})
     return status(cfg)
 
 

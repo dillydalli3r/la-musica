@@ -33,7 +33,7 @@ const KIND_LABEL: Record<SourceKind, string> = {
  *  `tab`/`tabLink` are for a key that can also arrive as a FILE: they name the
  *  Settings tab that holds the import box, and the copy that links to it. The
  *  link is only drawn where Settings is a page this render can reach — the
- *  wizard's Keys step is behind App's first-run gate, which opens /setup and
+ *  wizard's Connections step is behind App's first-run gate, which opens /setup and
  *  nothing else, so there the hint names the box instead of linking to a page
  *  that would bounce straight back to the step. */
 const KEY_INFO: Record<string, { label: string; hint: string; url?: string; link?: string; secret?: boolean; tab?: string; tabLink?: string }> = {
@@ -89,14 +89,14 @@ const KEY_INFO: Record<string, { label: string; hint: string; url?: string; link
     link: "MusicBrainz applications",
     secret: true,
   },
-  // The AcoustID pair belongs HERE, in the wizard's Keys step: the application
+  // The AcoustID pair belongs HERE, in the wizard's Connections step: the application
   // key is what makes fingerprint matching work at all, and the user key is
   // what publishing a match needs — telling someone to go to Settings → Import
   // in the middle of a first run is how an install ends up with neither.
   acoustid_api_key: {
     label: "AcoustID application key",
     hint:
-      "Register an application (free) and copy its API key. It is what fingerprint matching uses to identify which release the AUDIO is — MusicBrainz and the wizard's AcoustID step both need it.",
+      "Register an application (free) and copy its API key. It is what fingerprint matching uses to identify which release the AUDIO is — MusicBrainz and the wizard's Connections step both need it.",
     url: "https://acoustid.org/new-application",
     link: "acoustid.org — register an application",
   },
@@ -112,7 +112,7 @@ const KEY_INFO: Record<string, { label: string; hint: string; url?: string; link
 
 /** The config keys this panel can prompt for, in a stable order — every one of
  *  those settings has exactly one control, and it is this panel, wherever the
- *  panel is mounted (the wizard's Keys step and Settings → Sources draw the
+ *  panel is mounted (the wizard's Connections step and Settings → Connections draw the
  *  same component). */
 const KEY_NAMES = Object.keys(KEY_INFO);
 
@@ -127,16 +127,16 @@ const KEY_HOME: Record<string, string> = {
   auth_password_hash: "first-run setup, or Sign-in & security",
   // The credentials the two Connect flows produce themselves: a row that
   // needs one is not a dead end, it names the button that fills it.
-  lastfm_session_key: "the Connect button (Settings → Scrobbling & submissions, or this panel)",
-  musicbrainz_refresh_token: "the Connect button (the MusicBrainz page, or Settings → Scrobbling & submissions)",
+  lastfm_session_key: "the Connect button (Settings → Connections, or this panel)",
+  musicbrainz_refresh_token: "the Connect button (the MusicBrainz page, or Settings → Connections)",
 };
 
 /** What to say about a `needs` entry that is an installed PROGRAM rather than
  *  a config key. There is one today — yt-dlp, the only name in
  *  `server/sources_health.py`'s `_TOOLS`, which checks for it in the app's
  *  dependencies folder and on PATH — and it has no field to type, so it is a
- *  note wherever the ROW that needs it is drawn (Settings → Sources) and once
- *  in the panel's own copy wherever it is not (the wizard's Keys step draws
+ *  note wherever the ROW that needs it is drawn (Settings → Connections) and once
+ *  in the panel's own copy wherever it is not (the wizard's Connections step draws
  *  only the rows that ask for a key). Both halves of the YouTube cookie story
  *  are in the note: yt-dlp is what searches, fetches and captions, and its
  *  cookies are a Netscape-format cookies.txt — `tab`/`tabLink` jump to the box
@@ -222,7 +222,7 @@ function StatusChip({ row }: { row: SourceHealth }) {
 
 /** Every source the app can talk to, grouped by kind, each row testable on
  *  its own and carrying the key fields it needs. Shared by the setup wizard's
- *  Keys step and Settings → Sources.
+ *  Connections step and the Settings page's Sources section.
  *
  *  `only` narrows the panel to one family (or a list of them) — the wizard
  *  shows the credential rows instead of the whole source list.
@@ -230,7 +230,7 @@ function StatusChip({ row }: { row: SourceHealth }) {
  *  `askKeys` is that wizard view: the key FIELDS, with each row's status
  *  chips, failure detail, provider notes, live-test report and Test button
  *  folded into the row's own disclosure. A first run pastes the keys the app
- *  uses; triaging eleven providers is what Settings → Sources is for, and the
+ *  uses; triaging eleven providers is what Settings → Connections is for, and the
  *  panel was 4,800 px of exactly that on the step that exists to ask for keys. */
 export default function SourcesPanel({ only, askKeys }: { only?: SourceKind | SourceKind[]; askKeys?: boolean } = {}) {
   const qc = useQueryClient();
@@ -307,10 +307,10 @@ export default function SourcesPanel({ only, askKeys }: { only?: SourceKind | So
   if (error) return <div className="text-xs text-red-300">{String(error)}</div>;
   const wanted = only === undefined ? null : Array.isArray(only) ? only : [only];
   const rows = mergeRoles((data?.sources ?? []).filter((r) => !wanted || wanted.includes(r.kind)))
-    // The Keys step wants the rows that ASK for something: the credential list
+    // The Connections step wants the rows that ASK for something: the credential list
     // also carries rows whose keys live elsewhere (the AI provider, this
     // server's login), and a row with no field is a status line
-    // — those belong to Settings → Sources, not to the step that asks for keys.
+    // — those belong to Settings → Connections, not to the step that asks for keys.
     .filter((r) => !askKeys || promptKeysOf(r).length > 0);
   const groups = (Object.keys(KIND_LABEL) as SourceKind[])
     .filter((kind) => !wanted || wanted.includes(kind))
@@ -328,7 +328,7 @@ export default function SourcesPanel({ only, askKeys }: { only?: SourceKind | So
             {askKeys ? (
               <>
                 Optional: a source whose key is missing is simply skipped, and every one of these is editable
-                later in Settings → Sources. Saving a key re-tests that source.
+                later in Settings → Connections. Saving a key re-tests that source.
               </>
             ) : (
               <>
@@ -338,7 +338,7 @@ export default function SourcesPanel({ only, askKeys }: { only?: SourceKind | So
             )}
           </div>
         </div>
-        {/* The live-test sweep is triage, so the Keys step does not offer it —
+        {/* The live-test sweep is triage, so the Connections step does not offer it —
             each row still re-tests itself when its keys are saved. */}
         {!askKeys && (
           <button className="btn-ghost !py-1 text-xs tap" onClick={testAll} disabled={busy !== null}>
@@ -348,9 +348,9 @@ export default function SourcesPanel({ only, askKeys }: { only?: SourceKind | So
         )}
       </div>
 
-      {/* The one thing the Keys step names that is not a key: yt-dlp is a
+      {/* The one thing the Connections step names that is not a key: yt-dlp is a
           PROGRAM, so it has no row here — its `needs yt-dlp` chips hang off
-          the YouTube rows, which are activity sources that Settings → Sources
+          the YouTube rows, which are activity sources that Settings → Connections
           unfolds — and the cookie half of it is part of what a first run
           should know about the downloader it is about to lean on. */}
       {askKeys && (
@@ -366,7 +366,7 @@ export default function SourcesPanel({ only, askKeys }: { only?: SourceKind | So
       )}
 
       {/* The YouTube cookie login: its import box lives HERE too, so a first
-          run (this step) and Settings → Sources can hand the file over without
+          run (this step) and Settings → Connections can hand the file over without
           hunting for the Videos tab that owns the jar — and so the box that
           asks for the value is the box that accepts the export for it. ONE
           component for both, never a second paste box to keep in step. */}

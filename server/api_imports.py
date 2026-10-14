@@ -120,6 +120,13 @@ class BulkItem(BaseModel):
     # for this album before the run: `server.imports.bulk_import` resolves it
     # and imports THAT release. `release` (a full dict) wins when both are sent.
     mbid: Optional[str] = None
+    # Import ONLY these files of the staging folder `path` as this ONE album —
+    # the release-identify dialog lets the user pick a subset of a downloads
+    # entry and pin an mbid for it, leaving the rest for later (see
+    # `server.imports._bulk_one`). `None`/empty means the whole folder, the
+    # behaviour this route always had. `name` overrides the album folder's name.
+    files: Optional[List[str]] = None
+    name: Optional[str] = None
 
 
 class BulkRequest(BaseModel):
@@ -299,7 +306,7 @@ def import_bulk(req: BulkRequest):
     _cap(len(req.items), MAX_ITEMS, "items")
     _guard([item.path for item in req.items])
     items = [{"path": item.path, "move": item.move, "release": item.release,
-              "mbid": item.mbid}
+              "mbid": item.mbid, "files": item.files, "name": item.name}
              for item in req.items]
     return imports.start_bulk(items)
 

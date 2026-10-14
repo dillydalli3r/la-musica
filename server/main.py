@@ -1602,6 +1602,25 @@ def soulseek_uploads_forget(req: SoulseekForgetRequest):
     return {"ok": True, "forget": entries}
 
 
+# The review panel's OWN tag filter — the row it draws shows exactly these.
+# Kept verbatim: the panel's output is a contract other suites pin.
+_REVIEW_TAG_KEYS = ("TITLE", "ARTIST", "ALBUM", "DISCNUMBER",
+                    "TRACKNUMBER", "DATE", "GENRE")
+# What the release-IDENTIFY view needs on top: the album-artist/medium tags and
+# the MusicBrainz id family, so the picker can show what release each file
+# claims before a subset is imported. A SEPARATE, wider filter — never a change
+# to the panel's own narrower one.
+_RELEASE_TAG_KEYS = _REVIEW_TAG_KEYS + (
+    "ALBUMARTIST", "TRACKTOTAL", "MEDIA",
+    "MUSICBRAINZ_ALBUMID", "MUSICBRAINZ_RELEASEGROUPID", "MUSICBRAINZ_TRACKID",
+    "MUSICBRAINZ_ARTISTID", "MUSICBRAINZ_ALBUMARTISTID")
+
+
+def _filter_tags(tags, keys):
+    """The subset of *tags* whose names are in *keys* (names as stored)."""
+    return {k: v for k, v in (tags or {}).items() if k in keys}
+
+
 def _review_file_info(p, ffprobe=None):
     """Tech + tags for one completed download file (review panel row)."""
     from mlo.audio import AudioFile
@@ -1622,8 +1641,7 @@ def _review_file_info(p, ffprobe=None):
         "is_video": is_video,
         "size": os.path.getsize(p),
         "mtime": os.path.getmtime(p),
-        "tags": {k: v for k, v in (tags or {}).items()
-                 if k in ("TITLE", "ARTIST", "ALBUM", "DISCNUMBER", "TRACKNUMBER", "DATE", "GENRE")},
+        "tags": _filter_tags(tags, _REVIEW_TAG_KEYS),
         "tech": tech or {},
     }
 
@@ -7803,6 +7821,80 @@ def downloads_list():
     out = _staging_listing(_downloads_dir(folder))
     out["music_folder"] = folder.replace("\\", "/")
     return out
+
+
+def _downloads_file_row(p, audio_exts, video_exts):
+    """One download file with the tags a release-identify view needs.
+
+    Reads the tags exactly like `_review_file_info` (``AudioFile.all_tags()``
+    first) but through the WIDER `_RELEASE_TAG_KEYS` filter — the panel's own
+    output is untouched. ``audio``/``is_video`` say which family the file is,
+    so the picker only offers what a subset import can move.
+    """
+    from mlo.audio import AudioFile
+
+    ext = os.path.splitext(p)[1].lower()
+    af = AudioFile(p)
+    tags = af.all_tags() if af.audio is not None else {}
+    return {"name": os.path.basename(p),
+            "path": p.replace("\\", "/"),
+            "size": os.path.getsize(p),
+            "audio": ext in audio_exts,
+            "is_video": ext in video_exts,
+            "tags": _filter_tags(tags, _RELEASE_TAG_KEYS)}
+
+
+@app.get("/api/downloads/entry")
+def downloads_entry(name: str = Query(...)):
+    """One downloads entry, file by file, with the tags the picker shows.
+
+    The release-identify dialog opens ONE top-level entry, lets the user pick
+    individual files and pin a MusicBrainz release for the picked set (which it
+    then hands to ``POST /api/import/bulk`` as an item's ``files``). This lists
+    what is there to pick: for a folder, every audio/video file under it (any
+    depth, dot-dirs and dot-files skipped like the review walk); for a file,
+    that one file. Capped at 500 rows (``truncated`` says so). The name rule is
+    the delete route's own (`_downloads_name_error`), so a basename that could
+    escape the staging root is refused here too.
+    """
+    from mlo.paths import AUDIO_EXTS, LIB_VIDEO_EXTS
+
+    folder = load_config().get("music_folder") or ""
+    ddir = _downloads_dir(folder)
+    if not ddir or not os.path.isdir(ddir):
+        raise HTTPException(404, "downloads folder not found")
+    root = os.path.realpath(ddir)
+    err = _downloads_name_error(name, root)
+    if err:
+        raise HTTPException(400, err)
+    p = os.path.join(ddir, name)
+    if not os.path.lexists(p):
+        raise HTTPException(404, "not found in downloads")
+
+    audio_exts, video_exts = set(AUDIO_EXTS), set(LIB_VIDEO_EXTS)
+    wanted = audio_exts | video_exts
+    is_dir = os.path.isdir(p) and not os.path.islink(p)
+    found = []
+    if is_dir:
+        for base, dirs, files in os.walk(p):
+            dirs[:] = sorted(d for d in dirs if not d.startswith("."))
+            for f in sorted(files):
+                if f.startswith("."):
+                    continue
+                if os.path.splitext(f)[1].lower() in wanted:
+                    found.append(os.path.join(base, f))
+    elif os.path.splitext(p)[1].lower() in wanted:
+        found.append(p)
+    truncated = len(found) > 500
+    rows = []
+    for fp in found[:500]:
+        try:
+            rows.append(_downloads_file_row(fp, audio_exts, video_exts))
+        except Exception:
+            continue        # an unreadable file is skipped, not a 500
+    return {"ok": True, "name": name, "path": p.replace("\\", "/"),
+            "dir": is_dir, "count": len(rows), "truncated": truncated,
+            "files": rows}
 
 
 @app.post("/api/downloads/delete")

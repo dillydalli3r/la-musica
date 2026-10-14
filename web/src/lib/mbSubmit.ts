@@ -107,11 +107,53 @@ async function mbFetch<T>(path: string, body?: unknown): Promise<T> {
 }
 
 export const mbConnect = () => mbFetch<MbConnect>("/mb/auth/connect", {});
-export const mbFinish = (code: string, verifier: string) =>
-  mbFetch<MbFinish>("/mb/auth/finish", { code, verifier });
+/** Finish the login with the code MusicBrainz shows (a bare code or the whole
+ *  redirect URL — the server reads either). `verifier` is only needed by an
+ *  older server: the current one keeps the PKCE verifier itself and takes it
+ *  from the stored login when the body carries none. */
+export const mbFinish = (code: string, verifier?: string) =>
+  mbFetch<MbFinish>("/mb/auth/finish", verifier ? { code, verifier } : { code });
 export const mbDisconnect = () => mbFetch<MbAuthStatus>("/mb/auth/disconnect", {});
 export const mbSubmitRatings = (paths: string[]) =>
   mbFetch<MbSubmitResult>("/mb/ratings/submit", { paths });
+
+/** What the rating-upload queue is doing (GET /api/mb/ratings/queue): the
+ *  folders waiting, and the newest per-album results. */
+export interface MbRatingsQueueState {
+  ok: boolean;
+  connected: boolean;
+  enabled: boolean;
+  pending: number;
+  running: boolean;
+  recent: {
+    path: string;
+    name: string;
+    ok: boolean;
+    sent: number;
+    skipped: number;
+    detail: string;
+    at: number;
+  }[];
+}
+
+export const mbRatingsQueue = () => mbFetch<MbRatingsQueueState>("/mb/ratings/queue");
+/** Queue EVERY album this library has a rating for — the "upload all my
+ *  ratings" press. Answers at once with how many went into the queue; the
+ *  queue route above reports the progress. */
+export const mbRatingsSubmitAll = () =>
+  mbFetch<{ ok: boolean; queued: number }>("/mb/ratings/submit-all", {});
+
+/** The upload queue, polled while the panel is on screen (the worker drains
+ *  in the background, so this is what makes an in-flight upload visible). */
+export function useMbRatingsQueue(enabled = true) {
+  return useQuery({
+    queryKey: ["mbRatingsQueue"],
+    queryFn: mbRatingsQueue,
+    enabled,
+    refetchInterval: (q) =>
+      q.state.data?.pending || q.state.data?.running ? 2000 : 15000,
+  });
+}
 
 /** The saved login, for the panel (and the MusicBrainz page's action). */
 export function useMbAuth() {

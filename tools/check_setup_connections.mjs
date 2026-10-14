@@ -4,28 +4,36 @@
  *
  * The owner's ask: the first-run wizard must cover "logging into musicbrainz /
  * last.fm", and a person must not have to leave the app to find how to log in.
- * This check pins that on the code that actually draws it:
+ * The wizard was shortened from seven steps to five, and the one that used to
+ * be "Sources, keys & cookies" is gone as a step of its own: its Sources panel
+ * now sits on Connections, together with the two Connect flows and the
+ * Soulseek login. This check pins the merged contract on the code that actually
+ * draws it:
  *
- *   * `SETUP_STEPS` holds ONE step, right after "Sources, keys & cookies" and
- *     before "Soulseek", labelled "Connections", whose title says the logins
- *     are optional and whose ONE group is "Scrobbling & submissions" — so the
- *     Last.fm shared secret and the MusicBrainz client id + secret are editable
- *     ON the step (test_setup_coverage.py owns the one-step-per-group rule).
- *   * the step is SKIPPABLE and non-blocking: it asks no field by name and
- *     every one of its fields passes `cfgError` on a blank draft, so the
- *     page's own `badCount` is 0 and Continue is enabled with nothing filled
- *     in.
+ *   * `SETUP_STEPS` holds ONE step, right after "Account" (`password`, the
+ *     mandatory one) and before "Tools" (`dependencies` — the credentials come
+ *     FIRST, so an optional step can be read and skipped before any download is
+ *     explained), labelled "Connections", whose title says it is optional and
+ *     whose TWO groups are "Scrobbling & submissions" and "Soulseek (managed
+ *     slskd)" — so the Last.fm shared secret, the MusicBrainz client id +
+ *     secret AND the Soulseek login are editable ON the step
+ *     (test_setup_coverage.py owns the one-step-per-group rule).
+ *   * the step asks the three Soulseek keys BY NAME (they render above the
+ *     fold, where a first run cannot miss them), and every one of the step's
+ *     fields passes `cfgError` on a blank draft, so the page's own `badCount`
+ *     is 0 and Continue is enabled with nothing filled in — the step stays
+ *     skippable.
  *   * the ScrobblePanel and the MbLoginPanel each render the shared
  *     ConnnectGuide above their controls — three numbered lines, with ONE
  *     button per line that names a page, opened through `openExternal` (the
  *     shell's own external-link route). Rendered for real, through Vite, with
  *     the answer already in the query cache (renderToString runs no effects, so
  *     nothing may depend on a request landing).
- *   * SetupPage draws BOTH panels under `step.panel === "connections"`.
- *     SetupPage itself cannot be server-rendered to a step's content — its
- *     draft is seeded in an effect and renderToString runs none — so that one
- *     claim is read from the page's source, exactly as tools/check_stack_gates
- *     reads its page.
+ *   * SetupPage draws the Sources credential panel AND BOTH Connect panels
+ *     under `step.panel === "connections"`. SetupPage itself cannot be
+ *     server-rendered to a step's content — its draft is seeded in an effect
+ *     and renderToString runs none — so that one claim is read from the page's
+ *     source, exactly as tools/check_stack_gates reads its page.
  *
  * Run:  node tools/check_setup_connections.mjs
  * Exit codes: 0 pass, 1 a check failed, 2 the environment cannot run it.
@@ -100,22 +108,31 @@ try {
   const meta = await server.ssrLoadModule("/src/lib/configMeta.ts");
   const steps = meta.SETUP_STEPS;
   const at = (panel) => steps.findIndex((s) => s.panel === panel);
-  const iSources = at("sources");
+  const iPassword = at("password");
   const iConn = at("connections");
-  const iSoulseek = at("slskd");
+  const iDeps = at("dependencies");
+  // The panels the merged step replaced: neither may survive as a step of its
+  // own, or the Sources panel and the Soulseek login would be asked twice.
+  const iSources = at("sources");
+  const iSlskd = at("slskd");
 
   console.log("\n== the step list ==");
   check("a step with panel \"connections\" exists", iConn >= 0);
-  check("...right after Sources, keys & cookies and before Soulseek",
-    iSources >= 0 && iConn === iSources + 1 && iSoulseek === iConn + 1,
-    `sources=${iSources} connections=${iConn} soulseek=${iSoulseek}`);
+  check("...right after the mandatory Account step and before Tools",
+    iPassword >= 0 && iConn === iPassword + 1 && iDeps === iConn + 1,
+    `password=${iPassword} connections=${iConn} dependencies=${iDeps}`);
+  check("the old Sources and Soulseek steps are gone (merged into Connections)",
+    iSources === -1 && iSlskd === -1, `sources=${iSources} slskd=${iSlskd}`);
   const step = steps[iConn];
   check("its rail label is \"Connections\"", step.label === "Connections", step.label);
-  check("its title says the logins are optional", /optional/i.test(step.title), step.title);
-  check("it renders the one group that holds the pasteable credentials",
-    JSON.stringify(step.groups) === JSON.stringify(["Scrobbling & submissions"]), JSON.stringify(step.groups));
-  check("it asks no field by name (nothing is hoisted above a fold it owns)",
-    step.ask === undefined, JSON.stringify(step.ask));
+  check("its title says it is optional", /optional/i.test(step.title), step.title);
+  check("it renders the two groups that hold the credentials",
+    JSON.stringify(step.groups) === JSON.stringify(["Scrobbling & submissions", "Soulseek (managed slskd)"]),
+    JSON.stringify(step.groups));
+  check("it asks the Soulseek login by name (hoisted above the fold)",
+    JSON.stringify(step.ask)
+      === JSON.stringify(["soulseek_username", "soulseek_password", "soulseek_share_library"]),
+    JSON.stringify(step.ask));
   check("its blurb routes both services to their credential page",
     step.blurb.includes("last.fm/api/account/create")
       && step.blurb.includes("musicbrainz.org/account/applications"),
@@ -124,7 +141,8 @@ try {
   console.log("\n== the credentials proven on the step ==");
   const fields = meta.stepFields(step);
   const keys = fields.map((f) => f.k);
-  for (const key of ["lastfm_api_secret", "musicbrainz_client_id", "musicbrainz_client_secret"]) {
+  for (const key of ["lastfm_api_secret", "musicbrainz_client_id", "musicbrainz_client_secret",
+    "soulseek_username", "soulseek_password", "soulseek_share_library"]) {
     check(`${key} is editable on the step`, keys.includes(key));
   }
   const errors = fields
@@ -166,12 +184,19 @@ try {
 
   console.log("\n== how SetupPage draws it ==");
   const pageSrc = readFileSync(path.join(webDir, "src", "pages", "SetupPage.tsx"), "utf8");
-  check("the page has a `step.panel === \"connections\"` branch",
-    /step\.panel === "connections"/.test(pageSrc));
-  const branch = pageSrc.slice(pageSrc.indexOf('step.panel === "connections"'));
+  // `&&` (the JSX branch) rather than a bare match: the step's icon row also
+  // names this panel with a ternary, and slicing from THAT would leave the
+  // branch's own panels outside the window.
+  const branchAt = pageSrc.indexOf('{step.panel === "connections" &&');
+  check("the page has a `step.panel === \"connections\"` branch", branchAt >= 0);
+  const branch = pageSrc.slice(branchAt < 0 ? 0 : branchAt);
   const end = branch.indexOf("step.panel ===", 10);
   const branchBody = end > 0 ? branch.slice(0, end) : branch;
-  check("...that draws BOTH panels", /<ScrobblePanel\b/.test(branchBody) && /<MbLoginPanel\b/.test(branchBody),
+  check("...that draws the Sources credential panel (moved off the old Keys step)",
+    /<SourcesPanel\b[^>]*\baskKeys\b/.test(branchBody),
+    branchBody.replace(/\s+/g, " ").slice(0, 160));
+  check("...and BOTH Connect panels",
+    /<ScrobblePanel\b/.test(branchBody) && /<MbLoginPanel\b/.test(branchBody),
     branchBody.replace(/\s+/g, " ").slice(0, 160));
   check("the page's Continue is gated by `badCount` alone (which is 0 here)",
     /disabled=\{busy \|\| badCount > 0\}/.test(pageSrc));

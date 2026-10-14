@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Verify the .mlo/downloads manager and the library-layout scanner.
 
-Covers GET /api/downloads + POST /api/downloads/{delete,import} and
+Covers GET /api/downloads, GET /api/downloads/entry (the release-identify
+picker's per-file list) + POST /api/downloads/{delete,import} and
 GET /api/library/layout, plus the .mb_expected sidecar that makes a
 PARTIAL import visible on the album page.
 
@@ -58,6 +59,7 @@ def _cleanup_redirect():
 
 atexit.register(_cleanup_redirect)
 
+from fastapi import HTTPException  # noqa: E402
 from server import main as mlo_main  # noqa: E402
 from server import library as mlo_library  # noqa: E402
 
@@ -167,6 +169,111 @@ def test_downloads_listing():
     assert by[".incomplete"]["partial"] is True, by[".incomplete"]
     assert by["big.flac.part"]["partial"] is True, by["big.flac.part"]
     assert album["partial"] is False, album
+
+
+# ---- one entry, file by file (the release-identify picker) ----------------- #
+ENTRY_DIR = "Entry Album"
+
+
+def tagged_flac(path, **tags):
+    """A minimal real FLAC (marker + STREAMINFO, no frames) that mutagen — and
+    therefore mlo.audio — tags and reads like any other."""
+    import struct
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    si = struct.pack(">HH", 4096, 4096) + b"\x00\x00\x00" + b"\x00\x00\x00"
+    si += ((44100 << 44) | (1 << 41) | (15 << 36) | 0).to_bytes(8, "big")
+    si += b"\x00" * 16
+    with open(path, "wb") as fh:
+        fh.write(b"fLaC" + bytes([0x80]) + len(si).to_bytes(3, "big") + si)
+    from mutagen.flac import FLAC
+    f = FLAC(path)
+    for k, v in tags.items():
+        f[k] = v
+    f.save()
+    return path
+
+
+def test_downloads_entry():
+    use(MF)
+    folder = os.path.join(DOWNLOADS, ENTRY_DIR)
+    tagged_flac(os.path.join(folder, "01 - one.flac"),
+                TITLE="One", ARTIST="Entry Artist", ALBUM="Entry Album",
+                ALBUMARTIST="Entry Artist", DISCNUMBER="1", TRACKNUMBER="1",
+                TRACKTOTAL="2", DATE="2010", GENRE="Shoegaze", MEDIA="CD",
+                MUSICBRAINZ_ALBUMID="alb-1", MUSICBRAINZ_RELEASEGROUPID="rg-1",
+                MUSICBRAINZ_TRACKID="trk-1", MUSICBRAINZ_ARTISTID="art-1",
+                MUSICBRAINZ_ALBUMARTISTID="art-1")
+    write(os.path.join(folder, "02 - two.flac"), 64)      # untagged, still audio
+    write(os.path.join(folder, "cover.jpg"), 8)           # not audio/video
+    write(os.path.join(folder, ".hidden", "x.flac"), 8)   # dot-dir: skipped
+    write(os.path.join(folder, ".dotfile.flac"), 8)       # dot-file: skipped
+    write(os.path.join(folder, "clip.mp4"), 16)           # audio AND video family
+
+    res = mlo_main.downloads_entry(name=ENTRY_DIR)
+    assert res["ok"] is True and res["name"] == ENTRY_DIR, res
+    assert res["dir"] is True and res["truncated"] is False, res
+    assert res["path"] == folder.replace("\\", "/"), res["path"]
+    names = {f["name"] for f in res["files"]}
+    assert names == {"01 - one.flac", "02 - two.flac", "clip.mp4"}, names
+    assert res["count"] == len(res["files"]) == 3, res
+
+    by = {f["name"]: f for f in res["files"]}
+    one = by["01 - one.flac"]
+    assert one["audio"] is True and one["is_video"] is False, one
+    assert one["size"] == os.path.getsize(os.path.join(folder, "01 - one.flac")), one
+    assert one["path"] == os.path.join(folder, "01 - one.flac").replace("\\", "/"), one
+    for key, val in (("TITLE", "One"), ("ARTIST", "Entry Artist"),
+                     ("ALBUM", "Entry Album"), ("ALBUMARTIST", "Entry Artist"),
+                     ("DISCNUMBER", "1"), ("TRACKNUMBER", "1"),
+                     ("TRACKTOTAL", "2"), ("DATE", "2010"),
+                     ("GENRE", "Shoegaze"), ("MEDIA", "CD"),
+                     ("MUSICBRAINZ_ALBUMID", "alb-1"),
+                     ("MUSICBRAINZ_RELEASEGROUPID", "rg-1"),
+                     ("MUSICBRAINZ_TRACKID", "trk-1"),
+                     ("MUSICBRAINZ_ARTISTID", "art-1"),
+                     ("MUSICBRAINZ_ALBUMARTISTID", "art-1")):
+        assert one["tags"].get(key) == val, (key, one["tags"].get(key))
+    # the review panel's own filter is UNCHANGED: ALBUMARTIST is not in it
+    assert "ALBUMARTIST" not in mlo_main._review_file_info(
+        os.path.join(folder, "01 - one.flac"))["tags"], "panel filter was widened"
+    # a video container is listed, and flagged as video (not AUDIO_EXTS)
+    clip = by["clip.mp4"]
+    assert clip["audio"] is False and clip["is_video"] is True, clip
+    assert by["02 - two.flac"]["audio"] is True, by["02 - two.flac"]
+
+    # an entry that is a FILE lists just that file; a non-audio one lists none
+    file_res = mlo_main.downloads_entry(name="loose.flac")
+    assert file_res["dir"] is False and file_res["count"] == 1, file_res
+    assert file_res["files"][0]["name"] == "loose.flac", file_res
+    none_res = mlo_main.downloads_entry(name="notes.txt")
+    assert none_res["dir"] is False and none_res["count"] == 0, none_res
+    assert none_res["files"] == [], none_res
+
+    # the SAME name rule as delete: escapes/absolute/backslash -> 400,
+    # a name that does not exist -> 404
+    for bad in ("", ".", "..", "../escape", "a/b", "..\\escape"):
+        try:
+            mlo_main.downloads_entry(name=bad)
+        except HTTPException as e:
+            assert e.status_code == 400, (bad, e)
+        else:
+            raise AssertionError(f"accepted bad name {bad!r}")
+    try:
+        mlo_main.downloads_entry(name="ghost-entry")
+    except HTTPException as e:
+        assert e.status_code == 404, e
+    else:
+        raise AssertionError("a missing entry did not 404")
+
+
+def test_downloads_entry_cap():
+    use(MF)
+    folder = os.path.join(DOWNLOADS, "Big Entry")
+    for i in range(501):
+        write(os.path.join(folder, f"{i:04d}.flac"), 8)
+    res = mlo_main.downloads_entry(name="Big Entry")
+    assert res["count"] == 500 and res["truncated"] is True, res
+    assert len(res["files"]) == 500, len(res["files"])
 
 
 def test_downloads_name_guard():
@@ -331,6 +438,8 @@ def test_partial_flags():
 
 
 check("downloads listing shape + album/partial flags", test_downloads_listing)
+check("downloads entry lists files with identity tags", test_downloads_entry)
+check("downloads entry caps at 500 with truncated", test_downloads_entry_cap)
 check("downloads name guard refuses traversal", test_downloads_name_guard)
 check("downloads delete frees bytes, reports misses", test_downloads_delete)
 check("downloads import moves into the library", test_downloads_import)

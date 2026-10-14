@@ -5061,6 +5061,31 @@ def _move_into_library(src, root):
                 "use (stop playback and retry)")
 
 
+def _move_picked(files, dest):
+    """Move each PICKED staging file into the one album folder *dest*.
+
+    *dest* is a name `unique_dir` chose, so the folder itself never exists —
+    only two picked files that share a basename can collide, and the second
+    gets the app's own " (n)" suffix rather than overwriting the first. Every
+    file moves through `move_path`, the module's mover, so a file a player (or
+    slskd) still holds is retried and, at worst, reported — never silently
+    copied. Called only after EVERY file has been validated (see `_bulk_one`),
+    so it can assume each path is a real audio file inside the staging folder.
+    """
+    for f in files:
+        base = os.path.basename(f)
+        stem, ext = os.path.splitext(base)
+        dst = os.path.join(dest, base)
+        n = 2
+        while os.path.exists(dst):
+            dst = os.path.join(dest, f"{stem} ({n}){ext}")
+            n += 1
+        if not move_path(f, dst, log=lambda m: None):
+            return "", ("could not import — a file is still in use (stop "
+                        "playback and retry)")
+    return dest, ""
+
+
 def _bulk_one(item, cfg):
     """Move one item into the library (when it is not there yet) and finish it.
 
@@ -5110,6 +5135,36 @@ def _bulk_one(item, cfg):
             return row
     except Exception:
         pass
+
+    # `files`: the release-identify UI staged a downloads folder and asked for
+    # only SOME of it as this ONE album (it pins an mbid for the picked set).
+    # A blank/empty list is NOT a pick — it is the whole-folder import this
+    # row has always done, byte for byte. When files ARE picked, every listed
+    # path is validated BEFORE anything moves: one bad entry must move NOTHING,
+    # so the staging folder is left exactly as it was for a corrected retry.
+    # Only a staging folder OUTSIDE the library can be picked from (picking
+    # from an album already in the library would be a second, partial copy).
+    raw_picked = item.get("files")
+    picked = None
+    if isinstance(raw_picked, (list, tuple)):
+        picked = [str(f).strip() for f in raw_picked if str(f).strip()]
+    if picked:
+        if not os.path.isdir(src) or _inside(src, root) or item.get("move") is False:
+            row["error"] = ("only staged folders (outside the library) can be "
+                            "picked from")
+            return row
+        for f in picked:
+            fp = os.path.normpath(f)
+            name = os.path.basename(fp) or fp
+            if not _inside(fp, src):
+                row["error"] = f"picked file is not inside the staging folder: {name}"
+                return row
+            if not os.path.isfile(fp):
+                row["error"] = f"picked file not found: {name}"
+                return row
+            if os.path.splitext(fp)[1].lower() not in _AUDIO_EXTS:
+                row["error"] = f"not an audio file: {name}"
+                return row
 
     if os.path.isdir(src) and not _audio_files(src):
         # an empty/stray folder is not an album: importing it would publish a
@@ -5172,19 +5227,34 @@ def _bulk_one(item, cfg):
         return row
 
     move = item.get("move")
-    if move is None:
-        # staging paths are moved in; a folder that already IS in the library
-        # (a re-run, an album imported by another path) is left where it is
-        move = not _inside(src, root)
-    if move and _inside(src, root):
-        move = False
-    album = src
-    if move:
-        dest, move_error = _move_into_library(src, root)
-        if move_error:
-            row["error"] = move_error
+    if picked:
+        # The picked files MOVE into ONE new album folder (`unique_dir` owns
+        # the sanitize/dedup of its name — the item's `name`, else the staging
+        # folder's), while the files nobody picked stay in the staging folder,
+        # untouched, for a later pass. `row["picked"]` says how many moved.
+        dest, pick_error = _move_picked(
+            picked, unique_dir(root, item.get("name") or
+                               os.path.basename(src.rstrip("\\/"))))
+        if pick_error:
+            row["error"] = pick_error
             return row
+        row["picked"] = len(picked)
         album = dest
+    else:
+        if move is None:
+            # staging paths are moved in; a folder that already IS in the
+            # library (a re-run, an album imported by another path) is left
+            # where it is
+            move = not _inside(src, root)
+        if move and _inside(src, root):
+            move = False
+        album = src
+        if move:
+            dest, move_error = _move_into_library(src, root)
+            if move_error:
+                row["error"] = move_error
+                return row
+            album = dest
 
     stamp_error = None
     if release:
@@ -5250,7 +5320,9 @@ def bulk_import(items, cfg=None, progress=None, job_id=None):
     """Import a queue of albums (staging folders or library folders).
 
     *items*: ``{"path", "release": <optional MB release dict>, "mbid": <optional
-    MusicBrainz release or release-group link/id>, "move": bool}`` — ``move``
+    MusicBrainz release or release-group link/id>, "move": bool, "files":
+    <optional list of staging paths to import as this ONE album>, "name":
+    <optional album folder name for a picked import>}`` — ``move``
     defaults to True for a path outside the library and False for one already
     inside it. *mbid* is resolved here (`server.integrations.resolve_release`,
     through the shared rate-limited client) when no ``release`` dict came with

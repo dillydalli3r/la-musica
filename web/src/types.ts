@@ -353,6 +353,51 @@ export interface DownloadsPayload {
   music_folder: string;
 }
 
+/** One file of a downloads entry, with the tags a release-identify screen
+ *  needs (GET /api/downloads/entry) — the MB ids included, so an MBID input
+ *  can open on the release the file itself already names. */
+export interface DownloadEntryFile {
+  name: string;
+  path: string;
+  size: number;
+  audio: boolean;
+  is_video: boolean;
+  tags: Record<string, string | null>;
+}
+
+/** One top-level entry of <music>/.mlo/downloads, file by file
+ *  (GET /api/downloads/entry?name=…). `truncated` says the 500-file cap cut
+ *  the list; the entry's own count is still exact. */
+export interface DownloadsEntryDetail {
+  ok: boolean;
+  name: string;
+  path: string;
+  dir: boolean;
+  count: number;
+  truncated: boolean;
+  files: DownloadEntryFile[];
+}
+
+/** What the MusicBrainz rating-upload queue is doing right now
+ *  (GET /api/mb/ratings/queue): the folders waiting to be submitted, whether
+ *  the worker is mid-run, and the newest per-album results. */
+export interface MbRatingsQueue {
+  ok: boolean;
+  connected: boolean;
+  enabled: boolean;
+  pending: number;
+  running: boolean;
+  recent: {
+    path: string;
+    name: string;
+    ok: boolean;
+    sent: number;
+    skipped: number;
+    detail: string;
+    at: number;
+  }[];
+}
+
 /** One place the music folder does not match
  *  `<music>/Artists/<Artist>/<Album>/<files>`. */
 export interface LayoutIssue {
@@ -2021,11 +2066,16 @@ export interface LastfmConnect {
 }
 
 /** `POST /api/lastfm/connect/finish` — the stored session, plus the fresh
- *  status. */
+ *  status. With `wait: true` the answer to a token Last.fm has not seen
+ *  authorized YET is `waiting: true` (HTTP 200), which is the poll the
+ *  Connect flow runs while the user finishes approving in the browser —
+ *  never an error to show. */
 export interface LastfmFinish {
   ok: boolean;
+  waiting?: boolean;
   username?: string;
   status?: LastfmStatus;
+  reason?: string;
   error?: string;
 }
 

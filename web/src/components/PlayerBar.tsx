@@ -79,13 +79,18 @@ type RgMode = "track" | "album" | "off";
  *  turn every pause/play into another play. See PlayerBar's `countPlay`. */
 const PLAY_START_SECONDS = 1;
 
-/** Last.fm's own scrobble rule, as numbers — the same ones the server states
+/** The scrobble rule the client TRIGGERS on — the same one the server states
  *  in `server/lastfm.py` (this is only the client's own trigger; the server
- *  re-checks the rule against the FILE's duration, so a client cannot smuggle
- *  a play past it). A track must be at least this long, and a play reaches
- *  `min(50 % of the track, 4 minutes)` — whichever comes FIRST. */
+ *  re-checks it against the FILE's duration and the configured percentage, so
+ *  a client can never smuggle a play past the bar). A track must be at least
+ *  this long, and a play reaches `lastfm_scrobble_percent` of it (70 % by
+ *  default; clamped to Last.fm's own 50 % floor exactly as the server clamps
+ *  it). The client's guess must never be LOOSER than the server's bar, or the
+ *  one request per play would come back refused and the play lost — so it
+ *  reads the configured value, and `ended` gives a finished track its final
+ *  attempt. */
 const SCROBBLE_MIN_SECONDS = 30;
-const SCROBBLE_MAX_SECONDS = 240;
+const SCROBBLE_DEFAULT_PERCENT = 70;
 
 /** A jump shorter than this is not worth an undo entry: a drag on the seek bar
  *  emits a seek per pointermove, and a one-second nudge is not the misclick the
@@ -693,7 +698,9 @@ export default function PlayerBar() {
     if (scrobbled.current.el === el && scrobbled.current.path === path) return;
     const dur = el.duration;
     if (!Number.isFinite(dur) || dur < SCROBBLE_MIN_SECONDS) return;
-    const need = Math.min(dur / 2, SCROBBLE_MAX_SECONDS);
+    const pctRaw = Number(cfg?.lastfm_scrobble_percent);
+    const pct = Number.isFinite(pctRaw) ? Math.min(100, Math.max(50, pctRaw)) : SCROBBLE_DEFAULT_PERCENT;
+    const need = (dur * pct) / 100;
     const played = el.ended ? dur : el.currentTime;
     if (played < need) return;
     scrobbled.current = { el, path };

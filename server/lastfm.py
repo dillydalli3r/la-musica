@@ -43,10 +43,18 @@ _API_HOST = "ws.audioscrobbler.com"
 AUTH_URL = "https://www.last.fm/api/auth/"
 
 # Last.fm's own scrobble rule, as numbers: a track shorter than this cannot be
-# scrobbled at all, and a play has to reach half the track or this many
-# seconds, whichever comes FIRST.
+# scrobbled at all, and the play has to reach `lastfm_scrobble_percent` of the
+# track (default 70) — a stricter bar than the service's own 50 %, which is
+# the FLOOR the config clamps to: Last.fm discards a submission under its own
+# rule, so letting the setting go below it would only file scrobbles nobody
+# counts. The 4-minute cap the rule used to carry is gone with the owner's
+# call ("scrobbling … should only occur if a certain amount of the song is
+# listened to"): a percentage is what "listened to" means, and a fixed ceiling
+# made a 10-minute track scrobble at 40 % while a 3-minute one needed 80 %.
 MIN_TRACK_SECONDS = 30
-MAX_THRESHOLD_SECONDS = 240
+MIN_PERCENT = 50
+MAX_PERCENT = 100
+DEFAULT_PERCENT = 70
 
 # One `track.scrobble` call carries at most this many plays (Last.fm's own
 # ceiling); the flush sends the queue in slices of this size.
@@ -215,25 +223,40 @@ def auth_url(cfg=None, token: str = "") -> str:
 
 
 def get_session(cfg=None, token: str = "",
-                timeout: Optional[float] = None) -> Tuple[dict, str]:
-    """``auth.getSession`` -> ``{name, key}`` for that authorized token.
+                timeout: Optional[float] = None) -> dict:
+    """``auth.getSession`` -> an OUTCOME dict for that authorized token.
 
     Signed with the shared secret and carrying NO session key (the token is
     what stands in); the token is consumed by this call.
-    """
+
+    -> ``{ok, name, key, code, reason}``. `ok` is True only with a session key.
+    `code` names the ONE refusal a connect UI must WAIT OUT rather than treat
+    as a failure — ``"NOT_AUTHORIZED"`` is Last.fm's own error 14, "This token
+    has not been authorized", which just means the user has not finished in the
+    browser yet — and is "" for every other refusal (a blank token, a bad
+    signature, a network error). `reason` is always Last.fm's own words, so a
+    caller can show them either way."""
     token = str(token or "").strip()
     if not token:
-        return {}, "no token was given"
+        return {"ok": False, "name": "", "key": "", "code": "",
+                "reason": "no token was given"}
     data, err = _call("auth.getSession", {"token": token}, cfg, signed=True,
                       timeout=timeout)
     if err:
-        return {}, err
+        code = ""
+        try:
+            if int((data or {}).get("error") or 0) == 14:
+                code = "NOT_AUTHORIZED"
+        except (TypeError, ValueError):
+            code = ""
+        return {"ok": False, "name": "", "key": "", "code": code, "reason": err}
     session = (data or {}).get("session") or {}
     name = str(session.get("name") or "").strip()
     key = str(session.get("key") or "").strip()
     if not key:
-        return {}, "Last.fm answered with no session key"
-    return {"name": name, "key": key}, ""
+        return {"ok": False, "name": "", "key": "", "code": "",
+                "reason": "Last.fm answered with no session key"}
+    return {"ok": True, "name": name, "key": key, "code": "", "reason": ""}
 
 
 def _guard(cfg: dict, *, need=("enabled", "session")) -> str:
@@ -541,12 +564,28 @@ def _duration_of(af) -> float:
 # --------------------------------------------------------------------------- #
 # Last.fm's own scrobble rule
 # --------------------------------------------------------------------------- #
-def scrobble_threshold(duration: float) -> Optional[float]:
+def scrobble_percent(cfg=None) -> float:
+    """The share of a track a play must reach — `lastfm_scrobble_percent`,
+    clamped to 50–100.
+
+    The floor is Last.fm's own: it discards a scrobble below half the track,
+    so a setting under it would only file plays nobody counts. A missing,
+    blank or unparsable value reads as the shipped 70; 100 means "only a play
+    that reached the end counts".
+    """
+    raw = _cfg(cfg).get("lastfm_scrobble_percent")
+    try:
+        percent = float(raw)
+    except (TypeError, ValueError):
+        percent = float(DEFAULT_PERCENT)
+    return min(MAX_PERCENT, max(MIN_PERCENT, percent))
+
+
+def scrobble_threshold(duration: float, cfg=None) -> Optional[float]:
     """Seconds a play must reach to count, or None for a track too short.
 
     A track must be at least ``MIN_TRACK_SECONDS`` long, and the play reaches
-    ``min(50 % of the track, 4 minutes)`` — half the track OR four minutes,
-    whichever comes FIRST.
+    ``scrobble_percent`` of it — 70 % by default, configurable per library.
     """
     try:
         duration = float(duration)
@@ -554,12 +593,12 @@ def scrobble_threshold(duration: float) -> Optional[float]:
         return None
     if duration < MIN_TRACK_SECONDS:
         return None
-    return min(duration / 2.0, float(MAX_THRESHOLD_SECONDS))
+    return duration * scrobble_percent(cfg) / 100.0
 
 
-def meets_rule(duration: float, played_seconds: float) -> bool:
-    """Does this play count under Last.fm's own rule? (see `scrobble_threshold`)."""
-    need = scrobble_threshold(duration)
+def meets_rule(duration: float, played_seconds: float, cfg=None) -> bool:
+    """Does this play count under the scrobble rule? (see `scrobble_threshold`)."""
+    need = scrobble_threshold(duration, cfg)
     if need is None:
         return False
     try:

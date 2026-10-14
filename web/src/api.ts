@@ -15,6 +15,7 @@ import type {
   DiscoveryImageRow,
   DownloadEntry,
   DownloadsPayload,
+  DownloadsEntryDetail,
   GradeWarning,
   HomeData,
   ImportAutonomy,
@@ -3484,8 +3485,11 @@ export const api = {
       },
       1800000
     ),
-  /** Bulk import: move several staged albums into the library at once. */
-  importBulk: (items: { path: string; move?: boolean; release?: Record<string, unknown>; mbid?: string }[]) =>
+  /** Bulk import: move several staged albums into the library at once.
+   *  `files` (with `name`) imports only the listed files of a staged folder as
+   *  this one album — what the downloads picker sends — and `name` names the
+   *  album folder it becomes (default: the staged folder's own name). */
+  importBulk: (items: { path: string; move?: boolean; release?: Record<string, unknown>; mbid?: string; files?: string[]; name?: string }[]) =>
     json<ImportBulkResult>(
       `${API}/import/bulk`,
       {
@@ -3781,7 +3785,7 @@ export const api = {
     ),
 
   // ----------------------------------------------------------------- //
-  // Last.fm scrobbling — Settings → Scrobbling, and the player's two   //
+  // Last.fm scrobbling — Settings → Connections, and the player's two  //
   // fire-and-forget writes (server/api_lastfm.py).                     //
   // ----------------------------------------------------------------- //
   /** Everything the Scrobbling panel shows (no network on the server side). */
@@ -3792,11 +3796,11 @@ export const api = {
     json<LastfmConnect>(`${API}/lastfm/connect`, { method: "POST" }, 30000),
   /** Finish it: exchange the authorized token for the session Last.fm stores
    *  (the token is consumed once). */
-  lastfmConnectFinish: (token: string) =>
+  lastfmConnectFinish: (token: string, wait = false) =>
     json<LastfmFinish>(`${API}/lastfm/connect/finish`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ token }),
+      body: JSON.stringify({ token, wait }),
     }, 30000),
   /** Forget the saved session (the app's key/secret stay). */
   lastfmDisconnect: () =>
@@ -3924,6 +3928,11 @@ export const api = {
       body: JSON.stringify({ album_path: albumPath, assignments }),
     }, 600000).then(noteContainerSwap),
   downloads: () => json<DownloadsPayload>(`${API}/downloads`),
+  /** One downloads entry, file by file, with the tags each file states — what
+   *  the manual-import picker reads to prefill a release (GET
+   *  /api/downloads/entry). */
+  downloadsEntry: (name: string) =>
+    json<DownloadsEntryDetail>(`${API}/downloads/entry?name=${encodeURIComponent(name)}`, undefined, 120000),
   downloadsDelete: (names: string[]) =>
     json<{ deleted: string[]; failed: { name: string; error: string }[]; freed: number }>(
       `${API}/downloads/delete`,

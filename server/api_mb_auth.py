@@ -12,7 +12,9 @@ answer).
     POST /api/mb/auth/connect     -> {ok, url, verifier, detail}
     POST /api/mb/auth/finish      -> {ok, detail, username, status}   (code, verifier)
     POST /api/mb/auth/disconnect  -> the status afterwards
+    GET  /api/mb/ratings/queue    -> the background upload queue's own state
     POST /api/mb/ratings/submit   -> per-FILE rows  (paths: [file, …])
+    POST /api/mb/ratings/submit-all -> {ok, queued}  (every rated folder)
 
 The submit route is where the BATCHING lives: one album's recordings are one
 MusicBrainz request, and the album's release group rides in the SAME request
@@ -21,16 +23,20 @@ folder each file sits in. The user's own rating is read from the app's store
 (``server.ratings``, half-stars) and snapped to MusicBrainz's 20-point grid in
 ``mb_submit``; a file with no rating, no id, or a value that would snap to 0
 is reported as skipped with its own sentence, never silently dropped.
+
+``submit-all`` and the automatic post-rating upload do NOT submit here: they
+enqueue the folder on ``server.mb_ratings_sync``'s daemon worker, which builds
+the SAME items (via ``mb_ratings_sync.album_submission``) and submits them off
+the request path.
 """
 import os
-from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from server import auth as auth_mod
+from server import mb_ratings_sync
 from server import mb_submit
-from server import ratings as ratings_mod
 from server.api_common import load_config
 
 
@@ -76,24 +82,6 @@ def mb_auth_disconnect():
 # --------------------------------------------------------------------------- #
 # The submission
 # --------------------------------------------------------------------------- #
-def _album_release_group(paths):
-    """The release-group MBID the files of one album carry, or "".
-
-    Read off the files' own tags (MUSICBRAINZ_RELEASEGROUPID) — the same
-    evidence the import wrote — and the first file that states one decides for
-    the folder."""
-    from server import tagcache
-    for path in paths:
-        try:
-            tags, _ = tagcache.read_track(path, ["MUSICBRAINZ_RELEASEGROUPID"])
-        except Exception:
-            continue
-        got = str((tags or {}).get("MUSICBRAINZ_RELEASEGROUPID") or "").strip()
-        if got:
-            return got
-    return ""
-
-
 def _file_row(owner, decided):
     """One per-file result row: what was sent (and from what) or why not."""
     kind, path, value = owner
@@ -134,30 +122,16 @@ def mb_ratings_submit(body: SubmitBody, request: Request = None):
     if not paths:
         raise HTTPException(400, "no files were given to submit")
 
-    # The app's own ratings: the store's half-stars (a stored row wins; a
-    # track with no row takes its file's own RATING tag — `adopt`).
-    values = ratings_mod.map_for(paths=paths, user=user, adopt=True, scope="track")
-
     # One MusicBrainz request per album folder: its recordings, and its release
-    # group in the same request.
+    # group in the same request. What a folder contributes is decided by ONE
+    # builder — the queue worker calls the very same one.
     groups = {}
     for path in paths:
         groups.setdefault(os.path.dirname(os.path.normpath(path)), []).append(path)
 
     rows, details, all_ok = [], [], True
     for folder, files in groups.items():
-        owners, items = [], []
-        for path in files:
-            half = int(values.get(ratings_mod.api_path(path)) or 0)
-            value = half * ratings_mod.TAG_STEP
-            items.append(("recording", ratings_mod.mbid_for(path), value))
-            owners.append(("track", path, value))
-        rg_mbid = _album_release_group(files)
-        album_half = int(ratings_mod.value(folder, user=user, scope="album") or 0)
-        if rg_mbid or album_half:
-            items.append(("release_group", rg_mbid,
-                          album_half * ratings_mod.TAG_STEP))
-            owners.append(("album", folder, album_half * ratings_mod.TAG_STEP))
+        owners, items = mb_ratings_sync.album_submission(folder, files, user=user)
         result = mb_submit.submit_ratings(items, cfg)
         if not result.get("ok"):
             all_ok = False
@@ -175,3 +149,23 @@ def mb_ratings_submit(body: SubmitBody, request: Request = None):
         "username": state.get("username", ""),
         "rows": rows,
     }
+
+
+@router.get("/api/mb/ratings/queue")
+def mb_ratings_queue():
+    """The background upload queue: is it on, what is pending, what it did.
+
+    No network and no submission — just the worker's own state, so the panel
+    can poll it cheaply while a rating settles."""
+    return {"ok": True, **mb_ratings_sync.state()}
+
+
+@router.post("/api/mb/ratings/submit-all")
+def mb_ratings_submit_all():
+    """Queue EVERY folder that carries a rating; -> how many joined the queue.
+
+    Fast and offline: it only walks the app's own store and enqueues, never
+    waits for a submission. A login that is missing or switched off queues
+    nothing (``queued: 0``) — the queue itself refuses folders it cannot
+    submit."""
+    return {"ok": True, "queued": mb_ratings_sync.enqueue_all(load_config())}

@@ -806,7 +806,12 @@ def check_wizard_import_prompts(check):
           bool(begin) and "setIdentify({" in begin.group(1)
           and "startAutoImport(staged, {})" not in begin.group(1))
     check("a row left on the release it names sends no pin",
-          "if (v && v.toLowerCase() !== current.toLowerCase()) pinsOut[path] = v;" in
+          # The row's baseline is `seedOf` — the caller's `current`, else the
+          # release its own TAGS state (R433): a row left on either sends
+          # nothing, and only an edited row is a pin.
+          "const base = row ? seedOf(row) : \"\";" in
+          read("web/src/components/ImportIdentifyDialog.tsx")
+          and "if (v && v.toLowerCase() !== base.toLowerCase()) pinsOut[path] = v;" in
           read("web/src/components/ImportIdentifyDialog.tsx"))
     # The queue row carries the chain's own verdict.
     check("the queue row prints the server's line about the chain",

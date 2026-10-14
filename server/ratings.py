@@ -398,6 +398,33 @@ def all_track_tags(user="", scope="track"):
     return out
 
 
+def rated_folders():
+    """Every folder that holds ANY rating, as stored folder paths.
+
+    The MusicBrainz upload's own walk (``server.mb_ratings_sync.enqueue_all``):
+    an album row's path IS a folder, and a track row's FILE contributes the
+    folder it sits in. Artist rows are skipped — a MusicBrainz rating here is
+    per recording / release group, and an artist folder has no such entity.
+    Read through ``_read_conn`` so a store that was never created is an empty
+    answer rather than a new (empty) database planted by a bulk submit.
+    Returned sorted and deduped; the caller filters to folders that exist."""
+    out = set()
+    c = _read_conn()
+    if c is None:
+        return []
+    with c:
+        for r in c.execute("SELECT scope, path FROM ratings WHERE rating > 0"):
+            scope = str(r["scope"] or "track")
+            path = str(r["path"] or "")
+            if not path:
+                continue
+            if scope == "album":
+                out.add(os.path.normpath(path))
+            elif scope == "track":
+                out.add(os.path.dirname(os.path.normpath(path)))
+    return sorted(out)
+
+
 def map_for(paths=None, user="", adopt=True, scope="track"):
     """{path: half-stars} for one user and one scope — the map a client
     decorates from.
@@ -862,6 +889,26 @@ def _invalidate(path):
 # --------------------------------------------------------------------------- #
 # Rating an entity: store first, then (tracks only) the file
 # --------------------------------------------------------------------------- #
+def _enqueue_mb_sync(scope, path):
+    """Hand the folder a rating just landed in to the MusicBrainz upload queue.
+
+    Track scope contributes the folder the FILE sits in; album scope contributes
+    the folder itself; artist scope contributes nothing — a MusicBrainz rating
+    here is per recording / release group, never per artist folder. Imported
+    lazily so this module stays acyclic, and every failure swallowed: the rating
+    is already stored, and it must never be undone because the upload queue
+    could not be reached."""
+    try:
+        if scope == "artist":
+            return
+        folder = (os.path.dirname(os.path.normpath(path))
+                  if scope == "track" else path)
+        from server import mb_ratings_sync
+        mb_ratings_sync.enqueue(folder)
+    except Exception:
+        pass
+
+
 def rate(path, rating, mbid=None, user="", cfg=None, scope="track"):
     """Store one rating and, for a track, mirror it into the file. Returns the
     reply body.
@@ -882,9 +929,11 @@ def rate(path, rating, mbid=None, user="", cfg=None, scope="track"):
     scope = parse_scope(scope)
     if scope == "track":
         half = set_rating(path, rating, mbid=mbid or mbid_for(path), user=user)
+        _enqueue_mb_sync(scope, path)
         return {"path": api_path(path), "rating": half, "tag": write_tag(path, half, cfg)}
     half = set_rating(path, rating, user=user, scope=scope,
                       mbid=mbid or entity_mbid(scope, path, cfg))
+    _enqueue_mb_sync(scope, path)
     return {"path": api_path(path), "rating": half, "tag": None}
 
 
@@ -919,6 +968,7 @@ def bulk_rate(paths, rating, user="", cfg=None):
             failed.append({"path": api_path(p), "error": str(e)})
             continue
         updated += 1
+        _enqueue_mb_sync("track", p)
         res = write_tag(p, half, cfg)
         if res["error"]:
             tags_failed.append({"path": api_path(p), "error": res["error"]})

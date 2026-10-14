@@ -6,8 +6,6 @@ import {
   ArrowRight,
   Check,
   Copy,
-  Eye,
-  EyeOff,
   FolderOpen,
   KeyRound,
   Loader2,
@@ -15,9 +13,9 @@ import {
   Settings,
   ShieldCheck,
   Sparkles,
-  Users,
 } from "lucide-react";
 import { api, deviceUnavailable, installSummary, setToken, unavailableFeatures } from "../api";
+import CfgFields, { CfgSection, type RevealState } from "../components/CfgFields";
 import FolderPicker from "../components/FolderPicker";
 import PageHeader from "../components/PageHeader";
 import SetupRail from "../components/SetupRail";
@@ -239,17 +237,12 @@ export default function SetupPage() {
     setBusy(true);
     try {
       if (Object.keys(changed).length) await api.saveConfig(changed);
-      if (step.panel === "slskd") {
-        if (draft.soulseek_share_library !== false) {
-          await api.soulseekSharesRefresh().catch(() => undefined);
-          await api.soulseekStart();
-          toast("slskd started — sharing your library");
-        } else if (Object.keys(changed).length) {
-          toast.success("Saved");
-        }
-      } else if (Object.keys(changed).length) {
-        toast.success("Saved");
-      }
+      // A plain config save, even on the step that holds the Soulseek
+      // credentials: the Tools step comes AFTER this one now, so slskd may not
+      // be installed yet and starting it here would announce a share that
+      // cannot listen. The step's Test login does the whole thing — save,
+      // start, report the network's own answer — when the reader asks for it.
+      if (Object.keys(changed).length) toast.success("Saved");
       qc.invalidateQueries({ queryKey: ["config"] });
       if (advance) setIndex((i) => i + 1);
     } catch (e) {
@@ -357,82 +350,6 @@ export default function SetupPage() {
     }
   };
 
-  const renderField = (field: CfgField) => {
-    const value = draft?.[field.k];
-    const error = stepErrors[field.k];
-    const set = (v: unknown) => setField(field.k, v);
-    const help = field.help ? <span className="block text-[10px] text-zinc-600 mt-1 leading-relaxed">{field.help}</span> : null;
-    const errorLine = error ? <span className="block text-[10px] text-amber-300 mt-1">{error}</span> : null;
-
-    if (field.type === "bool") {
-      return (
-        <label key={field.k} className="flex items-start gap-2 text-xs text-zinc-300 cursor-pointer select-none">
-          <input type="checkbox" className="mt-0.5 accent-[var(--accent)]" checked={!!value} onChange={(e) => set(e.target.checked)} />
-          <span>
-            {field.label}
-            {help}
-          </span>
-        </label>
-      );
-    }
-
-    if (field.type === "select") {
-      // A value the option list does not carry (a config written by an older
-      // or newer backend) still has to be visible, or the control would look
-      // unset while the config holds a real value.
-      const options = field.options;
-      const current = String(value ?? "");
-      const shown: [string, string][] = !current || options.some(([v]) => v === current) ? options : [[current, current], ...options];
-      return (
-        <label key={field.k} className="block">
-          <span className="text-xs text-zinc-500 uppercase">{field.label}</span>
-          <select className="input mt-1" value={current} onChange={(e) => set(e.target.value)}>
-            {shown.map(([v, l]) => (
-              <option key={v} value={v}>
-                {l}
-              </option>
-            ))}
-          </select>
-          {help}
-          {errorLine}
-        </label>
-      );
-    }
-
-    // text / password / number share one control shape: the wizard's own
-    // label-over-input, with the value the config already holds.
-    const isPassword = field.type === "password";
-    return (
-      <label key={field.k} className="block">
-        <span className="text-xs text-zinc-500 uppercase flex items-center gap-2">{field.label}</span>
-        <div className={isPassword ? "relative mt-1" : undefined}>
-          <input
-            className={`input${isPassword ? " !pr-9" : ""}`}
-            type={isPassword && !showPasswords[field.k] ? "password" : field.type === "number" ? "number" : "text"}
-            min={field.type === "number" ? field.min : undefined}
-            max={field.type === "number" ? field.max : undefined}
-            step={field.type === "number" ? field.step : undefined}
-            value={String(value ?? "")}
-            onChange={(e) => set(e.target.value)}
-            spellCheck={false}
-          />
-          {isPassword && (
-            <button
-              type="button"
-              className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-zinc-500 hover:text-zinc-200"
-              title={showPasswords[field.k] ? "Hide" : "Show"}
-              onClick={() => setShowPasswords((prev) => (prev[field.k] ? { ...prev } : { ...prev, [field.k]: true }))}
-            >
-              {showPasswords[field.k] ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
-            </button>
-          )}
-        </div>
-        {help}
-        {errorLine}
-      </label>
-    );
-  };
-
   if (!draft) {
     // Held until the config answers: the draft is the saved config, and a form
     // rendered from nothing would read every untouched switch as a change.
@@ -442,6 +359,38 @@ export default function SetupPage() {
       </div>
     );
   }
+
+  // The wizard's rows ARE the Settings page's rows: the shared renderer draws
+  // them from the same field definitions, so a setting met here is recognisable
+  // on the page that keeps it. `catalogs` is empty because no group a step
+  // renders carries a provider `list` (those live on the Discovery tab, which
+  // the wizard deliberately does not open), and `reveal` is this page's own
+  // show-password state adapted to the renderer's contract.
+  const reveal: RevealState = {
+    has: (k) => !!showPasswords[k],
+    toggle: (k) =>
+      setShowPasswords((prev) => {
+        const next = { ...prev };
+        if (next[k]) delete next[k];
+        else next[k] = true;
+        return next;
+      }),
+  };
+  const fieldRows = (fields: CfgField[]) => (
+    <>
+      <CfgFields fields={fields} get={(k) => draft[k]} set={setField} catalogs={{}} reveal={reveal} />
+      {/* The renderer draws a row per setting, not a checklist, so a value that
+          fails `cfgError` keeps its amber line here — under the block of rows
+          it belongs to, never swallowed inside a fold the reader cannot see. */}
+      {fields
+        .filter((f) => stepErrors[f.k])
+        .map((f) => (
+          <div key={f.k} className="text-[11px] text-amber-300 mt-1">
+            {f.label}: {stepErrors[f.k]}
+          </div>
+        ))}
+    </>
+  );
 
   // How far the answers land from the shipped defaults — the closing screen's
   // one honest number, computed from what the wizard would write.
@@ -488,8 +437,7 @@ export default function SetupPage() {
         <div className="panel p-6 space-y-4">
           <div>
             <div className="flex items-center gap-2 text-sm font-semibold">
-              {step.panel === "sources" ? <Sparkles className="h-4 w-4 text-accent" /> : null}
-              {step.panel === "slskd" ? <Users className="h-4 w-4 text-accent" /> : null}
+              {step.panel === "connections" ? <Sparkles className="h-4 w-4 text-accent" /> : null}
               {step.panel === "password" ? <ShieldCheck className="h-4 w-4 text-accent" /> : null}
               {step.panel === "done" ? <Check className="h-4 w-4 text-emerald-400" /> : null}
               {step.title}
@@ -667,22 +615,18 @@ export default function SetupPage() {
             </>
           )}
 
-          {step.panel === "sources" && (
-            // The rows that ASK for a key, and nothing else: the credential
-            // rows the Sources endpoint files under `credentials` and `links`.
-            // The providers themselves are triaged in Settings → Sources,
-            // which draws this same panel unfolded.
-            <SourcesPanel only={["credentials", "links"]} askKeys />
-          )}
-
           {step.panel === "connections" && (
-            // The two Connect flows, side by side with the settings group
-            // below them: each panel carries its OWN numbered how-to (the
+            // Everything a first run can log in to or paste a key into, in the
+            // order the reader meets it: the Sources credentials first (the
+            // rows the Sources endpoint files under `credentials` and `links`,
+            // and nothing else — the providers themselves are triaged in
+            // Settings → Connections, which draws this same panel unfolded), then
+            // the two Connect flows, each carrying its OWN numbered how-to (the
             // shared ConnectGuide), so the wizard and the Settings surfaces
             // that draw these same panels read the flow identically. Nothing
-            // here gates the step — both logins are optional and the group
-            // below is what the step saves.
+            // here gates the step: every one of them is optional.
             <div className="space-y-3">
+              <SourcesPanel only={["credentials", "links"]} askKeys />
               <ScrobblePanel />
               <MbLoginPanel ids={[]} kind="album" />
             </div>
@@ -737,7 +681,7 @@ export default function SetupPage() {
                 </div>
               </div>
               <p className="text-[11px] text-zinc-500 leading-relaxed">
-                Source credentials can be tested and changed anytime in Settings → Sources; every other answer here
+                Source credentials can be tested and changed anytime in Settings → Connections; every other answer here
                 lives on the matching Settings tab. This wizard stays available from Settings → General, and the
                 settings it never asked about — the scripts, the audit and every grading check — are already at the
                 strict defaults it would have offered. Scripts that need missing tools will tell you when you run them.
@@ -747,14 +691,24 @@ export default function SetupPage() {
 
           {/* The fields this step asks BY NAME, above its groups: an account
               and a login are the values nothing has a shipped default for, and
-              a first run should not have to open a fold to find them. */}
+              a first run should not have to open a fold to find them. The
+              section names what the rows belong to, and the group they came
+              from skips exactly these keys — one setting, one control. */}
           {asked.length > 0 && (
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-2.5">{asked.map(renderField)}</div>
+            <CfgSection
+              title="Soulseek login & sharing"
+              blurb="The account slskd signs in with, and whether this client shares the library. Both are optional — the Tools step installs slskd, and Test login below saves these values, starts it and reports what the Soulseek network answered."
+            >
+              {fieldRows(asked)}
+            </CfgSection>
           )}
 
           {/* The step's own settings, group by group: the same titles and the
               same fields the Settings page shows, so "where do I change this
-              later" has one answer. */}
+              later" has one answer. A group this step does not OPEN
+              (`OPEN_GROUPS`) folds instead: one `details` whose summary is the
+              group's own heading, so a wall of shipped defaults never buries
+              the rows a first run actually came here to answer. */}
           {step.groups?.map((title) => {
             const group = cfgGroup(title);
             // The keys asked above are SKIPPED here: one setting, one control.
@@ -762,15 +716,23 @@ export default function SetupPage() {
             // A group whose fields are all asked above would draw an empty
             // card that only asks the reader what they are missing.
             if (!fields.length) return null;
-            const open = !!OPEN_GROUPS[title];
+            if (OPEN_GROUPS[title]) {
+              return (
+                <CfgSection key={title} title={group.title} blurb={group.blurb}>
+                  {fieldRows(fields)}
+                </CfgSection>
+              );
+            }
             return (
-              <details key={title} className="rounded-md border border-border bg-bg/40 px-3 py-2" open={open}>
+              <details key={title} className="rounded-md border border-border bg-bg/40 px-3 py-2">
                 <summary className="text-xs font-semibold text-zinc-300 cursor-pointer select-none">
                   {group.title}
-                  {!open && <span className="ml-2 font-normal text-[10px] text-zinc-600">{fields.length} settings — the defaults are fine</span>}
+                  <span className="ml-2 font-normal text-[10px] text-zinc-600">
+                    {fields.length} settings — the defaults are fine
+                  </span>
                 </summary>
                 {group.blurb && <p className="text-[11px] text-zinc-500 mt-1 leading-relaxed">{group.blurb}</p>}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-2.5 mt-2">{fields.map(renderField)}</div>
+                <div className="mt-2">{fieldRows(fields)}</div>
               </details>
             );
           })}
@@ -786,12 +748,12 @@ export default function SetupPage() {
             </button>
             {!isLast && (
               <div className="ml-auto flex flex-wrap justify-end gap-2">
-                {step.panel === "slskd" && (
+                {step.panel === "connections" && (
                   <button
                     className="btn-ghost"
                     onClick={testSoulseek}
                     disabled={busy}
-                    title="Save these credentials, start slskd and report what the Soulseek network answered — the same payload the Soulseek page's dot is drawn from"
+                    title="Save the Soulseek credentials above, start slskd and report what the Soulseek network answered — the same payload the Soulseek page's dot is drawn from"
                   >
                     Test login
                   </button>
@@ -815,7 +777,7 @@ export default function SetupPage() {
                   </button>
                 ) : (
                   <button className="btn-primary" onClick={() => saveStep(true)} disabled={busy || badCount > 0} title={badCount ? "Fix the highlighted fields first" : undefined}>
-                    {busy ? "Saving…" : step.panel === "slskd" ? "Save & start sharing" : "Save & continue"}{" "}
+                    {busy ? "Saving…" : "Save & continue"}{" "}
                     <ArrowRight className="h-3.5 w-3.5" />
                   </button>
                 )}

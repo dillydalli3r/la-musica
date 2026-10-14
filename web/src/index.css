@@ -533,6 +533,23 @@ body {
     height: max(100%, 44px);
     transform: translate(-50%, -50%);
   }
+  /* A switch is 18px tall by design (it reads as a toggle, not a tile), which
+     is under the phone tap floor `tools/check_responsive.cjs` sweeps every
+     page for. Growing the HIT area instead of the control is the same move
+     `.tap-hit` makes for icon buttons: INVISIBLE, and 32px rather than 44 —
+     switches stack 10px apart in the settings rows, where a 44px target would
+     reach into its neighbour's and make a thumb ambiguous about which one it
+     is over. Applied by the Switch component itself, so every surface that
+     draws one (Settings, the setup wizard, the player) gets the same target. */
+  .switch-hit::after {
+    content: "";
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: max(100%, 44px);
+    height: max(100%, 32px);
+    transform: translate(-50%, -50%);
+  }
 }
 
 /* A search field this narrow is a field whose placeholder is being eaten by

@@ -21,8 +21,8 @@ const identity = (c: { domain: string; path: string; name: string }) =>
 /** The YouTube cookie jar, in one panel: import a cookies.txt, see what was
  *  kept, write a note against any cookie, clear the jar.
  *
- *  ONE component for every place the jar is offered — Settings → Videos, the
- *  wizard's Keys step and Settings → Sources.
+ *  ONE component for every place the jar is offered — Settings → Videos and
+ *  the wizard's Connections step.
  *
  *  Every import arrives here as TEXT — a paste or a dropped file, never a
  *  path — and the server validates it as a Netscape cookie file BEFORE it

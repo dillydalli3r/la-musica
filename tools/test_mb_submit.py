@@ -423,6 +423,193 @@ finally:
     api_mb_auth.load_config = _real_load
 
 # --------------------------------------------------------------------------- #
+print("\nfinish accepts a bare code, a redirect URL, or the stored verifier")
+# --------------------------------------------------------------------------- #
+fake = FakeHTTP()
+mb.httpx = fake
+try:
+    cfg = {mb.CLIENT_ID_KEY: CID, mb.CLIENT_SECRET_KEY: SECRET}
+    # A full redirect URL: the ?code= is extracted from it.
+    fake.calls.clear()
+    fake.queue.append(Resp(200, "", {"access_token": "a1", "expires_in": 3600}))
+    fake.queue.append(Resp(200, "", {"sub": "listener"}))
+    got = mb.finish_connect(
+        "https://musicbrainz.org/oauth2/callback?code=URLCODE&state=s", "v1", cfg)
+    eq(got["ok"], True, "a full redirect URL connects")
+    eq(fake.calls[0][2]["data"]["code"], "URLCODE",
+       "the ?code= is extracted from the pasted URL")
+    eq(fake.calls[0][2]["data"]["code_verifier"], "v1",
+       "and the verifier handed in alongside is used")
+
+    # A redirect carrying ?error= is MusicBrainz's refusal, in its own words.
+    fake.calls.clear()
+    got = mb.finish_connect(
+        "https://musicbrainz.org/cb?error=access_denied"
+        "&error_description=The+user+denied+access", "v1", cfg)
+    eq(got["ok"], False, "an error redirect does not connect")
+    ok("denied" in got["detail"], "and says so in MusicBrainz's own words")
+    eq(fake.calls, [], "with no token request at all")
+
+    # A blank secret is a PUBLIC PKCE client: the token body omits it ENTIRELY,
+    # and a code-only finish uses the verifier connect_url saved.
+    cfg2 = {mb.CLIENT_ID_KEY: CID, mb.CLIENT_SECRET_KEY: ""}
+    mb.connect_url(cfg2)
+    stored = cfg2[mb.PKCE_VERIFIER_KEY]
+    ok(bool(stored) and cfg2[mb.PKCE_STATE_KEY],
+       "connect_url persists the PKCE verifier + state")
+    fake.calls.clear()
+    fake.queue.append(Resp(200, "", {"access_token": "a2", "expires_in": 3600}))
+    fake.queue.append(Resp(200, "", {"sub": "listener"}))
+    got = mb.finish_connect("just-the-code", "", cfg2)
+    eq(got["ok"], True, "a bare code with the STORED verifier connects")
+    data = fake.calls[0][2]["data"]
+    eq(data["code_verifier"], stored, "the stored verifier is what was used")
+    eq("client_secret" in data, False, "and a blank secret is omitted entirely")
+    eq(data["client_id"], CID, "the client id is still sent")
+    eq(cfg2[mb.PKCE_VERIFIER_KEY], "", "the verifier is cleared once consumed")
+
+    # The refresh half works the same way for a public client.
+    fake.calls.clear()
+    cfg3 = {mb.CLIENT_ID_KEY: CID, mb.CLIENT_SECRET_KEY: "",
+            mb.REFRESH_KEY: "r", mb.EXPIRES_KEY: int(time.time()) - 10}
+    fake.queue.append(Resp(200, "", {"access_token": "a3", "expires_in": 3600}))
+    tok, err, _where = mb.access_token(cfg3)
+    eq((tok, err), ("a3", ""), "a blank-secret install renews its token")
+    eq("client_secret" in fake.calls[0][2]["data"], False,
+       "the refresh omits client_secret too")
+
+    # No verifier anywhere is a clear error, not a silent broken request.
+    fake.calls.clear()
+    got = mb.finish_connect("code", "", {mb.CLIENT_ID_KEY: CID})
+    eq(got["ok"], False, "finish without any verifier is a clear error")
+    ok("verifier" in got["detail"], "naming what is missing")
+    eq(fake.calls, [], "and asking nobody")
+finally:
+    mb.httpx = REAL_HTTPX
+
+# --------------------------------------------------------------------------- #
+print("\nthe upload queue — dedup, coalescing, and a worker submit")
+# --------------------------------------------------------------------------- #
+from server import mb_ratings_sync as sync                          # noqa: E402
+
+_real_sync_load = sync.load_config
+_real_sync_enqueue = sync.enqueue
+cfg_q = connected_cfg()
+sync.load_config = lambda: cfg_q
+# A long window for the checks that only inspect the pending set — the worker
+# must not drain it mid-assertion.
+sync.COALESCE_SECONDS = 3600.0
+
+QA = os.path.join(MF, "Queue Album")
+QA1 = os.path.join(QA, "01 queue.flac")
+os.makedirs(QA, exist_ok=True)
+with open(QA1, "wb") as _h:
+    _h.write(b"\0")
+QTAGS = {os.path.normpath(QA1): {"MUSICBRAINZ_TRACKID": REC,
+                                 "MUSICBRAINZ_RELEASEGROUPID": RG}}
+_real_read2 = tagcache_mod.read_track
+tagcache_mod.read_track = lambda path, tag_list=None: (
+    {k: QTAGS.get(os.path.normpath(path), {}).get(k) for k in (tag_list or [])}, {})
+try:
+    sync._PENDING.clear()
+    sync._RECENT.clear()
+    eq(sync.enqueue(QA), True, "a folder joins the upload queue")
+    eq(sync.enqueue(QA), False, "enqueuing the same folder again is a no-op")
+    eq(sync.enqueue(QA + os.sep + "."), False,
+       "a differently-spelled same folder is deduped (normpath)")
+    eq(sync.state()["pending"], 1, "the pending set holds it exactly once")
+    ok(sync.state()["connected"] and sync.state()["enabled"],
+       "the queue reports a connected, enabled install")
+
+    # The worker: coalesce a burst, build the SAME items the route builds, and
+    # record the outcome.
+    ratings_mod.set_rating(QA1, 8, mbid=REC, user="")
+    ratings_mod.set_rating(QA, 8, user="", scope="album")
+    sync._PENDING.clear()
+    sync._RECENT.clear()
+    sync.COALESCE_SECONDS = 0.05
+    fake = FakeHTTP()
+    fake.queue.append(Resp(200, "<metadata/>"))
+    mb.httpx = fake
+    try:
+        sync.enqueue(QA)
+        recent = []
+        for _ in range(100):
+            recent = sync.state()["recent"]
+            if recent:
+                break
+            time.sleep(0.05)
+        eq(len(recent), 1, "the worker recorded one submission")
+        eq(recent[0]["ok"], True, "…marked ok")
+        eq(recent[0]["name"], "Queue Album", "…named for its folder")
+        eq(recent[0]["path"], os.path.normpath(QA), "…carrying the folder path")
+        eq(recent[0]["sent"], 2, "both the recording and the release group sent")
+        eq(len(fake.calls), 1, "the whole album went in ONE request")
+        eq(fake.calls[0][2]["content"].decode("utf-8"),
+           mb.build_body([("recording", REC, 80), ("release_group", RG, 80)]),
+           "the worker builds the SAME body the submit route does")
+        eq(sync.state()["pending"], 0, "and the pending set is drained")
+    finally:
+        mb.httpx = REAL_HTTPX
+        sync.COALESCE_SECONDS = 3600.0
+
+    # submit-all: every RATED folder, and nothing else.
+    sync._PENDING.clear()
+    sync._RECENT.clear()
+    UNRATED = os.path.join(MF, "Unrated Album")
+    os.makedirs(UNRATED, exist_ok=True)
+    ARTIST = os.path.join(MF, "Solo Artist")
+    os.makedirs(ARTIST, exist_ok=True)
+    ratings_mod.set_rating(ARTIST, 8, user="", scope="artist")
+    queued = sync.enqueue_all(cfg_q)
+    ok(queued >= 2, "submit-all queues the app's rated folders")
+    eq(sync.state()["pending"], queued, "and returns how many joined the queue")
+    ok(os.path.normpath(QA) in sync._PENDING, "the rated album is queued")
+    ok(os.path.normpath(ALBUM) in sync._PENDING,
+       "so is the album rated through the submit route")
+    ok(os.path.normpath(UNRATED) not in sync._PENDING,
+       "a folder with NO rating is skipped")
+    ok(os.path.normpath(ARTIST) not in sync._PENDING,
+       "and an ARTIST rating is not submitted (no MB entity for it)")
+
+    # The rating write itself feeds the queue — track scope hands over the
+    # FILE's folder, album scope the folder, artist scope nothing.
+    sync._PENDING.clear()
+    recorded = []
+    sync.enqueue = lambda folder: (recorded.append(os.path.normpath(str(folder))),
+                                   True)[1]
+    try:
+        recorded.clear()
+        ratings_mod.rate(QA1, 9, mbid=REC, cfg={})
+        ok(os.path.normpath(QA) in recorded,
+           "a track rating enqueues the folder the file sits in")
+        recorded.clear()
+        ratings_mod.rate(QA, 9, scope="album", mbid=RG, cfg={})
+        ok(os.path.normpath(QA) in recorded,
+           "an album rating enqueues the folder itself")
+        recorded.clear()
+        ratings_mod._enqueue_mb_sync("artist", QA)
+        eq(recorded, [], "an artist rating enqueues NOTHING")
+
+        recorded.clear()
+        ratings_mod.bulk_rate([QA1], 7, cfg={})
+        ok(os.path.normpath(QA) in recorded, "a bulk track rating enqueues too")
+    finally:
+        sync.enqueue = _real_sync_enqueue
+finally:
+    tagcache_mod.read_track = _real_read2
+    sync.load_config = _real_sync_load
+    sync.COALESCE_SECONDS = 5.0
+    # Leave no work for a worker that would then try the REAL network.
+    sync._PENDING.clear()
+    sync._RECENT.clear()
+    sync._WAKE.set()
+    for _ in range(40):
+        if sync._WORKER is None or not sync._WORKER.is_alive():
+            break
+        time.sleep(0.05)
+
+# --------------------------------------------------------------------------- #
 print("\na real scratch server (8017+) — every route, nothing connected")
 # --------------------------------------------------------------------------- #
 PORT = 0
@@ -498,6 +685,20 @@ if server.started:
     eq(body.get("connected"), False, "and says nothing is connected")
     eq(body.get("submit_enabled"), True, "with the submission switch reported")
     eq(body.get("client_id_set"), False, "and no client id saved")
+    eq(body.get("pending"), 0, "with the upload queue's pending count (empty)")
+
+    status_code, body = _request(PORT, "GET", "/api/mb/ratings/queue")
+    eq(status_code, 200, "GET /api/mb/ratings/queue answers 200")
+    eq(body.get("ok"), True, "and reports the queue")
+    eq((body.get("connected"), body.get("enabled")), (False, True),
+       "naming the login and switch state")
+    ok(isinstance(body.get("pending"), int) and isinstance(body.get("recent"), list),
+       "with a numeric pending count and a recent list")
+
+    status_code, body = _request(PORT, "POST", "/api/mb/ratings/submit-all")
+    eq(status_code, 200, "POST /api/mb/ratings/submit-all answers 200")
+    eq(body.get("ok"), True, "and answers ok")
+    eq(body.get("queued"), 0, "queuing nothing while no login is connected")
 
     status_code, body = _request(PORT, "POST", "/api/mb/auth/connect")
     eq(status_code, 200, "POST /api/mb/auth/connect answers 200")

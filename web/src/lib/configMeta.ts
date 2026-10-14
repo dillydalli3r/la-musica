@@ -91,7 +91,7 @@ export interface SetupStep {
   title: string;
   blurb: string;
   /** The panel this step draws above its groups. */
-  panel?: "folder" | "dependencies" | "sources" | "slskd" | "password" | "connections" | "done";
+  panel?: "folder" | "password" | "connections" | "dependencies" | "done";
   /** CONFIG_GROUPS titles this step renders, in order. */
   groups?: string[];
   /** Keys of THIS step's groups that are asked on the step itself, above the
@@ -526,9 +526,10 @@ export const CONFIG_GROUPS: CfgGroup[] = [
     },
     {
       title: "Scrobbling & submissions",
-      blurb: "What the app writes BACK to the services it reads. Last.fm scrobbling sends a now-playing notice the moment a track starts and one scrobble under Last.fm's own rule (played 50 %, or 4 minutes, of a track at least 30 s long) — a scrobble that cannot be sent is queued and retried, never dropped. It needs the app's OWN Last.fm application: the API key from the Discovery tab AND the shared secret issued beside it, then one authorization (the Connect button on this tab). MusicBrainz submissions are rating writes only: the app registers an OAuth2 application once, the owner pastes its client id and secret here and authorizes once, and the refresh token that comes back is renewed automatically. Nothing is ever sent with a blank credential, and every failure is reported in the service's own words on Settings → Sources.",
+      blurb: "What the app writes BACK to the services it reads. Last.fm scrobbling sends a now-playing notice the moment a track starts and one scrobble once the play reaches the percentage below of a track at least 30 s long — a scrobble that cannot be sent is queued and retried, never dropped. It needs the app's OWN Last.fm application: the API key from the Sources panel AND the shared secret issued beside it, then one authorization (the Connect button below). MusicBrainz submissions are rating writes only: the app registers an OAuth2 application once, the owner pastes its client id and secret here and authorizes once, and the refresh token that comes back is renewed automatically — while logged in, a rating is uploaded for its album by itself, and the panel's Upload all ratings queues every album the library has a rating for. Nothing is ever sent with a blank credential, and every failure is reported in the service's own words.",
       fields: [
         { k: "lastfm_scrobble_enabled", label: "Scrobble plays to Last.fm", type: "bool", help: "Off, nothing is announced or scrobbled and nothing is queued — the session key stays saved, so turning it back on resumes scrobbling without re-authorizing." },
+        { k: "lastfm_scrobble_percent", label: "Scrobble at this much of a track (%)", type: "number", min: 50, max: 100, help: "How far into a track a play must get before it is scrobbled — 70 by default. The floor is 50 % because Last.fm discards a scrobble below half the track; 100 means only a play that reached the end counts. A track shorter than 30 s is never scrobbled." },
         { k: "lastfm_api_secret", label: "Last.fm shared secret", type: "password", help: "Issued beside the API key on the same page (last.fm/api/account/create). The API key alone cannot sign a scrobble — this is what authorizes the Connect flow and every scrobble after it." },
         { k: "musicbrainz_client_id", label: "MusicBrainz OAuth2 client ID", type: "text", help: "Register an application at musicbrainz.org/account/applications (type: installed/public client; redirect URI: urn:ietf:wg:oauth:2.0:oob) and paste its Client ID. The `rating` scope is what lets the app submit your stars; reads need no login at all." },
         { k: "musicbrainz_client_secret", label: "MusicBrainz OAuth2 client secret", type: "password", help: "The secret the same application page shows. Paste both, then press Connect on the MusicBrainz page (or Settings → Sources) and authorize once." },
@@ -850,8 +851,14 @@ export const OPEN_GROUPS: Record<string, true> = {
 };
 
 /** The wizard, in order: a first run is asked only what it cannot answer for
- *  itself — where the library is, who may read it, the programs the scripts
- *  need, and the credentials the sources ask for.
+ *  itself — where the library is, who may read it, the sources and logins the
+ *  app can use, and the programs the scripts need.
+ *
+ *  Five steps, and the credentials step comes BEFORE the tools one: every
+ *  panel on it (Sources, the two Connect flows, the Soulseek login) is
+ *  optional, so it can be read and skipped without a working slskd/yt-dlp —
+ *  while a Tools table that runs first would have to explain downloads before
+ *  the reader has decided whether they want any of it.
  *
  *  Every quality and check knob is deliberately absent. Grading and the audit
  *  ship strict (mlo/config.py DEFAULT_CONFIG, held there by
@@ -861,8 +868,8 @@ export const OPEN_GROUPS: Record<string, true> = {
  *  here again would be a second screen for the same switch. */
 export const SETUP_STEPS: SetupStep[] = [
   {
-    label: "Folder",
-    title: "Your music library",
+    label: "Library",
+    title: "Where does your music live?",
     blurb:
       "Everything the app grades, tags and optimizes lives under one folder (your artist/album tree). The app's own state (data, downloads, trash) lives inside it too, so it moves with the library.",
     panel: "folder",
@@ -876,40 +883,32 @@ export const SETUP_STEPS: SetupStep[] = [
     groups: ["Login gate"],
   },
   {
+    // Everything a first run might paste or log in with, on ONE step: the
+    // sources panel (the keys and the YouTube cookie), the two Connect flows,
+    // and the Soulseek login. The keys live in the groups that already own
+    // them ("Discovery", "Import pipeline", "Scrobbling & submissions") rather
+    // than in a group of their own — the Sources panel reads the same config
+    // keys through its own endpoint, and a second group listing them would put
+    // two controls on one setting.
+    label: "Connections",
+    title: "Sources, logins & Soulseek (all optional)",
+    blurb:
+      "Everything on this step is OPTIONAL — nothing in your library needs any of it, and every answer stays editable in Settings. " +
+      "Sources & keys: paste the credentials a source asks for (Spotify, Discogs, Last.fm, MusicBrainz) and the YouTube cookie; a source without its key is simply skipped, saved keys are re-tested as you save them, and the provider rows, their orders and each one's live status live on Settings → Sources. " +
+      "Last.fm: create an API account at last.fm/api/account/create — that one page shows the app's API key AND its shared secret; paste the key in the Sources panel above and the shared secret below, then press Connect and authorize in the browser. " +
+      "MusicBrainz: register an application at musicbrainz.org/account/applications as an installed (public) client with redirect URI urn:ietf:wg:oauth:2.0:oob; paste its Client ID and secret below, press Connect, authorize, then paste back the code the page shows. " +
+      "Soulseek: the account slskd signs in with — its username, password and whether this client shares the library are asked below — and the listen port is opened on your router automatically when slskd starts (UPnP first, then NAT-PMP). slskd itself is installed from the Tools step that follows.",
+    panel: "connections",
+    groups: ["Scrobbling & submissions", "Soulseek (managed slskd)"],
+    ask: ["soulseek_username", "soulseek_password", "soulseek_share_library"],
+  },
+  {
     label: "Tools",
     title: "External tools",
     blurb:
       "The scripts need these programs. Missing ones are downloaded into the app's dependencies folder; the ones this device cannot run are listed with the reason instead.",
     panel: "dependencies",
     groups: ["Dependencies"],
-  },
-  {
-    label: "Keys & cookies",
-    title: "Sources, keys & cookies",
-    blurb:
-      "What the app uses for lyrics, genres, ratings and artwork. The credentials below are the only thing a first run has to paste, and every one of them is optional — a source without its key is simply skipped, saved keys are re-tested as you save them, and all of it is editable later in Settings → Sources (where the provider rows, their orders and the live status of each one live too). " +
-      "The COOKIE LOGIN below is for YouTube: yt-dlp — installed from the Tools step — takes a cookies.txt exported from a browser that is signed in, for age-gated, members-only and throttled videos (scripts 11 and 18). The box takes the Netscape file a browser-extension exporter like \"Get cookies.txt\" writes, and an import only ever replaces the one credential it belongs to.",
-    panel: "sources",
-  },
-  {
-    label: "Connections",
-    title: "Log in to Last.fm & MusicBrainz (optional)",
-    blurb:
-      "Both logins below are OPTIONAL — nothing in your library needs them. Last.fm only reports what you play (a now-playing notice and one scrobble per play); MusicBrainz only writes your own star ratings back. Neither is required to browse, tag, grade or play anything, and both can be set up later in Settings. " +
-      "Last.fm: create an API account at last.fm/api/account/create — that one page shows the app's API key AND its shared secret; paste the key on the Sources step and the shared secret here, then press Connect and authorize in the browser. " +
-      "MusicBrainz: register an application at musicbrainz.org/account/applications as an installed (public) client with redirect URI urn:ietf:wg:oauth:2.0:oob; paste its Client ID and secret here, press Connect, authorize, then paste back the code the page shows. " +
-      "The numbered how-to above each panel repeats this with the same links. The credential fields below are the Scrobbling & submissions settings; skipping this step keeps every one of them at its default.",
-    panel: "connections",
-    groups: ["Scrobbling & submissions"],
-  },
-  {
-    label: "Soulseek",
-    title: "Soulseek login & sharing",
-    blurb:
-      "Your Soulseek account, and whether this client shares the library. The listen port is opened on your router automatically when slskd starts (UPnP first, then NAT-PMP) so peers can reach you — turn that off below if you forward the port yourself or your router supports neither. The transfer limits, slots and extra shared folders keep their shipped defaults in Settings → Soulseek.",
-    panel: "slskd",
-    groups: ["Soulseek (managed slskd)"],
-    ask: ["soulseek_username", "soulseek_password", "soulseek_share_library"],
   },
   {
     label: "Done",
@@ -941,6 +940,13 @@ export const HIDDEN_KEYS: string[] = [
   "lastfm_session_key",
   "lastfm_username",
   "musicbrainz_username",
+  // The PKCE pair the MusicBrainz login carries between "Connect" and the
+  // code coming back (server/mb_submit.py persists it, finish/disconnect clear
+  // it). Server-written one-shot state, like the identity above — no screen
+  // renders a nonce, and a hand-typed one would only break the verifier the
+  // same call compares it against.
+  "musicbrainz_pkce_verifier",
+  "musicbrainz_pkce_state",
   // The password hash is refused by POST /api/config (it must be: a session
   // could otherwise replace the credential with a hash of its choosing) and is
   // set through /api/auth/setup, which is where the wizard's own password

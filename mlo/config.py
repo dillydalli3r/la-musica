@@ -1722,6 +1722,13 @@ DEFAULT_CONFIG = {
     "lastfm_session_key": "",
     "lastfm_username": "",
     "lastfm_scrobble_enabled": True,
+    # How much of a track a play must reach before it is scrobbled: 70 % of
+    # the track (server/lastfm.meets_rule), clamped to 50–100 because Last.fm
+    # itself discards a scrobble below half the track. The owner's call — a
+    # percentage is what "listened to the song" means, where the service's own
+    # rule (half the track OR 4 minutes, whichever comes first) scrobbled a
+    # two-minute track at a minute and a ten-minute one at four.
+    "lastfm_scrobble_percent": 70,
     # MusicBrainz login — rating SUBMISSIONS only (every read needs no
     # account). The app registers its own OAuth2 client
     # (musicbrainz.org/account/applications), the owner pastes its id and
@@ -1739,6 +1746,11 @@ DEFAULT_CONFIG = {
     "musicbrainz_token_expires_at": 0,
     "musicbrainz_username": "",
     "musicbrainz_submit_enabled": True,
+    # The in-flight PKCE handshake of a Connect that has not finished yet:
+    # `connect_url` saves the verifier + state so the client may finish with
+    # the CODE ALONE, and finish/disconnect clear both. Never typed by hand.
+    "musicbrainz_pkce_verifier": "",
+    "musicbrainz_pkce_state": "",
     # The per-cookie notes for the cookie logins (server/api_cookies.py): one
     # JSON object per source, one entry per cookie identity
     # ("domain\tpath\tname"), holding the comment the user wrote against an

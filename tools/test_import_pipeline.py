@@ -3178,3 +3178,172 @@ assert not os.path.isdir(os.path.join(_named, "Disc 1")), \
     f"the emptied disc subfolder is pruned by the same pass: {os.listdir(_named)}"
 shutil.rmtree(_dp_root, ignore_errors=True)
 print("a disc-parent album is one album: named, seen, and every disc's audio found")
+
+# --------------------------------------------------------------------------- #
+# PICKED FILES: SOME of a staged downloads folder as ONE album
+# --------------------------------------------------------------------------- #
+# The release-identify dialog opens one downloads entry, picks individual files
+# and pins a release for the picked set. The bulk item then carries `files` (the
+# picked staging paths, and an optional `name` for the album folder) and the row
+# imports ONLY those as this one album — the files nobody picked stay in the
+# staging folder, untouched, for a later pass. Every listed file is validated
+# BEFORE anything moves, so one bad entry moves NOTHING.
+from mlo.paths import downloads_dir                              # noqa: E402
+
+PICK_MF = os.path.join(ROOT, "pick_music")
+_pick_dl = downloads_dir(PICK_MF)
+_pick_lib = os.path.join(PICK_MF, "Artists")
+PICK_CFG = {"music_folder": PICK_MF, "import_auto_scripts": False,
+            "import_scripts": [], "import_bulk_concurrency": 1,
+            "metadata_auto_fetch": False, "cover_auto_fetch": False}
+
+_pick_stage = os.path.join(_pick_dl, "Pick Album")
+for _n in ("01 - one.wav", "02 - two.wav", "03 - three.wav"):
+    make_wav(os.path.join(_pick_stage, _n))
+with open(os.path.join(_pick_stage, "cover.jpg"), "wb") as _fh:
+    _fh.write(b"\xff\xd8\xff\xe0" + b"0" * 32)      # a sidecar, not audio
+_picked = [os.path.join(_pick_stage, "01 - one.wav"),
+           os.path.join(_pick_stage, "03 - three.wav")]
+_pick_out = imports.bulk_import([{"path": _pick_stage, "files": _picked}], PICK_CFG)
+_pick_row = _pick_out["items"][0]
+assert _pick_out["ok"] == 1 and _pick_out["failed"] == 0, _pick_out
+assert _pick_row["status"] == "imported", _pick_row
+assert _pick_row["picked"] == 2, _pick_row
+assert _pick_row["album_path"] == \
+    os.path.join(_pick_lib, "Pick Album").replace("\\", "/"), _pick_row
+# ONLY the picked files are in the album, and the folder keeps the entry's name
+assert sorted(os.listdir(_pick_row["album_path"])) == \
+    ["01 - one.wav", "03 - three.wav"], os.listdir(_pick_row["album_path"])
+# the file nobody picked (and the sidecar) stayed in the staging folder
+assert sorted(os.listdir(_pick_stage)) == ["02 - two.wav", "cover.jpg"], \
+    os.listdir(_pick_stage)
+
+# a `name` overrides the album folder's name
+_name_stage = os.path.join(_pick_dl, "Name Me")
+make_wav(os.path.join(_name_stage, "01 - a.wav"))
+make_wav(os.path.join(_name_stage, "02 - b.wav"))
+_name_out = imports.bulk_import(
+    [{"path": _name_stage, "name": "Chosen Album",
+      "files": [os.path.join(_name_stage, "02 - b.wav")]}], PICK_CFG)
+assert _name_out["items"][0]["album_path"] == \
+    os.path.join(_pick_lib, "Chosen Album").replace("\\", "/"), _name_out["items"][0]
+assert sorted(os.listdir(os.path.join(_pick_lib, "Chosen Album"))) == ["02 - b.wav"]
+assert os.path.exists(os.path.join(_name_stage, "01 - a.wav")), os.listdir(_name_stage)
+
+# ABSENT / EMPTY / blank `files` is today's whole-folder import, byte for byte
+for _wi, _empty in enumerate((None, [], ["", "   "])):
+    _whole = os.path.join(_pick_dl, f"Whole {_wi}")
+    make_wav(os.path.join(_whole, "01 - w.wav"))
+    make_wav(os.path.join(_whole, "02 - v.wav"))
+    _item = {"path": _whole}
+    if _empty is not None:
+        _item["files"] = _empty
+    _whole_out = imports.bulk_import([_item], PICK_CFG)
+    _whole_row = _whole_out["items"][0]
+    assert _whole_row["status"] == "imported", _whole_out
+    assert "picked" not in _whole_row, _whole_row
+    assert not os.path.exists(_whole), f"the whole folder must move: {_empty!r}"
+    assert sorted(os.listdir(os.path.join(_pick_lib, os.path.basename(_whole)))) == \
+        ["01 - w.wav", "02 - v.wav"], os.listdir(_pick_lib)
+
+# an INVALID pick fails the row and moves NOTHING — every file is validated
+# before the first move
+_bad = os.path.join(_pick_dl, "Bad Pick")
+make_wav(os.path.join(_bad, "01 - x.wav"))
+make_wav(os.path.join(_bad, "02 - y.wav"))
+with open(os.path.join(_bad, "cover.jpg"), "wb") as _fh:
+    _fh.write(b"not audio")
+make_wav(os.path.join(_pick_dl, "outside.wav"), 0.05)   # valid audio, wrong folder
+
+
+def _pick_refused(files, why):
+    out = imports.bulk_import([{"path": _bad, "files": files}], PICK_CFG)
+    row = out["items"][0]
+    assert row["status"] == "failed" and why in (row["error"] or ""), (why, row)
+    assert not os.path.isdir(os.path.join(_pick_lib, "Bad Pick")), os.listdir(_pick_lib)
+    assert sorted(os.listdir(_bad)) == ["01 - x.wav", "02 - y.wav", "cover.jpg"], \
+        os.listdir(_bad)
+
+
+_pick_refused([os.path.join(_bad, "01 - x.wav"),
+               os.path.join(_bad, "missing.wav")], "not found")
+_pick_refused([os.path.join(_bad, "01 - x.wav"),
+               os.path.join(_pick_dl, "outside.wav")], "not inside the staging folder")
+_pick_refused([os.path.join(_bad, "01 - x.wav"),
+               os.path.join(_bad, "cover.jpg")], "not an audio file")
+_pick_refused([os.path.join(_bad, "01 - x.wav"), _bad], "not found")
+
+# a pick whose `path` already IS in the library is refused — no second, partial
+# copy of an album that is already there
+_in_lib = os.path.join(_pick_lib, "Pick Album")
+_lib_out = imports.bulk_import(
+    [{"path": _in_lib, "files": [os.path.join(_in_lib, "01 - one.wav")]}], PICK_CFG)
+assert _lib_out["items"][0]["status"] == "failed", _lib_out
+assert "staged folders" in (_lib_out["items"][0]["error"] or ""), _lib_out["items"][0]
+# …and so is an explicit `move: False` (a pick requires a folder that MOVES in)
+_mv_stage = os.path.join(_pick_dl, "Move False")
+make_wav(os.path.join(_mv_stage, "01 - m.wav"))
+_mv_out = imports.bulk_import(
+    [{"path": _mv_stage, "move": False,
+      "files": [os.path.join(_mv_stage, "01 - m.wav")]}], PICK_CFG)
+assert _mv_out["items"][0]["status"] == "failed", _mv_out
+assert "staged folders" in (_mv_out["items"][0]["error"] or ""), _mv_out["items"][0]
+assert os.path.exists(os.path.join(_mv_stage, "01 - m.wav")), os.listdir(_mv_stage)
+
+# a pinned mbid still resolves, stamps (identity AND the chain's genre step) and
+# runs the chain for a PICKED album, exactly as for a whole-folder one
+_real_resolve_p, _real_stamp_p = _intg.resolve_release, imports._stamp_release
+_pin_stamps = []
+
+
+def _resolve_pick(mbid):
+    return {"id": PIN_ID, "title": "Pinned Pick", "release_group_id": PIN_GROUP,
+            "media": [{"disc": 1, "position": 1, "title": "Song",
+                       "recording_mbid": None}], "artists": []}, PIN_ID
+
+
+def _stamp_pick(album, release, cfg, **kw):
+    _pin_stamps.append(release.get("id"))
+    return (1, 0)
+
+
+_intg.resolve_release = _resolve_pick
+imports._stamp_release = _stamp_pick
+try:
+    _pin_stage = os.path.join(_pick_dl, "Pinned Pick")
+    make_wav(os.path.join(_pin_stage, "01 - p.wav"))
+    make_wav(os.path.join(_pin_stage, "02 - q.wav"))
+    _pin_out = imports.bulk_import(
+        [{"path": _pin_stage, "mbid": PIN_LINK,
+          "files": [os.path.join(_pin_stage, "02 - q.wav")]}], PICK_CFG)
+finally:
+    _intg.resolve_release, imports._stamp_release = _real_resolve_p, _real_stamp_p
+assert _pin_out["items"][0]["status"] == "imported", _pin_out
+assert _pin_out["items"][0]["picked"] == 1, _pin_out["items"][0]
+assert _pin_stamps == [PIN_ID, PIN_ID], _pin_stamps
+assert os.path.exists(os.path.join(_pick_lib, "Pinned Pick", "02 - q.wav"))
+assert sorted(os.listdir(_pin_stage)) == ["01 - p.wav"], os.listdir(_pin_stage)
+print("picked files: only the chosen set moves into one album, the rest stays "
+      "staged, an invalid pick moves nothing, and a pinned mbid still stamps")
+
+# the route's model carries the two new fields and hands BOTH through to the
+# queue's items `start_bulk` receives
+from server import api_imports as _api_imports                    # noqa: E402
+assert _api_imports.BulkItem(path="/a").files is None, "files must be optional"
+assert _api_imports.BulkItem(path="/a").name is None, "name must be optional"
+_built = []
+_start_real, _req_real, _guard_real = (imports.start_bulk, _api_imports._require_manual,
+                                       _api_imports._guard)
+imports.start_bulk = lambda items: _built.append(items) or {"ok": True}
+_api_imports._require_manual = lambda: None
+_api_imports._guard = lambda paths, staged=False: None
+try:
+    _api_imports.import_bulk(_api_imports.BulkRequest(items=[
+        _api_imports.BulkItem(path="/stage", files=["/stage/a.flac"],
+                              name="Named", mbid="m", move=True)]))
+finally:
+    imports.start_bulk, _api_imports._require_manual, _api_imports._guard = \
+        _start_real, _req_real, _guard_real
+assert _built[0][0] == {"path": "/stage", "move": True, "release": None,
+                        "mbid": "m", "files": ["/stage/a.flac"], "name": "Named"}, _built
+print("the bulk route's item carries files + name through to start_bulk")

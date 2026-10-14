@@ -9,12 +9,15 @@ import {
   mbConnect,
   mbDisconnect,
   mbFinish,
+  mbRatingsSubmitAll,
   mbSubmitRatings,
   trackFiles,
   useMbAuth,
+  useMbRatingsQueue,
   type MbSubmitResult,
 } from "../lib/mbSubmit";
 import type { Library } from "../types";
+import { toast } from "../store";
 import ConnectGuide from "./ConnectGuide";
 
 /* MusicBrainz login + "Submit ratings" — the one WRITE surface of the
@@ -28,6 +31,12 @@ import ConnectGuide from "./ConnectGuide";
  * batched request per album — the panel only shows what came back, row by row:
  * `sent 80 (from 80)` or the sentence explaining a skip, and MusicBrainz's own
  * refusal where it refused.
+ *
+ * Once the account is connected the panel ALSO becomes the upload surface for
+ * the whole library: `Upload all ratings` queues every album the app has a
+ * rating for (`mbRatingsSubmitAll`) and the panel then reads the queue route,
+ * which reports what is still waiting and the newest per-album results — the
+ * background worker drains it, so the poll is what makes progress visible.
  *
  * The config keys behind the status this draws are named literally, so
  * `tools/test_setup_coverage.py` can see the "Scrobbling & submissions" group
@@ -56,6 +65,11 @@ export default function MbLoginPanel({
   const auth = useMbAuth();
   const [verifier, setVerifier] = useState("");
   const [code, setCode] = useState("");
+  // True between a successful Connect and the Finish that closes the loop.
+  // The current server keeps the PKCE verifier itself, so the paste row can no
+  // longer key off `verifier` alone — this is the flow's own "we opened a page,
+  // now waiting for what MusicBrainz shows you".
+  const [awaitingCode, setAwaitingCode] = useState(false);
   const [result, setResult] = useState<MbSubmitResult | null>(null);
   const [error, setError] = useState("");
 
@@ -71,6 +85,9 @@ export default function MbLoginPanel({
   const recording = kind === "track" ? trackFiles(lib, String(ids[0] ?? "")) : null;
   const paths = kind === "album" ? albumFiles(album) : recording?.paths ?? [];
   const connected = !!auth.data?.connected;
+  // Polled only while an account is connected: the queue route is the
+  // account's own upload state and would be an empty shell otherwise.
+  const queue = useMbRatingsQueue(connected);
 
   const connect = useMutation({
     mutationFn: mbConnect,
@@ -78,6 +95,9 @@ export default function MbLoginPanel({
       if (got.ok && got.url) {
         setError("");
         setVerifier(got.verifier);
+        // The verifier may be empty now (the server keeps its own copy), but a
+        // page was opened, so the paste row is what the user waits on.
+        setAwaitingCode(true);
         openExternal(got.url);
       } else {
         setError(got.detail || "MusicBrainz could not be reached");
@@ -92,6 +112,7 @@ export default function MbLoginPanel({
       if (got.ok) {
         setCode("");
         setVerifier("");
+        setAwaitingCode(false);
         setError("");
         qc.invalidateQueries({ queryKey: ["mbAuth"] });
       } else {
@@ -106,7 +127,9 @@ export default function MbLoginPanel({
     onSuccess: () => {
       setResult(null);
       setError("");
+      setAwaitingCode(false);
       qc.invalidateQueries({ queryKey: ["mbAuth"] });
+      qc.invalidateQueries({ queryKey: ["mbRatingsQueue"] });
     },
     onError: (e) => setError((e as Error).message),
   });
@@ -123,7 +146,22 @@ export default function MbLoginPanel({
     },
   });
 
-  const busy = connect.isPending || finish.isPending || disconnect.isPending || submit.isPending;
+  // "Upload all ratings": the server queues every rated album and answers at
+  // once with the count; the queue poll above then narrates the drain.
+  const submitAll = useMutation({
+    mutationFn: mbRatingsSubmitAll,
+    onSuccess: (got) => {
+      toast.success(
+        got.queued
+          ? `Queued ${got.queued} album${got.queued === 1 ? "" : "s"} for upload to MusicBrainz`
+          : "Nothing to upload — no album in your library has a rating",
+      );
+      qc.invalidateQueries({ queryKey: ["mbRatingsQueue"] });
+    },
+    onError: (e) => toast.error((e as Error).message),
+  });
+
+  const busy = connect.isPending || finish.isPending || disconnect.isPending || submit.isPending || submitAll.isPending;
   const expiresAt = auth.data?.expires_at
     ? new Date(auth.data.expires_at * 1000).toLocaleString()
     : "";
@@ -143,17 +181,17 @@ export default function MbLoginPanel({
         ) : connected ? (
           <>
             <span
-              className="inline-flex items-center gap-1.5 text-emerald-300"
+              className="chip border bg-emerald-900/50 text-emerald-300 border-emerald-800 inline-flex items-center gap-1.5"
               title={
                 `${CONFIG_KEYS.token} is stored and renews itself; ` +
                 `${CONFIG_KEYS.expiry} = ${expiresAt || "not fetched yet"}`
               }
             >
-              <Check className="h-3.5 w-3.5" /> connected as {auth.data?.username || "your account"}
+              <Check className="h-3 w-3" /> connected as {auth.data?.username || "your account"}
             </span>
             <div className="ml-auto flex gap-1.5">
               <button
-                className="btn-primary !py-1 text-xs"
+                className="btn-primary !py-1 text-xs tap"
                 disabled={busy || !paths.length}
                 title={
                   paths.length
@@ -168,7 +206,7 @@ export default function MbLoginPanel({
                 {paths.length ? `Submit ratings (${paths.length})` : "Submit ratings"}
               </button>
               <button
-                className="btn-ghost !py-1 text-xs"
+                className="btn-ghost !py-1 text-xs tap"
                 disabled={busy}
                 onClick={() => disconnect.mutate()}
                 title="Forget the saved MusicBrainz login (the app's own client id/secret stay)"
@@ -182,13 +220,13 @@ export default function MbLoginPanel({
             <span className="text-zinc-500">reads need no login — only submitting your ratings does</span>
             <div className="ml-auto flex gap-1.5">
               <button
-                className="btn-primary !py-1 text-xs"
+                className="btn-primary !py-1 text-xs tap"
                 disabled={busy}
                 onClick={() => connect.mutate()}
                 title={
                   auth.data?.client_id_set
-                    ? "Open MusicBrainz to authorize this app, then paste back the code it shows"
-                    : "Save the MusicBrainz client id and secret in Settings → Scrobbling & submissions first"
+                    ? "Open MusicBrainz to authorize this app, then paste back the code (or the redirect URL) it shows"
+                    : "Save the MusicBrainz client id and secret in Settings → Connections first"
                 }
               >
                 {connect.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Unplug className="h-3.5 w-3.5" />}
@@ -199,36 +237,122 @@ export default function MbLoginPanel({
         )}
       </div>
 
-      {auth.data && !auth.data.submit_enabled && (
+      {auth.data && !auth.data.submit_enabled && !connected && (
         <div className="mt-1.5 text-amber-300 inline-flex items-center gap-1.5">
           <AlertTriangle className="h-3.5 w-3.5" />
           {CONFIG_KEYS.gate} is off — submissions are refused until it is turned on.
         </div>
       )}
 
-      {!!verifier && (
-        <div className="mt-2 flex items-center gap-2 flex-wrap">
-          <span className="text-zinc-400">
-            Authorize in the page that just opened, then paste the code MusicBrainz shows:
-          </span>
-          <input
-            className="input !py-1 text-xs w-56"
-            value={code}
-            placeholder="authorization code"
-            spellCheck={false}
-            onChange={(e) => setCode(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && code.trim() && !busy) finish.mutate();
-            }}
-          />
+      {/* The library-wide upload surface. It is drawn whether or not the
+          account is connected: disconnected it IS the disabled state with its
+          reason (connect first), and a connected-but-gated one carries the
+          gate's own sentence. Connected, it is the queue the worker drains —
+          the pending count, what was sent most recently (newest first), and
+          the one press that queues every rated album. */}
+      <div className="mt-2 rounded-lg border border-border/70 p-2 space-y-1.5">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="font-medium text-zinc-300">Ratings upload</span>
+          {connected && queue.data && (
+            <span
+              className={`chip border ${
+                queue.data.pending
+                  ? "bg-amber-950/30 border-amber-900/60 text-amber-300/90"
+                  : "bg-raise border-border text-zinc-400"
+              }`}
+              title="Albums with an app rating that have not been pushed to MusicBrainz yet"
+            >
+              {queue.data.pending} pending
+            </span>
+          )}
+          {connected && queue.data?.running && (
+            <span className="chip border bg-sky-950/40 border-sky-900/60 text-sky-300 inline-flex items-center gap-1">
+              <Loader2 className="h-3 w-3 animate-spin" /> uploading
+            </span>
+          )}
           <button
-            className="btn-primary !py-1 text-xs"
-            disabled={busy || !code.trim()}
-            onClick={() => finish.mutate()}
+            className="btn-primary !py-1 text-xs tap ml-auto"
+            disabled={busy || !connected || queue.data?.enabled === false}
+            title={
+              !connected
+                ? "Connect to MusicBrainz above first — the upload needs your account"
+                : queue.data?.enabled === false
+                  ? `${CONFIG_KEYS.gate} is off — uploads are refused until it is turned on`
+                  : "Queue every album with a rating in your library for upload to MusicBrainz"
+            }
+            onClick={() => submitAll.mutate()}
           >
-            {finish.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
-            Finish
+            {submitAll.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
+            Upload all ratings
           </button>
+        </div>
+
+        {(!connected || queue.data?.enabled === false) && (
+          <div className="text-[11px] text-amber-300 inline-flex items-center gap-1.5">
+            <AlertTriangle className="h-3.5 w-3.5" />
+            {!connected
+              ? "Connect to MusicBrainz above to upload your ratings."
+              : `${CONFIG_KEYS.gate} is off — uploads are refused until it is turned on.`}
+          </div>
+        )}
+
+        {connected && queue.data && (
+          <div className="text-[11px] text-zinc-500">
+            {queue.data.pending
+              ? `${queue.data.pending} album${queue.data.pending === 1 ? "" : "s"} waiting — the background worker uploads them one by one.`
+              : "Nothing waiting — every album with a rating has been uploaded."}
+          </div>
+        )}
+
+        {connected && queue.data && queue.data.recent.length > 0 && (
+          <div className="rounded-lg border border-border overflow-hidden max-h-48 overflow-auto">
+            {queue.data.recent.map((r, i) => (
+              <div
+                key={`${r.path}-${i}`}
+                className="flex items-center gap-2 px-2 py-1 border-t border-border/60 first:border-t-0 text-[11px]"
+                title={r.path}
+              >
+                <span className={r.ok ? "text-emerald-300" : "text-amber-300"}>
+                  {r.ok ? "sent" : "failed"}
+                </span>
+                <span className="flex-1 min-w-0 truncate text-zinc-300">{r.name}</span>
+                <span className="text-zinc-500 tabular-nums shrink-0">
+                  sent {r.sent} · skipped {r.skipped}
+                  {r.detail ? ` · ${r.detail}` : ""}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {awaitingCode && !connected && (
+        <div className="mt-2 space-y-1">
+          <div className="text-[11px] text-zinc-400">
+            Authorize this app in the page that just opened, then paste what MusicBrainz shows —
+            the code, or the whole address it sent your browser to (either works):
+          </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            <input
+              className="input !py-1 text-xs w-72 tap"
+              value={code}
+              placeholder="authorization code or redirect URL"
+              spellCheck={false}
+              title="MusicBrainz's code, or the full redirect URL — the server reads the code out of either"
+              onChange={(e) => setCode(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && code.trim() && !busy) finish.mutate();
+              }}
+            />
+            <button
+              className="btn-primary !py-1 text-xs tap"
+              disabled={busy || !code.trim()}
+              onClick={() => finish.mutate()}
+            >
+              {finish.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+              Finish
+            </button>
+          </div>
         </div>
       )}
 
