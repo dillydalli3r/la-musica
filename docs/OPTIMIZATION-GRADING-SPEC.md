@@ -267,7 +267,7 @@ publishes, including the ones that write nothing until they do.
 | 16 | Mood & Energy | The mood classifier alone | `MOOD`, `ENERGY` | no | no |
 | 17 | Lyrics transliterate (AI) | Romanization/translation tags and sidecars, re-synced at `lrc_sync_level`; the per-track work runs through the worker pool (one track's chunk requests used to be paid one after another) | `TRANSLITERATION-*`, `TRANSLATION-*`, sidecars | no | **yes** (configured AI endpoint) |
 | 19 | Optimize artist images | Re-fits `Artists/<Artist>/artist.*` to `artist_image_aspect` / `artist_image_target_size`, re-encodes as `artist.jpg`/`artist.png` | the artist image in place (only when it has to move) | re-encodes in place; never deletes | no |
-| 20 | Optimize library layout | The music folder's shape against `<music>/Artists/<Artist>/<Album>/…`: audio at the root or in an artist folder, stray files, unexpected folders, empty albums, `wrong_case` rows. With `layout_apply` (ON) it SETTLES what the folder itself proves — a wrong-case name is renamed, audio outside an album folder is moved into the one its tags name, and what is excess goes to the Trash (a stray file, a duplicate `description (2).txt`, the `.mlo_*` leftovers, and a folder — inside an album, an album, a foreign root folder, an album-less artist — only when it is EMPTY, since "holds no audio" is a finding and not a licence to take the .cue/.log/artwork inside it) — and reports every other row with the reason it stayed, re-derived at the move (R185). Writes ONE report describing the whole library (plus a `fixes` list) to `<music>/.mlo/data/`, which the Library page warns from; scoped to `targets` when a run names them, and library-wide when it does not (R9) | one report file + the renamed/moved/removed paths | `layout_apply` (removals go to the Trash) | no |
+| 20 | Optimize library layout | The music folder's shape against `<music>/Artists/<Artist>/<Album>/…`: audio at the root or in an artist folder, stray files, unexpected folders, empty albums, `wrong_case` rows. With `layout_apply` (ON) it SETTLES what the folder itself proves — a wrong-case name is renamed, audio outside an album folder is moved into the one its tags name, and what is excess goes to the Trash (a stray file, a duplicate `description (2).txt`, the `.mlo_*` leftovers, and a folder — inside an album, an album, a foreign root folder, an album-less artist — when every entry the removal would take may be named: junk by the stray rule, or the file the APP wrote for that folder; anything else refuses, because "holds no audio" is a finding and not a licence to take the `.cue`/`.log`/artwork inside it, R437) — and reports every other row with the reason it stayed, re-derived at the move (R185). Writes ONE report describing the whole library (plus a `fixes` list) to `<music>/.mlo/data/`, which the Library page warns from; scoped to `targets` when a run names them, and library-wide when it does not (R9) | one report file + the renamed/moved/removed paths | `layout_apply` (removals go to the Trash) | no |
 | 21 | Fix AcoustID pairs | Completes (or CREATES) a track's `ACOUSTID_ID`/`ACOUSTID_FINGERPRINT` pair — the failures `Missing ACOUSTID_ID and ACOUSTID_FINGERPRINT` and `Missing ACOUSTID_ID` / `Missing ACOUSTID_FINGERPRINT` (all `(run Fix AcoustID pairs)`). The recording the pair must name is a question the FILE answers itself (its own `ACOUSTID_ID`, its `MUSICBRAINZ_TRACKID`, or the recording MBID this app's naming script wrote into the file name), and the fingerprint is taken from the audio locally by fpcalc — so a CD rip AcoustID has never seen, or a run with no usable key, is repairable with no request at all. The service is asked only for a half pair whose file names no recording anywhere; a file carrying no AcoustID tag and naming no recording is skipped, never written from a guess | `ACOUSTID_ID`, `ACOUSTID_FINGERPRINT` | no | only for a half pair that names no recording |
 | 22 | Submit fingerprints (AcoustID) | Gives AcoustID the fingerprint and the MusicBrainz recording id a file already states (`mlo.acoustid.submit_files`): the recording is read the way script 21 reads it, the fingerprint is taken locally, the service is asked what it already links (`pair_known`) and what this app already handed over (`load_submissions`), and only what is genuinely new goes in ONE batched `v2/submit` — each track reported ACCEPTED, ALREADY_KNOWN, REJECTED or skipped with a named cause. **Not in the shipped order** (`OPT_IN_SCRIPTS`): a submission is a public, outward-facing write, so it runs only when someone asks — a details menu, `POST /api/import/acoustid/submit`, the wizard's AcoustID step, or a `run_all_order` the user put it in themselves | nothing locally | no | **yes** (AcoustID database) |
 | 23 | Optimize tags | The tag strip script 10 already performs as a step of its own pass, on its own and scoped (`mlo/taghygiene.py`): every tag the grader calls excess — a name outside the shared vocabulary, a `COMMENT` carrying a value, an alias nothing needs (R16a/R16b: the name is one the locale reads, the spelling is for another locale, a second spelling of the same alias, or the value is the name itself) | tags | **yes** (deletes the excess tags) | no |
@@ -879,7 +879,7 @@ The default writer of everything else is *Beets tagging (14) · import*.
 | `TITLE`, `ARTIST`, `ALBUM`, `ALBUMARTIST`, `TRACKNUMBER`, `DISCNUMBER`, `DATE` | identity | Beets tagging (14) · import | `grade_check_missing_tags` |
 | `TITLEALIAS`, `ARTISTALIAS` (identity), `ALBUMALIAS` (release) | identity / release | Beets tagging (14) · import (the album-level pair) · locale aliases · the tag editor | `grade_check_alias_needed` (missing where a name needs one), `grade_check_alias_excess` (present where none is needed), `grade_check_excess_tags` (the family is in `TAG_ALLOWLIST`, bare or locale-suffixed, so a legitimate alias is never a foreign tag) |
 | `GENRE` | identity | Auto tagging (8) · genre import · Format all (10) trims | `grade_check_genre`, `_genre_count`, `_genre_structure`, `_genre_vocab` |
-| `MEDIA`, `SOURCE` | release | Format lyrics (1) · media/source normalization | `grade_check_media`, `grade_check_source` |
+| `MEDIA`, `SOURCE` | release | `MEDIA`: Format lyrics (1) · media/source normalization, and the import's own MEDIA stamp on a download. `SOURCE`: the **user's own answer** (the wizard's Match step field, the album page's Source control, R438 — never autofilled from the release's store URLs or from where a download came), and Format lyrics (1) only with `fill_empty_source` on | `grade_check_media`, `grade_check_source` |
 | `ITUNESADVISORY` | identity | Auto tagging (8) · advisory fetch | `grade_check_missing_tags` |
 | `WEBRATING`, `WEBRATING_SOURCE`, `ALBUMWEBRATING`, `ALBUMWEBRATING_SOURCE` | opinion | Web ratings (24) | `grade_check_web_rating` (the per-track `WEBRATING`; the album-level pair is carried, never graded) |
 | `ALBUMITUNESADVISORY` | release | Auto tagging (8) · advisory fetch | `grade_check_album_tags` |
@@ -901,8 +901,11 @@ The default writer of everything else is *Beets tagging (14) · import*.
 | `PERFORMER`, `PRODUCER`, `ENGINEER`, `MIXER`, `ARRANGER`, `DJMIXER`, `CONDUCTOR`, `WRITER`, `DIRECTOR`, `COMPOSERSORT`, `MUSICBRAINZ_COMPOSERID` | release | Beets tagging (14, `beets_credits`) · Auto tagging (8) — the release's own artist/recording/work relations, fetched in ONE request per album | `grade_check_excess_tags` (allowlisted, never foreign) |
 | `ASIN`, `LANGUAGE`, `DISCSUBTITLE`, `LICENSE`, `ENCODEDBY` | release | Beets tagging (14) · Auto tagging (8) | `grade_check_excess_tags` |
 
-Notes that are easy to get wrong: `MEDIA`/`SOURCE` belong to script 1, not to
-script 8; `ACOUSTID_*` are written by the wizard's AcoustID apply — the
+Notes that are easy to get wrong: `MEDIA`/`SOURCE` belong to script 1's
+normalization, not to script 8 — and `SOURCE` is the user's own word on top of
+that (R438): the import never writes one from evidence, and script 1 fills an
+empty one only with `fill_empty_source` on; `ACOUSTID_*` are written by the
+wizard's AcoustID apply — the
 fingerprint/recording pair goes in with one save and is read back to prove it
 landed, and a container the app cannot tag is reported per file — and by script
 21, which completes a pair the file holds HALF of and CREATES the pair for a
@@ -5468,7 +5471,7 @@ used to be a second ffprobe on a file this pipeline had just produced; a
 
 ### 7.45 A digital-media import settles what the grader would otherwise report
 
-- **R262 — SOURCE, the lyrics format and the album description are settled by the import, which asks only for what it cannot know.** For a release whose medium is Digital Media: `SOURCE` is written from the release's own store URLs (the `purchase for download` / `download for free` / `streaming` relations, `mlo/digital_source.py`), else **asked** through the import-policy family `source` (the wizard's Match step, `POST /api/import/source`, the unattended prompt) with `digital_media_source_value` as the suggested answer — and written fill-only, never over a stated value, and only where `should_write_audio_tag` allows. The lyrics formatter (script 1, `mlo.lyrics._process_lyrics_for_audio`) runs as part of the import, so "Lyrics not optimally formatted" cannot survive it; a lyric that arrives untimed (with `lyrics_allow_plain` off) or that the app's own grade still rejects after the formatter is removed together with its `.lrc` sidecar and derived translations, **with the count reported**, and only when the chain's fetch step will replace it (never when script 13 is not in the chain, never when the user keeps the lyrics family, never when `lyrics_allow_plain` is on). The album description is fetched by the import's own metadata step (the same machinery the album page uses), and when nothing is found or reachable the import says so and points at the album page rather than implying success.
+- **R262 — SOURCE, the lyrics format and the album description are settled by the import, which asks only for what it cannot know.** For a release whose medium is Digital Media: `SOURCE` is the **user's own word** (R438) — written only from the answer they state (the wizard's Match step field, `POST /api/import/source`, the album page's Source control), fill-only, never over a stated value, only on a digital medium and only where `should_write_audio_tag` allows — while what the app itself knows (the release's own store URLs, the `purchase for download` / `download for free` / `streaming` relations in `mlo/digital_source.py`, or the provider the acquisition stated) is the **suggestion the prompt offers**, with `digital_media_source_value` as the field's own starting point; an album nobody answered for is **asked** through the import-policy family `source` (the wizard's Match step, the unattended prompt). The lyrics formatter (script 1, `mlo.lyrics._process_lyrics_for_audio`) runs as part of the import, so "Lyrics not optimally formatted" cannot survive it; a lyric that arrives untimed (with `lyrics_allow_plain` off) or that the app's own grade still rejects after the formatter is removed together with its `.lrc` sidecar and derived translations, **with the count reported**, and only when the chain's fetch step will replace it (never when script 13 is not in the chain, never when the user keeps the lyrics family, never when `lyrics_allow_plain` is on). The album description is fetched by the import's own metadata step (the same machinery the album page uses), and when nothing is found or reachable the import says so and points at the album page rather than implying success.
 
 - **R398 — an import never deletes a tag it did not write: `SOURCE` survives, and stripping it is opt-in.** The owner's report (2026-10-12): "make sure that auto-importing / importing doesn't strip tags already present in files like SOURCE". `SOURCE` is the one tag the app used to DELETE rather than only fill, in three places that ran on an import: script 1's MEDIA/SOURCE pass removed it from a CD (behind `strip_source_on_cd`, which shipped ON), the SAME pass removed it from **every other medium with no switch at all** (Vinyl, Cassette, SACD, a blank MEDIA — so a hand-imported vinyl rip lost the store the user had recorded), and the Soulseek stamp (`server.soulseek_auto._stamp_media`) removed it from a CD unconditionally as it wrote MEDIA, before verification. All three now read ONE switch, `strip_source_on_cd`, and it ships **OFF**: with it off, a SOURCE a rip arrived with — the user's own word, another tagger's, a store's — travels untouched through the wizard, the auto-importer, the queue and the chain, and the non-CD branch never deletes at all. With it on, script 1 and the Soulseek stamp remove it from a CD (and only a CD, the HDCD family included per R17) exactly as before. The **grade follows the same switch**: "SOURCE present but MEDIA is not Digital Media" is an issue only while `strip_source_on_cd` is on (its text names the setting and that script 1 is what removes it), because grading a value the pass now preserves would fail every album the switch protects; a digital album's SOURCE requirement (R262) is untouched. Where a value IS written, nothing changed: the digital fill (R262) and the Soulseek stamp stay fill-only.
 
@@ -7889,7 +7892,8 @@ checks see or how they judge it.
 | `library_codec_quality` / `library_codec_bitrate` / `library_codec_args` | 5 / 0 / `""` | the conversion's compression level (FLAC `-0`..`-8`), its lossy rate (`0` = the codec's own default) and extra encoder arguments |
 | `library_codec_optimize` | `lossless_to_lossy` | what script 3 may convert: a lossless source to the target (`lossless_to_lossy`), lossy sources too (`all`), or nothing (`keep`) |
 | `run_all_order` / `import_scripts` / `import_auto_scripts` | see R8 / R9 | what runs, and in which order |
-| `digital_media_source_value` | `Digital` | the answer an import offers when nothing states where a Digital Media release came from (R262); the `SOURCE` it writes is what the source checks then read |
+| `digital_media_source_value` | `Digital` | the value the SOURCE prompt OFFERS when nothing states where a Digital Media release came from (R262/R438: the Match step's field starts with it); nothing is written from it — the user's own answer is what lands on the files |
+| `fill_empty_source` | `False` | the ONE automatic SOURCE write a user can ask for by name (R438): on, script 1's MEDIA/SOURCE pass fills every empty `SOURCE` on a Digital Media album with `digital_media_source_value`; off, the album keeps failing `grade_check_source` until the user states one |
 
 Two keys deliberately do **not** change a verdict on their own:
 `grade_check_accuraterip` (AUDIT-only, R5) and `show_sidecar_files` —
@@ -9015,6 +9019,66 @@ also had to get shorter.
   `tools/test_lastfm.py` (the default, the clamp at both ends, 70 % of a
   100 s and of a 600 s track, the exact tenth-of-a-second boundary, junk
   values, and the route's stated reason).
+
+- **R437 — a folder is removed to the Trash when its CONTENTS may be named,
+  not only when it is empty.** The owner's report (2026-10-14): "The Scan
+  Library Layout script / fix library script doesn't work (not deleting files
+  / folders)". Script 20 did offer `empty_artist`/`empty_album`/
+  `unexpected_folder` rows, but the removal stood on ONE proof — the folder
+  was EMPTY — so the shape the owner actually had (an album-less artist folder
+  holding only the `artist.jpg` + `description.txt` the app itself wrote, left
+  behind when its album went to the Trash) was reported run after run with the
+  hint "remove the folder by hand if it is junk". The proof is now asked of
+  every entry the removal would take (`mlo.layout._may_take_contents`, the
+  same question at the scan and again at the move): each one has to be junk by
+  the stray rule (an nfo, a db, a stray text file, a duplicate sidecar — the
+  files the scan may trash individually anyway) or a file the APP wrote for
+  that folder (an artist's `artist.jpg`/`artist.png`/`description.txt`, an
+  album's `description.txt` — scripts 25/26 fetch them again and the Trash can
+  put them back), with a subfolder answering the same question itself. What a
+  release's own rip wrote — its audio, its artwork, its
+  `.cue`/`.log`/`.accurip` — refuses (the owner's EARLIER report: whole album
+  folders that still held their sidecars, moved to the Trash as "empty
+  albums"), so a folder holding any of it is still reported with the reason it
+  stayed, and nothing is ever deleted: every removal is a move the Trash page
+  can restore, origin included. The apply's Trash group now runs DEEPEST FIRST
+  (a file's row before its folder's), so the folder row finds only what it may
+  take and the run's log reads "moved the stray file" before "moved the empty
+  album folder". Pinned in `tools/test_layout_case.py` (133 checks: the
+  album-less artist folder of app files, junk inside an album folder, junk in
+  a foreign root folder, the emptied album shell, and the four refusals — a
+  bare cover in an artist folder, an album folder holding its cover, artwork
+  inside a root folder, and a root folder holding audio).
+
+- **R438 — `SOURCE` is the USER's own word: the app offers it, never writes
+  it.** The owner's report (2026-10-14): "make sure that for digital media
+  imported albums / manually downloaded files from soulseek it DOESN'T
+  autofill the SOURCE tag, that should be manually entered by the user (prompt
+  for entry)". Three writers are gone, and the ladder is now a SUGGESTION:
+  `server.imports.stamp_album_source` writes `SOURCE` only from the `value`
+  argument — the answer a user typed in the wizard's Match step field or the
+  album page's Source control — and reports what the app knows (the release's
+  own store URLs, `mlo/digital_source.py`; or the provider the acquisition
+  stated, "Soulseek"/"YouTube") as `state: suggested` with `value`/`from`
+  naming it and **nothing written**; the Soulseek/YouTube import's
+  `_stamp_source` (which stamped the network's own word into every empty slot)
+  is DELETED, its caller logging the origin instead; and the download stamp
+  `server.main._tag_media_for_albums` writes MEDIA alone. An unattended import
+  therefore lands a Digital Media album with NO `SOURCE`, keeps failing
+  `grade_check_source` ("Missing SOURCE (required for Digital Media)"), and the
+  `source` family's prompt is what asks for it — the wizard's Match step, whose
+  field is pre-filled with the suggestion and whose Continue/Save writes it
+  (fill-only, gated by `should_write_audio_tag`, only on a digital medium, and
+  nothing is written from an empty field). One switch still fills SOURCE
+  automatically and it is the user's own by name: `fill_empty_source` (OFF by
+  default, `mlo/lyrics.py`'s MEDIA/SOURCE pass writing
+  `digital_media_source_value`). A value the user stated is never overwritten,
+  and a value the app did not write is never deleted (R398). Pinned in
+  `tools/test_import_pipeline.py` (the offer writes nothing, the album keeps
+  failing the check, the provider suggestion, and the user's own answer
+  writing every track) and `tools/test_soulseek_candidates.py` (the deleted
+  writer, the download landing with no SOURCE, the MEDIA stamp and the CD
+  strip untouched).
 
 ---
 

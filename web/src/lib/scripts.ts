@@ -22,7 +22,7 @@ export const SCRIPTS: { ids: number[]; label: string }[] = [
   { ids: [16], label: "Mood & Energy" },
   { ids: [17], label: "Lyrics transliterate (AI)" },
   { ids: [19], label: "Optimize artist images" },
-  { ids: [20], label: "Scan library layout" },
+  { ids: [20], label: "Optimize library layout" },
   { ids: [21], label: "Fix AcoustID pairs" },
   { ids: [22], label: "Submit fingerprints (AcoustID)" },
   { ids: [23], label: "Optimize tags" },

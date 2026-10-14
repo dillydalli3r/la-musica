@@ -477,15 +477,16 @@ def import_settle(req: SettleRequest):
 
     What the wizard's Finish step calls before it runs the ticked scripts, so a
     release imported by hand ends in the state an unattended import leaves:
-    SOURCE written when the release or the acquisition states it (else
-    reported as still to be asked, the wizard's Match step), the untimed lyrics
-    this install refuses removed and counted, and the album description fetched
+    SOURCE written when the USER stated one (the Match step's field, *source*;
+    else reported as still to be asked, with whatever the release or the
+    acquisition knows offered as the suggestion), the untimed lyrics this
+    install refuses removed and counted, and the album description fetched
     through the import's OWN metadata step (`run_metadata_step` — the same
     machinery the album page's fetch and every other import path use).
 
     Every half reports its own state; nothing here is silent, and nothing is
-    invented: a SOURCE no evidence states comes back ``asked`` with the
-    config's default for the wizard to offer.
+    invented: SOURCE is the user's own word, so no value they did not state is
+    ever written.
     """
     from mlo.config import load_config
 
@@ -508,13 +509,14 @@ def import_source(req: SourceRequest):
     (`imports.stamp_album_source`) — the row `mlo.import_policy` publishes
     beside the ``source`` family, so the button and the import cannot drift:
 
-    * no *value* → the value the pipeline would write, derived from the
-      release's own store URLs (or the provider), plus the config's default
-      (`digital_media_source_value`) and why the tag is required — what the
-      Match step pre-fills;
+    * no *value* → what the prompt should offer: the value the app knows for
+      this album (the release's own store URLs, or the provider), plus the
+      config's default (`digital_media_source_value`) and why the tag is
+      required — what the Match step pre-fills. Nothing is written;
     * *value* given → written to every track of the album that lacks one (the
       write gate and the fill-only rule are the pipeline's own), and nothing is
-      touched on a non-digital medium.
+      touched on a non-digital medium. This is the user's own answer, and the
+      only thing that ever writes a SOURCE.
     """
     from mlo.config import load_config
 

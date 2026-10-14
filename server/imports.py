@@ -1188,18 +1188,22 @@ def _finish_album(path, cfg, progress=None, force=None, release=None,
     # own route calls this same function).
     #
     # BEFORE the chain, because script 1 (Format lyrics) is what normalizes
-    # MEDIA/SOURCE: a SOURCE the release states is written here, and the write
-    # gate the user configured is honored rather than second-guessed. The
-    # lyrics half is the lyric family's own decision, and it is a no-op for the
-    # common case — `drop_arrived_values` above already cleared the arrived
+    # MEDIA/SOURCE: a SOURCE the user stated is written here, and the write
+    # gate the user configured is honored rather than second-guessed. What the
+    # release or the acquisition knows is OFFERED, never written (SOURCE is the
+    # user's own word — see `stamp_album_source`): an unattended import lands
+    # the album with no SOURCE and this report is what raises it as a prompt.
+    # The lyrics half is the lyric family's own decision, and it is a no-op for
+    # the common case — `drop_arrived_values` above already cleared the arrived
     # lyrics when the chain fetches — so what it actually catches is the lyric
     # a KEPT family or a dropped fetch left behind: an untimed lyric the
     # grader's own check calls "Lyrics not optimally formatted (run Lyrics
     # script)" and no script can repair.
     #
     # Its result rides in this import's report (`settled`): a SOURCE nobody
-    # could state is a `source` gap the report raises as a prompt, and lyrics
-    # that went are named in `chain_summary`'s own line — never silent.
+    # stated is a `source` gap the report raises as a prompt (the value the app
+    # knows, when it knows one, is what that prompt offers), and lyrics that
+    # went are named in `chain_summary`'s own line — never silent.
     #
     # Announced only for an album this step has an answer for — a Digital Media
     # release, which is the one medium the grader requires a SOURCE on (see
@@ -1213,8 +1217,9 @@ def _finish_album(path, cfg, progress=None, force=None, release=None,
         _settle_rel = release
         if _settle_rel is None and album_mbid:
             # The identity the album carries is enough to ask for the release,
-            # and that release's own store URLs are the SOURCE's one piece of
-            # evidence (see `mlo.digital_source`). Cached, and never fatal.
+            # and that release's own store URLs are what the SOURCE prompt
+            # offers as its suggestion (see `mlo.digital_source`) — nothing is
+            # written from them. Cached, and never fatal.
             try:
                 from server import integrations as intg
                 _settle_rel, _rid = intg.resolve_release(album_mbid)
@@ -1230,6 +1235,12 @@ def _finish_album(path, cfg, progress=None, force=None, release=None,
         if _src.get("state") == SOURCE_ASKED:
             print(f"[mlo] import: no SOURCE for this Digital Media release — "
                   f"{os.path.basename(path)}")
+        elif _src.get("state") == SOURCE_SUGGESTED:
+            # Nothing was written: the app knows a value and the prompt offers
+            # it, the user states it (see `stamp_album_source`).
+            print(f"[mlo] import: SOURCE not written — it is the user's own "
+                  f"word; the app knows \u201c{_src.get('value')}\u201d "
+                  f"({_src.get('from')}) — {os.path.basename(path)}")
     except Exception:
         traceback.print_exc()
 
@@ -1671,9 +1682,21 @@ def _report_gaps(out, cfg, policy, path, grade=None):
     while that phase was still running, so the one surface that says "your album
     is ready" spoke before the album's own report existed.
     """
+    steps = {"advisory": out.get("advisory"),
+             "cover": out.get("cover")}
+    # The source family's entry carries what the app KNOWS about this copy: the
+    # settle's own answer (a release's store URL, or the provider the
+    # acquisition stated) is the value the wizard's field starts with, and a
+    # download's prompt should not have to be opened to see it. Only ever a
+    # note — nothing has been written (R438).
+    _src = (out.get("settled") or {}).get("source") or {}
+    if _src.get("value") and _src.get("state") == SOURCE_SUGGESTED:
+        steps["source"] = {
+            "note": ("not written \u2014 the app knows "
+                     f"\u201c{_src['value']}\u201d ({_src.get('from') or 'the app'})"
+                     "; it is your word to state")}
     gaps = import_policy.gaps(path, import_policy.effective_config(cfg),
-                              steps={"advisory": out.get("advisory"),
-                                     "cover": out.get("cover")},
+                              steps=steps,
                               grade=grade)
     out["autonomy"] = {
         "mode": policy["mode"],
@@ -3969,10 +3992,13 @@ def drop_arrived_values(album_dir, cfg=None, chain=None):
 # wizard, a test, a log line) never has to guess what a word means:
 #
 #   written/present   SOURCE landed on every track that lacked one / every
-#                     track already had one (the import wrote nothing)
-#   suggested         a dry call: here is the value a real one would write
-#   asked             nothing the pipeline knows states a SOURCE and none may
-#                     be invented — the user is asked (the `source` family)
+#                     track already had one (nothing was written)
+#   suggested         nothing was written and here is the value to offer the
+#                     user: either the ANSWER a caller passed in (`value`, the
+#                     wizard's own field) or what the release's store URLs /
+#                     the acquisition's provider state about this copy
+#   asked             nothing the app knows states a SOURCE and none may be
+#                     invented — the user is asked (the `source` family)
 #   not-digital       MEDIA is not Digital Media, which is the only medium the
 #                     grader requires a SOURCE on (script 1 strips one)
 #   no-tracks/failed  nothing to write / the tags could not be read
@@ -4011,28 +4037,38 @@ def stamp_album_source(album_dir, cfg=None, *, value="", release=None,
 
     ``SOURCE`` is required on every track of a Digital Media album
     (``grade_check_source``) and it is the one tag whose honest value the
-    pipeline cannot derive from the audio: where the release came from. So the
-    order is evidence, never invention — *value* (a caller that already knows,
-    i.e. the wizard's own answer), the RELEASE's own store URLs
-    (`mlo.digital_source`, read from the payload or from MusicBrainz'
-    url-relations) and *provider* (the acquisition's own statement, e.g.
-    "YouTube"). Nothing states one → nothing is written, the state is
-    ``asked``, and the import's own report hands the decision to the user (the
-    ``source`` family in ``mlo.import_policy``).
+    pipeline cannot derive from the audio: where the release came from — so it
+    is the USER's own word, and only an answer they gave is written (the
+    owner's report, 2026-10-14: "for digital media imported albums / manually
+    downloaded files from soulseek it DOESN'T autofill the SOURCE tag, that
+    should be manually entered by the user (prompt for entry)").
+
+    So the ladder is evidence offered, never invention written:
+
+    * *value* — the answer the user stated (the wizard's Match step field, the
+      album page's Source control). The ONE thing that writes.
+    * the RELEASE's own store URLs and the *provider* the acquisition knew
+      ("Soulseek", "YouTube") — reported as the SUGGESTION the prompt offers
+      (state ``suggested``, with ``value``/``from`` naming it), and written by
+      nobody.
+
+    Nothing states one and nothing was answered → state ``asked``, and the
+    import's own report hands the decision to the user (the ``source`` family
+    in ``mlo.import_policy``, the wizard's Match step, the unattended prompt).
 
     FILL only, like every writer in this module: a track that already carries a
     SOURCE keeps it, so the user's own word survives an import. Nothing is
     written for a non-digital medium either — script 1 deletes a SOURCE there,
     so writing one would only be undone.
 
-    *dry* answers the same question without touching a file: what value the
-    pipeline would write, and what the config's own default is
+    *dry* answers the same question without touching a file: what the prompt
+    should offer and what the config's own default is
     (``digital_media_source_value``) — what a pick list or an input is
     pre-filled with.
 
     Returns ``{"state", "value", "from", "default", "media", "tracks",
-    "missing", "written", "failed"}`` — see the states above. Never raises:
-    an album whose tags cannot be read is reported, not failed.
+    "missing", "written", "failed", "suggested"}`` — see the states above.
+    Never raises: an album whose tags cannot be read is reported, not failed.
     """
     from mlo.audio import AudioFile
     from mlo.config import should_write_audio_tag
@@ -4043,6 +4079,7 @@ def stamp_album_source(album_dir, cfg=None, *, value="", release=None,
     cfg = cfg or {}
     out = {"state": SOURCE_NO_TRACKS, "value": "", "from": "", "media": "",
            "tracks": 0, "missing": 0, "written": 0, "failed": 0,
+           "suggested": False,
            "default": str(cfg.get("digital_media_source_value")
                           or DEFAULT_DIGITAL_SOURCE).strip() or DEFAULT_DIGITAL_SOURCE}
     files = _audio_files(album_dir)
@@ -4073,25 +4110,31 @@ def stamp_album_source(album_dir, cfg=None, *, value="", release=None,
         # every other medium: an import has nothing to settle.
         out["state"] = SOURCE_NOT_DIGITAL
         return out
-    resolved, origin = "", ""
-    for candidate, source_from in ((value, "value"),
-                                   (str(provider or "").strip(), "provider"),
+    # The user's own answer is the ONLY thing that writes. What the app knows
+    # about the copy — the provider the acquisition stated, the release's own
+    # store URLs — is what the prompt offers, in this order (the acquisition
+    # saw the actual bytes; the release says where it is sold).
+    given = str(value or "").strip()
+    suggested, origin = "", ""
+    for candidate, source_from in ((str(provider or "").strip(), "provider"),
                                    (source_from_url(url), "release")):
-        if str(candidate or "").strip():
-            resolved, origin = str(candidate).strip(), source_from
+        if candidate:
+            suggested, origin = candidate, source_from
             break
-    if not resolved:
+    if not given and not suggested:
         rel = dict(release or {})
         if rel and not (rel.get("relations") or rel.get("urls")
                         or rel.get("url") or rel.get("source")
                         or rel.get("provider")):
             rel["relations"] = _release_relations_mb(rel)
-        resolved = source_from_release(rel)
-        if resolved:
+        suggested = source_from_release(rel)
+        if suggested:
             origin = "release"
-    out["value"], out["from"] = resolved, origin
-    if dry or not resolved:
-        out["state"] = SOURCE_SUGGESTED if resolved else SOURCE_ASKED
+    out["value"] = given or suggested
+    out["from"] = "value" if given else origin
+    out["suggested"] = bool(suggested) and not given
+    if dry or not given:
+        out["state"] = SOURCE_SUGGESTED if out["value"] else SOURCE_ASKED
         return out
     wrote = 0
     for path, af, existing in rows:
@@ -4103,7 +4146,7 @@ def stamp_album_source(album_dir, cfg=None, *, value="", release=None,
             defer = hasattr(af, "defer_save")
             if defer:
                 af.defer_save(True)
-            ok = bool(af.set_tag("SOURCE", resolved))
+            ok = bool(af.set_tag("SOURCE", given))
             if defer and af.defer_save(False) is False:
                 ok = False
             if ok:
@@ -4496,9 +4539,10 @@ def settle_digital_import(album_dir, cfg=None, *, release=None, provider="",
     wizard's own route, so a manual import and an unattended one cannot settle
     the same release differently:
 
-    * **SOURCE** — `stamp_album_source`, i.e. the value the release or the
-      acquisition states, else the ``source`` gap the prompt mechanism asks
-      about (never an invented one);
+    * **SOURCE** — `stamp_album_source`: the value the USER stated (*value*),
+      written fill-only, or the ``source`` gap the prompt mechanism asks about
+      with the value the release / the acquisition knows offered as its
+      suggestion (never written, never invented);
     * **the lyrics it cannot use** — `settle_digital_lyrics`, i.e. an arrived
       untimed lyric when this install requires synced ones and the fetch will
       run;

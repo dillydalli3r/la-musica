@@ -466,7 +466,7 @@ export default {
   // the lyrics and the album description when it finished an album.
   "import.source.title": "入手元",
   "import.source.why": "リリースがデジタルメディアの場合に必要です — ファイル自体は入手元を語りません。",
-  "import.source.suggested": "リリースから推定: {value}",
+  "import.source.suggested": "書き込みなし — アプリの把握値: {value}",
   "import.source.save": "入手元を保存",
   "import.source.save_hint": "このアルバムで SOURCE がまだ無いすべての曲にこの値を書き込みます（MEDIA がデジタルメディアの場合に必須）",
   "import.source.written": "{n} ファイルに SOURCE を書き込みました",

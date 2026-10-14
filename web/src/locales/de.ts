@@ -467,7 +467,7 @@ export default {
   // the lyrics and the album description when it finished an album.
   "import.source.title": "Quelle",
   "import.source.why": "Erforderlich, wenn das Release Digital Media ist — aus den Dateien geht nicht hervor, woher es stammt.",
-  "import.source.suggested": "Aus dem Release abgeleitet: {value}",
+  "import.source.suggested": "Nicht geschrieben — die App weiß: {value}",
   "import.source.save": "Quelle speichern",
   "import.source.save_hint": "Schreibt diesen Wert in jeden Titel des Albums ohne SOURCE — erforderlich, wenn MEDIA Digital Media ist",
   "import.source.written": "SOURCE in {n} Datei(en) geschrieben",

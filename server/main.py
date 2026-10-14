@@ -5456,17 +5456,23 @@ def _detect_rip_media(album_dir):
 
 
 def _tag_media_for_albums(album_dirs):
-    """Write MEDIA (and SOURCE for digital rips) on every audio file of the
-    freshly imported albums so grading and the library filters work.
+    """Write MEDIA on every audio file of the freshly imported albums so
+    grading and the library filters work.
 
-    Both writes honour the same gate every other writer uses
+    MEDIA alone: SOURCE is the user's own word, and an import never writes one
+    the user did not state (owner's report, 2026-10-14 — the digital fill used
+    to land the configured ``digital_media_source_value`` on every empty slot
+    of a Digital Media rip). A download that arrives with no SOURCE keeps it
+    empty, the grade reports it missing on a Digital Media release, and the
+    ``source`` family's prompt asks for it.
+
+    The write honours the same gate every other writer uses
     (should_write_audio_tag): normalize_media_source turns the whole
     MEDIA/SOURCE family off, and audio_tag_writes can disable it per
-    filetype — an import used to stamp MEDIA/SOURCE regardless, so a user
-    who turned the family off got it back on the next download."""
+    filetype — an import used to stamp MEDIA regardless, so a user who turned
+    the family off got it back on the next download."""
     from mlo.audio import AudioFile
     from mlo.config import should_write_audio_tag
-    from mlo.paths import DEFAULT_DIGITAL_SOURCE
 
     cfg = load_config()
     tagged = 0
@@ -5486,10 +5492,6 @@ def _tag_media_for_albums(album_dirs):
                     if (not str(af.get_tag("MEDIA") or "").strip()
                             and should_write_audio_tag(cfg, "MEDIA", filepath=path)):
                         af.set_tag("MEDIA", media)
-                    if (media == "Digital Media"
-                            and not str(af.get_tag("SOURCE") or "").strip()
-                            and should_write_audio_tag(cfg, "SOURCE", filepath=path)):
-                        af.set_tag("SOURCE", DEFAULT_DIGITAL_SOURCE)
                     tagged += 1
                 except Exception:
                     continue

@@ -51,10 +51,13 @@ EXPECTED_SCRIPTS = {
     # aspect and size — the remedy for the codes grade_check_artist_image
     # raises (mlo/artistdata.py run_optimize_artist_images).
     19: "Optimize artist images",
-    # 20 reports the shape of the whole music folder (mlo/layout.py) and
-    # stores that report under <music>/.mlo/data, which is what the Library
-    # page warns from. Read-only: it is the one script that changes no file.
-    20: "Scan library layout",
+    # 20 reports the shape of the whole music folder (mlo/layout.py), fixes
+    # what it can prove and stores the report under <music>/.mlo/data, which
+    # is what the Library page warns from. Apply is the DEFAULT (the scan
+    # always reports; `layout_apply` off is the read-only run) — the name says
+    # both halves, because "scan" alone is what the owner read as "does not
+    # delete anything" (2026-10-14, R437).
+    20: "Optimize library layout",
     # 21 completes an ACOUSTID_ID / ACOUSTID_FINGERPRINT pair a file only half
     # carries — the grading check that had no fixer in the registry at all
     # (mlo/acoustid.py run_fix_pairs).

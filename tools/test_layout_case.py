@@ -211,6 +211,39 @@ os.makedirs(os.path.join(MF, "Artists", "Loose"), exist_ok=True)
 with open(os.path.join(MF, "Artists", "Loose", "1-01 Song.flac"), "wb") as f:
     f.write(b"x")
 
+# The owner's second report (2026-10-14): "The Scan Library Layout script / fix
+# library script doesn't work (not deleting files / folders)". A folder-level
+# removal takes every entry at once, so the question is what may go with the
+# folder: junk by the stray rule, and the app's OWN file for that folder.
+# SOLO above is the shape that prompted the report (artist.jpg +
+# description.txt, both written by the app — scripts 25/26 fetch them again);
+# these are the other three, and the two near misses that must STAY.
+DUMP = os.path.join(MF, "Artists", "Dump")            # junk only → taken whole
+os.makedirs(DUMP, exist_ok=True)
+with open(os.path.join(DUMP, "notes.txt"), "wb") as f:
+    f.write(b"junk")
+DEBRIS = os.path.join(MF, "Artists", "Debris", "Shell")   # an album folder of junk
+os.makedirs(DEBRIS, exist_ok=True)
+with open(os.path.join(DEBRIS, "readme.txt"), "wb") as f:
+    f.write(b"junk")
+JUNKROOT = os.path.join(MF, "Junk")                   # a foreign root folder of junk
+os.makedirs(JUNKROOT, exist_ok=True)
+with open(os.path.join(JUNKROOT, "list.txt"), "wb") as f:
+    f.write(b"junk")
+# …and the near misses: a root folder holding artwork (a rip dump the user has
+# to file away — nothing here takes art out of it), and an artist folder
+# holding a release file of its own (a bare cover, which the album-leftover
+# rule names and trashes as its own row, so the folder is offered only once it
+# stands empty).
+GALLERY = os.path.join(MF, "Gallery")
+os.makedirs(GALLERY, exist_ok=True)
+with open(os.path.join(GALLERY, "cover.jpg"), "wb") as f:
+    f.write(b"art")
+KEPT = os.path.join(MF, "Artists", "Kept")
+os.makedirs(KEPT, exist_ok=True)
+with open(os.path.join(KEPT, "cover.jpg"), "wb") as f:
+    f.write(b"art")
+
 
 def listing():
     """Every relative path under the music folder, before and after the scan."""
@@ -298,9 +331,10 @@ artist_row = next(i for i in cases if i["path"] == "Artists/lower")
 ok("Lower" in artist_row["detail"], f"artist row names the expected spelling ({artist_row['detail']})")
 
 print("== existing kinds unchanged ==")
-ok(res["counts"].get("empty_album") == 1,
-   f"empty_album still reported (got {res['counts'].get('empty_album')})")
-ok(res["counts"].get("stray_file") == 1,
+ok(res["counts"].get("empty_album") == 2,
+   f"empty_album still reported, for the album of junk too "
+   f"(got {res['counts'].get('empty_album')})")
+ok(res["counts"].get("stray_file") == 2,
    f"stray_file still reported (got {res['counts'].get('stray_file')})")
 ok("wrong_case" not in {i["kind"] for i in issues
                         if i["path"] in ("Artists/Good/Good Album", "Artists/Caps/Empty")},
@@ -323,27 +357,50 @@ ok("beside" in sc[0]["detail"] and "description (2).txt" in sc[0]["detail"]
 
 print("== empty artist (an artist folder with no album) ==")
 ea = [i for i in issues if i["kind"] == "empty_artist"]
-ok(res["counts"].get("empty_artist") == 1
-   and [i["path"] for i in ea] == ["Artists/Solo"],
-   f"the artist folder holding no album folder is the only empty_artist row "
+solo = next((i for i in ea if i["path"] == "Artists/Solo"), None)
+ok(res["counts"].get("empty_artist") == 3
+   and sorted(i["path"] for i in ea)
+   == ["Artists/Dump", "Artists/Kept", "Artists/Solo"],
+   f"every artist folder holding no album folder is an empty_artist row "
    f"({[i['path'] for i in ea]})")
-ok(bool(ea[0]["detail"]) and "no album folder" in ea[0]["detail"]
-   and "Solo" in ea[0]["detail"],
-   f"the row says which folder and why ({ea[0]['detail']})")
-# The artist folder here holds artist.jpg + description.txt (the artist's own
-# art), so the scan reports it and offers NO removal: a folder-level removal
-# takes everything inside it, and script 20 only removes a folder that is
-# EMPTY. The hint says so, and says what a user who wants it gone can do.
-ok(not ea[0].get("fix"),
-   f"an artist folder that still holds files carries NO removal ({ea[0].get('fix')})")
-ok("leaves it" in ea[0]["hint"] and "by hand" in ea[0]["hint"],
-   f"…and the hint says the files are why it stays ({ea[0]['hint']})")
-# The near miss: audio anywhere beneath keeps a folder out of this finding.
-ok(not any(i["path"] == "Artists/Loose" for i in ea)
-   and res["counts"].get("audio_in_artist") == 1,
-   f"a folder holding audio is audio_in_artist, never an empty artist "
-   f"({[i['kind'] for i in issues if i['path'] == 'Artists/Loose']})")
-
+ok(bool(solo["detail"]) and "no album folder" in solo["detail"]
+   and "Solo" in solo["detail"],
+   f"the row says which folder and why ({solo['detail']})")
+# The artist folder here holds artist.jpg + description.txt — the app's OWN
+# files for an artist folder (scripts 25/26 fetch them again, and the Trash can
+# put them back), so the removal IS offered: the owner's report was exactly
+# this folder, reported run after run and never removed (2026-10-14, "not
+# deleting files / folders").
+ok(bool(solo.get("fix")) and solo["fix"].get("action") == "trash",
+   f"an artist folder holding only the app's own files is removable "
+   f"({solo.get('fix')})")
+ok("Trash" in solo["hint"],
+   f"…and the hint says so ({solo['hint']})")
+# The artist folder holding a RELEASE's file (a bare cover) is NOT: artwork is
+# not junk and not the app's own file for this folder, so the folder's row
+# stays and its reason names what it holds — the cover is a leftover the scan
+# reports on its own row, and the emptied shell is offered the next time the
+# scan sees it.
+kept_cover = next((i for i in issues if i["path"] == "Artists/Kept/cover.jpg"), None)
+kept_row = next((i for i in ea if i["path"] == "Artists/Kept"), None)
+ok(kept_cover is not None and kept_cover["kind"] == "leftover_file"
+   and (kept_cover.get("fix") or {}).get("action") == "trash",
+   f"the bare cover is its own removable row ({kept_cover})")
+ok(kept_row is not None and not kept_row.get("fix") and "not junk" in kept_row["hint"],
+   f"…so the folder itself is left, and says why ({kept_row and kept_row['hint']})")
+# …and the three shapes the removal IS for: junk in an album-less artist
+# folder, junk inside an album folder, and a foreign folder in the root whose
+# contents are junk — each carries the fix, and the near misses do not.
+for _kind, path in (("empty_artist", "Artists/Dump"),
+                    ("empty_album", "Artists/Debris/Shell"),
+                    ("unexpected_folder", "Junk")):
+    row = next((i for i in issues if i["path"] == path), None)
+    ok(row is not None and (row.get("fix") or {}).get("action") == "trash",
+       f"{path} is removable as it stands ({row})")
+gallery = next((i for i in issues if i["path"] == "Gallery"), None)
+ok(gallery is not None and not gallery.get("fix") and "not junk" in gallery["hint"],
+   f"…while a root folder holding artwork keeps it and says why "
+   f"({gallery and gallery['hint']})")
 # The grade fails the same folder — the finding and the grade are one answer
 # about one folder (mlo.layout.empty_artist, which both ask).
 from mlo.grader import grade_artist  # noqa: E402
@@ -425,23 +482,32 @@ ok(stored(os.path.join(MF, "Artists", "Loose"), "Loose Album")
    and stored(os.path.join(MF, "Artists", "Loose", "Loose Album"), "1-01 Song.flac")
    and not os.path.exists(os.path.join(MF, "Artists", "Loose", "1-01 Song.flac")),
    "audio loose in an artist folder moved into the album folder its own tags name")
-# The album-less artist folders that still HOLD FILES are left where they are —
-# a folder-level removal takes everything inside it, and the probe is that the
-# folder is empty — while the two genuinely EMPTY shells are gone.
-ok(os.path.isdir(NOBODY) and os.path.isfile(os.path.join(NOBODY, "artist.jpg"))
-   and os.path.isdir(SOLO),
-   "an album-less artist folder that still holds files is left where it is")
+# The album-less artist folders whose contents the scan may take ARE removed —
+# the app's own artist.jpg/description.txt (Solo, Nobody) is what the app wrote
+# and scripts 25/26 fetch again — while a shell still holding a release's own
+# file is left on this run and offered once it stands empty.
+ok(not os.path.exists(NOBODY) and not os.path.exists(SOLO)
+   and not os.path.exists(DUMP),
+   "an album-less artist folder holding only the app's own files (or junk) is "
+   "removed with them")
 ok(not os.path.exists(DUST) and not os.path.exists(GONE),
    "the genuinely empty artist and album shells are removed")
+ok(not os.path.exists(DEBRIS) and not os.path.exists(JUNKROOT)
+   and os.path.isdir(GALLERY),
+   "an album folder of junk and a foreign root folder of junk are removed "
+   "with what they held, while the one holding artwork stays")
 ok(os.path.isdir(os.path.join(MF, "Artists", "Caps", "Empty"))
    and os.path.isfile(os.path.join(MF, "Artists", "Caps", "Empty", "cover.jpg")),
-   "an album folder holding only its cover is left — the cover is a file, and "
+   "an album folder holding only its cover is left — artwork is not junk, and "
    "nothing here takes a file the scan did not name")
+ok(os.path.isdir(KEPT) and not os.path.exists(os.path.join(KEPT, "cover.jpg")),
+   "…the same for an artist folder: its bare cover goes as its own row, and "
+   "the shell it leaves is the next scan's removal")
 
 # The counts, and the rows: what is settled leaves `issues`, what may not move
 # stays — with its reason.
-ok(res.get("fixed") == 8 and res.get("fix_failed") == 0,
-   f"eight fixes, none failed (got fixed={res.get('fixed')} failed={res.get('fix_failed')})")
+ok(res.get("fixed") == 15 and res.get("fix_failed") == 0,
+   f"fifteen fixes, none failed (got fixed={res.get('fixed')} failed={res.get('fix_failed')})")
 left_kinds = sorted(res["counts"])
 ok("empty_album" in left_kinds and "empty_artist" in left_kinds
    and "hidden_folder" in left_kinds and "unexpected_folder" in left_kinds,
@@ -484,8 +550,16 @@ ok(empty_dest and os.path.isdir(empty_dest) and not os.listdir(empty_dest),
 dust_dest = binned("Dust")
 ok(not os.path.exists(DUST) and bool(dust_dest),
    f"…as is the empty artist shell ({dust_dest})")
-ok(not binned("Nobody") and not binned("Solo") and not binned("Empty"),
-   "no folder that still held a file was moved to the Trash")
+# A folder WITH contents in the bin: the app's own artist.jpg + description.txt
+# travel inside it (the Trash page restores the folder whole), which is the
+# owner's report settled in one run rather than left "remove it by hand".
+solo_dest = binned("Solo")
+ok(not os.path.exists(SOLO) and bool(solo_dest)
+   and sorted(os.listdir(solo_dest)) == ["artist.jpg", "description.txt"],
+   f"the album-less artist folder the owner reported is in the Trash with the "
+   f"files it held ({solo_dest})")
+ok(not binned("Empty") and not binned("Gallery") and not binned("Kept"),
+   "no folder holding a release's own file was moved to the Trash")
 with open(os.path.join(os.path.dirname(stray_dest), ".mlo_manifest.json"),
           encoding="utf-8") as f:
     trashed = json.load(f).get("entries", {})
@@ -798,7 +872,7 @@ ok(os.path.isdir(LATER) and os.path.isfile(os.path.join(LATER, "1-01 Song.flac")
 # whole reason its row carries no fix) and a hidden folder (which never does).
 by_path = {f["path"]: f for f in out["fixes"]}
 ok(by_path.get("Downloads", {}).get("result") == "skipped"
-   and "foreign folder that holds audio or files" in by_path.get("Downloads", {}).get("action", ""),
+   and "whose contents may not be taken" in by_path.get("Downloads", {}).get("action", ""),
    f"a foreign folder holding audio is left, with the reason ({by_path.get('Downloads')})")
 ok(by_path.get("Artists/.stfolder", {}).get("result") == "skipped"
    and "hidden folder" in by_path.get("Artists/.stfolder", {}).get("action", ""),

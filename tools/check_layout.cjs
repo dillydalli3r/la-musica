@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-/* The library-layout scan is script 20 (Scan library layout), not a panel.
+/* The library-layout scan is script 20 (Optimize library layout), not a panel.
  *
  * The Optimization page's own Scan/Apply "Library layout" card is gone: script
  * 20 in the script list is the one path, and the read-only `GET
@@ -62,8 +62,8 @@ const scan = async () => {
   // ---- 1. script 20 is the only path; the panel is gone --------------------
   await page.goto(`${BASE}/optimize`, { waitUntil: "domcontentloaded" });
   await page.waitForSelector("text=Individual scripts", { timeout: 30000 });
-  const scriptListed = await page.locator('text=Scan library layout').count();
-  check("the Optimization page lists script 20 (Scan library layout)", scriptListed > 0,
+  const scriptListed = await page.locator('text=Optimize library layout').count();
+  check("the Optimization page lists script 20 (Optimize library layout)", scriptListed > 0,
     `matches=${scriptListed}`);
   const rescan = await page.locator('button:has-text("Rescan")').count();
   const card = await page.getByText("Library layout", { exact: true }).count();
@@ -73,7 +73,11 @@ const scan = async () => {
   // ---- 2. the scan route scans AND stores ----------------------------------
   const first = await scan();
   const stamp1 = (await report()).scanned_at;
-  await sleep(500);
+  // `scanned_at` is written with SECOND precision (mlo.layout.save_report), so
+  // a sub-second gap could land both scans in the same second and read as "the
+  // route did not store" — which is a flake, not a finding. A full second plus
+  // margin, and the assertion is about the store, never about the clock.
+  await sleep(1100);
   const second = await scan();
   const stored = await report();
   check("GET /api/library/layout returns the scan and STORES its report",

@@ -1990,8 +1990,10 @@ print("import pipeline: all assertions passed")
 # the album page". What is asserted here is the SETTLE, the one entry point
 # both the pipeline and the wizard's Finish call:
 #
-#   * SOURCE asks (never invents) when nothing states one, and is written to
-#     every track that lacks it once the release or the user answers;
+#   * SOURCE is the user's own word: the value the release or the acquisition
+#     knows is OFFERED (state "suggested"), never written, and an album
+#     nobody answered for keeps failing the check — the `source` family's
+#     prompt — while the user's own answer writes every track that lacks one;
 #   * an untimed lyric — and one the formatter cannot canonicalise — is removed
 #     when the chain will fetch, and NOT touched when it will not (the honest
 #     report is the family's own skip there);
@@ -2089,22 +2091,33 @@ assert _sug["state"] == "asked" and _sug["value"] == "" and _sug["default"], _su
 assert _sug["missing"] == 2 and _sug["written"] == 0, _sug
 assert _dig_issues().get("Missing SOURCE (required for Digital Media)"), "a dry ask writes nothing"
 
-# the release's own store URL is evidence the pipeline MAY write
-_derived = imports.stamp_album_source(
+# the release's own store URL is evidence the prompt OFFERS — and it is never
+# written: SOURCE is the user's own word (owner's report, 2026-10-14)
+_offered = imports.stamp_album_source(
     DIG_ALBUM, DIG_CFG, release={"id": "", "urls": ["https://qobuz.com/album/x"]})
-assert _derived["state"] == "written" and _derived["value"] == "Qobuz", _derived
-assert _derived["from"] == "release" and _derived["written"] == 2, _derived
-assert "Missing SOURCE (required for Digital Media)" not in _dig_issues(), _dig_issues()
+assert _offered["state"] == "suggested" and _offered["value"] == "Qobuz", _offered
+assert _offered["from"] == "release" and _offered["written"] == 0, _offered
+assert _offered["suggested"] is True, _offered
+assert "Missing SOURCE (required for Digital Media)" in _dig_issues(), \
+    "a suggestion writes nothing — the album still fails the check"
 
-# the user's own answer fills what the release did not
+# …and the same for the provider the acquisition itself states
+_prov = imports.stamp_album_source(DIG_ALBUM, DIG_CFG, provider="Soulseek")
+assert _prov["state"] == "suggested" and _prov["value"] == "Soulseek" \
+    and _prov["from"] == "provider" and _prov["written"] == 0, _prov
+assert "Missing SOURCE (required for Digital Media)" in _dig_issues(), _dig_issues()
+
+# the user's own answer fills what the release did not — the one write there is
 from mutagen.flac import FLAC as _MFLAC
 for _p in _dig_files:
     _f = _MFLAC(_p)
-    del _f["SOURCE"]
+    _f.pop("SOURCE", None)      # no suggestion may have landed one; make it so
     _f.save()
 _answered = imports.stamp_album_source(DIG_ALBUM, DIG_CFG, value="Bandcamp")
 assert _answered["state"] == "written" and _answered["value"] == "Bandcamp", _answered
+assert _answered["from"] == "value" and _answered["written"] == 2, _answered
 assert all(_MFLAC(p).get("SOURCE") == ["Bandcamp"] for p in _dig_files)
+assert "Missing SOURCE (required for Digital Media)" not in _dig_issues(), _dig_issues()
 
 # the lyrics: the formatter cannot repair either lyric, and the fetch will run
 assert imports.settle_digital_lyrics(DIG_ALBUM, DIG_CFG, chain=[1, 13], dry=True) \

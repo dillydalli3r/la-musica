@@ -229,7 +229,36 @@ lacks(ordinary.html, ["Nothing is missing on this step"], "the ordinary wizard n
 lacks(ordinary.html, ["Re-rate"], "and offers the same ONE advisory action");
 
 // --------------------------------------------------------------------------- #
-// 3b. the switch: manual importing off offers no path at all
+// 3b. the prompt strip: a family's own words ride beside its name
+// --------------------------------------------------------------------------- #
+// `mlo.import_policy`'s entries carry the family's own report when it has one —
+// the source family says what the app KNOWS about the copy ("not written — the
+// app knows “Qobuz” (release); it is your word to state", R438), the advisory
+// family why it stayed open. Read on the row, the answer is one look away
+// instead of one wizard step.
+const PROMPT = { prompts: [{
+  album: ALBUM, album_name: "Daft Punk - Homework", at: 1, mode: "automatic",
+  reason: "missing",
+  link: `/import?album=${encodeURIComponent(ALBUM)}&step=Match&missing=source`,
+  families: [
+    { id: "source", label: "Source", step: "Match", state: "unsourced",
+      fields: ["source"], codes: ["SOURCE"],
+      note: "not written \u2014 the app knows \u201cQobuz\u201d (release); it is your word to state" },
+    { id: "genres", label: "Genres", step: "Genres", state: "unsourced",
+      fields: ["genre"], codes: ["GENRE_MISSING"] },
+  ],
+}]};
+const prompted = await render(`/import?album=${encodeURIComponent(ALBUM)}&step=Match`,
+                              CONFIG, { importPrompts: PROMPT });
+has(prompted.open, ["Imports still needing data (1)", "Daft Punk - Homework",
+                    "Source", "Genres",
+                    "not written \u2014 the app knows \u201cQobuz\u201d (release); it is your word to state"],
+    "the prompt row names the families and what the app knows about the answer");
+lacks(prompted.open, ["Genres: undefined", "Genres: "],
+      "a family with no note of its own adds no line");
+
+// --------------------------------------------------------------------------- #
+// 3c. the switch: manual importing off offers no path at all
 // --------------------------------------------------------------------------- #
 const off = await render(`/import?album=${encodeURIComponent(ALBUM)}&step=Advisory`,
                          { ...CONFIG, manual_import_enabled: false });

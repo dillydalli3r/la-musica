@@ -6591,48 +6591,6 @@ def _stamp_media(album_dir, media, cfg):
     return n, problems
 
 
-def _stamp_source(album_dir, source, per_file=None):
-    """Write SOURCE on the tracks of an album this app did not download from
-    the network.
-
-    MEDIA is written for every download by `_stamp_media`; WHERE the copy came
-    from normally is not this module's to decide — a Soulseek download is
-    tagged by the MEDIA/SOURCE pass (server.main) and a digital source by the
-    configured `digital_media_source_value` (mlo.lyrics' normalisation). An
-    album the YouTube branch fetched is neither, and the album must say so
-    itself rather than let a later pass call it "Digital": SOURCE is written
-    only where it is EMPTY, so a value the user chose is never overwritten.
-
-    `per_file` maps a file's NAME to the network that really served IT, for an
-    album fetched from more than one (see _youtube_fetch: YouTube for the
-    uploads it has, a peer for the tracks it does not). It wins over `source`,
-    which stays the album-wide value for every other file — including one this
-    map does not name, whose origin nobody recorded.
-
-    Returns (stamped, problems), the same contract as `_stamp_media`: a tag
-    that cannot be written is reported, never swallowed."""
-    from mlo.audio import AudioFile
-    from server.main import is_audio_file
-    origins = dict(per_file or {})
-    n, problems = 0, []
-    for root, _dirs, files in os.walk(album_dir):
-        for f in sorted(files):
-            if not is_audio_file(f):
-                continue
-            p = os.path.join(root, f)
-            try:
-                af = AudioFile(p)
-                if af.audio is None:
-                    problems.append(f"{f}: cannot be read for tagging")
-                    continue
-                if not str(af.get_tag("SOURCE") or "").strip():
-                    af.set_tag("SOURCE", origins.get(f) or source)
-                n += 1
-            except Exception as e:
-                problems.append(f"{f}: SOURCE tag not written ({str(e)[:80]})")
-    return n, problems
-
-
 def _cleanup_partial(ddir, local_files, remove_root=None):
     """Remove rejected partials so they don't linger in the download dir.
 
@@ -7139,10 +7097,11 @@ def _import(local_root, release, cfg, media, source="", sources=None):
     `media` is the medium already detected for this candidate — MEDIA is
     stamped from it instead of re-detecting the medium of the whole folder.
     `source` is where the album came from, for the one caller whose origin the
-    rest of the app cannot infer (the YouTube branch): it is written as SOURCE
-    where the file does not already say something. `sources` maps a file NAME
-    to the network that served THAT file, for an album fetched from two of
-    them at once (see `_stamp_source`); it wins over `source` per file.
+    rest of the app cannot infer (the YouTube branch); it is REPORTED (logged,
+    and offered as the SOURCE prompt's suggestion) and never written — SOURCE
+    is the user's own word. `sources` maps a file NAME to the network that
+    served THAT file, for an album fetched from two of them at once (see
+    `_file_origins`); it wins over `source` per file.
 
     The result says three separate things, because they are: `imported` (the
     album is in the library and its chain was started), `organized` (the naming
@@ -7222,18 +7181,25 @@ def _import(local_root, release, cfg, media, source="", sources=None):
     for pr in tag_problems[:4]:
         _log("  ! " + pr)
     if source or sources:
-        _sourced, source_problems = _stamp_source(dest, source, sources)
-        for pr in source_problems[:4]:
-            _log("  ! " + pr)
+        # SOURCE is NOT written: it is the user's own word (owner's report,
+        # 2026-10-14), and the app's own knowledge of where these bytes came
+        # from is what the prompt offers. So the value is logged — the user can
+        # put it on the album page (Tag actions → Source) or in the wizard's
+        # Match step — and until then the grade reports it missing, which is
+        # what the `source` family's prompt is raised from `_finish_album` for.
         if sources:
             # Every file's own origin, not one word for the album: a music
-            # video fetched from YouTube AND from a peer's share says which of
-            # the two served each track.
-            _log("Tagged the album's origin: SOURCE is the network that "
-                 "served each file" + (f" ({source} where it was not recorded)."
-                                       if source else "."))
+            # video fetched from YouTube AND from a peer's share came from the
+            # two of them.
+            named = ", ".join(f"{name} ← {net}" for name, net
+                              in sorted(sources.items())[:4])
+            more = " …" if len(sources) > 4 else ""
+            _log(f"SOURCE not written — it is yours to state. This album was "
+                 f"fetched from {named}{more}"
+                 + (f" ({source} where it was not recorded)." if source else "."))
         else:
-            _log(f"Tagged the album's origin: SOURCE={source}.")
+            _log(f"SOURCE not written — it is yours to state. This album came "
+                 f"from {source}.")
 
     organized = False
     organize_error = None

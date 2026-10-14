@@ -558,7 +558,11 @@ DEFAULT_CONFIG = {
     "normalize_media_source": True,
     "digital_media_source_value": DEFAULT_DIGITAL_SOURCE,
     # When True, empty SOURCE on Digital Media is filled with the value above;
-    # when False (default, per request), empty stays empty.
+    # when False (default, per request), empty stays empty. Since 2026-10-14
+    # (R438) this switch is the ONLY automatic SOURCE write left: an import
+    # never fills one from the release's store URLs or from where the download
+    # came — SOURCE is the user's own word, the app's knowledge is the prompt's
+    # suggestion, and this fill is the one a user can ask for by name.
     "fill_empty_source": False,
     # Strip SOURCE on CD rips. OFF by default (the owner's rule, 2026-10-12:
     # "importing must not strip tags already present"). A SOURCE a rip arrived

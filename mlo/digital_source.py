@@ -1,30 +1,34 @@
 """Where a digital release's ``SOURCE`` comes from — the one honest answer.
 
 The grader requires a non-empty, uniform ``SOURCE`` on every track of an album
-whose ``MEDIA`` is Digital Media (``grade_check_source``, spec §3), and the app
-writes exactly three values of its own (``mlo.tagtext.SOURCE_VALUES``:
-"Soulseek" on a download, "YouTube" on the video branch, "Digital" as the
-MEDIA/SOURCE pass's configured fallback). Everything else is the user's own
-word, and this module is where the IMPORT looks for one it may write without
-inventing it.
+whose ``MEDIA`` is Digital Media (``grade_check_source``, spec §3), and SOURCE
+is the USER's own word: it says where they got the copy, and the app writes a
+value only when they stated one (``server.imports.stamp_album_source`` takes
+the answer; the app's own knowledge of the release and of the acquisition is
+what the prompt OFFERS, never what lands on the file — owner's report,
+2026-10-14). This module is the table behind that offer: given a release or a
+store URL, which store's name (a value the user can accept in one press) does
+it name. ``mlo.tagtext.SOURCE_VALUES`` stays the vocabulary the app itself
+uses ("Soulseek", "YouTube", "Digital"); everything else is a store name this
+table recognizes.
 
 The evidence it reads, in order:
 
 * **The release's own URLs.** A MusicBrainz release carries url-relations —
   "purchase for download", "download for free", "streaming" — and the host
   names the store the release is published at (bandcamp.com, qobuz.com,
-  open.spotify.com, …). That is a fact about the RELEASE, which is why it may
-  be written: it is where this pressing comes from, not a guess about who
+  open.spotify.com, …). That is a fact about the RELEASE, which is why it is
+  worth offering: it is where this pressing comes from, not a guess about who
   ripped it.
 * **The provider the acquisition itself knew** ("Soulseek", "YouTube"): the
   download path states its own answer and hands it in here.
 
-Neither answers → nothing is written and the import ASKS (the ``source`` family
-in ``mlo.import_policy`` carries the gap, the wizard's Match step the control).
-A value this table has never heard of is returned unchanged, exactly as
-``mlo.tagtext``'s closed-vocabulary rule says: SOURCE is otherwise the user's
-own word, and a store this list has not learned yet must keep its spelling
-rather than be coerced.
+Neither answers → nothing is offered and the import ASKS (the ``source``
+family in ``mlo.import_policy`` carries the gap, the wizard's Match step the
+control). A value this table has never heard of comes back unchanged, exactly
+as ``mlo.tagtext``'s closed-vocabulary rule says: SOURCE is otherwise the
+user's own word, and a store this list has not learned yet must keep its
+spelling rather than be coerced.
 
 Pure and stdlib-only: the import path, the wizard's route and the tests all
 read ONE table.

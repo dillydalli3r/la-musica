@@ -750,14 +750,16 @@ export default function ImportWizard() {
     queryFn: () => api.importScriptsPreview(),
   });
 
-  // What the pipeline can honestly say about this album's SOURCE — the same
+  // What the app can honestly say about this album's SOURCE — the same
   // function every import path calls (`server.imports.stamp_album_source`,
-  // asked dry): a value it MAY write, derived from the release's own store
-  // URLs or from the provider the acquisition knew, or `asked` when nothing
-  // states one. The Match step is where the release identity is settled, so
-  // that is when it is read; the field is pre-filled with the value, never
-  // with an invented one (`default` is the config's own
-  // `digital_media_source_value`, offered as the user's starting point).
+  // asked dry): the value the app KNOWS for this copy (the release's own store
+  // URLs, or the provider the acquisition stated) — offered, never written,
+  // because SOURCE is the user's own word — or `asked` when nothing states
+  // one. The Match step is where the release identity is settled, so that is
+  // when it is read; the field is pre-filled with the value, never with an
+  // invented one (`default` is the config's own `digital_media_source_value`,
+  // offered as the user's starting point). Typing a value and pressing Save
+  // (or Continue) is what writes it.
   const { data: sourceInfo } = useQuery({
     queryKey: ["importSource", albumPath],
     queryFn: () => api.importSource(albumPath!),
@@ -3013,11 +3015,14 @@ export default function ImportWizard() {
     try {
       await assignTracks(albumPath, release, suggestions);
       // MEDIA lands with the identity, and a Digital Media release is exactly
-      // the one that must also state a SOURCE: the Match step's own answer is
-      // written in the same breath (fill-only and gated server-side), so
-      // walking through the wizard cannot leave the album failing
-      // "Missing SOURCE (required for Digital Media)". A failure here must not
-      // lose the tag writes that just succeeded.
+      // the one that should also state a SOURCE: the Match step's own field —
+      // what the user typed, or the value they left in it and accepted by
+      // pressing Continue — is written in the same breath (fill-only and gated
+      // server-side), so walking through the wizard cannot leave the album
+      // failing "Missing SOURCE (required for Digital Media)". Nothing is
+      // written when the field is empty: an album nobody answered for keeps
+      // failing the check, which is what its prompt is for. A failure here
+      // must not lose the tag writes that just succeeded.
       const mediumFormat = release.medium_formats?.[0] || mediaType;
       if (mediumFormat === "Digital Media" && sourceDraft.trim()) {
         try {
@@ -4394,6 +4399,20 @@ const finish = async (closeByNavigation: boolean, runScripts = true) => {
                   ? " — the import stopped there; its chain has not run"
                   : " — in the library, graded like any other album"}
               </span>
+              {/* What the family's own report adds to its name, when it adds
+                  anything: the source family says what the app KNOWS about the
+                  copy ("not written — the app knows “Qobuz” (release); it is
+                  your word to state", R438), the advisory family why it stayed
+                  open. Read here, the decision does not have to be opened to
+                  see what the answer is. */}
+              {p.families.some((f) => f.note) && (
+                <div className="w-full text-[11px] text-zinc-500">
+                  {p.families
+                    .filter((f) => f.note)
+                    .map((f) => `${f.label || FAMILY_LABEL[f.id] || f.id}: ${f.note}`)
+                    .join(" \u00b7 ")}
+                </div>
+              )}
               <div className="ml-auto flex items-center gap-1.5">
                 <button className="btn-primary !py-1 !px-2 text-[11px] tap" onClick={() => openPrompt(p)}>
                   Decide

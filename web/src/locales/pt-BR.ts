@@ -467,7 +467,7 @@ export default {
   // the lyrics and the album description when it finished an album.
   "import.source.title": "Origem",
   "import.source.why": "Obrigatório quando o lançamento é Digital Media — nada nos arquivos diz de onde ele veio.",
-  "import.source.suggested": "Sugerido pelo lançamento: {value}",
+  "import.source.suggested": "Não gravado — o app sabe: {value}",
   "import.source.save": "Salvar origem",
   "import.source.save_hint": "Grava este valor em toda faixa do álbum que ainda não tenha SOURCE — obrigatório quando MEDIA é Digital Media",
   "import.source.written": "SOURCE gravado em {n} arquivo(s)",

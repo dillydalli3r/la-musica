@@ -5033,16 +5033,24 @@ try:
             f"the strip is CD-only: a {_medium} album keeps its SOURCE " \
             f"({_f.get('SOURCE')!r})"
 
-    # (e) The fill half is unchanged: `_stamp_source` writes only into an
-    # EMPTY slot, so the network's own word lands beside the user's.
+    # (e) SOURCE is not this module's to write any more: the network's own word is
+    # REPORTED (the caller logs it and the import offers it as the prompt's
+    # suggestion), never stamped on the file — owner's report, 2026-10-14, "for
+    # digital media imported albums / manually downloaded files from soulseek
+    # it DOESN'T autofill the SOURCE tag, that should be manually entered by
+    # the user". The album lands with no SOURCE and the grade's "Missing SOURCE
+    # (required for Digital Media)" raises the `source` family's prompt.
     origin = _stamp_album(_stamp_probe, "Origin",
                           {"01 - A.flac": None, "02 - B.flac": "My Rip"})
-    _n, _probs = soulseek_auto._stamp_source(origin, "Soulseek")
-    assert (_n, _probs) == (2, []), (_n, _probs)
-    assert _RealFLAC(os.path.join(origin, "01 - A.flac")).get("SOURCE") \
-        == ["Soulseek"], _RealFLAC(os.path.join(origin, "01 - A.flac")).get("SOURCE")
-    assert _RealFLAC(os.path.join(origin, "02 - B.flac")).get("SOURCE") \
-        == ["My Rip"], "the user's own SOURCE is never overwritten"
+    assert not hasattr(soulseek_auto, "_stamp_source"), \
+        "the writer is gone, not merely unused"
+    for _fn, _want in (("01 - A.flac", None), ("02 - B.flac", ["My Rip"])):
+        _f = _RealFLAC(os.path.join(origin, _fn))
+        assert _f.get("SOURCE") == _want, \
+            f"no SOURCE is written for the download ({_fn}: {_f.get('SOURCE')!r})"
+    # (f) The fill path scripts DO have — the MEDIA/SOURCE pass — is the user's
+    # own switch (`fill_empty_source`), and it ships OFF: with it off the pass
+    # writes nothing either (mlo/lyrics.py).
 finally:
     shutil.rmtree(_stamp_probe, ignore_errors=True)
 

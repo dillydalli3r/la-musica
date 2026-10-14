@@ -78,10 +78,12 @@ FAMILIES = (
         "label": "Source",
         "step": "Match",
         # SOURCE is where the rip came from, and the grader requires one on
-        # every track of a Digital Media album. The import settles it from
-        # evidence it may honestly write — the release's own store URLs, or the
-        # provider the acquisition knew — and nothing else may invent one, so
-        # an album neither answer reaches is ASKED for it. No `off` key: no
+        # every track of a Digital Media album. It is the USER's own word: the
+        # app writes only the answer they stated, and what it knows about the
+        # copy (the release's own store URLs, the provider the acquisition
+        # saw) is the SUGGESTION the prompt offers — an album with no answer
+        # is ASKED for one, unattended imports included (owner's report,
+        # 2026-10-14: an import must not autofill SOURCE). No `off` key: no
         # switch writes a SOURCE on the import's behalf, so there is nothing to
         # turn off — keeping this family for yourself (`import_review_families`)
         # is what "I will set SOURCE by hand" means, and it is also the one
