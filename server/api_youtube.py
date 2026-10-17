@@ -17,9 +17,9 @@ ever reports it — the mode itself is saved by the ordinary config endpoint
 like every other setting.
 
 The file FORMAT, the strictness and the atomic write are
-``server/cookies.py``'s (it is the same cookies.txt the RYM import accepts);
-what is here is what makes the jar YouTube's: the hosts a YouTube request is
-actually sent to (the import keeps those and drops the rest of a browser
+``server/cookies.py``'s (one Netscape parser and one jar model for the whole
+app); what is here is what makes the jar YouTube's: the hosts a YouTube request
+is actually sent to (the import keeps those and drops the rest of a browser
 profile's export), and the sentences only YouTube can say.
 
 Mounted by server/main.py (``include_router``); this module never imports it.
@@ -31,9 +31,9 @@ from typing import Dict, List, Optional
 from fastapi import APIRouter, HTTPException
 
 from mlo.config import load_config, save_config
-# One Netscape parser, one upload model and one jar model for the whole app:
-# the yt-dlp jar and the RateYourMusic credential accept the same file, so the
-# file-or-junk rules (and the sentences that explain them) are stated once.
+# One Netscape parser, one upload model and one jar model for the whole app,
+# so the file-or-junk rules (and the sentences that explain them) are stated
+# once.
 from server import youtube
 from server.cookies import (MAX_COOKIE_BYTES, Cookie, CookieUpload, cookie_key,
                             cookie_row, comments_of, expired_warning,
@@ -63,8 +63,8 @@ REQUIRED_HOST = "youtube.com"
 # because they are keyed by identity, not by line.
 NOTES_KEY = "cookie_notes"
 
-# Which cookie source the notes belong to. RYM's notes share the same store
-# (the cookie panel's own store) — one store, one key, one reader.
+# The cookie source the notes belong to (the cookie panel's own store): one
+# store, one key, one reader.
 SOURCE = "youtube"
 
 

@@ -1,7 +1,7 @@
 """AI genre ranking — the import's one model call.
 
-`server.integrations.genre_chain` asks MusicBrainz, RateYourMusic and the
-other configured sources first and hands their answers here; this module
+`server.integrations.genre_chain` asks the configured sources (MusicBrainz
+alone on a shipped install) first and hands their answers here; this module
 turns them — plus, when ``ai_genre_research`` is on, the model's own
 knowledge of the release — into at most ``mb_genre_count - 1`` SPECIFIC
 genres. The app STORES the specific names a source stated, so a family answer
@@ -40,8 +40,7 @@ from mlo.genres import DEFAULT_GENRE_COUNT, GENRE_COUNT_MAX, canonical
 SYSTEM = (
     "You are a music taxonomist naming the genres a release is filed under. "
     "You answer ONLY with the JSON object asked for. The names you use are the "
-    "real, published genres RateYourMusic and MusicBrainz keep — never a name "
-    "you made up."
+    "real, published genres MusicBrainz keeps — never a name you made up."
 )
 
 # The shape the answer must have, spelled out in full: the model answers with
@@ -60,10 +59,10 @@ _SLOTS = (
     "Classical, Folk, Metal…) in any slot: the tag stores the specific names "
     "a source stated, so a family adds nothing there — and one sitting beside "
     "its own child is dropped as redundant.\n"
-    "Every name must be a genre RateYourMusic or MusicBrainz actually "
-    "PUBLISHES, in a spelling one of them uses — the kind their own genre "
-    "pages list. Never invent a name, a compound of two genres, or a "
-    "hyphenation neither taxonomy uses: the app stores published names only, "
+    "Every name must be a genre MusicBrainz actually PUBLISHES, in a spelling "
+    "it uses — the kind its own genre pages list. Never invent a name, a "
+    "compound of two genres, or a hyphenation MusicBrainz does not use: the "
+    "app stores published names only, "
     "and one it cannot resolve is thrown away. Be specific rather than broad "
     "when the record earns it (a real subgenre beats its family) and never "
     "pad the answer — one correct name is better than two vague ones.\n"
@@ -242,8 +241,8 @@ def _specifics(names, candidates, limit):
     LEVEL, not a genre this app stores (mlo.genres keeps the tag to what a
     source stated, and the ORDER is the model's own ranking),
     so a family here would take a specific genre's place. A name the app
-    cannot resolve — neither a published MusicBrainz/
-    RateYourMusic genre nor one of the fetched candidates — is DROPPED too:
+    cannot resolve — neither a published MusicBrainz genre nor one of the
+    fetched candidates — is DROPPED too:
     the model was told to use published names only, and storing an invented
     one would put a genre in the file that no source publishes and that
     `grade_check_genre_vocab` then fails. The answer is then whatever

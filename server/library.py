@@ -3,7 +3,7 @@
 Builds the artist -> album -> track tree from `mlo.grader` output and
 enriches every track with sortable metadata (audio tech info + tags),
 so the frontend can sort/filter by grade, audit, genre, year, advisory,
-instrumental, MBIDs, RYM links, duration, bitrate, sample rate, etc.
+instrumental, MBIDs, duration, bitrate, sample rate, etc.
 """
 import os
 import re

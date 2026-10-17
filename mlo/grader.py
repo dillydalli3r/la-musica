@@ -1854,8 +1854,8 @@ def _ambiguous_lrc_stems(filenames):
 # An episode of a podcast carries the PODCASTSERIES tag (mlo.autotag, written
 # from MusicBrainz's `part of` a series of type Podcast): it has no lyrics to
 # embed (the LYRICS check requires them of every non-instrumental track), no
-# RateYourMusic page to link, no album bio any source would write, and no
-# MusicBrainz genre vocabulary that describes it. Grading it with those checks
+# album bio any source would write, and no MusicBrainz genre vocabulary that
+# describes it. Grading it with those checks
 # ON is what would fail a podcast FOR BEING a podcast — they are the music
 # catalogue's expectations, not defects of the episode.
 #
@@ -2376,11 +2376,11 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
         # a rating is a WHOLE number on the app's 0-100 scale, and the app
         # writes nothing else. The presence check above says a track must CARRY
         # the public verdict; this one says the number it carries must be that
-        # verdict and not another scale's score pasted in raw — RateYourMusic's
-        # "4.54" is a perfectly good 0-5 average and a meaningless 0-100 rating,
-        # and no formatter may "fix" it (mlo.tagtext.canonical_rating has no
-        # canonical form for it), so the grade names it and points at the
-        # re-fetch (script 24). "91.0" is the SAME rating spelled with a
+        # verdict and not another scale's score pasted in raw — a 0-5 source's
+        # "4.54" is a perfectly good 0-5 average and a meaningless 0-100
+        # rating, and no formatter may "fix" it (mlo.tagtext.canonical_rating
+        # has no canonical form for it), so the grade names it and points at
+        # the re-fetch (script 24). "91.0" is the SAME rating spelled with a
         # decimal point: script 10 rewrites it to "91" (mlo.tagtext's rating
         # rule, applied by every writer through set_tag), so a file that has
         # been through a format pass is clean and this check agrees with what
@@ -2943,11 +2943,8 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                                        if md5_state == MD5_ABSENT
                                        else "FLAC_MD5_UNKNOWN")
 
-        # MusicBrainz / RateYourMusic identity links — required for a PASS.
-        # Exactly two links are graded: the MusicBrainz RELEASE (falling
-        # back to its release group) and the RateYourMusic release-group
-        # page. Artist / recording / per-track RYM links stay optional —
-        # they power extra buttons but are not graded.
+        # The MusicBrainz identity link — required for a PASS. ONE link is
+        # graded: the release (falling back to its release group).
         mb_release = str(
             af.get_tag("MUSICBRAINZ_ALBUMID") or af.get_tag("MUSICBRAINZ_RELEASEGROUPID") or ""
         ).strip()

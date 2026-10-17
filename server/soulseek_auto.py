@@ -26,8 +26,8 @@ whole pipeline a careful human would do by hand:
   5. import into the library: stamp the MusicBrainz release/recording IDs
      that drove the search into the tags, write MEDIA, organize with the
      naming script, then finish the album in the background via
-     ``server.imports.finish_album`` — RateYourMusic links, artist metadata
-     and cover art, AND the configured script chain (optimization, tagging,
+     ``server.imports.finish_album`` — the MusicBrainz link stamps, artist
+     metadata and cover art, AND the configured script chain (optimization,
      grading), because a download the user waited for must come out finished
      rather than half-tagged. Whatever the chain cannot supply (no cover
      found, a family the user kept for themselves) raises the album's own
@@ -6903,8 +6903,8 @@ def _start_import_chain(album_dir, cfg, release=None, download_dir=""):
             _log(f"The album could not be claimed for its chain: {e}")
             chain_mark(False)
 
-    _log("Running the import chain in the background (RateYourMusic links, "
-         "metadata, cover art, then the configured scripts).")
+    _log("Running the import chain in the background (links, metadata, "
+         "cover art, then the configured scripts).")
     threading.Thread(target=chain, name="mlo-soulseek-import-chain",
                      daemon=True).start()
 

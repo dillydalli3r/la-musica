@@ -8,9 +8,9 @@ server/data/
 dev.config.json
 
 # The folder docker-compose.yml mounts as /music — app state, not source. The
-# app writes .mlo/data (config.json with the RYM cookie, auth.db,
-# playlists.db), downloads and trash under it, so running the compose template
-# inside the checkout must never put that in a commit. Two empty files were
+# app writes .mlo/data (config.json, auth.db, playlists.db), downloads and
+# trash under it, so running the compose template inside the checkout must
+# never put that in a commit. Two empty files were
 # committed once this way; nothing else was, and this is the line that keeps
 # it that way.
 music/

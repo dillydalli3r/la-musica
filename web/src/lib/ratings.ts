@@ -152,11 +152,11 @@ export function webRatingOf(raw: unknown): number | undefined {
  *  number beside the stars is the number the source's own page rounds to: the
  *  app stores the source's score TRUNCATED to its grid (`mlo.web_ratings
  *  .scale_to_100`), so a value that sat just under a tenth's boundary can
- *  never be carried over it by a second rounding — RYM's 4.54 is stored as 90
- *  and prints "4.5", not "4.6" (MEASURED on the owner's own library,
- *  2026-10-11). `toFixed` is applied to the ROUNDED hundredth of a unit, never
- *  to the raw float, because `(4.55).toFixed(1)` depends on the binary
- *  representation and can print "4.5" for one value and "4.6" for its
+ *  never be carried over it by a second rounding — a 0-5 source's 4.54 is
+ *  stored as 90 and prints "4.5", not "4.6" (MEASURED on the owner's own
+ *  library, 2026-10-11). `toFixed` is applied to the ROUNDED hundredth of a
+ *  unit, never to the raw float, because `(4.55).toFixed(1)` depends on the
+ *  binary representation and can print "4.5" for one value and "4.6" for its
  *  neighbour. */
 export function webText(value: number): string {
   const tenths = Math.round(value * 10);

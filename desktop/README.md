@@ -166,7 +166,7 @@ backend on each OS in CI and presses the real button: Windows and Linux prove
   chosen; after the setup wizard, app state lives in
   `<music>/.mlo/data/config.json` exactly as in every other install, so a
   music folder can move between the container and the desktop app without
-  losing the RYM cookie, playlists or caches. In remote mode the client setup
+  losing its cookies, playlists or caches. In remote mode the client setup
   wizard (`web/src/pages/ClientSetup.tsx`) probes `${address}/api/health` with
   a 3 s deadline as before; the address is saved per device
   (`localStorage: mlo.server`) and changeable from Settings → Security.
@@ -498,7 +498,7 @@ place, because every report about iOS playback lands on the seam:
 
 ## Bundle config
 
-`bundle.iOS.minimumSystemVersion` 14.0, `bundle.iOS.bundleVersion` 2.0.0,
+`bundle.iOS.minimumSystemVersion` 14.0, `bundle.iOS.bundleVersion` 2.0.1,
 `bundle.iOS.infoPlist` and `bundle.android.minSdkVersion` 24 in
 `tauri.conf.json`. The Android package name and the iOS bundle id both come from
 the top-level `identifier` (`com.musiclibraryoptimizer.lamusica` — the old

@@ -1,5 +1,5 @@
 {
- "note": "captured from a scratch server (MLO_MUSIC_FOLDER=F:/tmp/mlo-lib-az) over the synthetic library; the artists' own `grade` objects (and Artist Alpha/Beta's `has_image`) were added by hand afterwards for the artist-dot cases — server.library sends grade per row now, and these two carry the pass/fail pair the check needs; the served album's own `meta` was given a LABEL/CATALOGNUMBER pair by hand too, so the album header's label · catalog fact is read off a release that states one — the check takes them away again for the other half of the rule",
+ "note": "captured from a scratch server (MLO_MUSIC_FOLDER=F:/tmp/mlo-lib-az) over the synthetic library; the artists' own `grade` objects (and Artist Alpha/Beta's `has_image`) were added by hand afterwards for the artist-dot cases — server.library sends grade per row now, and these two carry the pass/fail pair the check needs; the served album's own `meta` was given a LABEL/CATALOGNUMBER pair by hand too, so the album header's label · catalog fact is read off a release that states one — the check takes them away again for the other half of the rule; the RateYourMusic entries the capture carried were removed by hand (2026-10-16)",
  "album_path": "F:/tmp/mlo-lib-az/Artist Alpha/2020 - First Album",
  "library": {
   "folder": "F:/tmp/mlo-lib-az",
@@ -45,7 +45,6 @@
          "ENCODER_VERSION",
          "AUDIT",
          "MB_LINK",
-         "RYM_LINK",
          "LYRICS",
          "ALBUMITUNESADVISORY",
          "ALBUM DYNAMIC RANGE",
@@ -108,9 +107,6 @@
          "MUSICBRAINZ_RELEASEGROUPID": null,
          "MUSICBRAINZ_RELEASETRACKID": null,
          "MUSICBRAINZ_WORKID": null,
-         "RATEYOURMUSIC_ALBUM": null,
-         "RATEYOURMUSIC_TRACK": null,
-         "RATEYOURMUSIC_ARTIST": null,
          "ALBUMARTISTSORT": null,
          "ORIGINALDATE": null,
          "RELEASETYPE": null,
@@ -168,7 +164,6 @@
          "ENCODER_VERSION",
          "AUDIT",
          "MB_LINK",
-         "RYM_LINK",
          "SOURCE",
          "ALBUMITUNESADVISORY",
          "ALBUM DYNAMIC RANGE",
@@ -231,9 +226,6 @@
          "MUSICBRAINZ_RELEASEGROUPID": null,
          "MUSICBRAINZ_RELEASETRACKID": null,
          "MUSICBRAINZ_WORKID": null,
-         "RATEYOURMUSIC_ALBUM": null,
-         "RATEYOURMUSIC_TRACK": null,
-         "RATEYOURMUSIC_ARTIST": null,
          "ALBUMARTISTSORT": null,
          "ORIGINALDATE": null,
          "RELEASETYPE": null,
@@ -289,7 +281,6 @@
          "PATH",
          "AUDIT",
          "MB_LINK",
-         "RYM_LINK",
          "SOURCE",
          "ALBUMITUNESADVISORY",
          "ALBUM DYNAMIC RANGE",
@@ -352,9 +343,6 @@
          "MUSICBRAINZ_RELEASEGROUPID": null,
          "MUSICBRAINZ_RELEASETRACKID": null,
          "MUSICBRAINZ_WORKID": null,
-         "RATEYOURMUSIC_ALBUM": null,
-         "RATEYOURMUSIC_TRACK": null,
-         "RATEYOURMUSIC_ARTIST": null,
          "ALBUMARTISTSORT": null,
          "ORIGINALDATE": null,
          "RELEASETYPE": null,
@@ -447,11 +435,6 @@
         "02 - Second.flac",
         "03 - Bonus.mp3"
        ],
-       "Missing RateYourMusic release link": [
-        "01 - Intro.flac",
-        "02 - Second.flac",
-        "03 - Bonus.mp3"
-       ],
        "Lyrics not optimally formatted (run Lyrics script)": [
         "01 - Intro.flac"
        ],
@@ -512,7 +495,6 @@
        "MUSICBRAINZ_ALBUMID": null,
        "MUSICBRAINZ_ALBUMARTISTID": null,
        "MUSICBRAINZ_RELEASEGROUPID": null,
-       "RATEYOURMUSIC_ALBUM": null,
        "MEDIA": "Digital Media",
        "CATALOGNUMBER": null,
        "LABEL": null,
@@ -605,7 +587,6 @@
          "ENCODER_QUALITY",
          "ENCODER_VERSION",
          "MB_LINK",
-         "RYM_LINK",
          "LOG_GRADE",
          "AUDIT",
          "COVER"
@@ -676,9 +657,6 @@
          "MUSICBRAINZ_RELEASEGROUPID": null,
          "MUSICBRAINZ_RELEASETRACKID": null,
          "MUSICBRAINZ_WORKID": null,
-         "RATEYOURMUSIC_ALBUM": null,
-         "RATEYOURMUSIC_TRACK": null,
-         "RATEYOURMUSIC_ARTIST": null,
          "ALBUMARTISTSORT": null,
          "ORIGINALDATE": null,
          "RELEASETYPE": null,
@@ -755,9 +733,6 @@
        "Missing MusicBrainz release link (import from MusicBrainz)": [
         "01 - Side A.flac"
        ],
-       "Missing RateYourMusic release link": [
-        "01 - Side A.flac"
-       ],
        "CD rip sheets not named CD-{n} (found: rip.log, 2021 - Vinyl Rip.cue) — enable Settings → CD Rips → Auto-Rename or rename manually to CD-1.log": [
         "album"
        ],
@@ -801,7 +776,6 @@
        "MUSICBRAINZ_ALBUMID": null,
        "MUSICBRAINZ_ALBUMARTISTID": null,
        "MUSICBRAINZ_RELEASEGROUPID": null,
-       "RATEYOURMUSIC_ALBUM": null,
        "MEDIA": "CD",
        "CATALOGNUMBER": null,
        "LABEL": null,
@@ -902,7 +876,6 @@
          "ENCODER_VERSION",
          "AUDIT",
          "MB_LINK",
-         "RYM_LINK",
          "COVER"
         ],
         "values": {
@@ -962,9 +935,6 @@
          "MUSICBRAINZ_RELEASEGROUPID": null,
          "MUSICBRAINZ_RELEASETRACKID": null,
          "MUSICBRAINZ_WORKID": null,
-         "RATEYOURMUSIC_ALBUM": null,
-         "RATEYOURMUSIC_TRACK": null,
-         "RATEYOURMUSIC_ARTIST": null,
          "ALBUMARTISTSORT": null,
          "ORIGINALDATE": null,
          "RELEASETYPE": null,
@@ -1044,9 +1014,6 @@
        "Missing MusicBrainz release link (import from MusicBrainz)": [
         "01 - Hit.flac"
        ],
-       "Missing RateYourMusic release link": [
-        "01 - Hit.flac"
-       ],
        "Cover missing ENCODER_QUALITY (re-optimize)": [
         "album"
        ],
@@ -1070,7 +1037,6 @@
        "MUSICBRAINZ_ALBUMID": null,
        "MUSICBRAINZ_ALBUMARTISTID": null,
        "MUSICBRAINZ_RELEASEGROUPID": null,
-       "RATEYOURMUSIC_ALBUM": null,
        "MEDIA": "SHM-CD",
        "CATALOGNUMBER": null,
        "LABEL": null,
@@ -1149,7 +1115,6 @@
          "ENCODER_VERSION",
          "AUDIT",
          "MB_LINK",
-         "RYM_LINK",
          "LYRICS",
          "ALBUMITUNESADVISORY",
          "ALBUM DYNAMIC RANGE",
@@ -1212,9 +1177,6 @@
          "MUSICBRAINZ_RELEASEGROUPID": null,
          "MUSICBRAINZ_RELEASETRACKID": null,
          "MUSICBRAINZ_WORKID": null,
-         "RATEYOURMUSIC_ALBUM": null,
-         "RATEYOURMUSIC_TRACK": null,
-         "RATEYOURMUSIC_ARTIST": null,
          "ALBUMARTISTSORT": null,
          "ORIGINALDATE": null,
          "RELEASETYPE": null,
@@ -1272,7 +1234,6 @@
          "ENCODER_VERSION",
          "AUDIT",
          "MB_LINK",
-         "RYM_LINK",
          "SOURCE",
          "ALBUMITUNESADVISORY",
          "ALBUM DYNAMIC RANGE",
@@ -1335,9 +1296,6 @@
          "MUSICBRAINZ_RELEASEGROUPID": null,
          "MUSICBRAINZ_RELEASETRACKID": null,
          "MUSICBRAINZ_WORKID": null,
-         "RATEYOURMUSIC_ALBUM": null,
-         "RATEYOURMUSIC_TRACK": null,
-         "RATEYOURMUSIC_ARTIST": null,
          "ALBUMARTISTSORT": null,
          "ORIGINALDATE": null,
          "RELEASETYPE": null,
@@ -1425,10 +1383,6 @@
         "01 - The Stars of Track and Field.flac",
         "02 - Seeing Other People.flac"
        ],
-       "Missing RateYourMusic release link": [
-        "01 - The Stars of Track and Field.flac",
-        "02 - Seeing Other People.flac"
-       ],
        "Lyrics not optimally formatted (run Lyrics script)": [
         "01 - The Stars of Track and Field.flac"
        ],
@@ -1482,7 +1436,6 @@
        "MUSICBRAINZ_ALBUMID": null,
        "MUSICBRAINZ_ALBUMARTISTID": null,
        "MUSICBRAINZ_RELEASEGROUPID": null,
-       "RATEYOURMUSIC_ALBUM": null,
        "MEDIA": "Digital Media",
        "CATALOGNUMBER": null,
        "LABEL": null,
@@ -1561,7 +1514,6 @@
          "ENCODER_VERSION",
          "AUDIT",
          "MB_LINK",
-         "RYM_LINK",
          "LYRICS",
          "ALBUMITUNESADVISORY",
          "ALBUM DYNAMIC RANGE",
@@ -1624,9 +1576,6 @@
          "MUSICBRAINZ_RELEASEGROUPID": null,
          "MUSICBRAINZ_RELEASETRACKID": null,
          "MUSICBRAINZ_WORKID": null,
-         "RATEYOURMUSIC_ALBUM": null,
-         "RATEYOURMUSIC_TRACK": null,
-         "RATEYOURMUSIC_ARTIST": null,
          "ALBUMARTISTSORT": null,
          "ORIGINALDATE": null,
          "RELEASETYPE": null,
@@ -1684,7 +1633,6 @@
          "ENCODER_VERSION",
          "AUDIT",
          "MB_LINK",
-         "RYM_LINK",
          "SOURCE",
          "ALBUMITUNESADVISORY",
          "ALBUM DYNAMIC RANGE",
@@ -1747,9 +1695,6 @@
          "MUSICBRAINZ_RELEASEGROUPID": null,
          "MUSICBRAINZ_RELEASETRACKID": null,
          "MUSICBRAINZ_WORKID": null,
-         "RATEYOURMUSIC_ALBUM": null,
-         "RATEYOURMUSIC_TRACK": null,
-         "RATEYOURMUSIC_ARTIST": null,
          "ALBUMARTISTSORT": null,
          "ORIGINALDATE": null,
          "RELEASETYPE": null,
@@ -1837,10 +1782,6 @@
         "01 - Feeling Good.flac",
         "02 - I Put a Spell on You.flac"
        ],
-       "Missing RateYourMusic release link": [
-        "01 - Feeling Good.flac",
-        "02 - I Put a Spell on You.flac"
-       ],
        "Lyrics not optimally formatted (run Lyrics script)": [
         "01 - Feeling Good.flac"
        ],
@@ -1894,7 +1835,6 @@
        "MUSICBRAINZ_ALBUMID": null,
        "MUSICBRAINZ_ALBUMARTISTID": null,
        "MUSICBRAINZ_RELEASEGROUPID": null,
-       "RATEYOURMUSIC_ALBUM": null,
        "MEDIA": "Digital Media",
        "CATALOGNUMBER": null,
        "LABEL": null,
@@ -1973,7 +1913,6 @@
          "ENCODER_VERSION",
          "AUDIT",
          "MB_LINK",
-         "RYM_LINK",
          "LYRICS",
          "ALBUMITUNESADVISORY",
          "ALBUM DYNAMIC RANGE",
@@ -2036,9 +1975,6 @@
          "MUSICBRAINZ_RELEASEGROUPID": null,
          "MUSICBRAINZ_RELEASETRACKID": null,
          "MUSICBRAINZ_WORKID": null,
-         "RATEYOURMUSIC_ALBUM": null,
-         "RATEYOURMUSIC_TRACK": null,
-         "RATEYOURMUSIC_ARTIST": null,
          "ALBUMARTISTSORT": null,
          "ORIGINALDATE": null,
          "RELEASETYPE": null,
@@ -2096,7 +2032,6 @@
          "ENCODER_VERSION",
          "AUDIT",
          "MB_LINK",
-         "RYM_LINK",
          "SOURCE",
          "ALBUMITUNESADVISORY",
          "ALBUM DYNAMIC RANGE",
@@ -2159,9 +2094,6 @@
          "MUSICBRAINZ_RELEASEGROUPID": null,
          "MUSICBRAINZ_RELEASETRACKID": null,
          "MUSICBRAINZ_WORKID": null,
-         "RATEYOURMUSIC_ALBUM": null,
-         "RATEYOURMUSIC_TRACK": null,
-         "RATEYOURMUSIC_ARTIST": null,
          "ALBUMARTISTSORT": null,
          "ORIGINALDATE": null,
          "RELEASETYPE": null,
@@ -2249,10 +2181,6 @@
         "01 - Welcome to New York.flac",
         "02 - Blank Space.flac"
        ],
-       "Missing RateYourMusic release link": [
-        "01 - Welcome to New York.flac",
-        "02 - Blank Space.flac"
-       ],
        "Lyrics not optimally formatted (run Lyrics script)": [
         "01 - Welcome to New York.flac"
        ],
@@ -2306,7 +2234,6 @@
        "MUSICBRAINZ_ALBUMID": null,
        "MUSICBRAINZ_ALBUMARTISTID": null,
        "MUSICBRAINZ_RELEASEGROUPID": null,
-       "RATEYOURMUSIC_ALBUM": null,
        "MEDIA": "Digital Media",
        "CATALOGNUMBER": null,
        "LABEL": null,
@@ -2385,7 +2312,6 @@
          "ENCODER_VERSION",
          "AUDIT",
          "MB_LINK",
-         "RYM_LINK",
          "LYRICS",
          "ALBUMITUNESADVISORY",
          "ALBUM DYNAMIC RANGE",
@@ -2448,9 +2374,6 @@
          "MUSICBRAINZ_RELEASEGROUPID": null,
          "MUSICBRAINZ_RELEASETRACKID": null,
          "MUSICBRAINZ_WORKID": null,
-         "RATEYOURMUSIC_ALBUM": null,
-         "RATEYOURMUSIC_TRACK": null,
-         "RATEYOURMUSIC_ARTIST": null,
          "ALBUMARTISTSORT": null,
          "ORIGINALDATE": null,
          "RELEASETYPE": null,
@@ -2508,7 +2431,6 @@
          "ENCODER_VERSION",
          "AUDIT",
          "MB_LINK",
-         "RYM_LINK",
          "SOURCE",
          "ALBUMITUNESADVISORY",
          "ALBUM DYNAMIC RANGE",
@@ -2571,9 +2493,6 @@
          "MUSICBRAINZ_RELEASEGROUPID": null,
          "MUSICBRAINZ_RELEASETRACKID": null,
          "MUSICBRAINZ_WORKID": null,
-         "RATEYOURMUSIC_ALBUM": null,
-         "RATEYOURMUSIC_TRACK": null,
-         "RATEYOURMUSIC_ARTIST": null,
          "ALBUMARTISTSORT": null,
          "ORIGINALDATE": null,
          "RELEASETYPE": null,
@@ -2661,10 +2580,6 @@
         "01 - Peaches en Regalia.flac",
         "02 - Willie the Pimp.flac"
        ],
-       "Missing RateYourMusic release link": [
-        "01 - Peaches en Regalia.flac",
-        "02 - Willie the Pimp.flac"
-       ],
        "Lyrics not optimally formatted (run Lyrics script)": [
         "01 - Peaches en Regalia.flac"
        ],
@@ -2718,7 +2633,6 @@
        "MUSICBRAINZ_ALBUMID": null,
        "MUSICBRAINZ_ALBUMARTISTID": null,
        "MUSICBRAINZ_RELEASEGROUPID": null,
-       "RATEYOURMUSIC_ALBUM": null,
        "MEDIA": "Digital Media",
        "CATALOGNUMBER": null,
        "LABEL": null,
@@ -2797,7 +2711,6 @@
          "ENCODER_VERSION",
          "AUDIT",
          "MB_LINK",
-         "RYM_LINK",
          "LYRICS",
          "ALBUMITUNESADVISORY",
          "ALBUM DYNAMIC RANGE",
@@ -2860,9 +2773,6 @@
          "MUSICBRAINZ_RELEASEGROUPID": null,
          "MUSICBRAINZ_RELEASETRACKID": null,
          "MUSICBRAINZ_WORKID": null,
-         "RATEYOURMUSIC_ALBUM": null,
-         "RATEYOURMUSIC_TRACK": null,
-         "RATEYOURMUSIC_ARTIST": null,
          "ALBUMARTISTSORT": null,
          "ORIGINALDATE": null,
          "RELEASETYPE": null,
@@ -2920,7 +2830,6 @@
          "ENCODER_VERSION",
          "AUDIT",
          "MB_LINK",
-         "RYM_LINK",
          "SOURCE",
          "ALBUMITUNESADVISORY",
          "ALBUM DYNAMIC RANGE",
@@ -2983,9 +2892,6 @@
          "MUSICBRAINZ_RELEASEGROUPID": null,
          "MUSICBRAINZ_RELEASETRACKID": null,
          "MUSICBRAINZ_WORKID": null,
-         "RATEYOURMUSIC_ALBUM": null,
-         "RATEYOURMUSIC_TRACK": null,
-         "RATEYOURMUSIC_ARTIST": null,
          "ALBUMARTISTSORT": null,
          "ORIGINALDATE": null,
          "RELEASETYPE": null,
@@ -3073,10 +2979,6 @@
         "01 - Kvöld.flac",
         "02 - Í Vetur.flac"
        ],
-       "Missing RateYourMusic release link": [
-        "01 - Kvöld.flac",
-        "02 - Í Vetur.flac"
-       ],
        "Lyrics not optimally formatted (run Lyrics script)": [
         "01 - Kvöld.flac"
        ],
@@ -3130,7 +3032,6 @@
        "MUSICBRAINZ_ALBUMID": null,
        "MUSICBRAINZ_ALBUMARTISTID": null,
        "MUSICBRAINZ_RELEASEGROUPID": null,
-       "RATEYOURMUSIC_ALBUM": null,
        "MEDIA": "Digital Media",
        "CATALOGNUMBER": null,
        "LABEL": null,
@@ -3209,7 +3110,6 @@
          "ENCODER_VERSION",
          "AUDIT",
          "MB_LINK",
-         "RYM_LINK",
          "LYRICS",
          "ALBUMITUNESADVISORY",
          "ALBUM DYNAMIC RANGE",
@@ -3272,9 +3172,6 @@
          "MUSICBRAINZ_RELEASEGROUPID": null,
          "MUSICBRAINZ_RELEASETRACKID": null,
          "MUSICBRAINZ_WORKID": null,
-         "RATEYOURMUSIC_ALBUM": null,
-         "RATEYOURMUSIC_TRACK": null,
-         "RATEYOURMUSIC_ARTIST": null,
          "ALBUMARTISTSORT": null,
          "ORIGINALDATE": null,
          "RELEASETYPE": null,
@@ -3332,7 +3229,6 @@
          "ENCODER_VERSION",
          "AUDIT",
          "MB_LINK",
-         "RYM_LINK",
          "SOURCE",
          "ALBUMITUNESADVISORY",
          "ALBUM DYNAMIC RANGE",
@@ -3395,9 +3291,6 @@
          "MUSICBRAINZ_RELEASEGROUPID": null,
          "MUSICBRAINZ_RELEASETRACKID": null,
          "MUSICBRAINZ_WORKID": null,
-         "RATEYOURMUSIC_ALBUM": null,
-         "RATEYOURMUSIC_TRACK": null,
-         "RATEYOURMUSIC_ARTIST": null,
          "ALBUMARTISTSORT": null,
          "ORIGINALDATE": null,
          "RELEASETYPE": null,
@@ -3485,10 +3378,6 @@
         "01 - 群青日和.flac",
         "02 - 遭難.flac"
        ],
-       "Missing RateYourMusic release link": [
-        "01 - 群青日和.flac",
-        "02 - 遭難.flac"
-       ],
        "Lyrics not optimally formatted (run Lyrics script)": [
         "01 - 群青日和.flac"
        ],
@@ -3542,7 +3431,6 @@
        "MUSICBRAINZ_ALBUMID": null,
        "MUSICBRAINZ_ALBUMARTISTID": null,
        "MUSICBRAINZ_RELEASEGROUPID": null,
-       "RATEYOURMUSIC_ALBUM": null,
        "MEDIA": "Digital Media",
        "CATALOGNUMBER": null,
        "LABEL": null,
@@ -3621,7 +3509,6 @@
          "ENCODER_VERSION",
          "AUDIT",
          "MB_LINK",
-         "RYM_LINK",
          "LYRICS",
          "ALBUMITUNESADVISORY",
          "ALBUM DYNAMIC RANGE",
@@ -3684,9 +3571,6 @@
          "MUSICBRAINZ_RELEASEGROUPID": null,
          "MUSICBRAINZ_RELEASETRACKID": null,
          "MUSICBRAINZ_WORKID": null,
-         "RATEYOURMUSIC_ALBUM": null,
-         "RATEYOURMUSIC_TRACK": null,
-         "RATEYOURMUSIC_ARTIST": null,
          "ALBUMARTISTSORT": null,
          "ORIGINALDATE": null,
          "RELEASETYPE": null,
@@ -3776,11 +3660,6 @@
         "03 - Bonus.mp3"
        ],
        "Missing MusicBrainz release link (import from MusicBrainz)": [
-        "01 - Intro.flac",
-        "02 - Second.flac",
-        "03 - Bonus.mp3"
-       ],
-       "Missing RateYourMusic release link": [
         "01 - Intro.flac",
         "02 - Second.flac",
         "03 - Bonus.mp3"
@@ -3845,7 +3724,6 @@
        "MUSICBRAINZ_ALBUMID": null,
        "MUSICBRAINZ_ALBUMARTISTID": null,
        "MUSICBRAINZ_RELEASEGROUPID": null,
-       "RATEYOURMUSIC_ALBUM": null,
        "MEDIA": "Digital Media",
        "CATALOGNUMBER": null,
        "LABEL": null,
@@ -3907,7 +3785,6 @@
          "ENCODER_VERSION",
          "AUDIT",
          "MB_LINK",
-         "RYM_LINK",
          "LYRICS",
          "ALBUMITUNESADVISORY",
          "ALBUM DYNAMIC RANGE",
@@ -3970,9 +3847,6 @@
          "MUSICBRAINZ_RELEASEGROUPID": null,
          "MUSICBRAINZ_RELEASETRACKID": null,
          "MUSICBRAINZ_WORKID": null,
-         "RATEYOURMUSIC_ALBUM": null,
-         "RATEYOURMUSIC_TRACK": null,
-         "RATEYOURMUSIC_ARTIST": null,
          "ALBUMARTISTSORT": null,
          "ORIGINALDATE": null,
          "RELEASETYPE": null,
@@ -4066,11 +3940,6 @@
         "02 - Second.flac",
         "03 - Bonus.mp3"
        ],
-       "Missing RateYourMusic release link": [
-        "01 - Intro.flac",
-        "02 - Second.flac",
-        "03 - Bonus.mp3"
-       ],
        "Lyrics not optimally formatted (run Lyrics script)": [
         "01 - Intro.flac"
        ],
@@ -4131,7 +4000,6 @@
        "MUSICBRAINZ_ALBUMID": null,
        "MUSICBRAINZ_ALBUMARTISTID": null,
        "MUSICBRAINZ_RELEASEGROUPID": null,
-       "RATEYOURMUSIC_ALBUM": null,
        "MEDIA": "Digital Media",
        "CATALOGNUMBER": null,
        "LABEL": null,
@@ -4208,7 +4076,6 @@
      "ENCODER_VERSION",
      "AUDIT",
      "MB_LINK",
-     "RYM_LINK",
      "LYRICS",
      "ALBUMITUNESADVISORY",
      "ALBUM DYNAMIC RANGE",
@@ -4271,9 +4138,6 @@
      "MUSICBRAINZ_RELEASEGROUPID": null,
      "MUSICBRAINZ_RELEASETRACKID": null,
      "MUSICBRAINZ_WORKID": null,
-     "RATEYOURMUSIC_ALBUM": null,
-     "RATEYOURMUSIC_TRACK": null,
-     "RATEYOURMUSIC_ARTIST": null,
      "ALBUMARTISTSORT": null,
      "ORIGINALDATE": null,
      "RELEASETYPE": null,
@@ -4331,7 +4195,6 @@
      "ENCODER_VERSION",
      "AUDIT",
      "MB_LINK",
-     "RYM_LINK",
      "SOURCE",
      "ALBUMITUNESADVISORY",
      "ALBUM DYNAMIC RANGE",
@@ -4394,9 +4257,6 @@
      "MUSICBRAINZ_RELEASEGROUPID": null,
      "MUSICBRAINZ_RELEASETRACKID": null,
      "MUSICBRAINZ_WORKID": null,
-     "RATEYOURMUSIC_ALBUM": null,
-     "RATEYOURMUSIC_TRACK": null,
-     "RATEYOURMUSIC_ARTIST": null,
      "ALBUMARTISTSORT": null,
      "ORIGINALDATE": null,
      "RELEASETYPE": null,
@@ -4452,7 +4312,6 @@
      "PATH",
      "AUDIT",
      "MB_LINK",
-     "RYM_LINK",
      "SOURCE",
      "ALBUMITUNESADVISORY",
      "ALBUM DYNAMIC RANGE",
@@ -4515,9 +4374,6 @@
      "MUSICBRAINZ_RELEASEGROUPID": null,
      "MUSICBRAINZ_RELEASETRACKID": null,
      "MUSICBRAINZ_WORKID": null,
-     "RATEYOURMUSIC_ALBUM": null,
-     "RATEYOURMUSIC_TRACK": null,
-     "RATEYOURMUSIC_ARTIST": null,
      "ALBUMARTISTSORT": null,
      "ORIGINALDATE": null,
      "RELEASETYPE": null,
@@ -4610,11 +4466,6 @@
     "02 - Second.flac",
     "03 - Bonus.mp3"
    ],
-   "Missing RateYourMusic release link": [
-    "01 - Intro.flac",
-    "02 - Second.flac",
-    "03 - Bonus.mp3"
-   ],
    "Lyrics not optimally formatted (run Lyrics script)": [
     "01 - Intro.flac"
    ],
@@ -4675,7 +4526,6 @@
    "MUSICBRAINZ_ALBUMID": null,
    "MUSICBRAINZ_ALBUMARTISTID": null,
    "MUSICBRAINZ_RELEASEGROUPID": null,
-   "RATEYOURMUSIC_ALBUM": null,
    "MEDIA": "Digital Media",
    "CATALOGNUMBER": "7243 5 32093 0 8",
    "LABEL": "Parlophone",

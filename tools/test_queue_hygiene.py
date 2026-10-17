@@ -74,7 +74,6 @@ CFG = {
     "grade_check_genre_order": True,
     "grade_check_genre_vocab": True,
     "grade_check_mb_links": True,
-    "grade_check_rym_links": True,
     "grade_check_lyrics": True,
     "grade_check_mood": False,
     "grade_check_energy": False,
@@ -236,8 +235,7 @@ def make_album(name, *, cover=False, advisory=False, lyrics=True, links=True):
             "GENRE": "Shoegaze", "INSTRUMENTAL": "0",
             **({"LYRICS": "la la la la"} if lyrics else {}),
             **({"ITUNESADVISORY": "0"} if advisory else {}),
-            **({"MUSICBRAINZ_ALBUMID": "11111111-1111-1111-1111-111111111111",
-                "RATEYOURMUSIC_ALBUM": "https://rateyourmusic.com/release/album/x/"}
+            **({"MUSICBRAINZ_ALBUMID": "11111111-1111-1111-1111-111111111111"}
                if links else {}),
         })
     return album

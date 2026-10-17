@@ -154,7 +154,6 @@ ISO_CFG = {
     "grade_check_excess_tags": False,
     "grade_check_audit": False,
     "grade_check_mb_links": False,
-    "grade_check_rym_links": False,
     # Checks added after this file was written: off here (the fixtures carry
     # no MOOD / ReplayGain tags and no description.txt) and switched on in
     # the dedicated cases below.
@@ -887,6 +886,19 @@ _with = _grade_album(album, "EMBEDDED",
 ok(_with["tracks"][0]["issues"] == res["tracks"][0]["issues"]
    and _with["total_checks"] == res["total_checks"],
    f"a stored grade_check_genre_order is inert "
+   f"({_with['tracks'][0]['issues']} / {_with['total_checks']})")
+
+# The same for the removed RYM link check: gone from DEFAULT_CONFIG, nothing
+# reads it, and a config that still carries it grades identically — no link is
+# demanded, so the stored switch can neither fail nor un-fail a track.
+ok("grade_check_rym_links" not in _cfgmod.DEFAULT_CONFIG,
+   "grade_check_rym_links no longer exists")
+_with = _grade_album(album, "EMBEDDED",
+                     dict(struct_cfg, grade_check_rym_links=True))
+ok("RYM_LINK" not in _with["tracks"][0]["issues"]
+   and _with["tracks"][0]["issues"] == res["tracks"][0]["issues"]
+   and _with["total_checks"] == res["total_checks"],
+   f"a stored grade_check_rym_links is inert "
    f"({_with['tracks'][0]['issues']} / {_with['total_checks']})")
 
 # ----------------------------------------------------------------------

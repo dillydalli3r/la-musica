@@ -1,11 +1,10 @@
-"""MusicBrainz / LRCLIB / RYM: the metadata and lyrics lookups.
+"""MusicBrainz / LRCLIB: the metadata and lyrics lookups.
 
 GET /api/mb/* is the MusicBrainz browser (release, release-group, search,
 artist, recording, detect) and the import wizard's own match/assign writes;
-/api/lyrics/* is the LRCLIB-backed lyrics surface (search/get/write/publish);
-/api/rym/* validates and resolves RateYourMusic links. The network clients
-live in ``server.integrations`` and the release resolution in
-``server.mbresolve``, so these routes stay thin: parse, guard the path, hand
+/api/lyrics/* is the LRCLIB-backed lyrics surface (search/get/write/publish).
+The network clients live in ``server.integrations`` and the release resolution
+in ``server.mbresolve``, so these routes stay thin: parse, guard the path, hand
 over, answer.
 """
 import asyncio
@@ -44,13 +43,13 @@ class MatchRequest(BaseModel):
 
 
 class AssignTagsRequest(BaseModel):
-    """Write MB/RYM links to tags. `tracks` maps track path -> {tag: value}."""
+    """Write MusicBrainz links to tags. `tracks` maps track path -> {tag: value}."""
     tracks: dict
     staged: bool = False  # the import wizard's not-yet-imported album
 
 
 # --------------------------------------------------------------------------- #
-# MusicBrainz / LRCLIB / RYM
+# MusicBrainz / LRCLIB
 # --------------------------------------------------------------------------- #
 @router.get("/api/mb/release")
 def mb_release_query(
@@ -366,7 +365,7 @@ def mb_match(req: MatchRequest):
 @job_locks.holds(lambda req: list((req.tracks or {}).keys()), kind="tags",
                  label="Write MB links")
 def mb_assign(req: AssignTagsRequest):
-    """Write per-track MB/RYM link tags. tracks: {path: {TAG: value}}.
+    """Write per-track MusicBrainz link tags. tracks: {path: {TAG: value}}.
 
     Videos are re-emitted losslessly, so a raw container comes back as a
     same-stem MKV: `container_changed`/`output_paths` name those files."""

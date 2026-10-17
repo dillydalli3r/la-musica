@@ -1,20 +1,18 @@
 """Netscape cookie files: one parser, one jar model, for every cookie login.
 
-The app has two cookie-bearing credentials, and they are the same file:
-yt-dlp's jar on disk (``server/api_youtube.py``, ``<music>/.mlo/data/
-cookies.txt``) and YouTube's exported jar (``server/api_youtube.py``,
-a header string in the ``rym_cookie`` config key). Both accept a browser
-extension's ``cookies.txt`` export, so the file reading, the strictness, the
-sentences a refusal uses and the per-cookie notes all live HERE, once — a
-second parser is how the two would drift into accepting different files.
+The app's one cookie-bearing credential is yt-dlp's jar on disk
+(``server/api_youtube.py``, ``<music>/.mlo/data/cookies.txt``). What goes in
+is a browser extension's ``cookies.txt`` export, so the file reading, the
+strictness, the sentences a refusal uses and the per-cookie notes all live
+HERE, once.
 
 What is in the format, and what this module insists on:
 
   * a line is ``domain<TAB>include-subdomains<TAB>path<TAB>secure<TAB>expiry
     <TAB>name<TAB>value``. ``#HttpOnly_`` prefixed onto the DOMAIN column is
     part of the domain, not a comment: it is how a jar records a cookie the
-    page's own JavaScript must not see (the RYM `session` cookie), and it is
-    the one ``#``-prefixed line that carries a cookie.
+    page's own JavaScript must not see (a provider's `session` cookie), and
+    it is the one ``#``-prefixed line that carries a cookie.
   * a file is proven either by the ``# Netscape HTTP Cookie File`` header or by
     at least one well-shaped cookie line, because both are real exports
     (browsers' own exporters leave the header out).
@@ -95,9 +93,9 @@ _HTTPONLY_PREFIX = "#HttpOnly_"
 MAX_COMMENT_CHARS = 300
 
 # The empty-file sentence is the one thing this module says that a caller may
-# want to replace: the RYM import answers an empty paste with its own version
-# (see server/api_youtube.py). It names no credential, because it is the
-# shared one.
+# want to replace: the YouTube import answers an empty paste with its own
+# version (see server/api_youtube.py). It names no credential, because it is
+# the shared one.
 EMPTY_FILE = ("the file is empty — export cookies.txt from the browser you "
               "are signed in with, and paste it here")
 
@@ -220,28 +218,22 @@ def parse_cookies(text: str) -> Tuple[List[Cookie], Optional[str]]:
 
     The rich view: each entry keeps the path, the expiry and the flags, which
     is what a per-cookie list and a per-cookie note need. ``parse_cookie_file``
-    is the same parse projected onto the columns a caller that only builds a
-    ``Cookie`` header (or counts names) cares about.
+    is the same parse projected onto (domain, name) pairs.
     """
     cookies, error, _junk, _header = _parse(text)
     return cookies, error
 
 
-def parse_cookie_file(text: str, with_values: bool = False):
+def parse_cookie_file(text: str):
     """(cookies, error) for a Netscape cookie file's text.
 
-    ``cookies`` is ``[(domain, name)]`` — or ``[(domain, name, value)]`` when
-    *with_values* is set, for the caller that re-serves the file's cookies as a
-    `Cookie` header rather than as a jar of their own (the RateYourMusic
-    credential, server/api_youtube.py) — one entry per accepted line. The value is
-    only ever returned when asked for: it is a live credential, and the yt-dlp
-    jar's own state is names, counts and domains.
+    ``cookies`` is ``[(domain, name)]`` — one entry per accepted line, the two
+    columns a caller that only lists or counts cookies needs. A cookie's VALUE
+    is a live credential, so it is not in this projection.
     """
     cookies, error = parse_cookies(text)
     if error:
         return [], error
-    if with_values:
-        return [(c.domain, c.name, c.value) for c in cookies], None
     return [(c.domain, c.name) for c in cookies], None
 
 
@@ -465,9 +457,9 @@ def cookie_key(domain: str, path: str, name: str) -> str:
 def hosts_match(host: str, hosts: Sequence[str]) -> bool:
     """Is *host* one of *hosts*, or a subdomain of one?
 
-    A suffix match on the parsed host, so `www.rateyourmusic.com` and
-    `rateyourmusic.com` both count while `rateyourmusic.com.example.net`
-    (a domain someone else owns) cannot.
+    A suffix match on the parsed host, so `www.youtube.com` and `youtube.com`
+    both count while `youtube.com.example.net` (a domain someone else owns)
+    cannot.
     """
     host = str(host or "").lower()
     return any(host == h or host.endswith("." + h) for h in hosts)
@@ -707,17 +699,15 @@ def expired_warning(cookies: Sequence[Cookie], provider: str,
 # The per-cookie notes. One config value (`cookie_notes`), one JSON object per
 # cookie source, one entry per cookie identity:
 #
-#     {"youtube": {"youtube.com\t/\tSID": {"comment": "my main account"}},
-#      "rym":     {"rateyourmusic.com\t/\tsession": {"comment": "…",
-#                                                   "expiry": "1893456000",
-#                                                   "imported_at": "1760000000"}}}
+#     {"youtube": {"youtube.com\t/\tSID": {"comment": "my main account",
+#                                          "expiry": "1893456000",
+#                                          "imported_at": "1760000000"}}}
 #
 # `comment` is what the user typed, `expiry` is what the import's file stated
-# for that cookie (the RYM credential is a bare `Cookie` header, which has
-# nowhere to carry an expiry — the jar file keeps its own), and `imported_at`
-# is when the file it arrived in was imported (epoch seconds, refreshed on
-# every import — the UI groups one import's rows under one dated section). All
-# are optional; an entry with none is dropped.
+# for that cookie (the jar file keeps its own), and `imported_at` is when the
+# file it arrived in was imported (epoch seconds, refreshed on every import —
+# the UI groups one import's rows under one dated section). All are optional;
+# an entry with none is dropped.
 # --------------------------------------------------------------------------- #
 def _load_notes(raw: str) -> Dict[str, Dict[str, dict]]:
     """The store as a dict; anything unreadable is simply empty."""

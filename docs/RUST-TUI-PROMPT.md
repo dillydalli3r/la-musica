@@ -301,7 +301,7 @@ and fails the excess-tags check unless it is on the allowlist.
 | Family | Tags |
 |---|---|
 | identity | `TITLE` `ARTIST` `ALBUM` `ALBUMARTIST` `TRACKNUMBER` `DISCNUMBER` `DATE` `TITLEALIAS` `ARTISTALIAS` `GENRE` `ITUNESADVISORY` `INSTRUMENTAL` `COMMENT` |
-| release | `ALBUMALIAS` `MEDIA` `SOURCE` `ALBUMITUNESADVISORY` `RELEASETYPE` `LABEL` `CATALOGNUMBER` `BARCODE` `ASIN` `LANGUAGE` `DISCSUBTITLE` `LICENSE` `ENCODEDBY` `ISRC` `MUSICBRAINZ_*` `RATEYOURMUSIC_*` `WORK` `MOVEMENT` credits (`PERFORMER` `PRODUCER` `ENGINEER` `MIXER` `ARRANGER` `DJMIXER` `CONDUCTOR` `WRITER` `DIRECTOR` `COMPOSERSORT` `MUSICBRAINZ_COMPOSERID`) |
+| release | `ALBUMALIAS` `MEDIA` `SOURCE` `ALBUMITUNESADVISORY` `RELEASETYPE` `LABEL` `CATALOGNUMBER` `BARCODE` `ASIN` `LANGUAGE` `DISCSUBTITLE` `LICENSE` `ENCODEDBY` `ISRC` `MUSICBRAINZ_*` `WORK` `MOVEMENT` credits (`PERFORMER` `PRODUCER` `ENGINEER` `MIXER` `ARRANGER` `DJMIXER` `CONDUCTOR` `WRITER` `DIRECTOR` `COMPOSERSORT` `MUSICBRAINZ_COMPOSERID`) |
 | audio | `MOOD` `ENERGY` `BPM` `INITIALKEY` `DYNAMIC RANGE` `ALBUM DYNAMIC RANGE` `REPLAYGAIN_TRACK_GAIN` `REPLAYGAIN_TRACK_PEAK` `REPLAYGAIN_ALBUM_GAIN` `REPLAYGAIN_ALBUM_PEAK` |
 | lyrics | `LYRICS` `UNSYNCEDLYRICS` `TRANSLITERATION` `TRANSLATION` |
 | provenance | `AUDIT` `LOG_GRADE` `LOG_CRC` `INTEGRITY` `AUDIO_MD5` (legacy, read-only) `AUDIOAUDITOR_OVERRIDE` `ACOUSTID_ID` `ACOUSTID_FINGERPRINT` `ENCODER_PROGRAM` `ENCODER_QUALITY` `ENCODER_VERSION` |
@@ -496,7 +496,6 @@ AccurateRip never costs a grade point by itself.
 | AcoustID | fingerprint → recording, submission (opt-in) |
 | Cover Art Archive | front cover, per-release and per-release-group |
 | Discogs | release metadata, cover, ratings |
-| RateYourMusic | public album/track ratings (`RATEYOURMUSIC_*`) |
 | Apple Music / Deezer | artwork and descriptions when CAA has none |
 | LRCLIB + the lyrics provider chain | synced then plain lyrics |
 | YouTube (via yt-dlp or a native client) | music videos, downloads |
@@ -737,8 +736,8 @@ one empty album, one artist folder with no albums, one `.mlo_data` leftover.
 Missing/identity: `missing_tags`, `tag_case`, `tag_spaces`, `tag_blank_lines`,
 `excess_tags`, `alias_needed`, `alias_excess`, `naming`, `filename_case`,
 `ext_case`, `empty_folders`, `disallowed`, `unreadable`, `expected_tracks`.
-Release: `album_tags`, `mb_links`, `rym_links`, `media`, `source`, `genre`,
-`genre_count`, `genre_order`, `genre_vocab`, `naming`.
+Release: `album_tags`, `mb_links`, `media`, `source`, `genre`,
+`genre_count`, `genre_structure`, `genre_vocab`, `naming`.
 Audio: `key_bpm`, `mood`, `energy`, `replaygain` (opt-in family), `encoder`,
 `flac_md5`, `cr` (`crc`), `cd_format`, `cd_cue`, `cd_log`, `log_grade`,
 `log_checksum`, `accuraterip`, `accurip_format`, `lossless_source`, `audit`,

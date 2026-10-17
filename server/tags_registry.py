@@ -303,9 +303,9 @@ TAG_INFO = {
                                 "ALBUMWEBRATING. Required per track by the grader while web "
                                 "ratings are on (issue code WEBRATING_MISSING); a video is never "
                                 "graded for it."),
-    "WEBRATING_SOURCE": ("Web rating sources", "A LIST: the \"; \"-joined names of the sources that "
-                                               "contributed to WEBRATING (MusicBrainz, RateYourMusic, …), "
-                                               "the convention RELEASECOUNTRY uses."),
+    "WEBRATING_SOURCE": ("Web rating sources", "A LIST: the \"; \"-joined names of the sources behind "
+                                               "WEBRATING (MusicBrainz), the convention "
+                                               "RELEASECOUNTRY uses."),
     "ALBUMWEBRATING": ("Album web rating", "The PUBLIC score for the whole release (0-100), repeated on "
                                            "every track of the album — the same album-level slot "
                                            "ALBUMITUNESADVISORY uses. Written beside WEBRATING, never in "
@@ -654,7 +654,7 @@ CHECK_LABELS = {
     "grade_include_other": "Other files",
 }
 
-_ACRONYMS = {"mb": "MB", "rym": "RYM", "cue": "CUE", "cd": "CD", "lrc": "LRC",
+_ACRONYMS = {"mb": "MB", "cue": "CUE", "cd": "CD", "lrc": "LRC",
              "id3": "ID3", "bpm": "BPM", "dr": "DR"}
 
 

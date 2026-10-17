@@ -118,9 +118,9 @@ def charts_list(period="all", kind="tracks", source="all", limit=50, cfg=None):
 
     `period=all|year|month|week` picks the window and `kind=tracks|albums|
     artists` the rows; `source=all` asks every source that charts that kind, in
-    the registry's chart order (RateYourMusic first for tracks), and a single
-    source id answers from that one alone. A source asked for a window it does
-    not publish is reported as `unsupported:` in `notes` — never handed its
+    the registry's chart order, and a single source id answers from that one
+    alone. A source asked for a window it does not publish is reported as
+    `unsupported:` in `notes` — never handed its
     all-time chart — and every outcome is a note (`skipped:`/`failed:`), so an
     empty page always says which of the two it is. Charts are NOT merged across
     sources (a rank is per source); the library's own charts live at

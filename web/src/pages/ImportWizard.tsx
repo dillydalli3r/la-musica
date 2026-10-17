@@ -2426,8 +2426,7 @@ export default function ImportWizard() {
       const rel = await pickRelease(rid, albumPath);
       if (!rel) return;
       // The release link is the step's ONE pass over the album: MusicBrainz
-      // only — the app carries no RateYourMusic or Album of the Year data at
-      // all any more (2026-10-12), so there is no second link to write.
+      // is the app's one identity link, so there is no second link to write.
       await api.importCommit(albumPath, `https://musicbrainz.org/release/${rel.id}`, staged);
       // The release became this album's, so its OWN tracklist is recorded in
       // the same breath: the album page diffs the folder against it, and a

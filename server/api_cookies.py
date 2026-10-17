@@ -1,10 +1,9 @@
 """One per-cookie view for the cookie login — GET/POST /api/cookies/{source}.
 
-YouTube is the ONE cookie credential this app still keeps (the RateYourMusic
-and Album of the Year sessions went with the scraped sources, 2026-10-12):
-what a user does with it is import a cookies.txt, look at the cookies it kept,
-and write a note against one of them. This module is the surface for that, and
-a future cookie login would add an entry to ``SOURCES`` and need no new UI.
+YouTube is the ONE cookie credential this app keeps: what a user does with it
+is import a cookies.txt, look at the cookies it kept, and write a note against
+one of them. This module is the surface for that, and a future cookie login
+would add an entry to ``SOURCES`` and need no new UI.
 
 It reads and writes nothing itself: the source owns its storage
 (`server/api_youtube.cookie_list`/`set_cookie_comment`) and this module only

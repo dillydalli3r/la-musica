@@ -379,9 +379,9 @@ def prefetch_content(folder, cfg=None, *, background=False):
 
     "Add to library" puts the album in the library the moment it is asked for,
     so the page it links to must have something real on it before the download
-    lands: the artist image and descriptions, the album description, the
-    RateYourMusic links and the ranked cover candidates (with the policy's
-    winner marked) — see ``server.imports.prefetch_album``, which is the import
+    lands: the artist image and descriptions, the album description and the
+    ranked cover candidates (with the policy's winner marked) — see
+    ``server.imports.prefetch_album``, which is the import
     chain's own steps run early, gated by their own switches.
 
     Inline by default (the user is waiting for THIS album and the page is one
@@ -636,9 +636,9 @@ def create(release, cfg=None, *, source=SOURCE, queries=None, title="",
     fetched before this call returns, so the album's page renders real content
     while the search runs. NO REQUEST passes it: those provider calls measured
     10-20 s of an add's own latency (`server.api_add._create_all` — the cover
-    search, the RateYourMusic link lookup and the MusicBrainz metadata step)
-    for content that only an OPENED page ever reads, so the route writes the
-    record and then runs `prefetch_content(folder, cfg, background=True)`. It
+    search and the MusicBrainz metadata step) for content that only an OPENED
+    page ever reads, so the route writes the record and then runs
+    `prefetch_content(folder, cfg, background=True)`. It
     stays a parameter for a caller that does want the content in hand before
     its next line (the tests that assert what the marker then carries).
 

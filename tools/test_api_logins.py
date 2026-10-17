@@ -335,10 +335,9 @@ cap.route("GET", "/database/search",
           {"message": "You must authenticate to access this resource."},
           status=401)
 discovery.invalidate()
-# Discogs is no longer a GENRE source (the owner narrowed the chain to
-# RateYourMusic / Album of the Year / MusicBrainz), so its genre probe is an
-# honest "unknown source" — the refusal is owned by the credential row, which
-# the checks above already pin.
+# Discogs is not a GENRE source (MusicBrainz is the one the genre chain ships,
+# 2026-10-12), so its genre probe is an honest "unknown source" — the refusal is
+# owned by the credential row, which the checks above already pin.
 st, detail = sh._probe_genre("discogs", DISCOGS_CFG)
 check("discogs: not a genre source any more — the probe says so",
       st == "skipped" and "unknown source" in detail, f"{st}: {detail}")

@@ -317,7 +317,7 @@ _PARENT_OF = {
 
 # Spellings that are NOT MusicBrainz names but are the same thing. Every value
 # must be a real MusicBrainz genre (tested), and every key is a spelling the
-# app itself, RYM, or a model has been seen to produce.
+# app itself, a source, or a model has been seen to produce.
 ALIASES = {
     "hip-hop": "hip hop",
     "hiphop": "hip hop",

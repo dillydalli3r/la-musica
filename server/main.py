@@ -3108,9 +3108,8 @@ class ImportCommit(BaseModel):
     """Store the MusicBrainz release link on an imported album. target_dir =
     album folder name under music_folder, or an absolute path already inside
     it. ONE link, ONE pass over the album — the wizard's Links step has been
-    MusicBrainz-only since the scraped sources were removed (2026-10-12); the
-    nothing else is fetched or written: the app carries no RateYourMusic or
-    Album of the Year data at all (2026-10-12)."""
+    MusicBrainz-only since the scraped sources were removed (2026-10-12):
+    nothing else is fetched or written."""
     target_dir: str
     mb_link: Optional[str] = None
     staged: bool = False  # the wizard's album folder, wherever the user put it

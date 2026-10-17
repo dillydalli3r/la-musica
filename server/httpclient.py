@@ -19,8 +19,8 @@ What this module owns:
   call, so a response's ``Set-Cookie`` never reached a later, unrelated
   request; a shared client would silently accumulate cookies and send them to
   that domain again — including a cookie one user's session obtained when
-  another user's request follows. Sessions the app manages itself (RYM's
-  pasted jar) are passed per request and are untouched by this;
+  another user's request follows. Cookies a CALLER passes per request are
+  sent as given and are untouched by this;
 * bounded keep-alive, so an idle FastAPI process or a test run does not hold
   sockets open, and a close on interpreter exit;
 * :func:`install`, which points the module-level ``httpx.get``/``httpx.post``
@@ -60,7 +60,7 @@ def _discard_response_cookies(response):
     ``httpx.get`` built — and dropped — a client per call, so a response's
     ``Set-Cookie`` never reached a later, unrelated request. A shared client
     must not turn that into a session the next request inherits (a cookie one
-    user's RYM session obtained would otherwise ride along on another user's
+    user's session obtained would otherwise ride along on another user's
     request), so the jar stores none of its own. Cookies a CALLER passes per
     request are sent exactly as before.
     """

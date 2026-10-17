@@ -51,14 +51,14 @@ const { createServer } = await import(
   `file://${path.join(webDir, "node_modules/vite/dist/node/index.js").replace(/\\/g, "/")}`);
 
 const ALBUM = "F:/Music/Artists/Align Artist/2020 - Align Album";
-// 89 is a tag the owner actually saw: RateYourMusic's 4.45, stored on the app's
+// 89 is a tag the owner actually saw: a 0-5 source's 4.45, stored on the app's
 // 0-100 scale. The readout prints ONE decimal, rounded half-up (4.5 Web) — the
 // number the source's own page shows — which is `webText` in lib/ratings
 // (spec R358/R358e): a WEB value is rounded to its tenth BEFORE it is written,
 // never handed to `toFixed` raw (which depends on the binary representation of
 // 4.45). Every rating prints one decimal, always (R415) — the grid's `half`
 // spells the user's own number the same way ("5.0", "4.0").
-const WEB_TAGS = { WEBRATING: "89", WEBRATING_SOURCE: "RateYourMusic" };
+const WEB_TAGS = { WEBRATING: "89", WEBRATING_SOURCE: "MusicBrainz" };
 
 /** One track row of the album payload — the shape tools/check_lyrics_kind.mjs
  *  builds, with the WEBRATING family on the rows that state one. */

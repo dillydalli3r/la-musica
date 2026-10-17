@@ -559,7 +559,7 @@ async function stubTranslations(page) {
         .map((l) => l.replace(/\[[^\]]*\]/g, "").trim()).filter(Boolean);
       json.lyrics_trans = lines.map((l) => `EN — ${l}`).join("\n");
       if (json.tags && !json.tags.WEBRATING) {
-        json.tags = { ...json.tags, WEBRATING: "85", WEBRATING_SOURCE: "RateYourMusic" };
+        json.tags = { ...json.tags, WEBRATING: "85", WEBRATING_SOURCE: "MusicBrainz" };
       }
     }
     await route.fulfill({ response: resp, json });

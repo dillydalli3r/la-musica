@@ -4686,12 +4686,12 @@ def _stamp_release(album_dir, release, cfg, force_ids=False):
     The MusicBrainz ids (+ per-track recording ids) come from
     ``_stamp_mb_tags`` — the one writer of the release identity, so every
     import path tags identically. On top:
-    GENRE from the full per-track genre chain (RateYourMusic → ListenBrainz →
-    MusicBrainz → iTunes → Wikidata → Last.fm → Discogs → Deezer, see
-    ``integrations.genre_chain``), already merged per track and capped at
-    ``mb_genre_count``. ITUNESADVISORY is not written here —
-    ``finish_album`` resolves it from the ISRCs (``fetch_advisories``) before
-    the chain runs, which is the only path that can state a real rating
+    GENRE from the full per-track genre chain (the configured sources —
+    MusicBrainz alone on a shipped install; see ``integrations.genre_chain``),
+    already merged per track and capped at ``mb_genre_count``. ITUNESADVISORY
+    is not written here — ``finish_album`` resolves it from the ISRCs
+    (``fetch_advisories``) before the chain runs, which is the only path that
+    can state a real rating
     instead of echoing one.
 
     GENRE is written only into a track that carries none, which is what keeps

@@ -256,9 +256,9 @@ def _title_code(part: str) -> str:
 # 10): the listener's own RATING, script 24's WEBRATING and its album twin
 # (mlo/web_ratings.LEVEL_TAGS). Every one of them holds a WHOLE number — no
 # writer in this app emits anything else — so a value carrying a decimal point
-# is a SOURCE's score pasted in on the source's own scale (RateYourMusic's
-# "4.54" on a 0-5 scale, which every other tagger reads as 4.54/100), and a
-# formatter must not "fix" that by guessing which scale was meant.
+# is a SOURCE's score pasted in on the source's own scale (a 0-5 source's
+# "4.54", which every other tagger reads as 4.54/100), and a formatter must
+# not "fix" that by guessing which scale was meant.
 RATING_TAGS: Tuple[str, ...] = ("RATING", "WEBRATING", "ALBUMWEBRATING")
 RATING_SCALE_MAX = 100
 

@@ -73,7 +73,7 @@ services:
       - MLO_SERVER_HOST=0.0.0.0
     volumes:
       # ALL app state (config.json, playlists.db, the beets config +
-      # beets-library.db, and the ReplayGain / RYM / metadata caches) lives in
+      # beets-library.db, and the ReplayGain / metadata caches) lives in
       # /music/.mlo/data, beside the transient
       # /music/.mlo/downloads and /music/.mlo/trash AND the tools the
       # Dependencies page installs (/music/.mlo/tools), so this one mount

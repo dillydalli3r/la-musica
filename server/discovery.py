@@ -178,7 +178,7 @@ class ProviderRefused(RuntimeError):
     Everything else here answers [] for "nothing matched", which is right for a
     chain that must degrade quietly. A CHART is the opposite case: an empty list
     and a refused request look identical on screen, and the difference is the
-    whole diagnosis ("Last.fm said Invalid API key", "RYM served Cloudflare").
+    whole diagnosis ("Last.fm said Invalid API key", "ListenBrainz answered 401").
     The chart readers raise this instead, and the caller reports it verbatim."""
 
 
@@ -1066,7 +1066,7 @@ def discogs_album_genres(artist, album, cfg=None, timeout=None):
     """Discogs genres+styles for an album; [] without a configured token.
 
     The release's `genre` and `style` lists are both genres for tagging
-    purposes (`style` is the finer one, and RYM-style tagging wants both).
+    purposes (`style` is the finer one, and tagging wants both).
     """
     detail = _discogs_release(artist, album, cfg=cfg, timeout=timeout) or {}
     out = list(detail.get("genres") or [])
