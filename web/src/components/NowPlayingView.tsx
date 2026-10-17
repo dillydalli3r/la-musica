@@ -2606,19 +2606,23 @@ export default function NowPlayingView(p: Props) {
               no way to reach them. Capping it makes it scroll instead, and the
               strip sticks to the bottom of that scrollport so the bars are
               always visible when enabled.
-              ponytail: `justify-center` in a scroll container leaves the TOP
-              overflow unreachable on very short windows; move to a safe-center
-              layout if anyone ever uses the player that small.
+              SAFE-CENTRING, never `justify-center`: this column is a scroll
+              container, and `justify-center` in one pushes the FIRST item above
+              the scrollport — unreachable, since the scroll cannot go negative.
+              Measured on a 1440×620 window: the art's top 21 px were cut by
+              both this column's scrollport and the body's `lg:overflow-clip`,
+              with nothing to scroll to. Auto margins on the first and last
+              child do the same centring while there IS free space (they take
+              it in equal halves) and collapse to zero when there is not, so a
+              short window scrolls from its own top instead. (This is the
+              `ponytail` note the class used to carry, now the rule.)
               `my-auto` while the pane is away: with no words this column IS
               the composition (cover, metadata, transport, seek), so it takes
               the free space as margins instead of hugging the top of a phone
               screen. Auto margins and not `justify-center` on the body on
-              purpose — they resolve to zero when there is no free space, so a
-              window shorter than the composition (a landscape phone) scrolls
-              from its own top instead of hiding the cover above the
-              scrollport. */}
+              purpose — the same zero-when-cramped behaviour, one level up. */}
           <div
-            className={`w-full flex flex-col items-center justify-center gap-4 shrink-0 min-w-0 transition-[width] duration-300 ease-out ${
+            className={`w-full flex flex-col items-center gap-4 shrink-0 min-w-0 transition-[width] duration-300 ease-out [&>*:first-child]:mt-auto [&>*:last-child]:mb-auto ${
               paneOpen
                 ? "lg:w-[42%] lg:h-full lg:max-h-full lg:min-h-0 lg:overflow-y-auto"
                 : "my-auto max-h-full min-h-0 overflow-x-clip overflow-y-auto"
@@ -2680,7 +2684,7 @@ export default function NowPlayingView(p: Props) {
                 </div>
               </div>
             )}
-            <div className={`relative ${compactHeader ? "hidden md:block" : ""}`}>
+            <div className={`relative lg:w-full lg:max-w-[min(28rem,48vh)] lg:mx-auto ${compactHeader ? "hidden md:block" : ""}`}>
               {orbs && (
                 <div
                   className="artwork-glow absolute -inset-6 rounded-[2rem] blur-2xl"
@@ -2693,14 +2697,24 @@ export default function NowPlayingView(p: Props) {
                 w={PANE_COVER_W}
                 // One size per breakpoint per LAYOUT: the art never jumps when a
                 // track's lyrics load or finish, and above lg the pane sits
-                // beside it so the size is the same either way. Below `md` the
-                // art is drawn ONLY when no pane is up — with lyrics the
-                // compact header takes its place, and without them (`w-72`,
-                // 288 px) the cover is the phone composition's centrepiece, so
-                // a track with no lyrics is not a bare strip on a whole screen.
+                // beside it. The lg size is the column's OWN width, capped at
+                // `min(28rem, 48vh)` and kept square by `aspect-square` — NOT a
+                // fixed 448 px. A fixed width overflowed the 42 % column the
+                // pane leaves, and the column is a scroll container (so it
+                // CLIPS): measured at the owner's 1061×1024, the art's box was
+                // 448 square inside a 418 px column and 15 px were cut away on
+                // each side, which is the reported "album cover gets cut off by
+                // the lyrics". Width-driven sizing cannot do that: the art is
+                // never wider than the column it stands in, and it shrinks with
+                // it (a wide window still gets the full 448). Below `md` the
+                // art keeps its fixed sizes: drawn ONLY when no pane is up —
+                // with lyrics the compact header takes its place, and without
+                // them (`w-72`, 288 px) the cover is the phone composition's
+                // centrepiece, so a track with no lyrics is not a bare strip on
+                // a whole screen.
                 // `invisible` only while the block's first record is still
                 // resolving: the box keeps its size and shows nothing.
-                wrapperClass={`relative rounded-2xl shadow-2xl bg-raise overflow-hidden lg:w-[min(28rem,48vh)] lg:h-[min(28rem,48vh)] ${
+                wrapperClass={`relative rounded-2xl shadow-2xl bg-raise overflow-hidden lg:h-auto lg:w-full lg:aspect-square ${
                   paneOpen ? "w-32 h-32" : "w-72 h-72"
                 } ${artPending ? "invisible" : ""}`}
               />
@@ -2763,12 +2777,22 @@ export default function NowPlayingView(p: Props) {
               container itself is never removed, so the reader's scroll
               position, the zoom and the auto-follow refs all survive a toggle.
               The lyric lines are divs, not controls, so hiding the subtree
-              from assistive tech costs no tab stop. */}
+              from assistive tech costs no tab stop.
+
+              THE TWO COLUMNS MUST FIT THE ROW: at lg the cover column is 42 %
+              and this pane 54 %, so with the body's 32 px gap the row is
+              96 % + 32 px — inside the body at every lg width. It used to be
+              42 + 56 = 98 % + 32 px, which overflows whenever 2 % of the body
+              is narrower than 32 px (every window under ~1600 px), and the
+              body's `lg:overflow-clip` then cut this pane's own right edge:
+              measured at 1061×1024 the pane ended 12 px past the body, so its
+              right padding — and a wrapped line's last glyphs — sat in the
+              clipped strip. */}
           {!videoPath && lyricsDrawable && (
             <div
               className={`lyr-corner-host relative flex flex-col max-w-3xl overflow-clip transition-[width,max-height,opacity,transform] duration-300 ease-out ${
                 paneOpen
-                  ? "flex-1 min-h-[45vh] [@media(min-height:560px)]:min-h-0 w-full lg:min-h-0 lg:h-full lg:max-w-none lg:flex-none lg:w-[56%] lg:ml-auto opacity-100 translate-x-0"
+                  ? "flex-1 min-h-[45vh] [@media(min-height:560px)]:min-h-0 w-full lg:min-h-0 lg:h-full lg:max-w-none lg:flex-none lg:w-[54%] lg:ml-auto opacity-100 translate-x-0"
                   : "flex-none min-h-0 max-h-0 w-0 max-w-0 opacity-0 translate-x-6 pointer-events-none"
               }`}
               aria-hidden={!paneOpen}

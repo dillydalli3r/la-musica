@@ -360,6 +360,43 @@ const surface = (page) => page.evaluate(() => {
       hidden: pane.getAttribute("aria-hidden"),
       opacity: Number(paneCs.opacity),
     } : null,
+    // THE ART MUST FIT WHERE IT STANDS, and the two columns must fit the ROW.
+    // The column the art lives in is a scroll container (overflow auto), so
+    // anything wider than it is CLIPPED rather than scrolled to: at the owner's
+    // 1061×1024 the art's box was 448 square inside the 418 px column the
+    // lyrics pane leaves, so 15 px were cut away on each side — "the album
+    // cover can get cut off by the lyrics". Every ancestor whose overflow is
+    // not `visible` therefore has to contain the art's box, and the art has to
+    // be square (a width-and-height pair that disagreed would crop the art
+    // inside `object-cover` even with nothing clipping it). The overflow came
+    // from the row itself: its two columns plus their gap were 98 % + 32 px,
+    // i.e. past the body at every window under ~1600 px, and the body's
+    // `lg:overflow-clip` cut the pane's right edge with it.
+    layout: (() => {
+      const rowEl = document.querySelector(".safe-np-body");
+      const r = art ? art.getBoundingClientRect() : null;
+      if (!r || !rowEl) return null;
+      const cut = [];
+      for (let el = art.parentElement; el && el !== document.documentElement; el = el.parentElement) {
+        const cs = getComputedStyle(el);
+        if (cs.overflowX === "visible" && cs.overflowY === "visible") continue;
+        const b = el.getBoundingClientRect();
+        const c = {
+          left: Math.round(Math.max(0, b.left - r.left)), right: Math.round(Math.max(0, r.right - b.right)),
+          top: Math.round(Math.max(0, b.top - r.top)), bottom: Math.round(Math.max(0, r.bottom - b.bottom)),
+        };
+        if (c.left + c.right + c.top + c.bottom < 1) continue;
+        cut.push({ el: `${el.tagName.toLowerCase()}.${String(el.className || "").slice(0, 46)}`, cut: c });
+      }
+      const rb = rowEl.getBoundingClientRect();
+      return {
+        w: Math.round(r.width), h: Math.round(r.height),
+        square: Math.abs(r.width - r.height) < 1,
+        cut,
+        rowLeft: Math.round(rb.left), rowRight: Math.round(rb.right),
+        paneRight: pane ? Math.round(pane.getBoundingClientRect().right) : null,
+      };
+    })(),
     // The row the two columns live in, and its CONTENT-box centre: "centred"
     // has to mean the middle of the reading width the body actually uses (the
     // safe-area insets are not always symmetric), not the raw viewport middle.
@@ -1399,6 +1436,17 @@ const stampDecimalsPass = async (page, album) => {
   check("the art ends up centred in the reading width, not shoved aside",
     !!hidden.art && Math.abs(hidden.art.box.cx - hidden.body.cx) <= 2,
     `art centre ${hidden.art?.box.cx} vs body centre ${hidden.body?.cx}`);
+  // The art's own box, in the layout the owner reported: square, and clipped by
+  // nothing between it and the row (the column's scrollport, the body's
+  // `overflow-clip`). Read on the `before` state — the pane is UP there, which
+  // is the layout that cut it.
+  check("the art fits the column it stands in: square, and clipped by no scrollport or row",
+    !!before.layout && before.layout.square && before.layout.cut.length === 0,
+    before.layout ? `art ${before.layout.w}×${before.layout.h}, cut ${JSON.stringify(before.layout.cut)}` : "no art");
+  check("the two columns fit the row: the pane's right edge is inside the body",
+    !!before.layout && before.layout.paneRight !== null &&
+      before.layout.paneRight <= before.layout.rowRight + 0.5 && before.layout.paneRight > before.layout.rowLeft,
+    before.layout ? `pane right ${before.layout.paneRight} vs body ${before.layout.rowLeft}..${before.layout.rowRight}` : "no row");
   check("nothing is painted over the artwork with the pane hidden",
     hidden.overArt.length === 0, `over the art: ${JSON.stringify(hidden.overArt)}`);
   check("the control is still there (and now unpressed) while the pane is hidden",
@@ -1602,7 +1650,13 @@ const stampDecimalsPass = async (page, album) => {
   // ---- the same promises at other window sizes ----------------------------
   await page.keyboard.press("Escape");
   await sleep(400);
-  for (const [w, h] of [[1440, 900], [1920, 1080]]) {
+  // 1061×1024 is the OWNER's own window: the art's 448 px box overflowed the
+  // 418 px column the pane leaves there, and the column clipped 15 px off each
+  // side of it. 1440×620 is a SHORT window, where the left column's content is
+  // taller than its scrollport: `justify-center` used to push the art's top
+  // 21 px above it — cut by the column AND by the body's `lg:overflow-clip`,
+  // with no scroll position that could bring it back.
+  for (const [w, h] of [[1440, 900], [1920, 1080], [1061, 1024], [1440, 620]]) {
     await page.setViewportSize({ width: w, height: h });
     await page.locator('button[title="Fullscreen player with lyrics"]').first().click();
     await sleep(1200);
@@ -1617,6 +1671,17 @@ const stampDecimalsPass = async (page, album) => {
       !s.error && !!s.pane && s.pane.hidden === "false" && s.pane.box.w > 0 &&
         s.toggle?.pressed === "true" && s.art.box.cx < s.body.cx - s.pane.box.w / 2,
       s.error || `pane ${s.pane?.box.w}×${s.pane?.box.h} hidden=${s.pane?.hidden} art centre ${s.art?.box.cx} vs body centre ${s.body?.cx} pressed=${s.toggle?.pressed}`);
+    // The art's box at THIS width and height: square (nothing crops it inside
+    // `object-cover`) and contained by every scrollport and by the body, so the
+    // pane can never cut it. The 620 px case is the one that failed on the
+    // art's TOP before the column stopped centring with `justify-center`.
+    check(`${w}×${h}: the art is square and clipped by no scrollport or the row`,
+      !s.error && !!s.layout && s.layout.square && s.layout.cut.length === 0,
+      s.error || (s.layout ? `art ${s.layout.w}×${s.layout.h}, cut ${JSON.stringify(s.layout.cut)}` : "no art"));
+    check(`${w}×${h}: the pane's own box stays inside the body`,
+      !s.error && !!s.layout && s.layout.paneRight !== null &&
+        s.layout.paneRight <= s.layout.rowRight + 0.5 && s.layout.paneRight > s.layout.rowLeft,
+      s.error || (s.layout ? `pane right ${s.layout.paneRight} vs body ${s.layout.rowLeft}..${s.layout.rowRight}` : "no row"));
     await page.keyboard.press("Escape");
     await sleep(400);
   }

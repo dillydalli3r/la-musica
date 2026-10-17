@@ -9084,6 +9084,52 @@ also had to get shorter.
 
 ---
 
+### 7.83 The fullscreen viewer's geometry: the art fits its column, the columns fit the row
+
+The owner's report (2026-10-17): *"fix formatting in the fullscreen viewer (git
+release when done), the player elements, mainly the album cover can get cut off
+by the lyrics"*. Both halves were one class of bug — a box sized by a HARD
+number inside a box sized by a percentage, and a row whose children's widths
+plus their own gap added up past it — and both are measured, at the owner's own
+window size and at a short one, by `tools/check_fullscreen_player.cjs`.
+
+- **R439 — the art is never wider than the column it stands in, and the two
+  columns of the wide layout never add up past the row.** Above `lg` the player
+  is two columns: the left one (`lg:w-[42%]`) carries the cover and every
+  control, the right one the lyrics pane (`lg:w-[54%]`, was 56). The art's box
+  was `lg:w-[min(28rem,48vh)]` — a fixed 448 px at the owner's 1061×1024 — which
+  OVERFLOWED the 418 px column the pane leaves, and that column is a scroll
+  container (`overflow-y-auto`, so `overflow-x` computes to auto too): the art
+  was CLIPPED by its own column, 15 px on each side, its box 448 wide against a
+  448 tall (measured `cut {left: 15, right: 15}`). The art is now sized by the
+  column: `lg:w-full` with `aspect-square` and `max-w-[min(28rem,48vh)]` — the
+  same 448 px ceiling on a wide window, nothing to clip on a narrow one — and the
+  glow parent that wraps it stretches the same way, so the halo hugs the art
+  rather than the column. Its `48vh` cap still shrinks it on a short window
+  (measured 298 px at 1440×620). The row's arithmetic is fixed at the pane:
+  42 % + 54 % + the body's 32 px gap = 96 % + 32 px, inside the body at every
+  `lg` width (42 + 56 = 98 % overflowed whenever 2 % of the body was under
+  32 px — every window under ~1600 px wide — and the body's `lg:overflow-clip`
+  then cut the pane's own right edge: measured 12 px at 1061×1024, i.e. part of
+  its right padding and of any wrapped line's last glyphs). **The left column
+  also stopped centring with `justify-center`**: in a scroll container that
+  pushes the FIRST item above the scrollport, unreachable (measured on a
+  1440×620 window: the art's top 21 px cut by both the column and the body, with
+  no scroll position that could bring it back). Auto margins on the first and
+  last child (`[&>*:first-child]:mt-auto [&>*:last-child]:mb-auto`) do the same
+  centring while there is free space and collapse to zero when there is not —
+  the `ponytail` note the class used to carry, now the rule. The phone and `md`
+  layouts are untouched: below `lg` the art keeps its fixed `w-32`/`w-72` boxes
+  and the pane still stacks under the block. Pinned in
+  `tools/check_fullscreen_player.cjs`: every ancestor of the art whose overflow
+  is not `visible` must contain its box (and the box must be square) — checked
+  with the pane up at 1568×817, at 1440×900, 1920×1080 and **1440×620**, where
+  the old layout failed on the art's top; the pane's right edge must be inside
+  the body at each of those sizes; and the art must still end up centred in the
+  reading width when the pane is put away.
+
+---
+
 ## 10. Honest limits of this spec
 
 - The check **count** is 70 today; the registry derives it from
