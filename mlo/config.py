@@ -1357,23 +1357,15 @@ DEFAULT_CONFIG = {
     "soulseek_auto_physical_queries": ["catalognumber", "barcode"],
     "soulseek_auto_cd_queries": ["catalognumber"],
     "soulseek_auto_digital_queries": ["artist album year"],
-    # MBID-DRIVEN QUERIES — ON by default (the owner's ask): a release is
-    # searched by what a PEER's folder can literally carry, not only by its
-    # pressing traits — the release's own MusicBrainz id, the recording ids
-    # MusicBrainz states for its tracks, and each of those tracks' own
-    # "artist title". A peer that names the ids, or that holds exactly the
-    # album's tracks under a title the traits never match, is otherwise
-    # unreachable from a catalog-number query. They go out in the SAME parallel
-    # batch as the configured templates (one search window, never a second
-    # wait), and the scoring is unchanged: a query that turns up a folder with
-    # the whole album wins like any other.
+    # The release's OWN MusicBrainz id is added to its search batch — ON by
+    # default. A peer that names ids is otherwise unreachable from a
+    # catalog-number/barcode query, and the id is album-level: it names THIS
+    # release, not a track. An album is never searched track by track (spec
+    # R432): a track name asks the network for singles and compilations that
+    # hold one song, not for the album being imported. The id goes out in the
+    # SAME parallel batch as the configured templates (one search window, never
+    # a second wait), and the scoring is unchanged.
     "soulseek_auto_mbid_queries": True,
-    # How many of the release's tracks are chased that way — each one by its
-    # recording MBID and by its own artist + title, in disc/position order.
-    # Four covers what this exists for (the top of the tracklist, which is what
-    # a folder named after the album's own track order will hold) without
-    # asking the network one question per track of a thirty-track box set.
-    "soulseek_auto_mbid_tracks": 4,
     # Every disc's .log must score at least this (Logchecker 0-100) before
     # the full album is downloaded. **100 by default — a PERFECT log is the
     # owner's rule, for importing and grading alike** (`grade_log_score_
@@ -2156,9 +2148,6 @@ _INT_RANGES = {
     # and never longer than the top-up window it may precede.
     "soulseek_search_fast_seconds": (2, 60),
     "soulseek_auto_response_limit": (5, 500),
-    # How many of a release's tracks the MBID-driven queries chase (see the key
-    # in DEFAULT_CONFIG): at least one, and never one per track of a box set.
-    "soulseek_auto_mbid_tracks": (1, 10),
     "soulseek_search_concurrency": (1, 8),
     "soulseek_candidate_slots": (1, 20),
     # The queue patience (see the key in DEFAULT_CONFIG): a minute at the very

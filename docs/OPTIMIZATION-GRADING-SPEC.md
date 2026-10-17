@@ -8872,29 +8872,31 @@ when the log itself says something is wrong.** Pinned in
   `Deadline.why` names the pass when a budget cuts it. Pinned by
   `tools/test_lyrics_aliases.py` §3b.
 
-- **R432 — a release is searched by its tracks' own names, because the payload
-  is read as it is published.** The owner's report, 2026-10-13: *"Soulseek
-  importing seems to be rejecting practically every candidate."* The MBID-driven
-  queries (`_mbid_queries`, on by default) are meant to add, beside the pressing
-  traits, the release's own MusicBrainz id AND each of its first
-  `soulseek_auto_mbid_tracks` tracks' recording id and "artist title" — the one
-  way a peer that holds exactly the album's tracks under a folder name the
-  catalog-number/barcode traits never match is reachable at all. They are built
-  on `_release_tracks`, which read only NESTED payloads (`release["tracks"]` or
-  `media[].tracks[]`) — but `server.integrations.resolve_release` publishes
-  `media` as a FLAT track list (one entry per track, carrying `recording_mbid`,
-  `title`, `artist_credit`). So `_release_tracks` returned `[]` for every real
-  payload, the track queries never fired, and a release was searched by its
-  catalog number and barcode alone. Measured live on Gorillaz's *D-Sides* (a
-  22-track CD): 3 queries, one peer folder; with the payload read correctly, 11
-  queries (both catalog numbers, the release id, and four tracks' recording ids
-  and names), and the peers that name the album differently became reachable.
-  `_release_tracks` now reads the flat shape (each `media` entry IS a track)
-  and STILL reads the nested one (a raw MusicBrainz release), so both payloads
-  answer. Pinned in `tools/test_soulseek_candidates.py` (a flat-`media` release
-  yields its track queries; a nested-disc one yields the same; the two
-  end-to-end job tests assert the per-track queries reach slskd in the one
-  batch).
+- **R432 — an album import asks the network for the ALBUM, never for its
+  tracks one at a time.** The owner's report, 2026-10-17: *"If I'm
+  auto-importing an album, tracks should NOT be searched for individually, as
+  is the current behavior."* The album's own batch is its configured trait
+  templates (a pressing by catalog number/barcode, digital by artist album
+  year), the alias queries when MusicBrainz files it under another name, and
+  the release's OWN MusicBrainz id when `soulseek_auto_mbid_queries` is on
+  (`_mbid_queries`) — the id names the release, so a peer folder that names ids
+  stays reachable. It NEVER carries a track query: no recording MBID, no track
+  artist+title. A per-track query asks the network for singles, compilations
+  and loose files that hold one song, not for the release being imported, which
+  is what a batch of 11 queries on a 12-track CD showed (`GED24425`, its
+  barcode, the release id and four tracks' recording ids and names).
+  `soulseek_auto_mbid_tracks` and `_release_tracks` are GONE with the behavior
+  — a saved copy of the key is inert, because nothing reads it and it is no
+  longer part of the schema (`normalize_config` does not add it back). The
+  release id still rides the SAME single parallel batch as the templates (one
+  search window, never a second wait), and the scoring is unchanged. Pinned in
+  `tools/test_soulseek_candidates.py` (a release with a tracklist yields the
+  trait template and the id ONLY — no track title, no recording id, with the
+  old key set to 10 in the config; the end-to-end job tests assert exactly that
+  on slskd's own POST journal, whose releases DO state a FLAT `media`
+  tracklist). The manual per-track surface is UNAFFECTED: pasting a recording
+  MBID into the search box asks for that one song (`mbid_search_queries`), which
+  is a question the user asked about a track, not an album import.
 
 ---
 

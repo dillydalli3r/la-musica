@@ -44,15 +44,15 @@ from server import soulseek, soulseek_auto
 
 
 def q(release, cfg=None, *args, **over):
-    """`release_queries` with the MBID-driven queries turned OFF.
+    """`release_queries` with the release-MBID query turned OFF.
 
     Most assertions in this file read the TEMPLATE machinery (which template,
     which trait, in which order, and the alias expansion): one query list, one
-    reason per entry. The MBID-driven set (the release's own id, its tracks'
-    recording ids and their artist+title) is ON by default and has its own block
-    below ("MBID-driven queries"), so everywhere else it is explicitly off —
-    an OFF switch is a config the app really accepts, and the assertions then
-    stay readable as "what the templates render"."""
+    reason per entry. The release's own MusicBrainz id is appended by default
+    and has its own block below ("An album is searched as an ALBUM"), so
+    everywhere else it is explicitly off — an OFF switch is a config the app
+    really accepts, and the assertions then stay readable as "what the
+    templates render"."""
     return soulseek_auto.release_queries(
         release, dict(cfg or {}, soulseek_auto_mbid_queries=False, **over), *args)
 
@@ -2925,15 +2925,17 @@ for _tpl in (["catalognumber"], ["artist album catalognumber"], ["artist album"]
 
 
 # --------------------------------------------------------------------------- #
-# MBID-driven queries: ON by default (the owner's ask)
+# An album is searched as an ALBUM: the release MBID, never its tracks
+# (the owner's rule, spec R432)
 # --------------------------------------------------------------------------- #
-# A release is also searched by what a PEER's folder can literally carry — its
-# own MusicBrainz id, its tracks' recording ids and each track's own
-# "artist title" — so a peer that names the ids, or that holds exactly the
-# album's tracks under a title the pressing traits never match, is reachable at
-# all. They ride the SAME parallel batch as the templates (one search window),
-# are deduped against it, and stop after `soulseek_auto_mbid_tracks` tracks in
-# disc/position order.
+# The owner's report, 2026-10-17: "If I'm auto-importing an album, tracks
+# should NOT be searched for individually, as is the current behavior" — the
+# 11-query batch of a CD held the catalog number, its barcode, the release id
+# AND four tracks' recording ids and "artist title". Only ALBUM-level questions
+# belong in an album import's batch: a track name asks the network for singles,
+# compilations and loose files that hold one song, which is not the release the
+# job is importing. The release's own MusicBrainz id stays (it names THIS
+# release), and it still rides the SAME parallel batch as the templates.
 MBID_RELEASE = {
     "id": "11111111-2222-3333-4444-555555555555",
     "title": "Mbid Album", "date": "1999", "medium_formats": ["CD"],
@@ -2945,119 +2947,61 @@ MBID_RELEASE = {
          "artist_credit": "Mbid Artist"},
         {"disc": 1, "position": 2, "title": "Second Song",
          "recording_mbid": "aaaaaaaa-0000-0000-0000-00000000000b"},
-        {"disc": 1, "position": 3, "title": "Third Song",
-         "recording_mbid": "aaaaaaaa-0000-0000-0000-00000000000c"},
-        {"disc": 1, "position": 4, "title": "Fourth Song",
-         "recording_mbid": "aaaaaaaa-0000-0000-0000-00000000000d"},
-        {"disc": 1, "position": 5, "title": "Fifth Song",
-         "recording_mbid": "aaaaaaaa-0000-0000-0000-00000000000e"},
     ],
 }
 _mbid_q = soulseek_auto.release_queries(MBID_RELEASE, {})
-# the pressing traits first — the queries that name the exact pressing are not
-# displaced by the broad ones — then the release id, then the first four tracks
-# (recording id, then artist+title), each exactly once.
-assert _mbid_q == [
-    "MB-1",
-    MBID_RELEASE["id"],
-    "aaaaaaaa-0000-0000-0000-00000000000a", "Mbid Artist First Song",
-    "aaaaaaaa-0000-0000-0000-00000000000b", "Mbid Artist Second Song",
-    "aaaaaaaa-0000-0000-0000-00000000000c", "Mbid Artist Third Song",
-    "aaaaaaaa-0000-0000-0000-00000000000d", "Mbid Artist Fourth Song",
-], _mbid_q
-assert len(set(_mbid_q)) == len(_mbid_q), _mbid_q       # nothing asked twice
-# the cap is a NUMBER OF TRACKS, in disc/position order: the fifth is not asked
-assert "Fifth Song" not in " ".join(_mbid_q), _mbid_q
-assert "aaaaaaaa-0000-0000-0000-00000000000e" not in _mbid_q, _mbid_q
-# …and it is configurable, clamped to 1..10 like every other pipeline ceiling
+# the pressing trait first — the query that names the exact pressing is not
+# displaced by the id — then the release id. NO track query of any kind.
+assert _mbid_q == ["MB-1", MBID_RELEASE["id"]], _mbid_q
+assert "First Song" not in " ".join(_mbid_q), _mbid_q
+assert "aaaaaaaa-0000-0000-0000-00000000000a" not in _mbid_q, _mbid_q
+assert "aaaaaaaa-0000-0000-0000-00000000000b" not in _mbid_q, _mbid_q
+# …even when a saved config still carries the REMOVED track cap: the key is
+# gone from the schema and nothing reads it, so an old install does not
+# resurrect per-track searching
 assert soulseek_auto.release_queries(
-    MBID_RELEASE, {"soulseek_auto_mbid_tracks": 1}) == \
-    ["MB-1", MBID_RELEASE["id"], "aaaaaaaa-0000-0000-0000-00000000000a",
-     "Mbid Artist First Song"], "one track"
-assert soulseek_auto.release_queries(
-    MBID_RELEASE, {"soulseek_auto_mbid_tracks": 0}) == \
-    soulseek_auto.release_queries(MBID_RELEASE, {"soulseek_auto_mbid_tracks": 1}), \
-    "0 is clamped up to one track, never to none"
-assert soulseek_auto.release_queries(
-    MBID_RELEASE, {"soulseek_auto_mbid_tracks": 50}) == \
-    _mbid_q + ["aaaaaaaa-0000-0000-0000-00000000000e", "Mbid Artist Fifth Song"], \
-    "a cap above the track count (and above the clamp) asks for what there is"
+    MBID_RELEASE, {"soulseek_auto_mbid_tracks": 10}) == ["MB-1", MBID_RELEASE["id"]]
+assert "soulseek_auto_mbid_tracks" not in mlo_config.DEFAULT_CONFIG, \
+    "the track-chasing cap is gone with the per-track queries"
+assert "soulseek_auto_mbid_tracks" not in mlo_config._INT_RANGES
+assert "soulseek_auto_mbid_tracks" not in mlo_config.normalize_config({})
 assert mlo_config.DEFAULT_CONFIG["soulseek_auto_mbid_queries"] is True, \
-    "the owner's ask: MBID-driven queries ship ON"
-assert mlo_config.DEFAULT_CONFIG["soulseek_auto_mbid_tracks"] == 4
-assert mlo_config.normalize_config({})["soulseek_auto_mbid_tracks"] == 4
-assert mlo_config.normalize_config({"soulseek_auto_mbid_tracks": 99})[
-    "soulseek_auto_mbid_tracks"] == 10
-assert mlo_config.normalize_config({"soulseek_auto_mbid_tracks": 0})[
-    "soulseek_auto_mbid_tracks"] == 1
+    "the release MBID ships ON"
 # OFF is one setting, and then the list is exactly the trait templates again
 assert soulseek_auto.release_queries(
     MBID_RELEASE, {"soulseek_auto_mbid_queries": False}) == ["MB-1"]
-# The release's tracks are the FLAT `tracks` list `integrations.resolve_release`
-# publishes; a release that states none (an old payload, a folder grab) adds the
-# id only, and one with no MusicBrainz id at all adds nothing.
+# a release with no MusicBrainz id adds nothing, and one whose own trait
+# template already rendered the id does not ask it twice
 assert soulseek_auto.release_queries(
-    {k: v for k, v in MBID_RELEASE.items() if k != "tracks"}, {}) == \
+    {k: v for k, v in MBID_RELEASE.items() if k != "id"}, {}) == ["MB-1"]
+assert soulseek_auto.release_queries(
+    {"id": "", "release_mbid": MBID_RELEASE["id"], "title": "Mbid Album",
+     "date": "1999", "medium_formats": ["CD"], "country": "GB",
+     "catalog_number": MBID_RELEASE["id"],
+     "artists": [{"name": "Mbid Artist"}]}, {}) == [MBID_RELEASE["id"]]
+# the payload shape `integrations.resolve_release` publishes (a FLAT `media`
+# track list) changes nothing: the batch is the trait template and the release
+# id, whether the tracks are flat, nested or absent
+FLAT_MEDIA_RELEASE = dict(
+    MBID_RELEASE,
+    media=[{"disc": 1, "position": 1, "title": "First Song",
+            "recording_mbid": "aaaaaaaa-0000-0000-0000-00000000000a",
+            "artist_credit": "Mbid Artist"}])
+assert soulseek_auto.release_queries(
+    {k: v for k, v in FLAT_MEDIA_RELEASE.items() if k != "tracks"}, {}) == \
     ["MB-1", MBID_RELEASE["id"]]
-assert soulseek_auto.release_queries(
-    {k: v for k, v in MBID_RELEASE.items() if k not in ("id", "tracks")}, {}) == ["MB-1"]
-
-# ...and the shape `integrations.resolve_release` ACTUALLY publishes: a FLAT
-# `media` list — one entry per track, NO `tracks` key and NO nested
-# `media[].tracks`. `_release_tracks` used to read only the nested shape, so
-# for every real payload it returned nothing and the track queries below never
-# fired: a release was searched by its pressing traits alone (a catalog number
-# and a barcode), which is how "practically every candidate" got rejected —
-# the peers who hold the album under another folder name were never asked.
-FLAT_MEDIA_RELEASE = {
-    "id": MBID_RELEASE["id"], "title": "Mbid Album", "date": "1999",
-    "medium_formats": ["CD"], "country": "GB", "catalog_number": "MB-1",
-    "artists": [{"name": "Mbid Artist"}],
-    "media": [
-        {"disc": 1, "position": 1, "title": "First Song",
-         "recording_mbid": "aaaaaaaa-0000-0000-0000-00000000000a",
-         "artist_credit": "Mbid Artist"},
-        {"disc": 1, "position": 2, "title": "Second Song",
-         "recording_mbid": "aaaaaaaa-0000-0000-0000-00000000000b"},
-    ],
-}
-assert soulseek_auto._release_tracks(FLAT_MEDIA_RELEASE) == FLAT_MEDIA_RELEASE["media"], \
-    soulseek_auto._release_tracks(FLAT_MEDIA_RELEASE)
-_flat_q = soulseek_auto.release_queries(FLAT_MEDIA_RELEASE, {})
-assert _flat_q == [
-    "MB-1", MBID_RELEASE["id"],
-    "aaaaaaaa-0000-0000-0000-00000000000a", "Mbid Artist First Song",
-    "aaaaaaaa-0000-0000-0000-00000000000b", "Mbid Artist Second Song",
-], _flat_q
-# a nested-disc payload is still read too (a raw MusicBrainz release fetched by
-# the manual route, which nests the recordings under each medium)
-NESTED_MEDIA_RELEASE = dict(
-    FLAT_MEDIA_RELEASE,
-    media=[{"position": 1, "tracks": FLAT_MEDIA_RELEASE["media"]}])
-assert soulseek_auto._release_tracks(NESTED_MEDIA_RELEASE) == FLAT_MEDIA_RELEASE["media"], \
-    soulseek_auto._release_tracks(NESTED_MEDIA_RELEASE)
-assert soulseek_auto.release_queries(NESTED_MEDIA_RELEASE, {}) == _flat_q
 # …and an explicit template set a caller decided (the job's own stored queries,
-# its broad second pass) renders EXACTLY as given: no aliases, no MBID set.
+# its broad second pass) renders EXACTLY as given: no aliases, no release id.
 assert soulseek_auto.release_queries(MBID_RELEASE, {}, ["artist album"]) == \
     ["Mbid Artist Mbid Album"]
-# a per-track query that repeats what a template already rendered is not asked
-# twice — the dedupe is against the whole list built so far, and it covers the
-# ids too
+# a digital release's trait template ("artist album year") and the id are both
+# asked, once each — and still no track query
 _dupe = soulseek_auto.release_queries(
-    dict(MBID_RELEASE, medium_formats=["Digital Media"],
-         tracks=[dict(MBID_RELEASE["tracks"][0], title="Mbid Album")]),
-    {"soulseek_auto_digital_queries": ["artist album"]})
-assert _dupe == ["Mbid Artist Mbid Album", MBID_RELEASE["id"],
-                 "aaaaaaaa-0000-0000-0000-00000000000a"], _dupe
-assert soulseek_auto.release_queries(
-    dict(MBID_RELEASE,
-         tracks=[dict(MBID_RELEASE["tracks"][0], recording_mbid=MBID_RELEASE["id"])]),
-    {}).count(MBID_RELEASE["id"]) == 1, "the id is asked for once, not once per row"
-# the queries are what the JOB searches with: every one of them reaches slskd as
-# its own POSTED search, and a track query that finds the whole album wins like
-# any other — the SAME single window, never a second wait (see the parallel
-# batch proofs above: one POST per query, all of them polled in one loop).
+    dict(MBID_RELEASE, medium_formats=["Digital Media"]), {})
+assert _dupe == ["Mbid Artist Mbid Album 1999", MBID_RELEASE["id"]], _dupe
+# the queries are what the JOB searches with: every one reaches slskd as its
+# own POSTED search in the SAME single window (see the parallel batch proofs
+# above: one POST per query, all of them polled in one loop).
 
 # --------------------------------------------------------------------------- #
 # Search text: what reaches slskd is what a SHARE FOLDER NAME can carry. slskd
@@ -3204,15 +3148,12 @@ try:
                         artists=CJK_RELEASE["artists"])
     run = run_job(_cjk_digital, DIGITAL_ROWS, queries=[])
     assert run.imported, run.job["result"]
-    # The per-track queries ride the batch too: `_release_tracks` reads the
-    # FLAT `media` list `resolve_release` publishes, so each of the release's
-    # tracks contributes its own "artist title" (the fixture states no
-    # recording ids, so no `recording_mbid` query). Before that fix these were
-    # dropped and a release was searched by its pressing traits alone.
+    # …and NO track query rides the batch, though this release HAS a tracklist:
+    # an album is searched as an album (spec R432). The fixture's `media` states
+    # two tracks ("ぴーなた Alpha" / "… Beta") and neither is asked for.
     assert [q for q, _t, _l in run.stub.searches] == [
         "ぴーなた アンタに言ってんの 2026",
         CJK_RELEASE["id"],
-        "ぴーなた Alpha", "ぴーなた Beta",
         "pinata What I'm Telling You 2026"], run.stub.searches
 finally:
     _intg.mb_get_cached = _real_mb_cached
@@ -3373,14 +3314,12 @@ assert _sj_calls[1]["queries"] == ["pinned query"], _sj_calls[1]
 run = run_job(TWO_CAT, ONE_DISC_ROWS, queries=[])
 assert run.imported, run.job["result"]
 assert [q for q, _t, _l in run.stub.searches] == [
-    "CAT-1", "CAT-2", TWO_CAT["id"],
-    "Job Artist Alpha", "Job Artist Beta"], run.stub.searches
-# …and the release's own MBID rides the SAME batch (the MBID-driven queries,
-# on by default): it is POSTed as its own slskd search beside the templates,
-# in the one window — never a second wait. Its TRACKS ride it too (each
-# track's own artist+title, read from the FLAT `media` payload), which is the
-# whole point: a peer that holds the album under a name the catalog-number
-# traits never match is otherwise unreachable.
+    "CAT-1", "CAT-2", TWO_CAT["id"]], run.stub.searches
+# …and the release's own MBID rides the SAME batch (on by default): it is
+# POSTed as its own slskd search beside the templates, in the one window —
+# never a second wait. Its TRACKS do NOT ride it, though this release's FLAT
+# `media` payload states two: an album is searched as an album (spec R432),
+# never track by track.
 
 clock = FakeClock()
 _real_time = soulseek_auto.time

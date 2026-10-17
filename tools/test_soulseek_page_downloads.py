@@ -356,7 +356,7 @@ try:
           stopped.status_code == 200 and cancelled_ids == ["sid1", "sid2", "sid3"],
           (stopped.text, cancelled_ids))
     # A RELEASE id is the release case: its own query set, the release's id
-    # included (the MBID-driven queries are on by default).
+    # included (on by default), and never its tracks one at a time (R432).
     stated_queries.clear()
     rel = client.post("/api/soulseek/search", json={"mbid": RELEASE_ID})
     check("a release MBID searches the release's own query set",

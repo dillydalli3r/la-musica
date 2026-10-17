@@ -1707,13 +1707,14 @@ def release_queries(release, cfg, templates=None):
     at `_MAX_CATALOG_QUERIES` — the same cap the MusicBrainz alias queries
     (`_alias_queries`) stop at.
 
-    MBID-DRIVEN QUERIES are appended to that default set (`_mbid_queries`): the
-    release's own MusicBrainz id, its tracks' recording ids and each of those
-    tracks' own "artist title", so a peer folder that names the ids (or holds
-    exactly the album's tracks under a name the traits never match) is
-    reachable — ON by default, off with `soulseek_auto_mbid_queries`. The caller
-    hands the whole list to ONE parallel batch (`_search_queries`), so these
-    cost the same single search window as the traits.
+    The release's OWN MusicBrainz id is appended to that default set
+    (`_mbid_queries`), so a peer folder that names ids is reachable — ON by
+    default, off with `soulseek_auto_mbid_queries`. An album is searched as an
+    album: its tracks are NEVER asked for one at a time (spec R432), because a
+    per-track query asks the network for singles and compilations that hold one
+    song, not for the album being imported. The caller hands the whole list to
+    ONE parallel batch (`_search_queries`), so the id costs the same single
+    search window as the traits.
 
     `templates` renders an explicit set instead of the configured one: the job's
     own stored queries, and the broad digital query the job folds into its batch
@@ -1752,100 +1753,31 @@ def release_queries(release, cfg, templates=None):
     if not queries:
         queries.extend(_pressing_fallback(fields, digital))
     if not explicit:
-        queries.extend(_mbid_queries(release, cfg, queries, fields))
+        queries.extend(_mbid_queries(release, cfg, queries))
         queries.extend(_alias_queries(release, cfg, templates, fields, catalogs, queries))
     return queries
 
 
-def _release_tracks(release):
-    """The release's tracks, in disc/position order, as the payload states them.
+def _mbid_queries(release, cfg, queries):
+    """The release's own MusicBrainz id, appended to its default search set.
 
-    `integrations.resolve_release` publishes the tracklist as a FLAT `media`
-    list — one entry per track, each carrying the recording's MBID, its title
-    and its artist credit (`inc=recordings+artist-credits`) — so asking for
-    them here costs NO MusicBrainz request. A payload whose `media` is a list
-    of DISCS (`media[].tracks[]`, the raw MusicBrainz shape) is read too: the
-    tracks land wherever the payload puts them. Reading only the nested shape
-    is why the MBID / track-name queries below never fired for a `resolve_
-    release` payload, leaving a release searched by its pressing traits alone.
-    A row MusicBrainz states no ordering for keeps the place it came in at."""
-    rows = [t for t in (release.get("tracks") or []) if isinstance(t, dict)]
-    if not rows:
-        for medium in (release.get("media") or []):
-            if not isinstance(medium, dict):
-                continue
-            nested = [t for t in (medium.get("tracks") or [])
-                      if isinstance(t, dict)]
-            if nested:
-                for t in nested:
-                    rows.append(dict(t, disc=t.get("disc") or medium.get("position")))
-            else:
-                # a FLAT media list: this entry IS the track, and it carries
-                # the recording MBID / title / artist credit the queries need.
-                rows.append(medium)
-    order = []
-    for i, row in enumerate(rows):
-        order.append((_position_of(row.get("disc"), 1),
-                      _position_of(row.get("position"), i + 1), i, row))
-    order.sort(key=lambda item: item[:3])
-    return [item[3] for item in order]
+    The id is the album's identity, and a peer folder that names ids is
+    otherwise unreachable from a catalog-number/barcode query. It rides the
+    SAME parallel batch as the configured traits (one search window, never a
+    second wait).
 
-
-def _position_of(value, default):
-    """One track's disc/position as an integer, `default` when it states none."""
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def _mbid_queries(release, cfg, queries, fields):
-    """The MBID-driven queries appended to a release's default search set.
-
-    The owner's ask: search a release by the ids and the tracklist a peer's
-    folder can literally carry, in the SAME parallel batch as the configured
-    traits (one search window — never a second wait):
-
-    * the release's own MusicBrainz id, as a literal query;
-    * the recording MBID of its first `soulseek_auto_mbid_tracks` tracks;
-    * each of those tracks' own "artist title" from the tracklist — the MBID is
-      what puts the tracklist in hand, and a folder named nothing like the
-      release but holding exactly its tracks is otherwise unreachable from a
-      catalog-number query.
-
-    The track-derived queries stop after the first N tracks in disc/position
-    order (clamped 1..10), and everything is deduped against the queries already
-    built — a release whose traits already render the same words must not ask
-    the network twice.
+    NEVER a query per track — not the tracks' recording ids, not their
+    "artist title" (the owner's rule, spec R432): an album auto-import asks
+    the network for the ALBUM. A track name finds singles, compilations and
+    loose files that hold one song, and a folder of everything a peer shares
+    is not the release; the id alone is the album-level reach.
 
     Empty when the switch is off (`soulseek_auto_mbid_queries`, ON by default)
-    or when there is nothing to add."""
+    or when the release states no id."""
     if not bool((cfg or {}).get("soulseek_auto_mbid_queries", True)):
         return []
-    out = []
-
-    def add(q):
-        if q and q not in queries and q not in out:
-            out.append(q)
-
-    add(_search_text(str(release.get("id") or release.get("release_mbid") or "")))
-    # The clamp matches `mlo.config`'s range for the key (1..10), so a hand-set
-    # 0 reads the same here as it does after a save: one track, never none.
-    try:
-        limit = int((cfg or {}).get("soulseek_auto_mbid_tracks", 4))
-    except (TypeError, ValueError):
-        limit = 4
-    limit = max(1, min(10, limit))
-    artist = fields.get("artist") or ""
-    for track in _release_tracks(release)[:limit]:
-        # `resolve_release` states a flat `recording_mbid`; a raw MusicBrainz
-        # payload (the route's own JSON, a queue item's release) nests it.
-        recording = track.get("recording") if isinstance(track.get("recording"), dict) else {}
-        add(str(track.get("recording_mbid") or recording.get("id") or "").strip())
-        credit = str(track.get("artist_credit") or "").strip() or artist
-        title = str(track.get("title") or "").strip()
-        add(_search_text(f"{credit} {title}"))
-    return out
+    mbid = _search_text(str(release.get("id") or release.get("release_mbid") or ""))
+    return [mbid] if mbid and mbid not in queries else []
 
 
 
@@ -1899,8 +1831,9 @@ def mbid_search_queries(mbid, cfg=None):
       — answers with the queries for that one song: artist + title, its album,
       and the id itself (`_recording_queries`);
     * a release or release-group id is the RELEASE case instead — the release's
-      own query set, MBID-driven queries included (`release_queries`) — because
-      there is no single track to name;
+      own ALBUM-level query set (`release_queries`: its trait templates, its
+      alias queries and its own id — never its tracks one at a time, spec R432)
+      — because there is no single track to name;
     * anything MusicBrainz does not know, and any id that is not a UUID at all,
       answers with the reason.
 
