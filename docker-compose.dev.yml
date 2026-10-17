@@ -55,37 +55,17 @@ services:
       # gateway, which is how a browser on the host reaches a published port.
       - MLO_MUSIC_FOLDER=/music
       - MLO_SERVER_HOST=0.0.0.0
-      # The Cloudflare solver service below, so a bed run of the genre/rating
-      # chains reaches RateYourMusic and Album of the Year without a cookie —
-      # the same wiring the real install uses.
-      - MLO_SOLVER_URL=http://flaresolverr:8191
     volumes:
       - ./local/dev/music:/music
     # A bed is started and stopped by hand; it must not come back after a
     # reboot the way the real install does.
     restart: "no"
-    # Bring the solver service up with the bed (see docker-compose.yml).
-    depends_on:
-      - flaresolverr
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=4)"]
       interval: 15s
       timeout: 5s
       start_period: 20s
       retries: 5
-
-  # The Cloudflare solver, the same image the real compose file runs and the
-  # same version the app's own Dependencies installer fetches. The bed's app is
-  # told where it is (MLO_SOLVER_URL above), so a run against the scratch
-  # library reaches RateYourMusic and Album of the Year without a cookie — which
-  # is the whole point of having it in the bed. No host port: nothing outside
-  # this compose network needs to drive a browser through it.
-  flaresolverr:
-    image: ghcr.io/flaresolverr/flaresolverr:v3.5.2
-    container_name: la-musica-dev-solver
-    environment:
-      - LOG_LEVEL=info
-    restart: "no"
 
   # Vite over the app: the hot-reload half, and the one an agent iterating on
   # `web/src` should be looking at.

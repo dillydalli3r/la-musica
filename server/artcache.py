@@ -317,31 +317,50 @@ def _get(url, headers, timeout):
     is STREAMED with a cap: an oversized answer is a mistake or an attack, not
     a cover, and must not be held in memory. The client is the app's shared one
     (`server.httpclient`) — entering it as a context manager would close it for
-    every later caller — and the redirect/timeout stay this request's own.
+    every later caller — and the timeout stays this request's own.
+
+    Redirects are followed BY HAND, one hop at a time. A hop is exactly where
+    an allowlisted host stops being the host being talked to: httpx's own
+    ``follow_redirects`` checked nothing, so a 302 from a cover CDN to
+    ``http://169.254.169.254/…`` (or any address the box can reach) was fetched
+    and relayed back to the client. Every hop must land on a PUBLIC host, the
+    same rule `integrations.fetch_image_bytes` applies to the URLs it is given.
     """
-    try:
-        with httpclient.client().stream(
-                "GET", url, headers=headers, follow_redirects=True,
-                timeout=httpx.Timeout(timeout, read=timeout)) as r:
-            if r.status_code != 200:
-                return r.status_code, b"", ""
-            raw = r.headers.get("content-type")
-            chunks, size = [], 0
-            for chunk in r.iter_bytes(65536):
-                size += len(chunk)
-                if size > intg.IMAGE_MAX_BYTES:
+    from urllib.parse import urljoin, urlparse
+
+    for _hop in range(intg.IMAGE_MAX_REDIRECTS + 1):
+        try:
+            with httpclient.client().stream(
+                    "GET", url, headers=headers, follow_redirects=False,
+                    timeout=httpx.Timeout(timeout, read=timeout)) as r:
+                if r.is_redirect:
+                    target = urljoin(url, str(r.headers.get("location") or ""))
+                    hop = urlparse(target)
+                    if (hop.scheme not in ("http", "https") or not hop.netloc
+                            or not intg._public_host(hop.hostname)):
+                        return None, b"", ""
+                    url = target
+                    continue
+                if r.status_code != 200:
                     return r.status_code, b"", ""
-                chunks.append(chunk)
-    except Exception:
-        return None, b"", ""
-    data = b"".join(chunks)
-    if not data:
-        return 200, b"", ""
-    ctype = _ctype(raw, data)
-    # Not an image at all (some sources list a video as a cover): refuse it, so
-    # the fallback tier can answer with real artwork instead of the UI
-    # rendering a broken image.
-    return (200, data, ctype) if ctype.startswith("image/") else (200, b"", "")
+                raw = r.headers.get("content-type")
+                chunks, size = [], 0
+                for chunk in r.iter_bytes(65536):
+                    size += len(chunk)
+                    if size > intg.IMAGE_MAX_BYTES:
+                        return r.status_code, b"", ""
+                    chunks.append(chunk)
+        except Exception:
+            return None, b"", ""
+        data = b"".join(chunks)
+        if not data:
+            return 200, b"", ""
+        ctype = _ctype(raw, data)
+        # Not an image at all (some sources list a video as a cover): refuse it, so
+        # the fallback tier can answer with real artwork instead of the UI
+        # rendering a broken image.
+        return (200, data, ctype) if ctype.startswith("image/") else (200, b"", "")
+    return None, b"", ""          # a redirect chain that never landed
 
 
 def _caa_front(rg_mbid, size=1200):

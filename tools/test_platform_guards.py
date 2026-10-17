@@ -174,10 +174,10 @@ with runners(True):
               fetchdeps.install_problem(key, platform="linux", machine="x86_64") is None)
     # rsgain is the exception: upstream ships an x86-64 Linux build and no ARM
     # one, so an ARM host must fall back to the distro package rather than
-    # reading a download that does not exist. flaresolverr is the same x64-only
-    # shape with NO distro package behind it (it is distributed as a binary or
-    # a container), so there the row says it cannot be fetched instead of
-    # naming a package that does not provide it.
+    # reading a download that does not exist. A tool distributed as a binary
+    # (or a container) with NO distro package behind it has the same x64-only
+    # shape, so there the row says it cannot be fetched instead of naming a
+    # package that does not provide it.
     for key in LINUX_NATIVE_X64_ONLY:
         check(f"Linux/x86-64 installs {key} from its own release",
               fetchdeps.install_kind(key, platform="linux", machine="x86_64") == "deps"

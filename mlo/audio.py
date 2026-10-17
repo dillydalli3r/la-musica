@@ -1338,6 +1338,21 @@ class AudioFile:
             return self.flush()
         return True
 
+    def _remember_op(self, op):
+        """Remember the change a swap would be making, so a held-file denial
+        hands it to mlo.pending instead of losing it (see _queue_held).
+
+        While a batch is DEFERRED the ops ACCUMULATE: the caller's one flush at
+        the end writes every field in a SINGLE swap, so the queue has to carry
+        every one of them. Assigning per call kept only the LAST field - an
+        `/api/mb/assign` batch over a file the player held queued one tag and
+        reported the whole batch as written."""
+        ops = getattr(self, "_pending_ops", None) if self._defer_save else None
+        if ops is None:
+            self._pending_ops = [op]
+        else:
+            ops.append(op)
+
     def flush(self):
         """Write pending tag changes to disk (no-op when nothing changed)."""
         if not self._dirty:
@@ -1593,7 +1608,7 @@ class AudioFile:
             return True
         # Remember the change: a held-file denial on the swap inside the batch
         # hands this op to mlo.pending (see _queue_held) instead of losing it.
-        self._pending_ops = [{"op": "set_video_tags", "tags": clean}]
+        self._remember_op({"op": "set_video_tags", "tags": clean})
         return self._set_video_tags_batch(_to_mkv_meta(clean))
 
     def _delete_video_tag(self, name):
@@ -2575,9 +2590,9 @@ class AudioFile:
         # atomic swap below hands THIS op to mlo.pending (see _queue_held)
         # instead of throwing the user's edit away. A list value is kept as a
         # list so it stays JSON-serialisable.
-        self._pending_ops = [{
+        self._remember_op({
             "op": "set_tag", "name": str(name),
-            "value": list(value) if isinstance(value, (list, tuple, set)) else value}]
+            "value": list(value) if isinstance(value, (list, tuple, set)) else value})
         name = str(name).upper()
         if name == "LYRICS":
             return self.set_lyrics(value)
@@ -2797,7 +2812,7 @@ class AudioFile:
         name = str(name).upper()
         # Remember the change: a held-file denial on the swap hands this op to
         # mlo.pending (see _queue_held) rather than losing the delete.
-        self._pending_ops = [{"op": "delete_tag", "name": name}]
+        self._remember_op({"op": "delete_tag", "name": name})
         if self.kind == "video":
             return self._delete_video_tag(name)
         if name == "LYRICS":
@@ -2979,7 +2994,7 @@ class AudioFile:
                     return self.delete_lyrics()
                 return bool(self.set_video_tags({"LYRICS": text}))
 
-            self._pending_ops = [{"op": "set_lyrics", "text": text}]
+            self._remember_op({"op": "set_lyrics", "text": text})
             if self.kind in ("flac", "ogg", "opus"):
                 if self.audio.tags is None:
                     if hasattr(self.audio, "add_tags"):
@@ -3031,7 +3046,7 @@ class AudioFile:
         self._invalidate_cache()
         # Remember the change: a held-file denial on the swap hands this op to
         # mlo.pending (see _queue_held) rather than losing the delete.
-        self._pending_ops = [{"op": "delete_lyrics"}]
+        self._remember_op({"op": "delete_lyrics"})
         try:
             if self.kind == "video":
                 # Both lyric keys go in ONE ffmpeg rewrite (a video container

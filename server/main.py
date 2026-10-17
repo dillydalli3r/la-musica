@@ -3775,10 +3775,10 @@ def dependencies_install(req: DepsInstallRequest):
             # install what this platform can install rather than refusing the
             # whole press.
             keys = fetchdeps.installable_keys()
-        # A bulk press means "the missing encoders", never a ~300 MB service
-        # the user has not asked for (see fetchdeps.OPT_IN_TOOLS): FlareSolverr
-        # is installed from its own row (Settings → Discovery, or its
-        # Dependencies row) and only ever updated once it is there.
+        # A bulk press means "the missing encoders", never a service the user
+        # has not asked for (see fetchdeps.OPT_IN_TOOLS — empty since the
+        # scraped sources and their solver service left on 2026-10-12, and the
+        # single place a future service-style tool gets listed).
         keys = [k for k in keys if k not in fetchdeps.OPT_IN_TOOLS]
     else:
         wanted = set(req.keys)
@@ -3826,13 +3826,6 @@ def dependencies_install(req: DepsInstallRequest):
         row = rows.get(result["key"])
         if row:
             result["row"] = row
-    # FlareSolverr is the one tool whose install is not finished by the
-    # download: it is a SERVICE, and installing it is the user saying they want
-    # it. Bring it up here — best effort, in the background, so a ~300 MB
-    # install's response is not held for the start's own `/health` wait — so
-    # "install it" IS the whole setup and no Start press is needed. It no-ops
-    # when something already answers (a sidecar, or a child from an earlier
-    # run); the Discovery card polls until the URL appears.
     return {"results": results}
 
 

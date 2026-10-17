@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .audio import AudioFile
 from .config import should_write_audio_tag
-from .paths import AUDIO_EXTS, DEFAULT_DIGITAL_SOURCE, LIB_AUDIO_EXTS, fsync_dir
+from .paths import AUDIO_EXTS, DEFAULT_DIGITAL_SOURCE, LIB_AUDIO_EXTS
 from .stats import (
     new_stats, _make_pbar, _pbar_skip, _pbar_update, _diff_bytes,
     _walk_files, is_audio_file, _clean_set, _summarize_values,
@@ -15,7 +15,6 @@ from .stats import (
 )
 from .tagtext import canonical_text, is_cd_media
 from .ui import print_header, log, c, Color
-import tempfile
 
 TIMESTAMP_RE = re.compile(r"\[(\d{1,2}):(\d{1,2})(?:\.(\d+))?\]")
 WORD_TS_RE = re.compile(r"<(\d{1,2}):(\d{1,2})(?:\.(\d+))?>")
@@ -709,22 +708,24 @@ def _zero_target_allows(cfg, is_for_lrc: bool) -> bool:
 
 
 def _atomic_write_text(path, text):
-    """Atomic write with fsync to avoid corruption on crash/power loss."""
+    """Atomic write of an .lrc sidecar: temp beside it, then the app's own
+    retrying rename, so a crash cannot truncate the file and a reader holding
+    it momentarily cannot fail the write."""
     import os as _os, tempfile as _tf
+    from .atomic import replace_temp
     tmp = None
     try:
-        fd, tmp = _tf.mkstemp(prefix=".lrc_tmp_", suffix=".lrc", dir=_os.path.dirname(path) or ".")
+        fd, tmp = _tf.mkstemp(prefix=".lrc_tmp_", suffix=".lrc",
+                              dir=_os.path.dirname(path) or ".")
         with _os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
             f.write(text)
-            try:
-                f.flush()
-                _os.fsync(f.fileno())
-            except Exception:
-                pass
-        _os.replace(tmp, path)
-        # The directory fsync is POSIX-only (see paths.fsync_dir); on Windows
-        # the call it used to make could not work at all.
-        fsync_dir(_os.path.dirname(path))
+        # `replace_temp` fsyncs the bytes, carries the destination's mode over
+        # and swaps through `atomic.replace_locked` — the ONE rename every
+        # other library write funnels through. A bare `os.replace` here
+        # surfaced the raw "Access is denied" the moment a player or a scanner
+        # held the .lrc open for an instant.
+        replace_temp(tmp, path)
+        tmp = None                      # the temp IS the file now
         return True
     except Exception:
         try:

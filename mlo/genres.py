@@ -162,7 +162,6 @@ def normalize_genres(names: Iterable, count: int = DEFAULT_GENRE_COUNT,
     """
     count = max(1, int(count or DEFAULT_GENRE_COUNT))
     known: List[str] = []
-    unknown: List[str] = []
     seen = set()
     for raw in iter_names(names):
         name = canonical(raw)
@@ -170,17 +169,13 @@ def normalize_genres(names: Iterable, count: int = DEFAULT_GENRE_COUNT,
             # Kept verbatim: the grade check will flag it, but silently
             # dropping what a source said would be worse than a flagged name.
             name = _clean(raw)
-            if name:
-                unknown.append(name)
+        if not name:
             continue
-        if name in seen:
-            continue
-        seen.add(name)
-        known.append(name)
-    # Unrecognised names are kept, but a repeat of one is a duplicate like any
-    # other: without adding them to `seen` the same word twice survives, and
-    # `issues()` then fails the very list the writer just produced.
-    for name in unknown:
+        # Deduped case-insensitively, and IN PLACE: collecting the recognised
+        # names first and appending the unrecognised ones after reordered the
+        # list, so the cap then kept a name the source stated LATER over the
+        # first one it stated (`["Nonsense", "rock"]` at `mb_genre_count = 1`
+        # stored "Rock" and dropped "Nonsense") - and the order IS the rank.
         key = name.casefold()
         if key in seen:
             continue

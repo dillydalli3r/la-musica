@@ -663,10 +663,10 @@ def show_main_menu(config):
 
     _print_script_list()
 
-    print(f"  16. {'Run All':<23}  {config.get('run_all_order', DEFAULT_RUN_ALL_ORDER)}")
-    print(f"  17. {'Run Custom':<23}  (select order and scripts)")
-    print(f"  18. {'Configuration':<23}  (39 options incl. Run All order)")
-    print(f"  19. {'Dependencies':<23}  (download latest tools)")
+    print(f"  27. {'Run All':<23}  {config.get('run_all_order', DEFAULT_RUN_ALL_ORDER)}")
+    print(f"  28. {'Run Custom':<23}  (select order and scripts)")
+    print(f"  29. {'Configuration':<23}  (39 options incl. Run All order)")
+    print(f"  30. {'Dependencies':<23}  (download latest tools)")
     print(c(f"   0. {'Exit':<23}", Color.YELLOW))
 
     print()
@@ -784,6 +784,32 @@ def _session():
         if choice == "0":
             break
 
+        # The four COMMAND entries are answered BEFORE the script dispatch, and
+        # live on numbers no script uses (27-30). They used to be 16-19 — three
+        # of which ARE script ids — and the script test below came first, so
+        # "Run All" ran Mood & Energy, "Run Custom" ran the transliteration
+        # script and "Dependencies" ran the artist-image one, silently. Only 18
+        # (no script) reached Configuration.
+        elif choice == "27":
+            order = config.get("run_all_order", DEFAULT_RUN_ALL_ORDER)
+            run_scripts_sequence(config, order, title="RUN ALL SCRIPTS")
+
+        elif choice == "28":
+            order = show_custom_menu()
+
+            if not order:
+                print(c("\nNo valid scripts selected.", Color.YELLOW))
+                pause_for_input()
+                continue
+
+            run_scripts_sequence(config, order, title="CUSTOM RUN ORDER")
+
+        elif choice == "29":
+            show_config_menu(config)
+
+        elif choice == "30":
+            manage_dependencies()
+
         elif choice.isdigit() and int(choice) in SCRIPT_LABELS:
             script_id = int(choice)
             name, runner = runners[script_id]
@@ -806,26 +832,6 @@ def _session():
                 print_results(stats, title=f"RESULTS - {name}")
 
             pause_for_input()
-
-        elif choice == "16":
-            order = config.get("run_all_order", DEFAULT_RUN_ALL_ORDER)
-            run_scripts_sequence(config, order, title="RUN ALL SCRIPTS")
-
-        elif choice == "17":
-            order = show_custom_menu()
-
-            if not order:
-                print(c("\nNo valid scripts selected.", Color.YELLOW))
-                pause_for_input()
-                continue
-
-            run_scripts_sequence(config, order, title="CUSTOM RUN ORDER")
-
-        elif choice == "18":
-            show_config_menu(config)
-
-        elif choice == "19":
-            manage_dependencies()
 
         else:
             print(c("\nInvalid option. Please try again.", Color.RED))

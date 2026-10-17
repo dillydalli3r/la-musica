@@ -260,11 +260,11 @@ def drain(*, log=None, limit: int = 32, now=None) -> dict:
                 attempts = int(entry.get("attempts") or 0)
                 first = float(entry.get("first") or now)
                 if not ops:
-                    _remove(key)
+                    _remove(key, ops)
                     dropped += 1
                     continue
                 if not os.path.isfile(key):
-                    _remove(key)
+                    _remove(key, ops)
                     dropped += 1
                     continue
                 try:
@@ -272,13 +272,13 @@ def drain(*, log=None, limit: int = 32, now=None) -> dict:
                 except Exception:
                     attempts += 1
                     if attempts >= MAX_ATTEMPTS or (now - first) >= DROP_AFTER_S:
-                        _remove(key)
+                        _remove(key, ops)
                         dropped += 1
                     else:
-                        _bump(key, attempts, now + INTERVAL_S)
-                        held += 1
+                        if _bump(key, ops, attempts, now + INTERVAL_S):
+                            held += 1
                 else:
-                    _remove(key)
+                    _remove(key, ops)
                     written += 1
         finally:
             _local.active = False
@@ -298,23 +298,36 @@ def drain(*, log=None, limit: int = 32, now=None) -> dict:
     return summary
 
 
-def _remove(key: str) -> None:
+def _unchanged(data: dict, key: str, ops: list) -> bool:
+    """Whether the entry under *key* is still the one *ops* was snapshotted
+    from. A drain applies its entries OUTSIDE ``_lock``, so a second edit of
+    the same file can re-record it (``enqueue`` merges, and re-arms the
+    window) while the replay is running: acting on the entry then would throw
+    the newer value away."""
+    entry = data["entries"].get(key)
+    return entry is not None and list(entry.get("ops") or []) == ops
+
+
+def _remove(key: str, ops: list) -> None:
     with _lock:
         data = _read()
-        if key in data["entries"]:
+        if _unchanged(data, key, ops):
             del data["entries"][key]
             _write(data)
 
 
-def _bump(key: str, attempts: int, next_try: float) -> None:
+def _bump(key: str, ops: list, attempts: int, next_try: float) -> bool:
+    """Delay the entry this drain tried; False when a newer denial replaced it
+    (that one re-armed its own ``next_try``, so it needs no help)."""
     with _lock:
         data = _read()
-        entry = data["entries"].get(key)
-        if entry is None:
-            return
+        if not _unchanged(data, key, ops):
+            return False
+        entry = data["entries"][key]
         entry["attempts"] = int(attempts)
         entry["next_try"] = float(next_try)
         _write(data)
+        return True
 
 
 # --------------------------------------------------------------------------- #

@@ -1085,7 +1085,22 @@ export default function PlayerBar() {
     // painted elsewhere, so it must show the track the block is showing (and
     // the artwork URL that block already drew) rather than jumping a round
     // trip ahead of it on a track change.
-    if (!ms || !block) return;
+    if (!ms) return;
+    if (!block) {
+      // Nothing is playing, so the session must stop OFFERING the controls it
+      // offered for the track that is gone: these handlers close over that
+      // track, and a lock-screen / headset / media-key PLAY would start it
+      // again — the one press nobody can undo from a bar whose queue is empty
+      // (its transport is disabled). Clear exactly what was registered.
+      for (const action of Object.keys(osHandlers.current)) {
+        try {
+          ms.setActionHandler(action, null);
+        } catch { /* this action is unsupported here */ }
+      }
+      osHandlers.current = {};
+      try { ms.metadata = null; } catch { /* unsupported */ }
+      return;
+    }
     try {
       if (typeof (window as any).MediaMetadata === "function") {
         ms.metadata = new (window as any).MediaMetadata({
@@ -1486,7 +1501,20 @@ export default function PlayerBar() {
   // the <audio> pair stays paused so there is exactly one decoder.
   useEffect(() => {
     const track = queue[index];
-    if (!track) return;
+    if (!track) {
+      // The queue ran out — its only row, the PLAYING one, was removed (see
+      // store.queueRemoveAt, which bumps `queueId` for exactly this). Nothing
+      // owns the element any more, and this effect is the only thing that bump
+      // re-runs, so the element must be silenced HERE. Returning early (what
+      // this used to do) left the track sounding with no way to stop it: the
+      // bar flips to "Nothing playing", the transport is disabled off `idle`
+      // and the fullscreen pane unmounts with the track.
+      loadedPath.current = null;
+      loadedToken.current = playToken;
+      pauseApp(media(), "queue-emptied");
+      setPlaying(null);
+      return;
+    }
     // A pure reorder (queueMove / remove around the playing row) resolves to
     // the SAME track — reloading it would restart the song from zero, and a
     // trim of the queue is the same case. A DELIBERATE press that resolves to

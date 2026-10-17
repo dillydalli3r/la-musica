@@ -71,14 +71,6 @@ services:
       # password until a phone or another computer connects — set one under
       # Settings -> Security when it does.
       - MLO_SERVER_HOST=0.0.0.0
-      # The Cloudflare solver service below. FlareSolverr keeps a real browser
-      # warm behind Cloudflare's challenge, which is what makes the two scraped
-      # sources (RateYourMusic, Album of the Year) readable without the user
-      # pasting a session cookie. That is the whole wiring: server/solver.py
-      # reads this variable and `cf_solver_url` stays empty. Set a
-      # `cf_solver_url` in Settings → Discovery to point somewhere else, which
-      # wins over this.
-      - MLO_SOLVER_URL=http://flaresolverr:8191
     volumes:
       # ALL app state (config.json, playlists.db, the beets config +
       # beets-library.db, and the ReplayGain / RYM / metadata caches) lives in
@@ -98,13 +90,6 @@ services:
       #   - D:/Music:/music                 # Windows (Docker Desktop)
       - ./music:/music
     restart: unless-stopped
-    # The solver service first, so the app's first RateYourMusic/Album of the
-    # Year lookup is not racing the container's boot. `service_started` is the
-    # most this can promise without a healthcheck on a third-party image, and
-    # the app asks the solver per request anyway — a source that finds it
-    # silent reports the challenge rather than failing the import.
-    depends_on:
-      - flaresolverr
     # How long Docker waits after SIGTERM before it SIGKILLs the container.
     # This is the number that decides whether a script mid-album, an import
     # mid-move or a tag write gets to finish or to abort cleanly.
@@ -147,49 +132,13 @@ services:
       retries: 3
 
 # ---------------------------------------------------------------------------
-# The Cloudflare solver (FlareSolverr), as its own service.
-#
-# Both scraped sources — RateYourMusic and Album of the Year — sit behind
-# Cloudflare's challenge, which refuses every plain client this project can run
-# (measured: plain HTTP, curl_cffi, headless Chromium, a headed real Chrome).
-# This container keeps a real (undetected) browser warm and solves the
-# challenge once per site; the clearance cookies it wins are reused by the app's
-# fast path until they expire. The app finds it through MLO_SOLVER_URL above —
-# there is nothing else to configure, and no cookie to paste.
-#
-# It is PINNED to the same version the app's own Dependencies installer fetches
-# (mlo/fetchdeps.PINNED) so a container and a host install run the same solver.
-# Bump both together.
-#
-# The published port is LOOPBACK-ONLY and optional: the app reaches the service
-# over this compose network, so the mapping exists only for a browser or a
-# host-run app to use. FlareSolverr drives a real browser and upstream warns it
-# can be abused — never publish it on 0.0.0.0.
-#
-# It is deliberately NOT labelled for watchtower: the image is pinned on
-# purpose, and an automatic bump to `latest` would change the solver under a
-# running import.
-# ---------------------------------------------------------------------------
-  flaresolverr:
-    image: ghcr.io/flaresolverr/flaresolverr:v3.5.2
-    container_name: la-musica-solver
-    environment:
-      - LOG_LEVEL=info
-      - TZ=${TZ:-Etc/UTC}
-    ports:
-      - "127.0.0.1:8191:8191"
-    restart: unless-stopped
-
-# ---------------------------------------------------------------------------
 # Automatic updates (on by default - see the note at the top of this file).
 #
 # watchtower polls the registry and, when a newer la musica image appears,
 # stops this container, pulls the new one and starts it again. Two deliberate
 # restrictions: WATCHTOWER_LABEL_ENABLE means it only ever touches containers
-# carrying the watchtower label (the app above is the only one — the solver
-# service is pinned on purpose and updates with a `docker compose pull`), and
-# CLEANUP removes the image it replaced rather than leaving every version on
-# disk.
+# carrying the watchtower label (the app above is the only one), and CLEANUP
+# removes the image it replaced rather than leaving every version on disk.
 #
 # It checks every WATCHTOWER_POLL_INTERVAL (300 s by default) — the first check
 # is one interval after it starts, not at startup, so waiting out the first

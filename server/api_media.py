@@ -416,8 +416,7 @@ class SharedFileResponse(Response):
     Same observable behaviour as ``FileResponse``: the stat headers, a single
     ``Range`` answered with 206, ``Accept-Ranges`` where the route advertises
     it, and the handle held for the whole body (the point of it). ``close()``
-    releases the handle; it is also the response's own ``BackgroundTask``, so a
-    cancelled stream closes it too.
+    releases the handle, and ``__call__`` runs it on EVERY way out.
     """
 
     chunk_size = 64 * 1024
@@ -440,7 +439,6 @@ class SharedFileResponse(Response):
         self._declared = [(k.encode("latin-1"), v.encode("latin-1"))
                           for k, v in static.items()]
         super().__init__(content=b"", media_type=media_type, headers=static)
-        self.background = BackgroundTask(self.close)
 
     def close(self):
         try:
@@ -454,6 +452,19 @@ class SharedFileResponse(Response):
                 or value == formatdate(self.stat_result.st_mtime, usegmt=True))
 
     async def __call__(self, scope, receive, send):
+        # ``Response.__call__`` would run ``self.background`` for us, but this
+        # class answers the ASGI messages itself (holding the handle for the
+        # whole body is the point), so it also has to RELEASE that handle
+        # itself — on every exit, including a stream the client cancelled
+        # mid-track. Handing ``close`` to a BackgroundTask that nothing runs
+        # left one open handle (and, on Windows, the tag swap's moved-aside
+        # inode) per stream until a cyclic-GC pass got round to it.
+        try:
+            await self._stream(scope, receive, send)
+        finally:
+            self.close()
+
+    async def _stream(self, scope, receive, send):
         size = int(self.stat_result.st_size)
         start, end, status = 0, size - 1, 200
         request_headers = Headers(scope=scope)

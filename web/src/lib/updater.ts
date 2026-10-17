@@ -91,17 +91,33 @@ export async function checkForUpdate(): Promise<UpdateOffer | null> {
  *  at "installing", which is what the surface says while it waits. */
 export async function installUpdate(): Promise<void> {
   if (!updateSupported() || !state.offer) return;
+  // Subscribe BEFORE the stage says "downloading": the surface draws a spinner
+  // and no button for that stage, so a `listen` that rejects would leave the
+  // user watching a download that never started with nothing to press (the
+  // `invoke` catch below is the only other way back to idle). Every sibling
+  // bridge guards the same call the same way — "no such event API" is a real
+  // outcome on a plain browser build.
+  let stop: () => void;
+  try {
+    stop = await listen<{ stage: string; downloaded: number; total: number | null }>(
+      "mlo-update",
+      (event) => {
+        const { stage, downloaded, total } = event.payload;
+        setState({
+          stage: stage === "installing" ? "installing" : "downloading",
+          progress: stage === "installing" ? null : { downloaded, total },
+        });
+      },
+    );
+  } catch (e) {
+    setState({
+      stage: "idle",
+      progress: null,
+      error: e instanceof Error ? e.message : String(e),
+    });
+    return;
+  }
   setState({ stage: "downloading", progress: null, error: "" });
-  const stop = await listen<{ stage: string; downloaded: number; total: number | null }>(
-    "mlo-update",
-    (event) => {
-      const { stage, downloaded, total } = event.payload;
-      setState({
-        stage: stage === "installing" ? "installing" : "downloading",
-        progress: stage === "installing" ? null : { downloaded, total },
-      });
-    },
-  );
   try {
     await invoke("update_install");
   } catch (e) {

@@ -114,9 +114,18 @@ assert G.normalize_genres(["alternative rock", "trip hop"], 3) == [
 assert G.normalize_genres(["rock", "jazz"]) == ["Rock", "Jazz"]
 assert G.normalize_genres(["rock"]) == ["Rock"]
 # An unrecognised name is neither resolved nor dropped: it is kept verbatim and
-# never treated as an ancestor of anything (it lands after the known names).
+# never treated as an ancestor of anything. It also keeps its own POSITION: the
+# list IS the source's stated order and `normalize_genres` reorders nothing
+# (spec R38/R40 — "caps the list WITHOUT sorting it", "reorders nothing"), so a
+# name it cannot resolve is not quietly moved behind the ones it can. That
+# matters at the cap: the FIRST names win, so `["Nonsense", "rock"]` at
+# `mb_genre_count = 1` stores "Nonsense", which `GENRE_VOCAB` then flags —
+# dropping the name the source stated FIRST is the one outcome the rule forbids.
 assert G.normalize_genres(["Nonsense", "Pop", "Electropop"], 3) == [
-    "Pop", "Electropop", "Nonsense"]
+    "Nonsense", "Pop", "Electropop"]
+assert G.normalize_genres(["Nonsense", "rock"], 1) == ["Nonsense"]
+assert G.normalize_genres(["rock", "Nonsense"], 1) == ["Rock"]
+assert G.normalize_genres(["Rock", "rock"], 2) == ["Rock"]
 # A single stored value another tagger joined is read as the names inside it.
 assert G.split_stored("Rock; Shoegaze") == ["Rock", "Shoegaze"]
 assert G.split_stored("shoegaze / rock") == ["shoegaze", "rock"]

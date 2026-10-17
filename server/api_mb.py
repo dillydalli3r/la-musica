@@ -471,7 +471,14 @@ def mb_assign(req: AssignTagsRequest):
                     errs.append(f"{p} {k}: {af.error or 'write failed'}")
             except Exception as e:
                 errs.append(f"{p} {k}: {e}")
-        af.defer_save(False)
+        if af.defer_save(False) is False:
+            # The ONE write the batch saved up did not land (a full disk, a
+            # read-only file, a holder that refuses the rename). The change is
+            # queued in mlo.pending like any other denial, but the caller must
+            # still hear about it: a batch answering ok=true with an empty
+            # `errors` while the file is untouched is the owner's "Rated, but
+            # the RATING tag was not written" report all over again.
+            errs.append(f"{p}: {af.error or 'tag write failed'}")
         tagcache.invalidate_path(fp)
         return errs, 1, None
 

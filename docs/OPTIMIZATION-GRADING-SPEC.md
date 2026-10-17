@@ -527,7 +527,7 @@ neither is offered this — the notice they get is a link, not an installer.
 
 ## 3. Grading checks
 
-71 keys exist; **every one of them ships ON**, checks and file categories
+73 keys exist; **every one of them ships ON**, checks and file categories
 alike. A fresh install grades strictly without anyone pressing a preset: the
 two that used to ship off (`grade_check_audit`, `grade_include_other`) are
 named in `mlo/config.py::STRICT_DEFAULT_KEYS` so the change is visible rather
@@ -731,7 +731,7 @@ graded, taggable track rather than an invisible one.
 The three presets are one-click starting points on the Grading page; they edit
 the local config copy and only take effect on **Save** (`POST /api/config`).
 **R18 — the SHIPPED defaults ARE Strict**: every `grade_check_*` and every
-`grade_include_*` key ships `true` (69 of 69), so a fresh install grades
+`grade_include_*` key ships `true` (73 of 73), so a fresh install grades
 strictly with nobody pressing anything. The two that used to ship off —
 `grade_check_audit` and `grade_include_other` — are named in
 `mlo/config.py::STRICT_DEFAULT_KEYS`, so the change is a readable fact rather
@@ -6218,7 +6218,7 @@ import's own `_phase` reads are published only when the step really happens
   rule. This is the existing `grade_check_lyrics_format` check (its
   idempotency comparison: re-running the formatter must change nothing), with
   the existing `grade_check_lyrics` presence check reading the corrected
-  `has_lyrics_text`; **no new check key is introduced, so the count stays 69**.
+  `has_lyrics_text`; **no new check key is introduced, so the count stays 73**.
   `tools/test_lyrics_fix.py` holds the case: a file carrying
   `[id:$00000000]`, an `[ar:]`-style header and a matching `TITLE - ARTIST`
   line formats to the timed lines only and grades as one failed check, the

@@ -77,7 +77,7 @@ SCRIPT_LABELS = {sid: name for sid, name, _ in SCRIPTS}
 # An id the run does not contain is not a wait (a configured chain that leaves
 # a step out is satisfied by definition), so an edge can never wedge a run.
 SCRIPT_DEPS = {
-    4: (1, 2, 5, 8, 9, 10, 13, 15, 17, 21, 23),
+    4: (1, 2, 5, 6, 8, 9, 10, 13, 15, 17, 21, 23),
     6: (9,),
     # "advisories" is not a script: it is the step an IMPORT adds to its chain
     # (`run_chain`'s `extra`, built in server/imports.py) — the per-track
