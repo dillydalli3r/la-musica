@@ -236,6 +236,22 @@ defaulted to the owner's LIVE install on port 8000 (one of them deletes through
 twelve reported a missing `flac.exe` as a FAIL instead of the contract's exit
 2. All are fixed; the FLAC case is verified both ways on one machine.
 
+Two page-level defects in the same wave are fixed as well, both reachable by
+ordinary use:
+
+- **The Soulseek review tab CRASHED** when an album could not be imported: the
+  failed list read `x.album` while the server appends `{path, reason}`, so
+  `undefined.split()` threw inside render and the page unmounted into the app's
+  error screen. (The screen one line below explains the file-in-use case it
+  could never reach.)
+- **"Reset to defaults" + Save dropped a configured install into the first-run
+  wizard.** The reset copies `DEFAULT_CONFIG`, which carries
+  `first_run_done: false`, and the keep-guard read the FORM rather than the
+  live config — a map that holds neither `first_run_done` nor `music_folder`.
+  Reproduced before the fix and confirmed after, in a browser on a scratch
+  library: the old build lands on `/setup` with the settings surface gone, the
+  new one keeps both keys.
+
 Reported, not fixed — each is a behaviour change worth its own pass:
 
 - **`server/playlists.py`** — an interrupted `_ensure_user_key` rebuild leaves
@@ -269,6 +285,21 @@ Reported, not fixed — each is a behaviour change worth its own pass:
   found"; `thumbs` caches a failed probe for ever; a Spotify token is not keyed
   to its credentials and a 401 is never retried; `ai.py` retries 401/403/429;
   and `docs/RUST-TUI-PROMPT.md` still lists RateYourMusic as a live service.
+- **Five import/export flows discard a write's own failures.** `/api/mb/assign`
+  answers `{ok: false, errors: […]}` with HTTP 200 when a locked or read-only
+  file refused its tags (the route says so itself: "callers show `errors`"), and
+  the wizard's four Save buttons and the Soulseek "Tags written" toast report
+  success anyway, clear the edited mark and advance. `/api/run`'s per-script
+  failures are discarded the same way by the wizard's Finish step ("album
+  graded") and the Library's batch menu.
+- **`server/api_storage.py` measures the default transfer folders, not the
+  configured `soulseek_download_dir`**, so the Storage card's downloads row and
+  `app_total` are short by the whole download cache on any install that moved
+  it — while the Downloads page, the staging routes and the cap sweep all act
+  on the real folder.
+- **The ratings heal can revert the user's newest verdict**: `map_for`'s
+  `UPDATE OR REPLACE` moves a stale pre-move row onto a path that already holds
+  a newer rating, and SQLite resolves that conflict by DELETING the newer row.
 
 ## Verification
 
