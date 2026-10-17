@@ -4116,7 +4116,7 @@ export const api = {
       body: JSON.stringify({ path }),
     }),
   soulseekImport: () =>
-    json<{ ok: boolean; moved: string[]; failed?: { album: string; reason: string }[]; organized?: boolean; organize_error?: string; media_tagged?: number; converted?: number }>(`${API}/soulseek/import`, { method: "POST" }, 120000),
+    json<{ ok: boolean; moved: string[]; failed?: { path: string; reason: string }[]; organized?: boolean; organize_error?: string; media_tagged?: number; converted?: number }>(`${API}/soulseek/import`, { method: "POST" }, 120000),
   soulseekAutoStatus: () =>
     json<SlskAutoJob>(`${API}/soulseek/auto`, undefined, 30000),
   /** Start the auto-import for one release (or one browsed folder). With

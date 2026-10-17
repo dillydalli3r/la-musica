@@ -1678,9 +1678,15 @@ export default function SettingsPage() {
     const d = configDefaults as Record<string, unknown> | undefined;
     if (!d) return;
     const cur = scriptCfg as Record<string, unknown>;
+    const live = config as Record<string, unknown> | undefined;
     const next: Record<string, unknown> = { ...d };
     for (const k of ["music_folder", "first_run_done"]) {
-      if (cur[k] !== undefined) next[k] = cur[k];
+      // The LIVE config, not the form: neither key is a settings FIELD, so
+      // neither ever appears in `scriptCfg` — reading the form copied nothing
+      // and the default's own `first_run_done: false` then rode the next Save,
+      // dropping a configured install back into the first-run wizard.
+      const value = cur[k] !== undefined ? cur[k] : live?.[k];
+      if (value !== undefined) next[k] = value;
     }
     setScriptCfg(next);
     if (d.encoder_tags) setEncoderTags(d.encoder_tags as Record<string, Record<string, boolean>>);

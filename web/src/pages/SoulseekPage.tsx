@@ -3344,7 +3344,11 @@ function ReviewPanel() {
   };
   const [justImported, setJustImported] = useState<{
     moved: string[];
-    failed: { album: string; reason: string }[];
+    // `{path, reason}` — what server/soulseek.py's `_last_import_failed`
+    // actually appends. It was declared `album` here and read as `x.album`
+    // below, so the failed list threw `Cannot read properties of undefined`
+    // and unmounted the page the moment one album could not be moved.
+    failed: { path: string; reason: string }[];
   } | null>(null);
   const importAll = async () => {
     // The preview player streams the file straight off disk; Windows won't let
@@ -3444,9 +3448,9 @@ function ReviewPanel() {
           </div>
           <div className="space-y-0.5 text-[11px] text-red-200/80">
             {justImported.failed.map((x) => (
-              <div key={x.album} title={x.album}>
+              <div key={x.path} title={x.path}>
                 <span className="text-red-300">
-                  {x.album.split(/[\\/]/).filter(Boolean).pop() ?? x.album}
+                  {x.path.split(/[\\/]/).filter(Boolean).pop() ?? x.path}
                 </span> — {x.reason}
                 {/winerror\s*32|being used by another process|in use/i.test(x.reason)
                   ? " · a file is still in use — stop the preview player and retry"
