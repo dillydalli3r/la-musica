@@ -30,7 +30,7 @@ TOOLS = tools_mod.detect_all_tools()
 FFMPEG = (TOOLS.get("ffmpeg") or {}).get("ffmpeg_exe")
 if not FFMPEG:
     print("skip: ffmpeg not installed (run a dependency install first)")
-    sys.exit(0)
+    sys.exit(2)                      # cannot run here, not a pass
 
 from mlo.audio import AudioFile          # noqa: E402
 from mlo import naming                   # noqa: E402

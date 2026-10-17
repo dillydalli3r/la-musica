@@ -77,7 +77,10 @@ TMP = tempfile.mkdtemp(prefix="mlo_mb_metadata_")
 
 def make_flac(path):
     """A real (silent) FLAC, so the writes below go through the real writer."""
-    assert FLAC_EXE, "flac.exe not found under .dependencies"
+    if not FLAC_EXE:
+        # AGENTS.md: 2 means "this machine", never a failure — a box
+        # without .dependencies must not report the suite as red.
+        raise SystemExit(2)   # cannot run here: flac.exe not found under .dependencies
     wav = path + ".wav"
     with wave.open(wav, "w") as w:
         w.setnchannels(2)

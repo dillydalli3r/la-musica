@@ -29,7 +29,7 @@ if ui.returncode == 0:
 elif ui.returncode == 2:
     print("SKIPPED  the wizard render check (node or web/node_modules missing): "
           + ((ui.stderr.strip().splitlines() or [""])[0]))
-    sys.exit(0)
+    sys.exit(2)                      # the child's own "cannot run here", passed on
 else:
     print(ui.stdout)
     raise SystemExit("the wizard render check failed:\n" + ui.stderr)

@@ -18,7 +18,7 @@
  * Needs a live backend serving the built app (`web/dist`):
  *   npm --prefix web run build
  *   python -m uvicorn server.main:app --host 127.0.0.1 --port 8000
- *   node tools/check_sidebar.cjs http://127.0.0.1:8000
+ *   node tools/check_sidebar.cjs http://127.0.0.1:8011
  *
  * Playwright is required (same resolution as tools/shot.cjs): set PLAYWRIGHT
  * to a module path, or install it. Exit 2 when it is missing.
@@ -36,7 +36,7 @@ try {
   process.exit(2);
 }
 
-const BASE = process.argv[2] || process.env.BASE || "http://127.0.0.1:8000";
+const BASE = process.argv[2] || process.env.BASE || "http://127.0.0.1:8011";   // never the owner's 8000 - see AGENTS.md
 const results = [];
 const check = (name, pass, detail) => results.push({ name, pass: !!pass, detail: String(detail) });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

@@ -318,7 +318,7 @@ try:
     from fastapi.testclient import TestClient
 except Exception as e:                                            # pragma: no cover
     print(f"  SKIP  TestClient unavailable: {e}")
-    raise SystemExit(0)
+    raise SystemExit(2)                                          # cannot run here
 
 app = FastAPI()
 app.include_router(api_add.router)

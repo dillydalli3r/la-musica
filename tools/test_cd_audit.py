@@ -56,7 +56,7 @@ def ffmpeg_exe():
 FLAC, FFMPEG = flac_exe(), ffmpeg_exe()
 if not FLAC:
     print("skipped: no flac encoder available")
-    sys.exit(0)
+    sys.exit(2)                      # cannot run here, not a pass
 
 TMP = tempfile.mkdtemp(prefix="mlo-cd-audit-")
 ALBUM = os.path.join(TMP, "Artists", "Artist", "Ripped (2020)")

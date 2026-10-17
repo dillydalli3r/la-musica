@@ -28,7 +28,7 @@ FFPROBE = (TOOLS.get("ffmpeg") or {}).get("ffprobe_exe")
 FLAC = (TOOLS.get("flac") or {}).get("flac_exe")
 if not FFMPEG or not FFPROBE or not FLAC:
     print("skip: ffmpeg/flac not installed (run a dependency install first)")
-    sys.exit(0)
+    sys.exit(2)                      # cannot run here, not a pass
 
 from mlo.config import DEFAULT_CONFIG
 from mlo.flac import convert_album_lossless, target_codec

@@ -97,7 +97,7 @@ def _find(name):
 FLAC, FFMPEG = _find("flac.exe"), _find("ffmpeg.exe")
 if not FLAC or not FFMPEG:
     print("SKIP: a real rip fixture needs .dependencies' flac.exe and ffmpeg.exe")
-    sys.exit(0)
+    sys.exit(2)                      # cannot run here, not a pass
 
 from fastapi.testclient import TestClient  # noqa: E402
 from mutagen.flac import FLAC as MFLAC  # noqa: E402

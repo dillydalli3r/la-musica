@@ -204,7 +204,10 @@ def make_wav(path, seconds=1, freq=440):
 
 
 def make_flac(path):
-    assert FLAC_EXE, "flac.exe not found under .dependencies"
+    if not FLAC_EXE:
+        # AGENTS.md: 2 means "this machine", never a failure — a box
+        # without .dependencies must not report the suite as red.
+        raise SystemExit(2)   # cannot run here: flac.exe not found under .dependencies
     wav = path + ".wav"
     make_wav(wav)
     subprocess.run([FLAC_EXE, "-s", "-f", "-8", "-o", path, wav],

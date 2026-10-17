@@ -195,6 +195,20 @@ def scrobble_post(req: ScrobblePost):
     if accepted >= 1:
         return {"ok": True, "scrobbled": True, "queued": False,
                 "queued_count": lastfm.queued_count(cfg), "error": ""}
+    if lastfm.session_dead(err):
+        # NOT an outage: the session is gone (Last.fm 9/26 — the user revoked
+        # the app, or the key was suspended). Queueing this play would keep the
+        # spool growing for ever while Settings → Scrobbling still showed
+        # "Connected as …", because nothing else ever tests the session on the
+        # write path. Drop the stored session — the same thing the Disconnect
+        # button does — so the panel stops claiming a connection and offers the
+        # reconnect that is the only fix.
+        cfg["lastfm_session_key"] = ""
+        cfg["lastfm_username"] = ""
+        _save(cfg)
+        return {"ok": False, "scrobbled": False, "queued": False,
+                "queued_count": lastfm.queued_count(cfg),
+                "error": err, "reconnect": True, "status": lastfm.status(cfg)}
     count = lastfm.queue_scrobble(entry, cfg)
     return {"ok": False, "scrobbled": False, "queued": True,
             "queued_count": count, "error": err or "Last.fm did not accept it"}

@@ -12,7 +12,7 @@
  * Needs a live backend serving the built app (`web/dist`):
  *   npm --prefix web run build
  *   python -m uvicorn server.main:app --host 127.0.0.1 --port 8000
- *   node tools/check_responsive.cjs http://127.0.0.1:8000
+ *   node tools/check_responsive.cjs http://127.0.0.1:8011
  *
  * Playwright is required (same resolution as tools/shot.cjs): set PLAYWRIGHT
  * to a module path, or install it. Exit 2 when it is missing. */
@@ -26,7 +26,7 @@ try {
   process.exit(2);
 }
 
-const BASE = process.argv[2] || process.env.BASE || "http://127.0.0.1:8000";
+const BASE = process.argv[2] || process.env.BASE || "http://127.0.0.1:8011";   // never the owner's 8000 - see AGENTS.md
 
 /* The three shapes that matter: a phone in portrait (the narrowest thing the
  * app is installed on), a tablet, and a desktop window. */

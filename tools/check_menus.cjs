@@ -36,7 +36,7 @@ try {
 }
 
 const ARGS = process.argv.slice(2);
-const BASE = ARGS.find((a) => !a.startsWith("--")) || process.env.BASE || "http://127.0.0.1:8000";
+const BASE = ARGS.find((a) => !a.startsWith("--")) || process.env.BASE || "http://127.0.0.1:8011";   // never the owner's 8000 - see AGENTS.md
 const ONLY = (ARGS.find((a) => a.startsWith("--only=")) || "").slice("--only=".length);
 const want = (group) => !ONLY || ONLY === group;
 

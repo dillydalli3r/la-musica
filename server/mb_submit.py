@@ -155,7 +155,17 @@ def _get_userinfo(token, timeout=None):
 
 def _post_rating(body, token, timeout=None):
     """One rating POST. -> (answer_text, refusal); a refusal inside a 200
-    (MusicBrainz's `<error>` element) counts as a refusal too."""
+    (MusicBrainz's `<error>` element) counts as a refusal too.
+
+    The POST takes MusicBrainz's request SLOT first (`integrations.
+    mb_reserve_slot`): submissions share the host's one-request-per-second
+    budget with every read, and "Upload all ratings" walks a whole rated
+    library one POST per album — without the gate that is a burst MetaBrainz
+    answers with 429, and a refused album used to be dropped on the floor
+    (see server.mb_ratings_sync).
+    """
+    from server import integrations as _intg
+    _intg.mb_reserve_slot()
     headers = {"Authorization": f"Bearer {token}",
                "Content-Type": "application/xml; charset=utf-8",
                "User-Agent": _user_agent()}

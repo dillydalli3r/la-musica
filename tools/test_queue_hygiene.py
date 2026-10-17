@@ -181,9 +181,10 @@ for _entry in sorted(os.listdir(os.path.join(ROOT, ".dependencies"))):
         if os.path.isfile(_cand):
             FLAC_EXE = _cand
             break
-assert FLAC_EXE, "flac.exe not found under .dependencies"
-
-
+if not FLAC_EXE:
+    # AGENTS.md: 2 means "this machine", never a failure — a box
+    # without .dependencies must not report the suite as red.
+    raise SystemExit(2)   # cannot run here: flac.exe not found under .dependencies
 def _png1x1():
     """A real 1x1 PNG: the grader opens the album cover when Pillow is
     installed, so the artwork has to be an image."""

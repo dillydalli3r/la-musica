@@ -81,6 +81,24 @@ class MusicBrainzError(RuntimeError):
         self.status = status
 
 
+def mb_reserve_slot():
+    """Take this process's MusicBrainz request slot: wait until one second has
+    passed since the last MB request made here, then stamp it.
+
+    ONE budget for READS (`mb_get`) and WRITES (`mb_submit._post_rating`):
+    MusicBrainz's etiquette is per client, not per verb. The slot is reserved
+    BEFORE the request — so two writers queue behind each other instead of
+    bursting — and it is the same `_last_request` `mb_get` stamps after its own
+    call, so a write and a read can never land inside one second either.
+    """
+    global _last_request
+    with _mb_lock:
+        elapsed = time.time() - _last_request
+        if elapsed < _MB_MIN_INTERVAL:
+            time.sleep(_MB_MIN_INTERVAL - elapsed)
+        _last_request = time.time()
+
+
 _MB_MIN_INTERVAL = 1.0     # MusicBrainz etiquette: one request per second
 _MB_RETRY_STATUS = (429, 500, 502, 503, 504)
 _MB_BACKOFF_BASE = 1.0     # retry wait: base * 2**(attempt-1), plus jitter
@@ -140,23 +158,35 @@ def mb_get(endpoint, params=None, timeout=30.0, retries=3, deadline=MB_RETRY_DEA
                 time.sleep(min(_MB_MIN_INTERVAL - elapsed,
                                max(0.0, deadline - (time.time() - started))))
             try:
-                r = httpx.get(
-                    f"{MB_BASE}/{endpoint}",
-                    params=params or {},
-                    headers=headers,
-                    # never sit on the socket past the deadline either
-                    timeout=min(timeout, max(1.0, deadline - (time.time() - started))),
-                )
-            except httpx.HTTPError as e:
-                status, reason = None, f"connection error ({e.__class__.__name__})"
-            else:
-                if r.status_code not in _MB_RETRY_STATUS:
-                    _raise_mb_refusal(r)
-                    r.raise_for_status()
-                    return r.json()
-                status, reason = r.status_code, f"HTTP {r.status_code}"
-                retry_after = r.headers.get("Retry-After")
-            _last_request = time.time()
+                try:
+                    r = httpx.get(
+                        f"{MB_BASE}/{endpoint}",
+                        params=params or {},
+                        headers=headers,
+                        # never sit on the socket past the deadline either
+                        timeout=min(timeout, max(1.0, deadline - (time.time() - started))),
+                    )
+                except httpx.HTTPError as e:
+                    status, reason = None, f"connection error ({e.__class__.__name__})"
+                else:
+                    if r.status_code not in _MB_RETRY_STATUS:
+                        _raise_mb_refusal(r)
+                        r.raise_for_status()
+                        return r.json()
+                    status, reason = r.status_code, f"HTTP {r.status_code}"
+                    retry_after = r.headers.get("Retry-After")
+            finally:
+                # The stamp IS the throttle, so it is set on EVERY way out of
+                # this block — the successful one included. Stamping it only on
+                # the retry/error path left `_last_request` at 0.0 for a whole
+                # run of successful reads, which is MusicBrainz's documented
+                # one-request-per-second etiquette turned into "as fast as the
+                # socket answers": an artist walk (four pages of release groups
+                # plus a browse each) or a rated-library pass fired every
+                # request back to back, and MetaBrainz answers that burst with
+                # 429/503 — or blocks the user agent. `finally` also covers the
+                # 4xx raises below, which cost the same request budget.
+                _last_request = time.time()
         if attempts >= retries:
             break
         wait = min(_MB_BACKOFF_BASE * (2 ** (attempts - 1)), _MB_BACKOFF_MAX)

@@ -2033,9 +2033,10 @@ if os.path.isdir(_deps):
                 break
 if FLAC_EXE is None:
     FLAC_EXE = shutil.which("flac")
-assert FLAC_EXE, "flac.exe not found — the digital-release case needs real FLACs"
-
-
+if not FLAC_EXE:
+    # AGENTS.md: 2 means "this machine", never a failure — a box
+    # without .dependencies must not report the suite as red.
+    raise SystemExit(2)   # cannot run here: flac.exe not found — the digital-release case needs real FLACs
 def _dig_flac(name, tags):
     path = os.path.join(DIG_ALBUM, name)
     wav = path + ".wav"

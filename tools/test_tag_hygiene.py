@@ -72,7 +72,10 @@ def ok(cond, label):
 def make_flac(path):
     """A real (if silent) FLAC, so the tag writes below go through the real
     container writer — the same fixture recipe tools/test_grading_paths.py uses."""
-    assert FLAC_EXE, "flac.exe not found under .dependencies"
+    if not FLAC_EXE:
+        # AGENTS.md: 2 means "this machine", never a failure — a box
+        # without .dependencies must not report the suite as red.
+        raise SystemExit(2)   # cannot run here: flac.exe not found under .dependencies
     wav = path + ".wav"
     with wave.open(wav, "w") as w:
         w.setnchannels(2)

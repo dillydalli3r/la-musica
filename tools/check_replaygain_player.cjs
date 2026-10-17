@@ -22,7 +22,7 @@
  * Needs a live backend serving the built app (`web/dist`):
  *   npm --prefix web run build
  *   python -m uvicorn server.main:app --host 127.0.0.1 --port 8000
- *   node tools/check_replaygain_player.cjs http://127.0.0.1:8000
+ *   node tools/check_replaygain_player.cjs http://127.0.0.1:8011
  *
  * `/api/replaygain` is STUBBED (a pending answer that later becomes a real
  * one) so the late-apply path is exercised deterministically instead of
@@ -39,7 +39,7 @@ try {
   process.exit(2);
 }
 
-const BASE = process.argv[2] || process.env.BASE || "http://127.0.0.1:8000";
+const BASE = process.argv[2] || process.env.BASE || "http://127.0.0.1:8011";   // never the owner's 8000 - see AGENTS.md
 const GAIN_DB = -7.2;
 const GAIN_LINEAR = Math.pow(10, GAIN_DB / 20); // 0.4365
 const results = [];

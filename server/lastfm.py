@@ -31,6 +31,7 @@ surface and ``server/credential_checks.py`` reads ``verify_session``.
 import hashlib
 import json
 import os
+import threading
 from typing import Dict, List, Optional, Tuple
 
 # Last.fm's single API host — the same one ``server/discovery.py`` throttles as
@@ -164,6 +165,25 @@ def _error_of(payload, status: int) -> str:
     if status and status >= 400:
         return f"HTTP {status}"
     return ""
+
+
+# Last.fm's codes that mean the SAVED SESSION is gone rather than the service
+# being away: 9 "Invalid session key" (the user revoked the app in their
+# Last.fm settings, or Last.fm invalidated it) and 26 "Suspended API key".
+# Queueing a scrobble either refused would grow the spool for ever while the
+# panel still said "Connected as …" — the only fix is to reconnect, so the app
+# has to say so instead of pretending it is an outage.
+_DEAD_SESSION_ERRORS = ("error 9", "error 26")
+
+
+def session_dead(error: str) -> bool:
+    """Whether a refusal means the stored session no longer works.
+
+    Read off the sentence `_error_of` builds, so it is the SAME answer however
+    the call was made (a scrobble write, a now-playing notice, a verify).
+    """
+    text = str(error or "").strip().lower()
+    return any(text.startswith(code) for code in _DEAD_SESSION_ERRORS)
 
 
 def _call(method: str, params: dict, cfg: dict, *, signed: bool,
@@ -432,13 +452,28 @@ def _read_spool() -> List[dict]:
 def _write_spool(rows: List[dict]) -> None:
     path = spool_path()
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    tmp = f"{path}.tmp-{os.getpid()}"
+    # The temp name carries the THREAD as well as the process: two scrobbles
+    # handled by two FastAPI worker threads would otherwise share one temp
+    # path and overwrite each other's half-written file.
+    tmp = f"{path}.tmp-{os.getpid()}-{threading.get_ident()}"
     with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
         for row in rows:
             fh.write(json.dumps(row, ensure_ascii=False) + "\n")
         fh.flush()
         os.fsync(fh.fileno())
     os.replace(tmp, path)
+
+
+# ONE lock for the spool's read-modify-write. Both `queue_scrobble` and
+# `flush_spool` rewrite the WHOLE file, so overlapping them lost a play: the
+# flush reads [p1], spends seconds on the network, meanwhile a second scrobble
+# appends p2 (writing [p1, p2]), and the flush then writes back its own list —
+# p2 gone although its caller was told "queued". FastAPI runs these sync routes
+# in a threadpool, so the overlap is real, and it is likeliest exactly when it
+# matters: during an outage, when several plays queue while the opportunistic
+# flush is in flight. The promise this module makes is "a refused scrobble is
+# queued and retried, never dropped".
+_spool_lock = threading.Lock()
 
 
 def queue_scrobble(entry: dict, cfg=None) -> int:
@@ -448,15 +483,20 @@ def queue_scrobble(entry: dict, cfg=None) -> int:
     older than 14 days, so the oldest queued entries are the ones already
     nearest to being unusable.
     """
-    rows = _read_spool()
-    rows.append(dict(entry))
-    if len(rows) > SPOOL_MAX:
-        rows = rows[-SPOOL_MAX:]
-    try:
-        _write_spool(rows)
-    except OSError:
+    with _spool_lock:
+        # The whole read-modify-write lives inside the lock: a list read
+        # before it would be seconds stale by the time a concurrent flush
+        # finished, and writing that list back is how a just-queued play was
+        # dropped.
+        rows = _read_spool()
+        rows.append(dict(entry))
+        if len(rows) > SPOOL_MAX:
+            rows = rows[-SPOOL_MAX:]
+        try:
+            _write_spool(rows)
+        except OSError:
+            return len(rows)
         return len(rows)
-    return len(rows)
 
 
 def queued_count(cfg=None) -> int:
@@ -475,34 +515,40 @@ def flush_spool(cfg=None, timeout: Optional[float] = None) -> dict:
     if reason:
         return {"ok": False, "flushed": 0, "queued": queued_count(cfg),
                 "error": reason}
-    rows = _read_spool()
-    if not rows:
-        return {"ok": True, "flushed": 0, "queued": 0, "error": ""}
-    flushed = 0
-    while rows:
-        slice_ = rows[:BATCH]
-        accepted, err = send_scrobbles(cfg, slice_, timeout=timeout)
-        if err or accepted < len(slice_):
-            # A slice the service took only PART of is kept WHOLE: Last.fm
-            # does not say which entries it ignored in a way that maps back to
-            # the spool's order, and re-sending an accepted scrobble is a
-            # lesser sin than dropping a play that was never counted.
-            try:
-                _write_spool(rows)
-            except OSError:
-                pass
-            return {"ok": False, "flushed": flushed,
-                    "queued": len(rows),
-                    "error": err or "Last.fm accepted only part of the batch"}
-        flushed += accepted
-        rows = rows[accepted:]
-        if accepted == 0:
-            break
-    try:
-        _write_spool(rows)
-    except OSError:
-        pass
-    return {"ok": True, "flushed": flushed, "queued": len(rows), "error": ""}
+    # The whole read → send → write-back runs under the spool lock. Sending
+    # takes seconds, and a scrobble queued in the meantime used to be erased
+    # by the write-back of a list read before it (see _spool_lock). The lock
+    # is held across the network on purpose: the alternative is losing plays,
+    # and this runs at most once per play.
+    with _spool_lock:
+        rows = _read_spool()
+        if not rows:
+            return {"ok": True, "flushed": 0, "queued": 0, "error": ""}
+        flushed = 0
+        while rows:
+            slice_ = rows[:BATCH]
+            accepted, err = send_scrobbles(cfg, slice_, timeout=timeout)
+            if err or accepted < len(slice_):
+                # A slice the service took only PART of is kept WHOLE: Last.fm
+                # does not say which entries it ignored in a way that maps back
+                # to the spool's order, and re-sending an accepted scrobble is
+                # a lesser sin than dropping a play that was never counted.
+                try:
+                    _write_spool(rows)
+                except OSError:
+                    pass
+                return {"ok": False, "flushed": flushed,
+                        "queued": len(rows),
+                        "error": err or "Last.fm accepted only part of the batch"}
+            flushed += accepted
+            rows = rows[accepted:]
+            if accepted == 0:
+                break
+        try:
+            _write_spool(rows)
+        except OSError:
+            pass
+        return {"ok": True, "flushed": flushed, "queued": len(rows), "error": ""}
 
 
 # --------------------------------------------------------------------------- #

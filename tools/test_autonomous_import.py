@@ -41,8 +41,10 @@ if os.path.isdir(_deps):
             if os.path.isfile(cand):
                 FLAC_EXE = cand
                 break
-assert FLAC_EXE, "flac.exe not found under .dependencies"
-
+if not FLAC_EXE:
+    # AGENTS.md: 2 means "this machine", never a failure — a box
+    # without .dependencies must not report the suite as red.
+    raise SystemExit(2)   # cannot run here: flac.exe not found under .dependencies
 TMP = tempfile.mkdtemp(prefix="mlo_autonomous_import_")
 MF = os.path.join(TMP, "music")
 LIB = os.path.join(MF, "Artists")

@@ -172,7 +172,10 @@ CFG = {
 def make_flac(name, artist="System of a Down", title="Suite-Pee",
               album="System of a Down", lyrics=None, seconds=1.2):
     """One real FLAC track with the tags the lyrics chain reads."""
-    assert FLAC_EXE, "flac.exe not found under .dependencies"
+    if not FLAC_EXE:
+        # AGENTS.md: 2 means "this machine", never a failure — a box
+        # without .dependencies must not report the suite as red.
+        raise SystemExit(2)   # cannot run here: flac.exe not found under .dependencies
     path = os.path.join(MF, "Album", name)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     wav = path + ".wav"

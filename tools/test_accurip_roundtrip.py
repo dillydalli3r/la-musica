@@ -82,7 +82,7 @@ except Exception:
 if not FFMPEG or not ARCUE:
     print("skipped: no ffmpeg and/or CUETools ARCUE available "
           f"(ffmpeg={FFMPEG}, arcue={ARCUE})")
-    sys.exit(0)
+    sys.exit(2)                      # cannot run here, not a pass
 
 TMP = tempfile.mkdtemp(prefix="mlo-accurip-")
 ALBUM = os.path.join(TMP, "Artists", "Artist", "Ripped (2020)")

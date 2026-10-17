@@ -205,12 +205,92 @@ Reported but deliberately NOT changed, with the reasoning:
   step on the instrumentals node when 13 is absent is a two-line change and
   leaves every chain that carries 13 exactly as it is.
 
+## The second wave
+
+Six more slices were audited once the first ten were in — the third-party
+integrations, state and persistence, the server-side player, the dev harness,
+secret handling, and the page components. Four of its findings are fixed here
+because each broke a promise the app makes out loud:
+
+- **MusicBrainz's one-request-per-second etiquette was INERT on the success
+  path.** `mb_get` stamped its throttle only when a request was retried or
+  failed, so every successful read went out as fast as the socket answered: an
+  artist walk, a rated-library pass and the genre taxonomy all burst, which
+  MetaBrainz answers with 429/503 — or blocks the user agent for. Measured with
+  a stubbed transport: four reads used to fire with gaps `[0.0, 0.0, 0.0] s`;
+  they are `[1.0, 1.0, 1.001]` now.
+- **Rating submissions posted with no throttle at all**, one request per album
+  back to back — the write half of the same budget. Both now take ONE slot
+  (`integrations.mb_reserve_slot`), whatever direction they travel in.
+- **A revoked Last.fm session was queued as though it were an outage**: every
+  play was refused and spooled for ever while Settings still said "Connected
+  as …". Last.fm's error 9/26 now clears the stored session and asks for the
+  reconnect that is the only fix, and queues nothing.
+- **The scrobble spool's read-modify-write had no lock**, so "a refused
+  scrobble is queued and retried, never dropped" was false under concurrency —
+  exactly during the outage it exists for. Verified with two threads.
+
+The harness defects are the same class of broken promise: six browser checks
+defaulted to the owner's LIVE install on port 8000 (one of them deletes through
+`/api/trash/delete`), seven suites reported "cannot run here" as a PASS, and
+twelve reported a missing `flac.exe` as a FAIL instead of the contract's exit
+2. All are fixed; the FLAC case is verified both ways on one machine.
+
+Reported, not fixed — each is a behaviour change worth its own pass:
+
+- **`server/playlists.py`** — an interrupted `_ensure_user_key` rebuild leaves
+  `likes_user` behind, and every later call then fails with "table likes_user
+  already exists": playlists, hearts and favourites are unreachable until the
+  table is dropped by hand. Reproduced in a scratch database.
+- **`mlo/config.py` + `mlo/paths.py`** — a scratch scope MOVES the checkout's
+  own `server/data` into the scratch folder, so the documented cleanup (delete
+  the scratch folder) loses it. The comment two lines above states the opposite
+  intent.
+- **Four watchers in `server/main.py` never stop**, and the Soulseek page
+  watcher can start a NEW import after the shutdown window has opened.
+- **`server/mb_ratings_sync.py`** — queued rating uploads are lost on any
+  failure or exit (an in-memory set cleared before the POST), the queue submits
+  as the default user so a named user's album rating is never uploaded, and the
+  worker has no stop.
+- **`server/soulseek_auto.py`** — a job cancelled while waiting for its album
+  folder never releases the claim, so the next job for that album waits an hour
+  and then fails, on every retry, until the app restarts; and a cancelled job
+  can still add the wish it was about to ask about.
+- **The desktop shell grants its privileged commands to ANY loopback page**
+  (`capabilities/default.json`'s `http://127.0.0.1:*` list with `csp: null`),
+  and the shell drops its probe listener before the child binds the port — so a
+  local process that wins the race holds them.
+- **`GET /api/config` returns every stored third-party secret** (Soulseek
+  password, AI key, Spotify/Last.fm/MusicBrainz/AcoustID/Discogs credentials)
+  to any client holding a session; its own docstring says it returns "minus the
+  one secret in it". Fixing it means masking the keys AND teaching
+  `POST /api/config` to ignore the sentinel, which is a UI-visible change.
+- Smaller ones: a yt-dlp failure is reported as "no acceptable YouTube match
+  found"; `thumbs` caches a failed probe for ever; a Spotify token is not keyed
+  to its credentials and a 401 is never retried; `ai.py` retries 401/403/429;
+  and `docs/RUST-TUI-PROMPT.md` still lists RateYourMusic as a live service.
+
 ## Verification
 
 Every Python suite and every Node suite in `tools/` runs for this release on
 the frozen tree, together with the web gate (`tsc -b`, `oxlint src`,
-`npm run build`); the audit's changes were re-run against the suites that
-import them. The audit itself is a source read: every defect above was traced
-through the code, and the two whose mechanism needed a runtime answer (the
-redirect relay and the emptied queue) were verified by following the call path
-to the ASGI response and the effect's own guards respectively.
+`npm run build`) and `check_versions.py v2.0.0` (twelve copies, tag matches).
+The changes this audit made were re-run against the suites that import them.
+
+The two defects whose mechanism needed a runtime answer were driven for real:
+the emptied queue in a browser, on a scratch library — the OLD build keeps
+sounding (`paused=false t=10.34`) while the bar says "Nothing playing", the new
+one pauses — and the CLI menu through a dispatch stub (`27` runs the whole
+chain, `16` runs Mood & Energy). Beyond those, the four second-wave fixes carry
+their own reproductions: the MusicBrainz read and write budgets were measured
+on a stubbed transport (`[0.0, 0.0, 0.0] s` before, `[1.0, 1.0, 1.001]` after,
+one shared sequence of writes and reads), the spool race with two threads (a
+scrobble queued during an in-flight flush survives it), the revoked Last.fm
+session through the real route on a scratch config (`queued: false`,
+`reconnect: true`, session cleared, `connected: false`), and the harness skip
+rule both ways (twelve suites pass with flac present; one exits 2 with
+`.dependencies` hidden and PATH stripped of flac).
+
+Where a defect could not be answered by running it, the report says so: the
+rest of the audit is a source read, and every claim in it is a traced call
+path, not a guess.

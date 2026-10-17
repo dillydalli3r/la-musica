@@ -94,7 +94,10 @@ def check(label, cond, detail=""):
 def make_flac(path, seconds=6):
     """A real (silent) FLAC, so every tag write below goes through the real
     container writer — the fixture recipe tools/test_tag_hygiene.py uses."""
-    assert FLAC_EXE, "flac.exe not found under .dependencies"
+    if not FLAC_EXE:
+        # AGENTS.md: 2 means "this machine", never a failure — a box
+        # without .dependencies must not report the suite as red.
+        raise SystemExit(2)   # cannot run here: flac.exe not found under .dependencies
     os.makedirs(os.path.dirname(path), exist_ok=True)
     wav = path + ".wav"
     with wave.open(wav, "w") as w:
