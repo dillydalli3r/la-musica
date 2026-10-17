@@ -1780,7 +1780,6 @@ def _mbid_queries(release, cfg, queries):
     return [mbid] if mbid and mbid not in queries else []
 
 
-
 # --------------------------------------------------------------------------- #
 # A user's own search, by MusicBrainz id (the manual surface)
 # --------------------------------------------------------------------------- #
