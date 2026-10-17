@@ -663,6 +663,7 @@ _fp_calls = []
 _fp_probe = {"inside": 0, "peak": 0}
 _fp_lock = _threading.Lock()
 _real_run_tool, _real_request = _acoustid.run_tool, _acoustid._request
+_real_fpcalc_path = _acoustid.fpcalc_path
 
 
 def _stub_fpcalc(argv, capture_output=True, text=True, timeout=None):
@@ -697,6 +698,12 @@ def _detect(cfg):
 
 _acoustid.run_tool = _stub_fpcalc
 _acoustid._request = _stub_request
+# …and the AVAILABILITY gate answers yes whatever this machine has: the section
+# is about the LANES (`run_tool` is stubbed above), so a box without Chromaprint
+# — every CI runner — must not turn it into "fpcalc not installed" and an empty
+# `albums` list, which is what made this section pass only where fpcalc is
+# bundled. The real gate's own answers are pinned in the section above.
+_acoustid.fpcalc_path = lambda cfg=None: "fpcalc"
 _acoustid._FP_MEMO.clear()
 try:
     _fp_calls.clear()
@@ -721,6 +728,7 @@ try:
     assert again == laned, f"{again} != {laned}"
 finally:
     _acoustid.run_tool, _acoustid._request = _real_run_tool, _real_request
+    _acoustid.fpcalc_path = _real_fpcalc_path
     _acoustid._FP_MEMO.clear()
 
 # --------------------------------------------------------------------------- #

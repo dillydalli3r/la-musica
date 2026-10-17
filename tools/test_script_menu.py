@@ -635,8 +635,25 @@ else:
         """What one album press reported for *key*, or 0."""
         res = outcomes.get(("album", sid, None)) or {}
         return int(((res.get("stats") or {}).get(key)) or 0)
+    # A pass whose TOOL this machine does not have cannot write anything, and
+    # that is not a failure — it is the same "cannot run here" a suite reports
+    # with exit 2, so it is SAID OUT LOUD here rather than dropped from the
+    # loop. `mlo.deps.capabilities` is the app's OWN answer to "which tools are
+    # here" (the Dependencies page renders it), so the sweep asks it instead of
+    # keeping a second list of what each script needs. On a CI runner — no
+    # Chromaprint, no vendored librosa — that is 12 and 21; on a machine with
+    # both, every one of these assertions runs.
+    from mlo import deps as _deps
+    _caps = _deps.capabilities()
+    _tool_feature = {12: "keybpm", 21: "acoustid"}
     for sid, what in ((12, "Key & BPM"), (21, "the AcoustID pair"),
                       (3, "the FLAC re-encode"), (1, "the lyrics format")):
+        feature = _tool_feature.get(sid)
+        row = _caps.get(feature) or {}
+        if feature and not row.get("available"):
+            print(f"  SKIP {sid} ({what}) cannot write here: "
+                  f"{row.get('reason') or 'its tool is not installed'}")
+            continue
         check(f"{sid} ({what}) really wrote something ({wrote(sid)})",
               wrote(sid) >= 1,
               str((outcomes.get(("album", sid, None)) or {}).get("stats"))[:160])
