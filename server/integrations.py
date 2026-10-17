@@ -5093,6 +5093,75 @@ def _kind_for(mbid):
     return {"release-group": "release_group"}.get(t, t) or None
 
 
+def releases_for_disc_id(disc_id):
+    """The releases MusicBrainz holds for a Disc ID — one row per release.
+
+    A Disc ID is a hash of the disc's own track table (mlo.discs), so this is
+    the one lookup that answers "WHICH pressing is this?" from the rip log
+    alone: no tag, no fingerprint, no name search. `GET /ws/2/discid/<id>`
+    answers every release attached to that disc — a compilation, a reissue and
+    its original all share one — and each row here carries what an import
+    needs to offer one: the release's id, title, artist and date, the MEDIUM
+    that holds this disc (its position, format and track count) and the
+    tracklist, in order.
+
+    Rows are ordered by the medium's own position then the release's date, so
+    a single-disc release (medium 1 of a set that states one disc) is the
+    first row — the ordinary case — and a boxed set's later discs keep their
+    order. Raises `MusicBrainzError` when the service does not answer; an
+    unknown Disc ID is an empty list, not an error."""
+    from urllib.parse import quote
+
+    data = mb_get("discid/" + quote(str(disc_id)),
+                  {"inc": "artist-credits+recordings+release-groups",
+                   "fmt": "json"}, timeout=30.0)
+    rows = []
+    for rel in (data or {}).get("releases") or []:
+        rid = str(rel.get("id") or "")
+        if not rid:
+            continue
+        credits = [c for c in (rel.get("artist-credit") or []) if isinstance(c, dict)]
+        artist = "".join(str(c.get("name") or (c.get("artist") or {}).get("name") or "")
+                         for c in credits)
+        artist_mbid = ""
+        for c in credits:
+            mbid = str((c.get("artist") or {}).get("id") or "")
+            if mbid:
+                artist_mbid = mbid
+                break
+        media = [m for m in (rel.get("media") or []) if isinstance(m, dict)]
+        mine = None
+        for m in media:
+            for d in (m.get("discs") or []):
+                if str((d or {}).get("id") or "") == str(disc_id):
+                    mine = m
+                    break
+            if mine is not None:
+                break
+        tracks = []
+        for m in ([mine] if mine is not None else media):
+            for t in (m.get("tracks") or []):
+                tracks.append({"position": t.get("position"),
+                               "title": t.get("title") or t.get("name") or ""})
+        rows.append({
+            "release_id": rid,
+            "title": rel.get("title") or "",
+            "artist": artist,
+            "artist_mbid": artist_mbid,
+            "date": rel.get("date") or "",
+            "country": rel.get("country") or "",
+            "status": rel.get("status") or "",
+            "track_count": int(mine.get("track-count") or 0) if mine else int(rel.get("track-count") or 0),
+            "disc_position": int(mine.get("position") or 0) if mine else 0,
+            "discs": len(media),
+            "format": (mine.get("format") or "") if mine else "",
+            "matches_this_disc": mine is not None,
+            "tracks": tracks,
+        })
+    rows.sort(key=lambda r: (r["disc_position"] or 99, r["date"] or "9999"))
+    return rows
+
+
 def auto_import_targets(mbid, kind=None, mode="best", types=None,
                         limit=BULK_MAX_GROUPS):
     """([{mbid,title,candidates}], [{mbid,reason}]) — what a bulk auto-import should queue.
@@ -5140,8 +5209,8 @@ def auto_import_targets(mbid, kind=None, mode="best", types=None,
     # queuing a release or a group the library already holds downloaded the
     # same album a second time, and the duplicate then landed beside it.
     from mlo.config import load_config
-    from server import wishes
-    owned = wishes.owned_mbids(load_config())
+    from server import library as lib_mod
+    owned = lib_mod.owned_mbids(load_config())
     if kind == "release":
         rel, rid = resolve_release(mbid)
         if not rid:

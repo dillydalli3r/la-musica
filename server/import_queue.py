@@ -137,24 +137,6 @@ def start(paths=None, on_done=None):
         _thread = threading.Thread(target=_run, args=(work, on_done),
                                    name="mlo-import-all", daemon=True)
         # A NEW IMPORT IS RUNNING: the queue view's COMPLETED rows come off its
-        # list (nothing on disk is touched, and failed/needs-attention rows are
-        # never taken — see api_queue.clear_completed_for_new_import). Off this
-        # thread on purpose: the clear reads the whole queue payload, and
-        # `start()` holds `_lock` for its whole body. The CUT is stamped HERE,
-        # before the thread is spawned: the clear's read of slskd takes seconds,
-        # and a row that settles while it is in flight — including one this very
-        # run finished — is THIS run's news, not history.
-        before = time.time()
-
-        def _autoclear():
-            try:
-                from server import api_queue
-                api_queue.clear_completed_for_new_import(before=before)
-            except Exception:
-                pass
-
-        threading.Thread(target=_autoclear, name="mlo-queue-autoclear",
-                         daemon=True).start()
         _thread.start()
         return {"ok": True, "status": status()}
 

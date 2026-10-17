@@ -52,6 +52,19 @@
  * same window reads after it is widened to 1440×900, and the wide layout's
  * right-hand column is re-measured at 1440×900 / 1920×1080 while it is at it.
  *
+ * The player must not paint a scrollbar the reader did not ask for. A box that
+ * scrolls on ONE axis and says nothing about the other has `overflow: auto`
+ * computed for it, and the cover column — the pane's own left half — is
+ * `overflow-y-auto` for a short window: the artwork's `-inset-6` halo overhung
+ * it, so the column painted a horizontal bar along its bottom-left edge, which
+ * is the owner's "scroll bar still shows up in the bottom left of the
+ * fullscreen player". Measured from the LAYOUT, not from a screenshot: an
+ * overlay engine (any headless Chromium) paints that bar with no layout effect
+ * and no pixels at all, while the owner's runtime reserves real space for it —
+ * so the pass reads the condition that makes a bar exist (a horizontally
+ * scrollable box whose content is wider than it, with no `scrollbar-width:
+ * none`), at the owner's own window size and at the other three.
+ *
  * Everything here is measured, not eyeballed: the frame from the cover
  * wrapper's COMPUTED border/outline (a `ring-*` in Tailwind is a box-shadow,
  * so a ring is told apart from the art's deliberate drop shadow by its zero
@@ -429,6 +442,35 @@ const surface = (page) => page.evaluate(() => {
     rowTitles: row ? [...row.querySelectorAll("button")].map((b) => b.getAttribute("title")) : [],
     rowBox: row ? box(row) : null,
     viewport: { w: window.innerWidth, h: window.innerHeight },
+    // A box that scrolls on ONE axis and says nothing about the other has
+    // `overflow: auto` COMPUTED for it, so content wider than it paints a
+    // horizontal scrollbar along that box's bottom edge. The artwork's halo is
+    // `-inset-6` — 24 px past the art on every side — so once the art was as
+    // wide as its column (R439) the halo overhung the column, and the cover
+    // column painted that bar at its own bottom-left: the owner's "scroll bar
+    // in the bottom left of the fullscreen player" (measured at their
+    // 1061×1024 the column's clientWidth was 419 with a scrollWidth of 451).
+    // The bar itself cannot be seen in a headless run (overlay scrollbars, and
+    // the screenshot shows nothing), so this reads the LAYOUT that would paint
+    // one: an overflowing horizontally-scrollable box that no `scrollbar-width:
+    // none` themes away. `barH` is the height a real bar reserves there — 0 in
+    // an overlay engine, the platform's thickness in a classic one.
+    scrollBars: (() => {
+      const found = [];
+      for (const el of root.querySelectorAll("*")) {
+        const cs = getComputedStyle(el);
+        if (cs.overflowX !== "auto" && cs.overflowX !== "scroll") continue;
+        if (cs.scrollbarWidth === "none") continue;
+        const overX = el.scrollWidth - el.clientWidth;
+        if (overX <= 1) continue;
+        found.push({
+          el: `${el.tagName.toLowerCase()}.${String(el.className || "").slice(0, 46)}`,
+          overX,
+          barH: el.offsetHeight - el.clientHeight,
+        });
+      }
+      return found;
+    })(),
     overArt,
     paintedOverArt,
     meta: bare(titleLine ? (titleLine.closest("div.h-8")?.parentElement ?? null) : null),
@@ -1386,6 +1428,14 @@ const stampDecimalsPass = async (page, album) => {
   check("the album art wrapper has no outline in the default state",
     before.art?.outlineStyle === "none" && !before.art?.focused, `outline ${before.art?.outlineStyle} ${before.art?.outlineWidth}`);
 
+  // ---- no scrollbar the reader did not ask for ------------------------------
+  // The pane's own scroller themes its bar away (`.no-scrollbar`), and nothing
+  // else in the player is allowed to paint one: a box that scrolls on one axis
+  // computes `overflow: auto` on the other, and the artwork's `-inset-6` halo
+  // overhanging the cover column is exactly such an overflow (R440).
+  check("no scroll container in the player paints a horizontal scrollbar",
+    before.scrollBars.length === 0, JSON.stringify(before.scrollBars));
+
   // ---- ONE lyrics control, in the player's own control row -----------------
   check("the lyrics pane has exactly one control", before.toggleCount === 1, `found ${before.toggleCount}`);
   check("that control sits in the player's control row",
@@ -1682,6 +1732,11 @@ const stampDecimalsPass = async (page, album) => {
       !s.error && !!s.layout && s.layout.paneRight !== null &&
         s.layout.paneRight <= s.layout.rowRight + 0.5 && s.layout.paneRight > s.layout.rowLeft,
       s.error || (s.layout ? `pane right ${s.layout.paneRight} vs body ${s.layout.rowLeft}..${s.layout.rowRight}` : "no row"));
+    // …and no box in the player is left overflowing on the axis it looks like it
+    // does not scroll, which is what paints a bar the reader cannot account for
+    // (the cover column's own bottom-left edge, R440).
+    check(`${w}×${h}: no scroll container in the player paints a horizontal scrollbar`,
+      !s.error && s.scrollBars.length === 0, s.error || JSON.stringify(s.scrollBars));
     await page.keyboard.press("Escape");
     await sleep(400);
   }

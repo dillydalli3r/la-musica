@@ -1,5 +1,17 @@
 # Notes for coding agents working in this repo
 
+## Album download / Soulseek was REMOVED in 2.1.0
+
+The acquisition pipeline (slskd, search, transfers, shares, the wishlist,
+artist watch, the acquisition queue, page downloads) is gone — modules, routes,
+pages and config keys. The bullets below that describe Soulseek behaviour are
+history: they explain what the code did and why, and the rules they carry
+(fill-only tag writes, strip_source_on_cd OFF, a serial advisory pass, a
+worker's own cost) still bind wherever the same code runs. **Nothing may add a
+download path back without the owner saying so** (spec R441); what replaces the
+pipeline's evidence is the manual import, whose wizard now matches a CD rip to
+its pressing from the log's own TOC (`/api/import/log-match`, spec R442).
+
 ## Never host the app on port 8000
 
 The owner runs la musica on **127.0.0.1:8000** (the Docker container `la-musica`,

@@ -89,14 +89,6 @@ DISPLAY_NAMES = {
     "beets": "beets",
     "chromaprint": "Chromaprint (fpcalc)",
     "yt-dlp": "yt-dlp",
-    # The Soulseek daemon. It is a TOOL, not a pip package, and the Soulseek
-    # page's empty state sends the user here for it ("Install it from Settings
-    # → Dependencies (key: slskd)") — the row has to exist for that sentence to
-    # mean anything. Upstream ships one build per host and they share one
-    # `slskd v<version>` folder in a library two hosts can read (see
-    # server.soulseek.slskd_exe), which is why the Windows asset and the Linux
-    # ones are both in the tables below.
-    "slskd": "slskd",
 }
 
 REPOS = {
@@ -111,7 +103,6 @@ REPOS = {
     "cuetools": "gchudov/cuetools.net",
     "chromaprint": "acoustid/chromaprint",
     "yt-dlp": "yt-dlp/yt-dlp",
-    "slskd": "slskd/slskd",
 }
 
 # Ordered asset-name preferences (regex, matched case-insensitively).
@@ -132,12 +123,6 @@ ASSET_PATTERNS = {
     # The release also ships extensionless POSIX builds and a tarball; the
     # Windows binary is the bare .exe (SINGLE_EXE_TOOLS).
     "yt-dlp": [r"^yt-dlp\.exe$"],
-    # One zip per host, all from the same release tag: win-x64 here, the
-    # linux builds in LINUX_BINARIES below. Each holds its own name —
-    # slskd.exe on Windows, a bare slskd elsewhere — and both may sit in one
-    # folder (a library two hosts read), which is why the two tables are the
-    # only thing that decides which of them this host runs.
-    "slskd": [r"^slskd-[\d.]+-win-x64\.zip$"],
 }
 
 INSTALL_PREFIX = {
@@ -155,7 +140,6 @@ INSTALL_PREFIX = {
     "beets": "beets",
     "chromaprint": "chromaprint",
     "yt-dlp": "yt-dlp",
-    "slskd": "slskd",
 }
 
 # Tools whose upstream releases ship a NATIVE Linux build, mapped to the asset
@@ -258,24 +242,6 @@ LINUX_BINARIES = {
         "markers": ("jpegtran",),
         "lib_dir": "lib64",
         "launcher": ("jpegtran", "jpegtran", 'env LD_LIBRARY_PATH="$(dirname "$0")/lib64"'),
-    },
-    "slskd": {
-        # One self-contained zip per architecture, each holding the BARE
-        # `slskd` (the Windows asset of the same release holds `slskd.exe`;
-        # see ASSET_PATTERNS). Both land in the same `slskd v<version>` folder
-        # when a library is shared by two hosts, which is why the name — not
-        # the folder — is what decides which of them a host may run
-        # (server.soulseek.slskd_exe).
-        "patterns": {
-            "x64": r"^slskd-[\d.]+-linux-x64\.zip$",
-            "arm64": r"^slskd-[\d.]+-linux-arm64\.zip$",
-            # Upstream ships a musl build under its own name, and
-            # _linux_pattern looks it up as "<arch>-musl" — the glibc zips are
-            # NOT a fallback for a musl host the way oxipng's static build is.
-            "x64-musl": r"^slskd-[\d.]+-linux-musl-x64\.zip$",
-            "arm64-musl": r"^slskd-[\d.]+-linux-musl-arm64\.zip$",
-        },
-        "markers": ("slskd",),
     },
 }
 
@@ -661,12 +627,9 @@ def run_name(key, platform=None):
         cuetools' Linux table names `CUETools.ARCUE.exe`, which is what the
         Windows install runs too, so the shared name must survive;
       * the WINDOWS marker table otherwise. A tool whose two builds carry
-        different names (slskd: `slskd` on Linux, `slskd.exe` on Windows, both
-        in ONE `slskd v<version>` folder because a library can be read by two
-        hosts at once) had the Linux marker returned on Windows by the old
-        `spec.get("markers") or MARKER_EXES[key]` chain — the same wrong-file
-        family as the spawn failure that chain caused in
-        server.soulseek.slskd_exe.
+        different names had the Linux marker returned on Windows by the old
+        `spec.get("markers") or MARKER_EXES[key]` chain — the wrong file for
+        the host.
     """
     win = _platform_of(platform) == "windows"
     spec = LINUX_BINARIES.get(key) or {}
@@ -729,7 +692,6 @@ MARKER_EXES = {
     "cuetools": ("CUETools.exe",),
     "chromaprint": ("fpcalc.exe",),
     "yt-dlp": ("yt-dlp.exe",),
-    "slskd": ("slskd.exe",),
 }
 
 # Tools whose release asset is a single bare exe - no archive to extract.
@@ -797,15 +759,6 @@ PINNED = {
         "tag": "v2.2.6",
         "asset": "CUETools_2.2.6.zip",
         "version": "2.2.6",
-    },
-    "slskd": {
-        # The Windows asset is the pin's face (PINNED's asset is a Windows
-        # name — see pick_asset); the Linux hosts take the same tag's own
-        # asset through LINUX_BINARIES. Upstream's newest release IS 0.26.0,
-        # so an installed copy reads `ok` rather than a permanent Update.
-        "tag": "0.26.0",
-        "asset": "slskd-0.26.0-win-x64.zip",
-        "version": "0.26.0",
     },
     "librosa": {
         "tag": "0.11.0",

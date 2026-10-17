@@ -190,7 +190,7 @@ backend on each OS in CI and presses the real button: Windows and Linux prove
   The setup wizard's folder step calls the shell's `set_music_folder` command
   so the next launch spawns the backend already knowing the library.
 - **Notifications**: `tauri-plugin-notification`, registered on every target,
-  used by the web UI for "wish found", "download done" and "import ready".
+  used by the web UI for "import ready".
 
 ## How it works (mobile)
 
@@ -209,7 +209,7 @@ the reason, instead of offering an Install button that cannot succeed.
 
 - **Notifications work the same** while the app is open — and the socket is why
   the desktop tray exists at all: a hidden window keeps its connection alive, so
-  it is still told when a wish lands or an import finishes. What the shells do
+  it is still told when an import finishes. What the shells do
   **not** have is remote push: a Tauri webview registers no service worker, so a
   CLOSED shell cannot be woken. Push belongs to the browser and to the installed
   PWA — on iPhone and iPad that means la musica on the Home Screen, iOS 16.4 or
@@ -498,7 +498,7 @@ place, because every report about iOS playback lands on the seam:
 
 ## Bundle config
 
-`bundle.iOS.minimumSystemVersion` 14.0, `bundle.iOS.bundleVersion` 2.0.3,
+`bundle.iOS.minimumSystemVersion` 14.0, `bundle.iOS.bundleVersion` 2.1.0,
 `bundle.iOS.infoPlist` and `bundle.android.minSdkVersion` 24 in
 `tauri.conf.json`. The Android package name and the iOS bundle id both come from
 the top-level `identifier` (`com.musiclibraryoptimizer.lamusica` — the old

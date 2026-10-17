@@ -499,7 +499,6 @@ AccurateRip never costs a grade point by itself.
 | Apple Music / Deezer | artwork and descriptions when CAA has none |
 | LRCLIB + the lyrics provider chain | synced then plain lyrics |
 | YouTube (via yt-dlp or a native client) | music videos, downloads |
-| slskd / local downloads | download sources the user configures |
 | AudioAuditor, CUETools, Logchecker | audit, AccurateRip, rip-log scoring |
 
 Rules: one HTTP client, per-service rate limits (MusicBrainz: 1 req/s,

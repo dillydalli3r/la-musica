@@ -1,15 +1,12 @@
 #!/usr/bin/env python3
-"""Verify the .mlo/downloads manager and the library-layout scanner.
+"""Verify the library-layout scanner (GET /api/library/layout + its report).
 
-Covers GET /api/downloads, GET /api/downloads/entry (the release-identify
-picker's per-file list) + POST /api/downloads/{delete,import} and
-GET /api/library/layout, plus the .mb_expected sidecar that makes a
-PARTIAL import visible on the album page.
+One throwaway music folder carries a finding of every kind the scanner names,
+so the counts and the fix descriptions are read against a known tree. The
+expected-tracklist sidecar and the partial-import flags are asserted on the
+same fixture.
 
-Two throwaway music folders are used, one per concern, so the downloads tests
-deleting and moving entries can never change what the layout scanner reports.
-The real configured music_folder is never listed, deleted or even opened.
-Run: python tools/test_downloads_layout.py  (exit 0 pass, 1 fail)
+Run: python tools/test_layout_report.py  (exit 0 pass, 1 fail)
 """
 import atexit
 import json
@@ -63,28 +60,11 @@ from fastapi import HTTPException  # noqa: E402
 from server import main as mlo_main  # noqa: E402
 from server import library as mlo_library  # noqa: E402
 
-# --------------------------------------------------------------------------- #
-# fixture A: a music folder whose .mlo/downloads (the download staging area)
-# is being triaged
-# --------------------------------------------------------------------------- #
+# The music folder the layout checks point the app at.
 MF = tempfile.mkdtemp(prefix="mlo-dl-test-")
-DOWNLOADS = os.path.join(MF, ".mlo", "downloads")
 ARTISTS = os.path.join(MF, "Artists")
-
-# --------------------------------------------------------------------------- #
-# fixture B: a music folder holding every layout problem the scanner reports.
-# Deliberately SEPARATE from A: the downloads tests delete and move entries in
-# their folder, which would otherwise change what the layout scan counts.
-# --------------------------------------------------------------------------- #
 MLF = tempfile.mkdtemp(prefix="mlo-layout-test-")
 LART = os.path.join(MLF, "Artists")
-
-# safety: this suite must never point at the user's real library
-REAL = REAL_MUSIC_FOLDER.replace("\\", "/").rstrip("/")
-for _t in (MF, MLF):
-    if REAL:
-        assert not _t.replace("\\", "/").lower().startswith(REAL.lower()), \
-            f"temp fixture {_t} sits inside the real music folder {REAL}"
 
 
 def write(path, size=8):
@@ -92,17 +72,6 @@ def write(path, size=8):
     with open(path, "wb") as f:
         f.write(b"x" * size)
     return path
-
-
-ALBUM_DIR = "Some Album (2010)"
-write(os.path.join(DOWNLOADS, ALBUM_DIR, "01 - a.flac"), 1000)
-write(os.path.join(DOWNLOADS, ALBUM_DIR, "02 - b.flac"), 2000)
-write(os.path.join(DOWNLOADS, ALBUM_DIR, "cover.jpg"), 500)
-write(os.path.join(DOWNLOADS, "loose.flac"), 4000)
-write(os.path.join(DOWNLOADS, "notes.txt"), 100)
-# a download's in-flight leftovers must not look like finished results
-write(os.path.join(DOWNLOADS, ".incomplete", "half.flac"), 700)
-write(os.path.join(DOWNLOADS, "big.flac.part"), 300)
 
 # ---- fixture B: library layout problems ------------------------------------ #
 LAYOUT_ALBUM = os.path.join(LART, "Artist", "Album")
@@ -145,34 +114,7 @@ def check(label, fn):
 
 
 # ---- downloads listing ----------------------------------------------------- #
-def test_downloads_listing():
-    res = mlo_main.downloads_list()
-    assert res["exists"] is True, res
-    assert res["folder"] == DOWNLOADS.replace("\\", "/"), res["folder"]
-    assert res["music_folder"] == MF.replace("\\", "/"), res["music_folder"]
-    names = {e["name"] for e in res["entries"]}
-    assert names == {ALBUM_DIR, "loose.flac", "notes.txt", ".incomplete",
-                     "big.flac.part"}, names
-    assert res["count"] == 5, res["count"]
-    assert res["bytes"] == sum(e["bytes"] for e in res["entries"]), res["bytes"]
-
-    by = {e["name"]: e for e in res["entries"]}
-    album = by[ALBUM_DIR]
-    assert album["dir"] is True and album["album"] is True, album
-    assert album["audio"] == 2 and album["images"] == 1, album
-    assert album["files"] == 3, album
-    # a loose audio FILE is not an album (nothing to move into the library)
-    assert by["loose.flac"]["album"] is False, by["loose.flac"]
-    assert by["loose.flac"]["audio"] == 1, by["loose.flac"]
-    assert by["notes.txt"]["album"] is False and by["notes.txt"]["audio"] == 0, by["notes.txt"]
-    # in-flight leftovers are flagged, never presented as results
-    assert by[".incomplete"]["partial"] is True, by[".incomplete"]
-    assert by["big.flac.part"]["partial"] is True, by["big.flac.part"]
-    assert album["partial"] is False, album
-
-
 # ---- one entry, file by file (the release-identify picker) ----------------- #
-ENTRY_DIR = "Entry Album"
 
 
 def tagged_flac(path, **tags):
@@ -191,131 +133,6 @@ def tagged_flac(path, **tags):
         f[k] = v
     f.save()
     return path
-
-
-def test_downloads_entry():
-    use(MF)
-    folder = os.path.join(DOWNLOADS, ENTRY_DIR)
-    tagged_flac(os.path.join(folder, "01 - one.flac"),
-                TITLE="One", ARTIST="Entry Artist", ALBUM="Entry Album",
-                ALBUMARTIST="Entry Artist", DISCNUMBER="1", TRACKNUMBER="1",
-                TRACKTOTAL="2", DATE="2010", GENRE="Shoegaze", MEDIA="CD",
-                MUSICBRAINZ_ALBUMID="alb-1", MUSICBRAINZ_RELEASEGROUPID="rg-1",
-                MUSICBRAINZ_TRACKID="trk-1", MUSICBRAINZ_ARTISTID="art-1",
-                MUSICBRAINZ_ALBUMARTISTID="art-1")
-    write(os.path.join(folder, "02 - two.flac"), 64)      # untagged, still audio
-    write(os.path.join(folder, "cover.jpg"), 8)           # not audio/video
-    write(os.path.join(folder, ".hidden", "x.flac"), 8)   # dot-dir: skipped
-    write(os.path.join(folder, ".dotfile.flac"), 8)       # dot-file: skipped
-    write(os.path.join(folder, "clip.mp4"), 16)           # audio AND video family
-
-    res = mlo_main.downloads_entry(name=ENTRY_DIR)
-    assert res["ok"] is True and res["name"] == ENTRY_DIR, res
-    assert res["dir"] is True and res["truncated"] is False, res
-    assert res["path"] == folder.replace("\\", "/"), res["path"]
-    names = {f["name"] for f in res["files"]}
-    assert names == {"01 - one.flac", "02 - two.flac", "clip.mp4"}, names
-    assert res["count"] == len(res["files"]) == 3, res
-
-    by = {f["name"]: f for f in res["files"]}
-    one = by["01 - one.flac"]
-    assert one["audio"] is True and one["is_video"] is False, one
-    assert one["size"] == os.path.getsize(os.path.join(folder, "01 - one.flac")), one
-    assert one["path"] == os.path.join(folder, "01 - one.flac").replace("\\", "/"), one
-    for key, val in (("TITLE", "One"), ("ARTIST", "Entry Artist"),
-                     ("ALBUM", "Entry Album"), ("ALBUMARTIST", "Entry Artist"),
-                     ("DISCNUMBER", "1"), ("TRACKNUMBER", "1"),
-                     ("TRACKTOTAL", "2"), ("DATE", "2010"),
-                     ("GENRE", "Shoegaze"), ("MEDIA", "CD"),
-                     ("MUSICBRAINZ_ALBUMID", "alb-1"),
-                     ("MUSICBRAINZ_RELEASEGROUPID", "rg-1"),
-                     ("MUSICBRAINZ_TRACKID", "trk-1"),
-                     ("MUSICBRAINZ_ARTISTID", "art-1"),
-                     ("MUSICBRAINZ_ALBUMARTISTID", "art-1")):
-        assert one["tags"].get(key) == val, (key, one["tags"].get(key))
-    # the review panel's own filter is UNCHANGED: ALBUMARTIST is not in it
-    assert "ALBUMARTIST" not in mlo_main._review_file_info(
-        os.path.join(folder, "01 - one.flac"))["tags"], "panel filter was widened"
-    # a video container is listed, and flagged as video (not AUDIO_EXTS)
-    clip = by["clip.mp4"]
-    assert clip["audio"] is False and clip["is_video"] is True, clip
-    assert by["02 - two.flac"]["audio"] is True, by["02 - two.flac"]
-
-    # an entry that is a FILE lists just that file; a non-audio one lists none
-    file_res = mlo_main.downloads_entry(name="loose.flac")
-    assert file_res["dir"] is False and file_res["count"] == 1, file_res
-    assert file_res["files"][0]["name"] == "loose.flac", file_res
-    none_res = mlo_main.downloads_entry(name="notes.txt")
-    assert none_res["dir"] is False and none_res["count"] == 0, none_res
-    assert none_res["files"] == [], none_res
-
-    # the SAME name rule as delete: escapes/absolute/backslash -> 400,
-    # a name that does not exist -> 404
-    for bad in ("", ".", "..", "../escape", "a/b", "..\\escape"):
-        try:
-            mlo_main.downloads_entry(name=bad)
-        except HTTPException as e:
-            assert e.status_code == 400, (bad, e)
-        else:
-            raise AssertionError(f"accepted bad name {bad!r}")
-    try:
-        mlo_main.downloads_entry(name="ghost-entry")
-    except HTTPException as e:
-        assert e.status_code == 404, e
-    else:
-        raise AssertionError("a missing entry did not 404")
-
-
-def test_downloads_entry_cap():
-    use(MF)
-    folder = os.path.join(DOWNLOADS, "Big Entry")
-    for i in range(501):
-        write(os.path.join(folder, f"{i:04d}.flac"), 8)
-    res = mlo_main.downloads_entry(name="Big Entry")
-    assert res["count"] == 500 and res["truncated"] is True, res
-    assert len(res["files"]) == 500, len(res["files"])
-
-
-def test_downloads_name_guard():
-    """Names travel as basenames: anything that could resolve outside the
-    downloads dir is refused before a byte is touched."""
-    root = os.path.realpath(DOWNLOADS)
-    for bad in ("", ".", "..", "../escape", "a/b", "..\\escape", "sub/../../x"):
-        assert mlo_main._downloads_name_error(bad, root), f"accepted {bad!r}"
-    assert mlo_main._downloads_name_error(ALBUM_DIR, root) is None
-    assert mlo_main._downloads_name_error("loose.flac", root) is None
-
-    # and the delete route enforces it rather than trusting the caller
-    outside = os.path.join(MF, "keep-me.flac")
-    write(outside, 10)
-    res = mlo_main.downloads_delete(mlo_main.DownloadsDelete(names=["../keep-me.flac"]))
-    assert res["deleted"] == [], res
-    assert res["failed"], res
-    assert "not a valid entry name" in res["failed"][0]["error"], res
-    assert os.path.exists(outside), "escape target was touched"
-    assert os.path.getsize(outside) == 10, "escape target was modified"
-
-
-def test_downloads_delete():
-    res = mlo_main.downloads_delete(mlo_main.DownloadsDelete(names=["loose.flac", "nope.flac"]))
-    assert res["deleted"] == ["loose.flac"], res
-    assert res["freed"] == 4000, res["freed"]
-    assert [f["name"] for f in res["failed"]] == ["nope.flac"], res
-    assert not os.path.exists(os.path.join(DOWNLOADS, "loose.flac"))
-
-
-def test_downloads_import():
-    res = mlo_main.downloads_import(mlo_main.DownloadsImport(names=[ALBUM_DIR]))
-    assert res["failed"] == [], res
-    assert [m["name"] for m in res["moved"]] == [ALBUM_DIR], res
-    dest = os.path.join(ARTISTS, ALBUM_DIR)
-    assert os.path.isdir(dest), dest
-    assert os.path.exists(os.path.join(dest, "01 - a.flac")), os.listdir(dest)
-    assert not os.path.exists(os.path.join(DOWNLOADS, ALBUM_DIR)), "source left behind"
-
-    # an entry that is gone lands in `failed`, never a 500 for the whole batch
-    res2 = mlo_main.downloads_import(mlo_main.DownloadsImport(names=[ALBUM_DIR]))
-    assert res2["moved"] == [] and res2["failed"], res2
 
 
 # ---- library layout -------------------------------------------------------- #
@@ -437,12 +254,6 @@ def test_partial_flags():
     pathmod.save_expected_tracks(album, None, [])
 
 
-check("downloads listing shape + album/partial flags", test_downloads_listing)
-check("downloads entry lists files with identity tags", test_downloads_entry)
-check("downloads entry caps at 500 with truncated", test_downloads_entry_cap)
-check("downloads name guard refuses traversal", test_downloads_name_guard)
-check("downloads delete frees bytes, reports misses", test_downloads_delete)
-check("downloads import moves into the library", test_downloads_import)
 check("layout scanner reports every category", test_layout_report)
 check("layout scanner is read-only", test_layout_read_only)
 check("expected-tracklist sidecar round trip", test_expected_tracks_roundtrip)

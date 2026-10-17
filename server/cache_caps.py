@@ -1,32 +1,23 @@
-"""Two configurable size caps on the app's transient stores.
+"""A configurable size cap on the app's remove-from-library bin.
 
-Both stores are the app's own scratch space and both grew without one: a
-Soulseek job that is cancelled, a candidate that loses the race or an import
-that fails leaves its bytes in the download/staging folders (`soulseek_
-clear_downloads` only removes the copy an import actually landed), and the
-trash bin keeps every album ever removed. On a real install that was tens of
-gigabytes of nothing.
+The bin keeps every album ever removed, and nothing else bounded it: on a real
+install that was tens of gigabytes of nothing.
 
-`soulseek_cache_cap_gb` and `trash_cap_gb` are two INDEPENDENT caps, 5 GB each
-by default, 0 = that store's cap off. A store over its cap is pruned oldest
-first until it fits, and what a prune may never take is what is in use:
+`trash_cap_gb` is the cap, 5 GB by default, 0 = off. A store over its cap is
+pruned oldest first until it fits, and what a prune may never take is what is
+in use:
 
   * a path ``server.job_locks`` holds — the registry every import, script run,
     remove and export claims against, so the answer is the same sentence a
     route would be refused with, naming the job that has it;
-  * an entry belonging to an slskd transfer that is still running, read from
-    slskd's own tree (``soulseek.downloads_state()``) — the same evidence
-    ``soulseek.import_completed`` refuses to move an unfinished album on, so a
-    folder this app will not import yet is a folder a prune will not delete;
-  * anything the filesystem itself refuses to give up: a file slskd still has
-    open fails the delete, and that entry is kept and REPORTED instead of
-    worked around.
+  * anything the filesystem itself refuses to give up: a file another program
+    still has open fails the delete, and that entry is kept and REPORTED
+    instead of worked around.
 
-The unit of deletion is the one the app's own staging routes use — a top-level
-entry of a staging root (`/api/soulseek/staging/delete`, the Downloads page) and
-a child of a per-user trash bin (`/api/trash/delete`, the Trash page) — because
-a deeper granularity would be a second bookkeeping scheme for the same files.
-An entry that is itself in use is skipped whole, never partly deleted.
+The unit of deletion is the one ``/api/trash/delete`` uses — a child of a
+per-user trash bin — because a deeper granularity would be a second bookkeeping
+scheme for the same files. An entry that is itself in use is skipped whole,
+never partly deleted.
 
 Trash entries are removed exactly like ``/api/trash/delete`` removes them: the
 entry goes first, then its record is dropped from the bin's origin manifest
@@ -54,12 +45,12 @@ from server import events, job_locks
 # The two caps, keyed by the store each one owns. Both are GB in config (a
 # float is fine — the Settings row is one decimal) and they are never summed:
 # one store filling up must not eat the other's room.
-CAP_KEYS = {"soulseek": "soulseek_cache_cap_gb", "trash": "trash_cap_gb"}
+CAP_KEYS = {"trash": "trash_cap_gb"}
 
 # What each store is called in a log line and a notification, and where a
 # client should open when one is clicked (a route web/src/App.tsx mounts).
-STORE_LABELS = {"soulseek": "the Soulseek download folder", "trash": "the trash bin"}
-STORE_LINKS = {"soulseek": "/soulseek", "trash": "/trash"}
+STORE_LABELS = {"trash": "the trash bin"}
+STORE_LINKS = {"trash": "/trash"}
 
 # How often a pass runs. The cap is about disk that fills up over hours, so a
 # few minutes is ample; the first pass waits out a settle delay, because a boot
@@ -153,53 +144,6 @@ def _entry(store: str, root: str, name: str, bin_dir: str = "") -> dict:
             "path": path, "bytes": _entry_bytes(path), "mtime": mtime}
 
 
-def download_roots(cfg) -> list:
-    """The folders slskd writes into, in the order the card reports them.
-
-    Read out of ``server.soulseek``, which derives them from the config, rather
-    than from the music folder: a custom ``soulseek_download_dir`` (and the
-    ``incomplete`` sibling derived from it) is where the bytes really are, so
-    the cap holds over the folders the client uses and not a second guess at
-    their names. The paths module is the fallback for an install where soulseek
-    cannot be imported at all.
-    """
-    try:
-        from server import soulseek
-        roots = [soulseek.download_dir(cfg), soulseek._incomplete_dir(cfg)]
-    except Exception:
-        from mlo.paths import downloads_dir, incomplete_dir
-        folder = (cfg or {}).get("music_folder") or None
-        roots = [downloads_dir(folder), incomplete_dir(folder)]
-    out: list = []
-    for root in roots:
-        if root and root not in out:
-            out.append(root)
-    return out
-
-
-def soulseek_entries(cfg) -> list:
-    """Every candidate in the download/staging pair.
-
-    A top-level child of either root, which is the unit the app already lists
-    and deletes (``/api/soulseek/staging``), dot-entries excepted: ``.incomplete``
-    is slskd's own staging tree on an install that has not migrated, and the
-    importer steps over every dot-dir for the same reason — they are not results
-    an entry-level action may take. A dot-dir that holds a running transfer is
-    still PROTECTED by the in-use check below; it is just never a candidate.
-    """
-    out = []
-    for root in download_roots(cfg):
-        try:
-            names = os.listdir(root)
-        except OSError:
-            continue  # slskd creates both roots on its own schedule
-        for name in names:
-            if name.startswith("."):
-                continue
-            out.append(_entry("soulseek", root, name))
-    return out
-
-
 def trash_entries(cfg) -> list:
     """Every candidate in the trash root, across the per-user bins.
 
@@ -240,65 +184,9 @@ def trash_entries(cfg) -> list:
 # --------------------------------------------------------------------------- #
 # What is in use
 # --------------------------------------------------------------------------- #
-def running_transfer_names(cfg) -> tuple:
-    """What a transfer that is STILL RUNNING owns, from slskd's own tree:
-    ``(folders, files)``, both lower-cased.
-
-    ``folders`` are the peer's username — the first path segment under either
-    staging root in the layout slskd writes today (see
-    ``soulseek.DESTINATION_SUBDIR``) — and the leaf of the remote folder it is
-    writing into. (``soulseek._pending_album_folders``/``_still_downloading``
-    name the same folders for an import: there the peer AND the remote folder
-    path are the identity, because a leaf alone is shared by every peer's and
-    every batch's own folder.) ``files`` are the transfer's own file names,
-    which only ever protect a LOOSE candidate: a directory candidate under a
-    staging root is already named by the username or the remote folder slskd
-    writes through, while a partial dropped straight in the root has nothing
-    but its name.
-
-    An unreachable slskd answers with two empty sets: guessing "nothing is
-    running" is what the entry-level delete cannot prove, so it keeps whatever
-    the filesystem refuses to give up, and the transfer's own bytes simply hold
-    the cap until the transfer is done.
-    """
-    try:
-        from server import soulseek
-        from server.soulseek_auto import _remote_rel
-        tree = soulseek.downloads_state(cfg) or []
-    except Exception:
-        return set(), set()
-    folders, files = set(), set()
-    for user in tree:
-        if not isinstance(user, dict):
-            continue
-        who = str(user.get("username") or "").strip().lower()
-        for d in user.get("directories") or []:
-            if not isinstance(d, dict):
-                continue
-            for f in d.get("files") or []:
-                if not isinstance(f, dict):
-                    continue
-                try:
-                    if soulseek.finished_transfer(f.get("state")):
-                        continue
-                except Exception:
-                    continue
-                if who:
-                    folders.add(who)
-                parts = [p for p in _remote_rel(str(f.get("filename") or "")).replace("\\", "/").split("/") if p]
-                if not parts:
-                    continue
-                files.add(parts[-1].strip().lower())
-                if len(parts) > 1:
-                    folders.add(parts[-2].strip().lower())
-    folders.discard("")
-    files.discard("")
-    return folders, files
-
-
 # One sentence for both halves of "a transfer is using this": what the user
 # needs to know is that the app is not the thing holding the bytes.
-TRANSFER_IN_USE = "an slskd transfer is still running in it"
+TRANSFER_IN_USE = "a running job is using it"
 
 
 def _in_use(entry, folders=frozenset(), files=frozenset()) -> str:
@@ -306,14 +194,12 @@ def _in_use(entry, folders=frozenset(), files=frozenset()) -> str:
 
     Two questions, both asked of state the app already trusts: is a job holding
     the path (``server.job_locks`` — the same registry a route is refused
-    against, so the answer carries the job's own sentence), and is a running
-    slskd transfer writing in it. The second is a NAME question, answered the
-    way ``soulseek.import_completed`` decides an album is not ready yet: the
-    entry's own name, then every directory name inside it, against the peer and
-    remote-folder names a running transfer owns. Files are only matched when
-    the candidate IS a file — a leftover loose partial in a staging root — so
-    two candidates of one release sharing a track name cannot make the app keep
-    a folder forever.
+    against, so the answer carries the job's own sentence), and does the entry
+    carry a name a caller says is in use. The second is a NAME question: the
+    entry's own name, then every directory name inside it, against the folder
+    and file names the caller passes in. Files are only matched when the
+    candidate IS a file, so two entries sharing a track name cannot make the
+    app keep a folder forever.
 
     A file another process holds open is deliberately not guessed at here: the
     delete fails on it, and the caller keeps and reports the entry.
@@ -407,8 +293,8 @@ def _prune(store: str, entries: list, cap: int, folders: set = frozenset(),
     (a leftover from a previous version counts like anything else) and an entry
     that cannot be deleted stays in it. Ties on age break by path, so two
     entries written in the same second come out in an order a test can name.
-    *folders* / *files* are what a running slskd transfer owns (see
-    :func:`running_transfer_names`); the trash bin passes neither.
+    *folders* / *files* are names a caller says are in use; the trash bin
+    passes neither.
     """
     before = sum(int(e["bytes"]) for e in entries)
     out = {"store": store, "cap_bytes": cap, "before_bytes": before,
@@ -447,14 +333,6 @@ def prune_trash(cfg=None) -> dict:
     """Bring the trash bin under its cap, oldest first."""
     cfg = load_config() if cfg is None else cfg
     return _prune("trash", trash_entries(cfg), cap_bytes(cfg, "trash"))
-
-
-def prune_soulseek_cache(cfg=None) -> dict:
-    """Bring the Soulseek download/staging cache under its cap, oldest first."""
-    cfg = load_config() if cfg is None else cfg
-    folders, files = running_transfer_names(cfg)
-    return _prune("soulseek", soulseek_entries(cfg),
-                  cap_bytes(cfg, "soulseek"), folders, files)
 
 
 # --------------------------------------------------------------------------- #
@@ -512,7 +390,7 @@ def run_pass(cfg=None) -> dict:
     """
     cfg = load_config() if cfg is None else cfg
     out: dict = {}
-    for store, fn in (("soulseek", prune_soulseek_cache), ("trash", prune_trash)):
+    for store, fn in (("trash", prune_trash),):
         try:
             res = fn(cfg)
         except Exception as e:

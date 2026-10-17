@@ -542,6 +542,7 @@ export default function ImportWizard() {
   const [excluded, setExcluded] = useState<Set<string>>(new Set());
 
   const [mbLink, setMbLink] = useState("");
+  const [logBusy, setLogBusy] = useState(false);
   const [detectedFromTags, setDetectedFromTags] = useState(false);
   const [mbSearch, setMbSearch] = useState("");
   const [searchHits, setSearchHits] = useState<any[]>([]);
@@ -3795,6 +3796,48 @@ export default function ImportWizard() {
    *  match to a release. It ends in the SAME flow a manual id takes
    *  (`acceptAcoustidRelease` → `pickRelease`), so tags are written by one
    *  writer either way, and accepting the match also files its ACOUSTID pair. */
+  /** Match this album to a release from its RIP LOG's own TOC.
+   *
+   *  A CD rip's `.log` states the disc's whole track table, and that table IS
+   *  a MusicBrainz Disc ID (mlo.discs): the server hashes it libdiscid's way
+   *  and looks the disc up, so the answer is the exact PRESSING the log came
+   *  from — no tag, no fingerprint, no name search. Pressed, never automatic:
+   *  a different pressing of the same album is still a different release, and
+   *  the field stays the user's to confirm (the badge says how it was filled).
+   *  A folder with no log, or a log with no TOC table, says so instead of
+   *  guessing. */
+  const matchReleaseFromLog = async () => {
+    if (!albumPath) {
+      toast("Import the files first — the rip log travels with the album");
+      return;
+    }
+    setLogBusy(true);
+    try {
+      const res = await api.importLogMatch(albumPath);
+      const hit = (res.logs ?? []).find((l) => (l.releases ?? []).length);
+      const rel = hit?.releases?.[0];
+      if (!rel) {
+        const why = res.reason
+          || (res.logs ?? []).map((l) => `${l.file}: ${l.error}`).filter(Boolean).join("; ")
+          || "no release found";
+        toast(`Rip-log match: ${why}`);
+        return;
+      }
+      setMbLink(`https://musicbrainz.org/release/${rel.release_id}`);
+      setDetectedFromTags(false);
+      markEdited(1);
+      const more = (hit.releases.length - 1) + (res.logs ?? [])
+        .reduce((n, l) => n + Math.max(0, (l.releases ?? []).length - 1), 0);
+      toast(`Rip log matched ${rel.artist ? `${rel.artist} — ` : ""}${rel.title}`
+        + (rel.disc_position ? ` (disc ${rel.disc_position} of ${rel.discs})` : "")
+        + (more > 0 ? ` — ${more} other release(s) share this disc` : ""));
+    } catch (e) {
+      toast(String(e));
+    } finally {
+      setLogBusy(false);
+    }
+  };
+
   const matchReleaseFromFingerprint = async () => {
     const paths = uploaded.length ? uploaded.map((a) => a.path) : albumPath ? [albumPath] : [];
     if (!paths.length) {
@@ -5009,6 +5052,21 @@ const finish = async (closeByNavigation: boolean, runScripts = true) => {
                     ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
                     : <Fingerprint className="h-3.5 w-3.5" />}
                   Match from fingerprint
+                </button>
+                {/* The rip log's own TOC: a CD rip states its disc's exact
+                    track table, which is a MusicBrainz Disc ID — the one
+                    lookup that names the PRESSING without a fingerprint. */}
+                <button
+                  className="btn-ghost tap shrink-0"
+                  onClick={matchReleaseFromLog}
+                  disabled={logBusy || !albumPath}
+                  title={"Read this folder's rip log, compute its MusicBrainz Disc ID and "
+                         + "use the release that disc belongs to — a log with no TOC table says so"}
+                >
+                  {logBusy
+                    ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    : <Disc3 className="h-3.5 w-3.5" />}
+                  Match from rip log
                 </button>
               </div>
               {detectStatus !== "idle" && !releaseId && (

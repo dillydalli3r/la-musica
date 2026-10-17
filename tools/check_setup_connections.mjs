@@ -6,23 +6,19 @@
  * last.fm", and a person must not have to leave the app to find how to log in.
  * The wizard was shortened from seven steps to five, and the one that used to
  * be "Sources, keys & cookies" is gone as a step of its own: its Sources panel
- * now sits on Connections, together with the two Connect flows and the
- * Soulseek login. This check pins the merged contract on the code that actually
- * draws it:
+ * now sits on Connections, together with the two Connect flows. This check
+ * pins the merged contract on the code that actually draws it:
  *
  *   * `SETUP_STEPS` holds ONE step, right after "Account" (`password`, the
  *     mandatory one) and before "Tools" (`dependencies` — the credentials come
  *     FIRST, so an optional step can be read and skipped before any download is
  *     explained), labelled "Connections", whose title says it is optional and
- *     whose TWO groups are "Scrobbling & submissions" and "Soulseek (managed
- *     slskd)" — so the Last.fm shared secret, the MusicBrainz client id +
- *     secret AND the Soulseek login are editable ON the step
- *     (test_setup_coverage.py owns the one-step-per-group rule).
- *   * the step asks the three Soulseek keys BY NAME (they render above the
- *     fold, where a first run cannot miss them), and every one of the step's
- *     fields passes `cfgError` on a blank draft, so the page's own `badCount`
- *     is 0 and Continue is enabled with nothing filled in — the step stays
- *     skippable.
+ *     whose group is "Scrobbling & submissions" — so the Last.fm shared secret
+ *     and the MusicBrainz client id + secret are editable ON the step
+ *     (test_setup_coverage.py owns the one-step-per-group rule), and every one
+ *     of the step's fields passes `cfgError` on a blank draft, so the page's own
+ *     `badCount` is 0 and Continue is enabled with nothing filled in — the step
+ *     stays skippable.
  *   * the ScrobblePanel and the MbLoginPanel each render the shared
  *     ConnnectGuide above their controls — three numbered lines, with ONE
  *     button per line that names a page, opened through `openExternal` (the
@@ -126,13 +122,9 @@ try {
   const step = steps[iConn];
   check("its rail label is \"Connections\"", step.label === "Connections", step.label);
   check("its title says it is optional", /optional/i.test(step.title), step.title);
-  check("it renders the two groups that hold the credentials",
-    JSON.stringify(step.groups) === JSON.stringify(["Scrobbling & submissions", "Soulseek (managed slskd)"]),
+  check("it renders the group that holds the credentials",
+    JSON.stringify(step.groups) === JSON.stringify(["Scrobbling & submissions"]),
     JSON.stringify(step.groups));
-  check("it asks the Soulseek login by name (hoisted above the fold)",
-    JSON.stringify(step.ask)
-      === JSON.stringify(["soulseek_username", "soulseek_password", "soulseek_share_library"]),
-    JSON.stringify(step.ask));
   check("its blurb routes both services to their credential page",
     step.blurb.includes("last.fm/api/account/create")
       && step.blurb.includes("musicbrainz.org/account/applications"),
@@ -141,8 +133,7 @@ try {
   console.log("\n== the credentials proven on the step ==");
   const fields = meta.stepFields(step);
   const keys = fields.map((f) => f.k);
-  for (const key of ["lastfm_api_secret", "musicbrainz_client_id", "musicbrainz_client_secret",
-    "soulseek_username", "soulseek_password", "soulseek_share_library"]) {
+  for (const key of ["lastfm_api_secret", "musicbrainz_client_id", "musicbrainz_client_secret"]) {
     check(`${key} is editable on the step`, keys.includes(key));
   }
   const errors = fields

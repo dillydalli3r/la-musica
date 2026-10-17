@@ -225,8 +225,6 @@ def _notify_configured(kind: str, cfg: dict) -> bool:
         "import_ready": "notify_import_ready",
         "import_started": "notify_import_start",
         "import_done": "notify_import_done",
-        "download_started": "notify_soulseek_download_start",
-        "upload_started": "notify_soulseek_upload_start",
     }.get(kind)
     if not key:
         return True
@@ -389,7 +387,6 @@ def flush_coalesced() -> dict:
         return {}
     source = (last.get("run") or last.get("imported") or {})
     data = {**(source.get("data") or {}), "import_summary": tally}
-    data.setdefault("link", "/soulseek")
     # The config is read HERE rather than carried from the counted steps: a
     # switch the user flipped during the window has to decide this notice, and
     # `emit` is where that decision lives.

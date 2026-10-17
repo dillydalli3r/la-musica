@@ -9084,14 +9084,16 @@ also had to get shorter.
 
 ---
 
-### 7.83 The fullscreen viewer's geometry: the art fits its column, the columns fit the row
+### 7.83 The fullscreen viewer's geometry: the art fits its column, the columns fit the row, and no column paints a scrollbar
 
-The owner's report (2026-10-17): *"fix formatting in the fullscreen viewer (git
+The owner's reports (2026-10-17): *"fix formatting in the fullscreen viewer (git
 release when done), the player elements, mainly the album cover can get cut off
-by the lyrics"*. Both halves were one class of bug — a box sized by a HARD
-number inside a box sized by a percentage, and a row whose children's widths
-plus their own gap added up past it — and both are measured, at the owner's own
-window size and at a short one, by `tools/check_fullscreen_player.cjs`.
+by the lyrics"*, and then *"the scroll bar still shows up in the bottom left of
+the fullscreen player"*. All of it was one class of bug — a box sized by a HARD
+number inside a box sized by a percentage, a row whose children's widths plus
+their own gap added up past it, and a box that scrolls on one axis leaving the
+other one to `auto` — and all of it is measured, at the owner's own window size
+and at a short one, by `tools/check_fullscreen_player.cjs`.
 
 - **R439 — the art is never wider than the column it stands in, and the two
   columns of the wide layout never add up past the row.** Above `lg` the player
@@ -9123,10 +9125,102 @@ window size and at a short one, by `tools/check_fullscreen_player.cjs`.
   and the pane still stacks under the block. Pinned in
   `tools/check_fullscreen_player.cjs`: every ancestor of the art whose overflow
   is not `visible` must contain its box (and the box must be square) — checked
-  with the pane up at 1568×817, at 1440×900, 1920×1080 and **1440×620**, where
-  the old layout failed on the art's top; the pane's right edge must be inside
-  the body at each of those sizes; and the art must still end up centred in the
-  reading width when the pane is put away.
+  with the pane up at 1568×817, at 1440×900, 1920×1080, **1061×1024** (the
+  owner's own window, where the old tree's art was 448 square inside a 418 px
+  column: `cut {left: 15, right: 15}`) and **1440×620**, where the old layout
+  failed on the art's top (`cut {top: 21}`, by the column AND by the body); the
+  pane's right edge must be inside the body at each of those sizes; and the art
+  must still end up centred in the reading width when the pane is put away.
+
+- **R440 — a box that scrolls on ONE axis never paints a bar on the other.**
+  `overflow-y-auto` with nothing said about `overflow-x` has `overflow-x: auto`
+  COMPUTED for it, so anything wider than such a box paints a horizontal
+  scrollbar along its bottom edge. The wide layout's cover column is one on
+  purpose (it exists to scroll vertically on a short window), and the artwork's
+  halo is `-inset-6` — 24 px past the art on every side — so with the art as
+  wide as its column (R439) the halo overhung it: measured at the owner's
+  1061×1024, `clientWidth` 419 against a `scrollWidth` of 451, with the bar
+  along that column's bottom-left edge — the owner's *"the scroll bar still
+  shows up in the bottom left of the fullscreen player"*. The column and the
+  body it stands in now declare `overflow-x-clip` beside their `overflow-y-auto`,
+  so the axis they do not scroll can hold no bar and no scroll position;
+  `clip` and not `hidden` for the reason the pane's own root carries it (a
+  `hidden` box is still a scroll container — a script or a focus move can scroll
+  it, and it still answers `scrollLeft`), while `clip` has no scroll position at
+  all. Nothing visible is lost at the reader's own position: the shipped state
+  and the state before this rule are PIXEL-IDENTICAL over the cover and its halo
+  (measured on a 520×520 crop of the column with animations frozen, `ImageChops`
+  bbox `None` at `scrollLeft` 0), the art covers the column's full width so the
+  halo already reads as a ring above and below it, and the vertical scrolling
+  this column exists for is untouched. What the clip gives up is the 21 px sliver
+  of halo overhang that only the very scrollbar being removed could reveal — the
+  pre-fix box at `scrollLeft` 24 differs from the same box at 0 in exactly that
+  21-px strip at the column's right edge, and in nothing else. The pane's own
+  scroller keeps its bar THEMED away instead (`.no-scrollbar`, `scrollbar-width:
+  none`) rather than clipped, because a lyric line wider than the pane must stay
+  readable. Pinned in `tools/check_fullscreen_player.cjs`: no scroll container
+  inside the player may be a horizontally scrollable box whose content is wider
+  than it and whose `scrollbar-width` is not `none` — with the pane up at
+  1568×817, 1440×900, 1920×1080, **1061×1024** (the owner's window, where the
+  tree before this rule overlapped the column by 26 px and the check reports it
+  as its single failure, 137/138) and 1440×620. The measurement is the LAYOUT
+  and not a screenshot on purpose: an overlay-scrollbar engine (any headless
+  Chromium) paints that bar with no layout effect and no pixels, while the
+  owner's runtime reserves real space for it, so what the check reads is the
+  condition that makes a bar exist.
+
+---
+
+### 7.84 The app no longer downloads albums, and a rip log's TOC now names its pressing
+
+The owner's decision (2026-10-17): *"I want to remove album download / soulseek
+from the app entirely"*, and *"in MANUAL / auto-importing (with user uploaded
+files) it should support .log TOC lookups for matching to musicbrainz
+releases"*. One release, two halves: the acquisition pipeline goes, and the
+manual import grows the evidence the pipeline used to provide.
+
+- **R441 — no download path exists.** Soulseek is gone: no slskd daemon (start,
+  stop, autostart, port mapping, sharing, share audit), no search, no
+  transfers, no uploads or private messages, no wishlist, no artist watch, no
+  acquisition queue, no page downloads, and no downloads staging area of its
+  own. Deleted with it are the modules that only served it
+  (`server/soulseek*.py`, `server/wishes*.py`, `server/artist_watch*.py`,
+  `server/api_queue.py`, `server/api_watch.py`, `mlo/portmap.py`), their
+  configuration keys (`soulseek_*`, `wishes_*`, `artist_watch_*`,
+  `notify_soulseek_*`, `notify_wish_found`, `notify_download_done`,
+  `auto_acquisition_enabled`) and the workflow that audited a share from
+  outside. What REMAINS is every path the user drives: drag-drop and the
+  wizard (`/api/import/*`), the AcoustID fingerprint press, the MusicBrainz
+  search and link, the script chain, grading, the audit, the log report, the
+  per-track CRCs and AccurateRip read from a log the user supplied, and
+  YouTube's music-video download. `Add to library` still writes a framework
+  album for a release the user will supply audio for — it no longer attaches a
+  search to it. "Add to library" framework albums are otherwise untouched.
+- **R442 — a rip log's TOC is a MusicBrainz Disc ID, and that is how a
+  hand-imported disc is matched to its release.** `mlo.discs.parse_log_toc`
+  reads the log's own table — EAC's and XLD's "TOC of the extracted CD"
+  (start and length per track, dot or colon as the ripper's frame separator),
+  or whipper's per-track "Length: mm:ss:ff", whose offsets are the running
+  sum — and `mlo.discs.musicbrainz_disc_id` hashes it exactly as libdiscid
+  does (SHA-1 over the first/last track numbers, the lead-out and 99 track
+  offsets, upper-case hex, base64 in MusicBrainz's own alphabet `.`/`_`/`-`).
+  `GET /api/import/log-match?path=<folder or .log>` answers the disc id each
+  log states plus `server.integrations.releases_for_disc_id`'s rows for it —
+  the release, its artist and date, the medium that holds this disc (position,
+  format, track count) and the tracklist — and the wizard's Links step carries
+  the press ("Match from rip log") beside "Match from fingerprint": pressed,
+  never automatic, because several pressings legitimately share one disc id
+  and the field stays the user's to confirm. A folder with no log, a log with
+  no TOC table, a table with a gap in its numbering and a disc id MusicBrainz
+  does not know each answer with the reason instead of a guess. Offsets are
+  absolute (`start + 150` frames: the two seconds of lead-in are part of every
+  Disc ID). Pinned in `tools/test_cd_audit.py` against the two worked examples
+  on MusicBrainz's own Disc ID Calculation page (`49HHV7Eb8UKF3aQiNmu1GR8vKTY-`
+  and `BPnh1KU.hea1C.KMYWLGZkHJr0w-`), the EAC and whipper spellings of the
+  same table, the gap refusal, and the no-table answer; and verified against a
+  real library log, whose TOC computed `eSYc6AlHqIoJuRcf47DZ9RQbxfQ-` — a disc
+  id MusicBrainz returns eight Nevermind releases for, the album the library
+  holds among them.
 
 ---
 

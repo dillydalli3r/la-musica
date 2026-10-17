@@ -177,18 +177,16 @@ check("a run with its own summary reports itself",
       len(own) == 1 and own[0]["title"] == "Imported 4 albums"
       and own[0]["body"] == "all done — 4 of 4 finished", str(own))
 
-# PROGRESS is not a notice at all, and a run whose albums all FAILED says
-# nothing here: each failure spoke for itself (see the failing-download frame).
+# Narration that ships OFF stays silent, and the quiet window adds no summary
+# on top of it: only `import_done` / `download_done` are counted (the per-album
+# success and the run's own tally).
 drain()
-events_mod.import_step("download_started", "Download started: An Album", "1 file(s)")
 events_mod.import_step("import_ready", "An Album", "in the download folder")
+check("a narration kind that ships OFF publishes nothing", frames() == [], str(frames()))
 events_mod.flush_coalesced()
-check("progress alone publishes nothing, ever", frames() == [], str(frames()))
-drain()
-events_mod.emit("download_failed", "Download failed: An Album", "no candidate delivered it")
-events_mod.flush_coalesced()
-check("...and a failed run does not add a summary to the failure that spoke",
-      [f["event"] for f in frames()] == ["download_failed"], str([f["event"] for f in frames()]))
+check("...and the quiet window adds no summary on top of it",
+      frames("import_done") == [] and frames("download_done") == [],
+      str(frames("import_done") + frames("download_done")))
 
 print("== the master switch and the outcome switch ==")
 from mlo.config import DEFAULT_CONFIG  # noqa: E402

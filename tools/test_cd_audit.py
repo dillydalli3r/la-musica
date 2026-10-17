@@ -820,6 +820,71 @@ finally:
 
 shutil.rmtree(TMP, ignore_errors=True)
 
+# --------------------------------------------------------------------------- #
+# A rip log's TOC is a MusicBrainz Disc ID
+# --------------------------------------------------------------------------- #
+# The owner's ask: a manual/uploaded import should be matchable to MusicBrainz
+# from the rip log's own TOC. `mlo.discs.parse_log_toc` reads the log's table and
+# `mlo.discs.musicbrainz_disc_id` hashes it libdiscid's way; the two worked
+# examples on https://musicbrainz.org/doc/Disc_ID_Calculation are the vectors, so
+# the algorithm is pinned to the publisher's own numbers rather than to ours.
+print("\n== the log TOC as a MusicBrainz Disc ID ==")
+_MB_DOC_EXAMPLES = [
+    # (track offsets in CD frames, lead-out, the disc id MB documents)
+    ([150, 15363, 32314, 46592, 63414, 80489], 95462,
+     "49HHV7Eb8UKF3aQiNmu1GR8vKTY-"),
+    # a CD-Extra: the data session is not part of the id, so the lead-out is
+    # the last AUDIO track's end
+    ([150, 14109, 33586, 53077, 65781, 77892, 99174], 114574,
+     "BPnh1KU.hea1C.KMYWLGZkHJr0w-"),
+]
+for _offs, _lead, _want in _MB_DOC_EXAMPLES:
+    toc = {"first": 1, "last": len(_offs), "offsets": _offs, "leadout": _lead}
+    got = discs_mod.musicbrainz_disc_id(toc)
+    ok(got == _want, f"the documented example ids as MB prints it ({got} != {_want})")
+ok(discs_mod.musicbrainz_disc_id(None) == "" and
+   discs_mod.musicbrainz_disc_id({"offsets": [], "leadout": 0}) == "",
+   "a missing/empty TOC produces no id rather than a hash of nothing")
+
+
+def _toc_table(starts, lengths):
+    """An EAC-style 'TOC of the extracted CD' table, mm:ss.ff per column."""
+
+    def t(frames):
+        return "%d:%02d.%02d" % (frames // 4500, (frames // 75) % 60, frames % 75)
+
+    rows = ["TOC of the extracted CD", "",
+            "     Track |   Start  |  Length  | Start sector | End sector",
+            "    ---------------------------------------------------------"]
+    sector = 0
+    for i, (s, ln) in enumerate(zip(starts, lengths), start=1):
+        rows.append(f"       {i:2d}  | {t(s)} | {t(ln)} | {sector:11d} | {sector + ln - 1:9d}")
+        sector += ln
+    return "\n".join(rows) + "\n"
+
+
+_OFFS = _MB_DOC_EXAMPLES[0][0]          # absolute frames (150 = the lead-in)
+_LEAD = _MB_DOC_EXAMPLES[0][1]
+_len = [_OFFS[i + 1] - _OFFS[i] for i in range(len(_OFFS) - 1)] + [_LEAD - _OFFS[-1]]
+_EAC = _toc_table([o - 150 for o in _OFFS], _len)
+_toc = discs_mod.parse_log_toc(_EAC)
+ok(_toc is not None and _toc["first"] == 1 and _toc["last"] == 6, f"the table parses ({_toc})")
+ok(_toc is not None and discs_mod.musicbrainz_disc_id(_toc) == _MB_DOC_EXAMPLES[0][2],
+   "…and its Disc ID is the documented one (offsets are absolute: +150 frames)")
+ok(discs_mod.parse_log_toc("") is None and
+   discs_mod.parse_log_toc("no table here\n") is None,
+   "a log with no TOC table answers None, never a guessed id")
+_gap = _EAC.replace("        3  |", "        4  |", 1)
+ok(discs_mod.parse_log_toc(_gap) is None,
+   "a table with a GAP in its numbering is not a disc")
+# whipper states lengths only: its offsets are the running sum from track 1.
+_WHIPPER = "TOC:\n" + "".join(
+    f"  {i}:\n    Length: {ln // 4500}:{(ln // 75) % 60:02d}:{ln % 75:02d}\n"
+    for i, ln in enumerate(_len, start=1))
+_wtoc = discs_mod.parse_log_toc(_WHIPPER)
+ok(_wtoc is not None and discs_mod.musicbrainz_disc_id(_wtoc) == _MB_DOC_EXAMPLES[0][2],
+   f"whipper's lengths-only TOC gives the same id ({_wtoc})")
+
 print()
 if FAILS:
     print("FAILED: %d check(s)" % len(FAILS))

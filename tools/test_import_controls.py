@@ -219,18 +219,12 @@ def add_env(config):
 # --------------------------------------------------------------------------- #
 print("\nconfig")
 base = cfgmod.normalize_config({})
-eq(base["auto_acquisition_enabled"], True, "automatic acquisition is on by default")
 eq(base["manual_import_enabled"], True, "manual importing is on by default")
-eq(import_policy.auto_acquisition_enabled({}), True,
-   "a config written before the key reads as on")
 eq(import_policy.manual_import_enabled({}), True, "the manual path too")
-eq(import_policy.auto_acquisition_enabled({"auto_acquisition_enabled": False}), False,
-   "the switch is honoured when it is set")
 eq(import_policy.manual_import_enabled({"manual_import_enabled": False}), False,
    "the manual switch too")
-ok("auto_acquisition_enabled" in import_policy.AUTO_OFF_NOTE
-   and "manual_import_enabled" in import_policy.MANUAL_OFF_NOTE,
-   "each refusal names the setting it is about")
+ok("manual_import_enabled" in import_policy.MANUAL_OFF_NOTE,
+   "the refusal names the setting it is about")
 
 # --------------------------------------------------------------------------- #
 # 2. manual importing off: the importing routes refuse, nothing else does

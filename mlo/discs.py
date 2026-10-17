@@ -28,6 +28,8 @@ program instead (dBpoweramp's and CUERipper's own per-track CRCs, plus the
 AccurateRip verdict the log states). See spec R425.
 """
 import hashlib
+import base64
+import hashlib
 import os
 import re
 import subprocess
@@ -892,6 +894,98 @@ def cue_track_rows(path, disc=None):
         if not r["title"] and r["file"] and seen[r["file"]] == 1:
             r["title"] = os.path.splitext(os.path.basename(r["file"]))[0]
     return rows
+
+
+# ----------------------------------------------------------------------
+# The log's TOC as a MusicBrainz Disc ID
+# ----------------------------------------------------------------------
+# EAC and XLD print the same table with a START and a LENGTH column
+# ("  1  |  0:00.00  |  3:13.27  |         0 | ...", the dots/colons being the
+# ripper's own frame separator). The START column is the only place a log
+# states where each track begins, and it is what a Disc ID is computed from.
+_TOC_FULL_ROW_RE = re.compile(
+    rf"^\s*(\d{{1,3}})\s*\|\s*(\d+):(\d{{2}})[.:](\d{{2}})\s*\|"
+    rf"\s*(\d+):(\d{{2}})[.:](\d{{2}})\s*\|",
+    re.MULTILINE,
+)
+# libdiscid's own Base64 alphabet: the RFC characters are URL-unsafe, so MB
+# spells them this way (its calculation page's two worked examples use `+`,
+# which becomes `.`, and the padding `=`, which becomes `-`).
+_MB_BASE64 = str.maketrans({"+": ".", "/": "_", "=": "-"})
+
+
+def _toc_frames(groups):
+    """(mm, ss, ff) as CD frames — 75 frames to the second."""
+    minutes, seconds, frames = groups
+    return int(minutes) * 60 * 75 + int(seconds) * 75 + int(frames)
+
+
+def parse_log_toc(text):
+    """The log's TOC as ``{first, last, offsets, leadout}``, or None.
+
+    EAC and XLD state each track's start and length; whipper's YAML states the
+    lengths only, under the track's own "N:" key, so its offsets are the
+    running sum. A table with a GAP in its numbering is not a disc and answers
+    None — a Disc ID is a hash over exactly which tracks are there, and a
+    guessed middle row would produce an id no lookup can match.
+
+    The offsets are the CD's own (``start + 150`` frames: the standard two
+    seconds of lead-in sit before track 1 and are part of every Disc ID)."""
+    rows = {}
+    for m in _TOC_FULL_ROW_RE.finditer(text or ""):
+        rows[int(m.group(1))] = (_toc_frames(m.group(2, 3, 4)),
+                                 _toc_frames(m.group(5, 6, 7)))
+    if not rows:
+        start = 0
+        for m in WHIPPER_TOC_RE.finditer(text or ""):
+            length = _toc_frames(m.group(2, 3, 4))
+            rows[int(m.group(1))] = (start, length)
+            start += length
+    if not rows:
+        return None
+    numbers = sorted(rows)
+    first, last = numbers[0], numbers[-1]
+    if len(numbers) != last - first + 1:
+        return None
+    return {
+        "first": first,
+        "last": last,
+        "offsets": [rows[n][0] + 150 for n in numbers],
+        "leadout": rows[last][0] + rows[last][1] + 150,
+    }
+
+
+def musicbrainz_disc_id(toc):
+    """The MusicBrainz Disc ID of a TOC, or "" for a malformed one.
+
+    libdiscid's algorithm as MusicBrainz documents it: SHA-1 over the first and
+    last track numbers, the lead-out offset and 99 track offsets (0 for a track
+    the disc does not have), each as upper-case hex ASCII, base64-encoded in
+    MB's own alphabet. Verified against both worked examples on
+    https://musicbrainz.org/doc/Disc_ID_Calculation — see
+    ``tools/test_layout_report.py``."""
+    if not toc:
+        return ""
+    offsets, leadout = toc.get("offsets") or [], int(toc.get("leadout") or 0)
+    if not offsets or leadout <= 0:
+        return ""
+    body = "".join(
+        "%08X" % (leadout if i == 0 else
+                  (offsets[i - 1] if i <= len(offsets) else 0))
+        for i in range(100))
+    head = "%02X%02X" % (int(toc.get("first") or 1), int(toc["last"]))
+    digest = hashlib.sha1((head + body).encode("ascii")).digest()
+    return base64.b64encode(digest).decode("ascii").translate(_MB_BASE64)
+
+
+def disc_id_for_log(path):
+    """``(disc_id, toc)`` for one rip log file, or ``("", None)``."""
+    try:
+        text = read_log_text(path)
+    except Exception:
+        return "", None
+    toc = parse_log_toc(text or "")
+    return musicbrainz_disc_id(toc), toc
 
 
 def parse_log_track_seconds(text):

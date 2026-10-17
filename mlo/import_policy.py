@@ -357,27 +357,12 @@ def mode(cfg):
     return value if value in MODES else "automatic"
 
 
-# What a stage says when its own switch is off. ONE sentence each, so the wish
-# log, the watch's summary, the API's refusal and the UI all use the same
-# words: who refused, why, and what to do about it.
-AUTO_OFF_NOTE = (
-    "Automatic acquisition is off (auto_acquisition_enabled) — nothing was "
-    "searched or downloaded. What you asked for is recorded; turn the switch "
-    "back on in Settings → Import pipeline, or start it by hand.")
+# What a stage says when its own switch is off. ONE sentence, so the API's
+# refusal and the UI use the same words: who refused, why, and what to do
+# about it.
 MANUAL_OFF_NOTE = (
     "Importing by hand is off (manual_import_enabled) — turn it back on in "
     "Settings → Import pipeline to import albums yourself.")
-
-
-def auto_acquisition_enabled(cfg):
-    """`auto_acquisition_enabled` — may the app search and download on its own?
-
-    The master switch over every unattended acquisition: the wishes worker's
-    own passes, an artist watch queueing a release, and an "Add to library"
-    request starting the download. A user's own action (a wish's Search now,
-    the wizard, the Soulseek page) is not this switch's business.
-    """
-    return bool((cfg or {}).get("auto_acquisition_enabled", True))
 
 
 def manual_import_enabled(cfg):

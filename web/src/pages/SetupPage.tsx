@@ -237,64 +237,9 @@ export default function SetupPage() {
     setBusy(true);
     try {
       if (Object.keys(changed).length) await api.saveConfig(changed);
-      // A plain config save, even on the step that holds the Soulseek
-      // credentials: the Tools step comes AFTER this one now, so slskd may not
-      // be installed yet and starting it here would announce a share that
-      // cannot listen. The step's Test login does the whole thing — save,
-      // start, report the network's own answer — when the reader asks for it.
       if (Object.keys(changed).length) toast.success("Saved");
       qc.invalidateQueries({ queryKey: ["config"] });
       if (advance) setIndex((i) => i + 1);
-    } catch (e) {
-      toast.error(String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  /**
-   * Save the Soulseek credentials and prove them: slskd performs the network
-   * handshake, so the only honest test is "start it and ask what the network
-   * says". The status payload is the Soulseek tab's own source of truth —
-   * `logged_in` names the account, `error` is slskd's own sentence
-   * (INVALIDPASS, empty credentials, a port it could not bind) — so Test and
-   * the tab can never disagree about what happened.
-   */
-  const testSoulseek = async () => {
-    setBusy(true);
-    try {
-      // Save first: the server builds slskd's config from the SAVED values, so
-      // testing an unsaved pair would test the previous login.
-      const changed = cfgChanges(draft ?? {}, config ?? {}, stepFields(step));
-      if (Object.keys(changed).length) {
-        await api.saveConfig(changed);
-        qc.invalidateQueries({ queryKey: ["config"] });
-      }
-      const started = await api.soulseekStart();
-      let last = await api.soulseekStatus();
-      if (!last.installed) {
-        toast.error("slskd is not installed on this host yet — install it on the Tools step first");
-        return;
-      }
-      // slskd's web API answers a few seconds before the network login does.
-      // The plain promise is the app's own idiom for this wait (see
-      // ImportWizard's retry loop): Promise.withResolvers is ES2024 and this
-      // tsconfig's lib predates it.
-      for (let i = 0; i < 30 && !last.logged_in && !last.error; i++) {
-        await new Promise((r) => setTimeout(r, 1000));
-        last = await api.soulseekStatus();
-      }
-      if (last.logged_in) {
-        toast.success(`Signed in as ${last.account || last.username || "your Soulseek account"}`);
-      } else if (last.error) {
-        toast.error(`slskd refused the login: ${last.error}`);
-      } else if (last.conflict) {
-        toast.error(
-          `Another slskd already holds port ${last.web_port}${last.conflict_username ? ` (signed in as ${last.conflict_username})` : ""} — stop it, or change the web port`
-        );
-      } else {
-        toast(started.message || "slskd started, but the Soulseek login has not answered yet — the Soulseek page shows the live state");
-      }
     } catch (e) {
       toast.error(String(e));
     } finally {
@@ -689,20 +634,6 @@ export default function SetupPage() {
             </>
           )}
 
-          {/* The fields this step asks BY NAME, above its groups: an account
-              and a login are the values nothing has a shipped default for, and
-              a first run should not have to open a fold to find them. The
-              section names what the rows belong to, and the group they came
-              from skips exactly these keys — one setting, one control. */}
-          {asked.length > 0 && (
-            <CfgSection
-              title="Soulseek login & sharing"
-              blurb="The account slskd signs in with, and whether this client shares the library. Both are optional — the Tools step installs slskd, and Test login below saves these values, starts it and reports what the Soulseek network answered."
-            >
-              {fieldRows(asked)}
-            </CfgSection>
-          )}
-
           {/* The step's own settings, group by group: the same titles and the
               same fields the Settings page shows, so "where do I change this
               later" has one answer. A group this step does not OPEN
@@ -748,16 +679,6 @@ export default function SetupPage() {
             </button>
             {!isLast && (
               <div className="ml-auto flex flex-wrap justify-end gap-2">
-                {step.panel === "connections" && (
-                  <button
-                    className="btn-ghost"
-                    onClick={testSoulseek}
-                    disabled={busy}
-                    title="Save the Soulseek credentials above, start slskd and report what the Soulseek network answered — the same payload the Soulseek page's dot is drawn from"
-                  >
-                    Test login
-                  </button>
-                )}
                 {/* The account step is the one step the wizard will not let a
                     first run skip: everything after it can be read by anyone
                     who reaches this address, and the password is the only

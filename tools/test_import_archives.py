@@ -761,20 +761,6 @@ check(not os.path.exists(STAGED_SRC), "…and the staged tree is gone: no leftov
 check(os.path.isfile(os.path.join(library_root(MF), "Staged Album", "01 - Staged.wav")),
       "…its file is in the library")
 
-# …and so does a finished DOWNLOAD, through the downloads route.
-staged_dl = os.path.join(downloads_dir(MF), "Staged Download")
-os.makedirs(staged_dl, exist_ok=True)
-make_wav(os.path.join(staged_dl, "01 - Downloaded.wav"), 0.05)
-res = CLIENT.post("/api/downloads/import", json={"names": ["Staged Download"]})
-eq(res.status_code, 200, "a finished download imports", res.text[:200])
-eq([m["name"] for m in res.json()["moved"]], ["Staged Download"], res.text[:200])
-check(not os.path.exists(staged_dl), "the staged download is gone (drained)")
-eq(os.listdir(downloads_dir(MF)), [],
-   "…and the downloads staging area holds nothing at all")
-check(os.path.isfile(os.path.join(library_root(MF), "Staged Download",
-                                 "01 - Downloaded.wav")),
-      "…its file is in the library")
-
 # --------------------------------------------------------------------------- #
 # 4. an archive with no audio says so
 # --------------------------------------------------------------------------- #

@@ -2583,10 +2583,27 @@ export default function NowPlayingView(p: Props) {
             the overflow across both edges and the cover lands half a gap left
             of the middle. Packed from the start, the cover column is the whole
             row and the art sits dead centre, which is also where the
-            no-lyrics layout puts it. */}
+            no-lyrics layout puts it.
+
+            `overflow-x-clip`, on this row AND on the cover column: a box that
+            scrolls on ONE axis (here `overflow-y-auto`) and says nothing about
+            the other has `overflow-x: auto` computed for it, so anything wider
+            than it paints a horizontal scrollbar. The artwork's halo is
+            `-inset-6` — 24 px past the art on every side — so with the art as
+            wide as its column the halo's side overhang was exactly such an
+            overflow: measured at the owner's 1061x1024, the column (419 px,
+            `scrollWidth` 451) painted a scrollbar along its bottom-left edge,
+            which is the reported "scroll bar in the bottom left of the
+            fullscreen player". `clip` and not `hidden`: a hidden box is still a
+            scroll container. Nothing visible changes where the reader actually
+            is — with animations frozen the cover and its halo are
+            pixel-identical to the state before this (the overhang was never
+            painted at scrollLeft 0; only the bar being removed could reveal the
+            21 px of it at the column's right edge) — and the vertical scrolling
+            this column exists for is untouched. */}
         {!videoPath && (
         <>
-        <div className={`safe-np-body flex-1 min-h-0 flex flex-col lg:flex-row items-center gap-4 sm:gap-8 ${
+        <div className={`safe-np-body flex-1 min-h-0 flex flex-col lg:flex-row items-center gap-4 sm:gap-8 overflow-x-clip ${
           paneOpen
             ? "overflow-y-auto [@media(min-height:560px)]:overflow-clip"
             : "overflow-y-auto"
@@ -2624,7 +2641,7 @@ export default function NowPlayingView(p: Props) {
           <div
             className={`w-full flex flex-col items-center gap-4 shrink-0 min-w-0 transition-[width] duration-300 ease-out [&>*:first-child]:mt-auto [&>*:last-child]:mb-auto ${
               paneOpen
-                ? "lg:w-[42%] lg:h-full lg:max-h-full lg:min-h-0 lg:overflow-y-auto"
+                ? "overflow-x-clip lg:w-[42%] lg:h-full lg:max-h-full lg:min-h-0 lg:overflow-y-auto"
                 : "my-auto max-h-full min-h-0 overflow-x-clip overflow-y-auto"
             }`}
           >
