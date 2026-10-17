@@ -258,7 +258,6 @@ const ADVISORY_SOURCE_WORDS: Record<string, string> = {
   "spotify-isrc": "Spotify (ISRC)",
   "apple-album": "Apple (album editions)",
   "itunes-song": "iTunes (song search)",
-  "youtube-age": "YouTube (age gate)",
   "ai-lyrics": "the AI's read of the lyrics",
   ai: "the AI (no lyrics in the file)",
   instrumental: "the track is instrumental",
@@ -430,7 +429,14 @@ export function DisambiguationMark({ value, className = "text-zinc-500" }: {
 }) {
   const text = (value || "").trim();
   if (!text) return null;
-  return <span className={`shrink-0 ${className}`}> ({text})</span>;
+  /* It SHRINKS and TRUNCATES, and that is the owner's rule (2026-10-17): the
+     MusicBrainz comment sits to the RIGHT of the artist name, so the name is
+     what the row is for — a `shrink-0` comment ("(1980s-1990s US grunge band)")
+     quietly took the whole line and clipped "Nirvana" down to nothing. The name
+     keeps its width (the caller's own `shrink-0 max-w-[…] truncate`), the
+     comment takes what is left, and a comment too long for that remainder ends
+     in an ellipsis instead of eating the name. */
+  return <span className={`min-w-0 truncate ${className}`}> ({text})</span>;
 }
 
 /** Which KIND a track's stored lyrics are — the server's own field

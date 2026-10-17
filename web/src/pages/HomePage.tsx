@@ -1,11 +1,9 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { AlertTriangle, BarChart3, Clock, Compass, Disc3, Globe, Heart, ListChecks, Loader2, Radio, RefreshCw, Sparkles, Star, TrendingUp, Users } from "lucide-react";
+import { AlertTriangle, BarChart3, Clock, Disc3, Heart, ListChecks, Loader2, Radio, RefreshCw, Sparkles, Star, Users } from "lucide-react";
 import { api } from "../api";
 import { EmptyState, PageLoading } from "../components/Badges";
-import DiscoverRow from "../components/DiscoverRow";
-import RecommendShelf from "../components/RecommendShelf";
 import StorageCard from "../components/StorageCard";
 import GradeWarning, { GradeDot } from "../components/GradeWarning";
 import PageHeader from "../components/PageHeader";
@@ -18,12 +16,10 @@ import { useI18n } from "../lib/i18n";
 import ArtistAvatar from "../components/ArtistAvatar";
 import ArtistName from "../components/ArtistName";
 import { GRID_SIZE_MIN, releaseCount } from "../lib/fmt";
-import { HOME_ONLINE } from "../lib/homeOnline";
 import { albumRef } from "../lib/refs";
 import { GRID_SIZES, useGridSize, useSelectMode } from "../lib/libraryView";
 import { useStore } from "../store";
 import type { ReactNode } from "react";
-import type { DiscoverItem } from "../api";
 import type { HomeAlbum, HomeArtist, HomePodcast, Track } from "../types";
 
 /** Shelf chip: why a row is here (a favourite's origin, a rediscovered pick). */
@@ -224,125 +220,6 @@ function PodcastShelf({ title, items, gridSize }: {
           );
         })}
       </div>
-    </section>
-  );
-}
-
-/** ONE online shelf: the shared chrome (RecommendShelf) and the shared row
- *  (DiscoverRow) every Discover/Charts surface wears, so an album the library
- *  owns links into it and one it does not offers the same Add action as
- *  anywhere else. `loading` is this shelf's OWN state — a request still in
- *  flight says so under its heading and nothing else on Home waits for it. */
-function OnlineShelf({
-  icon: Icon,
-  title,
-  hint,
-  rows,
-  loading,
-}: {
-  icon: typeof Globe;
-  title: string;
-  hint: string;
-  rows: DiscoverItem[];
-  loading: boolean;
-}) {
-  // Nothing to show and nothing to wait for: an outage or an empty answer is
-  // drawn as NO shelf, never an empty box. (The section's own heading follows
-  // the same rule — see OnlineSection.)
-  if (!rows.length && !loading) return null;
-  return (
-    <RecommendShelf
-      icon={Icon}
-      title={title}
-      hint={hint}
-      meta={
-        rows.length > 0 ? (
-          <span className="text-[11px] text-zinc-500">
-            {rows.length} {rows.length === 1 ? "row" : "rows"}
-          </span>
-        ) : null
-      }
-    >
-      {rows.length === 0 ? (
-        <div className="flex items-center gap-2 py-2 text-[11px] text-zinc-500">
-          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-          Asking the online providers…
-        </div>
-      ) : (
-        <ul className="divide-y divide-border/60 stagger">
-          {rows.map((item, i) => (
-            <DiscoverRow
-              key={`${item.source}:${item.kind}:${item.mbid || item.path || item.title}-${i}`}
-              item={item}
-            />
-          ))}
-        </ul>
-      )}
-    </RecommendShelf>
-  );
-}
-
-/** The ONLINE half of Home: what the world is playing, what is new & notable
- *  and what this library's own taste suggests. Every shelf is its OWN request
- *  with its own cache window, drawn after the page has already rendered — an
- *  offline install or a provider outage can only ever make one shelf absent,
- *  never delay or blank the library shelves above it.
- *
- *  It is gated by `discovery_enabled` (the Discovery tab's "Use online
- *  discovery providers"): off, the whole section is absent and no online
- *  request is made. */
-function OnlineSection() {
-  // The master switch. The config is the app's shared ["config"] cache (loaded
-  // once by the shell), so reading it here costs no request of its own.
-  const { data: cfg } = useQuery({ queryKey: ["config"], queryFn: api.config, staleTime: 5 * 60_000 });
-  // Nothing is asked until the switch is known, so a config still in flight
-  // cannot fire a provider request the user has turned off.
-  const enabled = !!cfg && cfg.discovery_enabled !== false;
-
-  const trending = useQuery({ ...HOME_ONLINE.trending, enabled, retry: 1 });
-  const fresh = useQuery({ ...HOME_ONLINE.fresh, enabled, retry: 1 });
-  const forYou = useQuery({ ...HOME_ONLINE.forYou, enabled, retry: 1 });
-
-  const trendingRows = trending.data?.items ?? [];
-  const freshRows = fresh.data?.items ?? [];
-  const forYouRows = forYou.data?.items ?? [];
-  // The section's heading exists only while it has something under it: all
-  // three empty or failed (and none still loading) is Home without an Online
-  // section at all, not a heading over nothing.
-  const anyLive = trendingRows.length > 0 || freshRows.length > 0 || forYouRows.length > 0
-    || trending.isLoading || fresh.isLoading || forYou.isLoading;
-  if (!enabled || !anyLive) return null;
-
-  return (
-    <section className="space-y-5">
-      <div className="flex items-baseline gap-2 px-1">
-        <Globe className="h-4 w-4 text-accent self-center" />
-        <h2 className="text-sm font-semibold tracking-tight">Online</h2>
-        <span className="text-[11px] text-zinc-600">
-          Pulled from the music services — every row names its source, and anything you do not own can be added from it.
-        </span>
-      </div>
-      <OnlineShelf
-        icon={TrendingUp}
-        title="Trending now"
-        hint="Apple Music's most-played songs, in Apple's own order; when Apple has nothing, Deezer's chart stands in."
-        rows={trendingRows}
-        loading={trending.isLoading}
-      />
-      <OnlineShelf
-        icon={Sparkles}
-        title="New & notable"
-        hint="Deezer's current album chart — the online providers wired here publish no dated new-releases feed."
-        rows={freshRows}
-        loading={fresh.isLoading}
-      />
-      <OnlineShelf
-        icon={Compass}
-        title="For you"
-        hint="Online picks seeded by this library's genres and most-collected artists; what you already own is left out."
-        rows={forYouRows}
-        loading={forYou.isLoading}
-      />
     </section>
   );
 }
@@ -651,7 +528,6 @@ export default function HomePage() {
       {/* Below the library's own shelves, and independent of them: the online
           half renders its own loading/error per shelf and is simply absent
           when discovery is off or the network is. */}
-      <OnlineSection />
 
       {statsOpen && (
         <StatsPanel

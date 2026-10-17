@@ -4,7 +4,6 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Bell, Save, RotateCcw, LayoutGrid, Settings as SettingsIcon, Check, Wand2, FolderOpen, Loader2, Copy, Trash2 } from "lucide-react";
 import { api, deviceUnavailable, unavailableFeatures } from "../api";
 import ConfirmButton from "../components/ConfirmButton";
-import CookieJarPanel from "../components/CookieJarPanel";
 // The ONE field renderer + its section/row frames (components/CfgFields.tsx):
 // the first-run wizard draws the same groups from lib/configMeta, so a setting
 // looks the same wherever the reader meets it.
@@ -192,8 +191,6 @@ const CFG_DEFAULTS: Record<string, unknown> = {
   metadata_auto_fetch: true,
   metadata_review: false,
   trash_cap_gb: 5,
-  youtube_enabled: true,
-  youtube_max_height: 0,
   auto_import_avoid_promo: true,
   auto_import_require_country: true,
   prefer_release_country: "",
@@ -331,17 +328,6 @@ function CoverDefaults() {
       </div>
     </div>
   );
-}
-
-/** The YouTube cookie jar (Settings → Videos).
- *
- *  The panel itself is `components/CookieJarPanel.tsx` — ONE implementation,
- *  shared with Settings → Connections and the wizard's Connections step, so the import box
- *  (and the per-cookie comment list it shows) cannot drift apart. This wrapper
- *  is only where the Videos tab renders it, exactly as before.
- */
-function YoutubeCookieJar() {
-  return <CookieJarPanel source="youtube" />;
 }
 
 /** HH:MM:SS on the reader's own clock. The report is read next to the moment
@@ -705,10 +691,6 @@ export default function SettingsPage() {
           k: "lyrics_search_aliases", label: t("settings.lyrics_search_aliases"), type: "bool",
           help: t("settings.lyrics_search_aliases_help"),
         },
-        {
-          k: "lyrics_youtube_captions", label: "Use YouTube captions (yt-dlp)", type: "bool",
-          help: "Time-synced captions, but only for tracks that carry a YouTube id — the id the video download records — so this never searches YouTube for a track. Automatic captions are used when a video has no typed subtitles and can mishear; needs yt-dlp under Dependencies, otherwise the provider is skipped.",
-        },
         { k: "lrc_timestamp_precision", label: "Timestamp precision (decimals)", type: "number", min: 2, max: 3 },
         { k: "lrc_strip_metadata", label: "Strip metadata tags ([ti:], [ar:])", type: "bool" },
         { k: "lrc_collapse_blank_lines", label: "Collapse blank lines", type: "bool" },
@@ -899,18 +881,6 @@ export default function SettingsPage() {
       title: "Videos (script 11)",
       blurb: "Lossless remux: any video container → MKV with the video copied bit-exact and lossless audio converted to FLAC (level below); lossy audio (AC3/DTS/AAC) is copied rather than inflated into FLAC unless that is turned off. Captions/subtitles are always kept and verified — never removed. If the muxer refuses the video codec, H.264 is a last-resort fallback (off by default: it re-encodes the only copy). The original (e.g. the .VOB) is removed after a verified remux.",
       fields: [
-        { k: "youtube_enabled", label: "Fetch missing music videos from YouTube", type: "bool", help: "The master switch for every YouTube download: the album header's film button and a track's \"Download music video\" action both refuse to search while it is off. Script 11 itself never searches YouTube — it remuxes the video files already in the folder." },
-        { k: "youtube_max_height", label: "Maximum video height (px, 0 = best available)", type: "number", min: 0, max: 4320 },
-        {
-          k: "youtube_cookies_mode", label: "Cookies for YouTube", type: "select",
-          options: [["none", "None — anonymous"], ["file", "A cookies file (saved below)"], ["browser", "Read from a browser"]],
-          help: "Your own YouTube session is the only thing that opens an age-gated or members-only video — without it YouTube answers \"Sign in to confirm your age\" — and it stops the throttling a fresh IP gets. None: nothing is sent. A cookies file: the jar saved in the box below this row — paste a cookies.txt into it or drop the file on it, in Netscape format, which is what a browser-extension exporter like \"Get cookies.txt\" writes. Read from a browser: yt-dlp opens that browser's own cookie store — same machine, signed in to YouTube, and closed if its store is locked.",
-        },
-        {
-          k: "youtube_cookies_browser", label: "Browser to read cookies from", type: "select",
-          options: [["chrome", "Chrome"], ["chromium", "Chromium"], ["edge", "Edge"], ["firefox", "Firefox"], ["brave", "Brave"], ["opera", "Opera"], ["safari", "Safari"], ["vivaldi", "Vivaldi"], ["whale", "Whale"]],
-          help: "Which browser \"Read from a browser\" opens, using its DEFAULT profile. Pick the one you are signed in to YouTube with.",
-        },
         { k: "video_reencode_incompatible", label: "Allow H.264 video fallback (lossy re-encode, last resort)", type: "bool" },
         { k: "video_lossy_audio_copy", label: "Copy lossy audio streams instead of re-encoding to FLAC", type: "bool" },
         { k: "video_crf", label: "H.264 CRF (lower = better)", type: "number", min: 0, max: 51 },
@@ -1225,6 +1195,7 @@ export default function SettingsPage() {
     { k: "grade_check_sidecar_cover", label: "Sidecar cover", type: "bool" },
     { k: "grade_check_mb_links", label: "MusicBrainz links (album/artist/track)", type: "bool" },
     { k: "grade_check_media", label: "MEDIA tag", type: "bool" },
+    { k: "grade_check_media_evidence", label: "MEDIA agrees with the disc sheets", type: "bool" },
     { k: "grade_check_source", label: "SOURCE tag", type: "bool" },
     { k: "grade_check_album_tags", label: "Album-level tags", type: "bool" },
     { k: "grade_check_cd_log", label: "CD log", type: "bool" },
@@ -2368,7 +2339,7 @@ export default function SettingsPage() {
                   panel is deliberately collapsible so Settings stays readable
                   for everyone else). */}
               {groupSection("Downloads & playback", <PlaybackDiag />)}
-              {groupSection("Videos (script 11)", <YoutubeCookieJar />)}
+              {groupSection("Videos (script 11)")}
             </>
           )}
 

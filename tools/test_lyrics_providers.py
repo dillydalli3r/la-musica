@@ -49,7 +49,7 @@ listed = lp.available_sources()
 assert [s["id"] for s in listed] == lp.SOURCES, listed
 assert all(set(s) == {"id", "kind", "label", "synced", "free", "needs",
                       "rank", "notes"} for s in listed), listed
-assert [s["rank"] for s in listed] == [1, 2, 3, 4, 5, 6], listed
+assert [s["rank"] for s in listed] == [1, 2, 3, 4, 5], listed
 assert all(s["synced"] and s["free"] and s["needs"] == [] for s in listed), listed
 assert all(s["notes"].strip() for s in listed), listed
 

@@ -43,7 +43,6 @@ import type { Playlist } from "../types";
 const SERVICE_LABELS: Record<string, string> = {
   deezer: "Deezer",
   spotify: "Spotify",
-  youtube: "YouTube Music",
   apple: "Apple Music",
 };
 

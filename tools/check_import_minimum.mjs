@@ -838,6 +838,15 @@ try {
   // its own files name (A_MBID is stubbed for /api/album).
   const firstInput = page.locator('[role="dialog"] input[placeholder^="MusicBrainz release"]').first();
   await firstInput.waitFor({ timeout: 20000 });
+  // The dialog OPENS on the press and fills each row from the album's own
+  // payload afterwards (server round trips, one per album): the row's release
+  // arrives a moment later, so the check waits for the value it is about
+  // instead of reading the instant the input exists.
+  await page.waitForFunction(() => {
+    const el = document.querySelector(
+      '[role="dialog"] input[placeholder^="MusicBrainz release"]');
+    return !!el && el.value.trim().length > 0;
+  }, null, { timeout: 20000 }).catch(() => {});
   check("the auto-import asks about an album whose files ALREADY name a release",
         (await firstInput.inputValue()).trim().length > 0,
         await firstInput.inputValue());
@@ -900,6 +909,14 @@ try {
   await page.getByRole("button", { name: /Import \d+ album\(s\) from 2 batches into library/ }).click();
   const plainRow = page.locator('[role="dialog"] input[placeholder^="MusicBrainz release"]').first();
   await plainRow.waitFor({ timeout: 20000 });
+  // The dialog opens on the press and fills each row from that album's own
+  // payload a moment later (one album read per row, in parallel): wait for the
+  // value the check is about rather than the instant the input exists.
+  await page.waitForFunction(() => {
+    const el = document.querySelector(
+      '[role="dialog"] input[placeholder^="MusicBrainz release"]');
+    return !!el && el.value.trim().length > 0;
+  }, null, { timeout: 20000 }).catch(() => {});
   check("the plain multi-album Import ASKS which release before it queues (R424)",
         (await plainRow.inputValue()).trim().length > 0, await plainRow.inputValue());
   await page.locator('[role="dialog"] button', { hasText: /^Import \d+ album/ }).first().click();

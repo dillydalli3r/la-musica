@@ -394,6 +394,44 @@ def is_cd_format(name):
     return is_cd_media(name)
 
 
+def medium_mismatch(evidence, formats):
+    """The warning for a release whose stated medium CONTRADICTS its own copy.
+
+    The owner's ask (2026-10-17): "the app should warn the user if a track's
+    MBID in tags is in the wrong media format — a release being imported with a
+    .log / .cue file [that is] tagged with a MBID for a vinyl / cassette release
+    or digital media release should warn the user".
+
+    `evidence` is what the FILES state about themselves — "cd" for a rip log or
+    a cue sheet (the sheets only a disc rip has), "digital" for a MEDIA tag
+    that says Digital Media — and `formats` is every format MusicBrainz states
+    for the release's media. Two directions are a warning, and they are the
+    same rule read both ways:
+
+      * a copy with disc sheets against a release that states NO CD-family
+        format (Vinyl, Cassette, Digital Media …) — the link is a different
+        edition, whatever its title says;
+      * a copy whose own MEDIA tag says Digital Media against a release that is
+        CD-only — the files cannot have come from that pressing.
+
+    Returns the sentence to show, or "" when they agree (or when either side
+    states nothing — a guess would be worse than silence)."""
+    ev = {str(e or "").strip().lower() for e in (evidence or []) if str(e or "").strip()}
+    stated = [str(f or "").strip() for f in (formats or []) if str(f or "").strip()]
+    if not ev or not stated:
+        return ""
+    cds = [f for f in stated if is_cd_format(f)]
+    if "cd" in ev and not cds:
+        return (f"This release is on {', '.join(stated)} — but the folder carries "
+                f"a rip log or a cue sheet, which only a CD rip has. The "
+                f"MusicBrainz link looks like a different edition of this album.")
+    if "digital" in ev and cds and len(cds) == len(stated):
+        return (f"This release is a CD pressing ({', '.join(stated)}) — but the "
+                f"files' own MEDIA says Digital Media. The MusicBrainz link looks "
+                f"like a different edition of this album.")
+    return ""
+
+
 def cd_media_value(rel):
     """The MEDIA value a release's own formats state for its CD, or None.
 

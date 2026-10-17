@@ -226,7 +226,7 @@ export default function MoreLikeThis({
     </span>
   );
   return (
-    <RecommendShelf icon={Sparkles} title="Recommended (Local)" hint={HINT} meta={count}>
+    <RecommendShelf icon={Sparkles} title="Recommended" hint={HINT} meta={count}>
       {albumShelf ? (
         /* A wrapped GRID, not a scroller. The scroller this replaces laid the
            cards out on one row that ran off the shelf's own width and cut the

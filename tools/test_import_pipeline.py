@@ -2316,10 +2316,14 @@ again = imports.finish_album(album_dir, IDENT_CFG, release=LATEST)
 assert again["release_identity"] == {"written": 0, "skipped": 2, "failed": 0}, \
     again["release_identity"]
 
-# ---- (2) a value that is already there is the USER's -------------------------
-# The shipped MEDIA default and a catalogue number the user typed are kept, the
+# ---- (2) a value that is already there is the USER's — except the MEDIUM -----
+# A catalogue number, a label and a country the user typed are kept, the
 # release fills only what is empty — the app's writer rule, which is what makes
-# an import safe on an album somebody has already edited.
+# an import safe on an album somebody has already edited. The MEDIUM is the one
+# exception when the release was CHOSEN for the album (R445, the owner's rule
+# 2026-10-17: a copy tagged 12" Vinyl stayed Vinyl through every import of the
+# CD release it names): the pressing the import is FOR is what the album is, so
+# its MEDIA lands over a differing one. Every other slot stays fill-only.
 KEPT = ident_release(4, "Vinyl", "DE", catalog="SHOULD-NOT-LAND")
 kept_dir, kept_files = ident_album("Remain in Light (kept)",
                                    track_tags=(("MEDIA", "CD"),
@@ -2332,7 +2336,9 @@ kept_tags = ident_tags(kept_files[0])
 # value already there is untouched — "written" counts files, as the genre stamp
 # beside it does.
 assert kept["release_identity"]["written"] == 2, kept["release_identity"]
-assert kept_tags["MEDIA"] == "CD", kept_tags
+# the CHOSEN release is Vinyl, so the album states Vinyl now (R445) — the copy
+# said CD and the release it was imported AS does not
+assert kept_tags["MEDIA"] == "Vinyl", kept_tags
 assert kept_tags["CATALOGNUMBER"] == "MINE", kept_tags
 assert kept_tags["LABEL"] == "My Label", kept_tags
 # RELEASECOUNTRY is the one release tag the app WIDENS rather than fills — a
@@ -2341,6 +2347,19 @@ assert kept_tags["LABEL"] == "My Label", kept_tags
 assert kept_tags["RELEASECOUNTRY"] == "FR", kept_tags
 # the slots nobody had still land, so "kept" is not "left alone entirely"
 assert kept_tags["RELEASESTATUS"] == "Official" and kept_tags["DATE"] == "1980-10-08", kept_tags
+
+# A release the import merely RESOLVED (not chosen) is not allowed to replace
+# the file's own medium: `explicit=False` keeps fill-only behaviour, so a
+# guessed edition can never rewrite what the copy says about itself.
+KEPT_IMPLICIT = ident_release(8, "Vinyl", "DE")
+implicit_dir, implicit_files = ident_album("Remain in Light (implicit)",
+                                           track_tags=(("MEDIA", "CD"),))
+imports._stamp_release_identity(implicit_dir, KEPT_IMPLICIT, IDENT_CFG,
+                                explicit=False)
+assert ident_tags(implicit_files[0])["MEDIA"] == "CD", ident_tags(implicit_files[0])
+imports._stamp_release_identity(implicit_dir, KEPT_IMPLICIT, IDENT_CFG,
+                                explicit=True)
+assert ident_tags(implicit_files[0])["MEDIA"] == "Vinyl", ident_tags(implicit_files[0])
 
 # …and the SAME rule holds for the country the release DOES state, as the
 # server writes it: widening, never replacing (mlo.autotag's own rule).

@@ -22,8 +22,6 @@ export default {
   "nav.playlists": "Playlists",
   "nav.favorites": "Favorites",
   "nav.import": "Import",
-  "nav.discover": "Discover",
-  "nav.recommended": "Recommended",
   "nav.charts": "Charts",
   "nav.musicbrainz": "MusicBrainz",
   "nav.export": "Export",
@@ -83,8 +81,6 @@ export default {
   "menu.runAllHint": "These run over the current selection, in this order:",
   "menu.openTrackPage": "Open track page",
   "menu.openTrackPageHint": "Open this track's own page — its tags, technical readout and lyrics",
-  "menu.downloadVideo": "Download music video",
-  "menu.downloadVideoHint": "Search YouTube for this track's music video and save it next to the album",
 
   // —— Playback: the file a library job is using right now ——————————————
   "player.locked_playing": "“{name}” is in use by {label} — it keeps playing; starting it again may fail.",
@@ -301,9 +297,6 @@ export default {
 
   // —— Charts page: this user's play history beside the online charts ————
   "charts.subtitle": "What you have actually played, and what the world is playing — one window at a time. The library half counts your own plays here; the online half shows each provider's own chart, named on every row.",
-  "charts.scope.library": "Your library",
-  "charts.scope.online": "Online",
-  "charts.scope.all": "Both",
   "charts.period.all": "All time",
   "charts.period.year": "This year",
   "charts.period.month": "This month",
@@ -313,8 +306,6 @@ export default {
   "charts.kind.artists": "Artists",
   "charts.your_library": "Your most played",
   "charts.library_note": "counted from your own plays in this window",
-  "charts.online": "Online charts",
-  "charts.online_note": "each provider's own ranking, kept separate",
   "charts.rows": "{n} rows",
   "charts.plays": "{n} plays",
   "charts.listened": "{plays} plays · {time} listened",
@@ -322,11 +313,7 @@ export default {
   "charts.open_page": "Open this in the library",
   "charts.gone": "This play's file is no longer in the library",
   "charts.loading_library": "Counting your plays…",
-  "charts.loading_online": "Asking the chart sources…",
   "charts.no_plays_title": "No plays yet",
-  "charts.no_source_title": "No source had a chart for this window",
-  "charts.unsupported_title": "No chart could be read",
-  "charts.empty_online": "Every source the server asked came back empty, and the chips above say which ones were asked. Try another window, or another kind — Last.fm, Deezer and Apple publish a current chart only.",
   "charts.error_title": "The charts could not be read",
 
   // —— Browse page: what an empty or failed result says ——————————————————
@@ -525,20 +512,7 @@ export default {
   "import.settle.description_staged": "Candidates staged for your review",
   "import.settle.description_missing": "Not found — you can fetch one on the album page",
   // —— Cookie logins: a cookies.txt import, and a note per cookie ————————————
-  "cookies.commentPlaceholder": "comment",
-  "cookies.commentFor": "Comment for the {name} cookie",
-  "cookies.session": "session",
-  "cookies.expired": "expired",
-  "cookies.keptHosts": "Only cookies for {hosts} are kept — everything else in the export is left out.",
-  "cookies.importedAt": "Imported {when} — {count} cookie(s)",
-  "cookies.keptCount": "{count} cookie(s) kept",
-  "cookies.fromBrowser": "Read from {browser}",
-  "cookies.fromBrowserTitle": "Read the session out of a browser you are already signed in to",
-  "cookies.fromBrowserHint": "No export and no pasting: the app takes the cookies that browser already holds for {host}, and stores that browser's own User-Agent with them — Cloudflare binds a clearance to the exact User-Agent that earned it, so the two have to travel together.",
-  "cookies.fromBrowserDone": "Read {count} cookie(s) from {browser}.",
-  "cookies.fromBrowserNone": "No browser with a cookie profile was found on this machine — install yt-dlp from Dependencies, then open {host} in the browser once.",
 
-  "cookies.sectionTitle": "Cookie logins — import a cookies.txt",
 
   // —— Library page: the toolbar's alphabet pair — a name field and the A–Z
   // rail. Two controls over one filter (the typed words and the picked

@@ -27,7 +27,6 @@ sys.path.insert(0, ROOT)
 import mlo.lyrics_providers as lyrics  # noqa: E402
 from mlo.lyrics_providers import SOURCES as LYRICS_SOURCES  # noqa: E402
 from server import credential_checks as cc  # noqa: E402
-from server import discover  # noqa: E402
 from server import discovery  # noqa: E402
 from server import integrations as intg  # noqa: E402
 from server import sources_health as sh  # noqa: E402
@@ -76,7 +75,6 @@ ids = [r["id"] for r in rows]
 # repeat, though one id can appear under two kinds (a source and its login).
 expected = (list(LYRICS_SOURCES) + sorted(intg.ADVISORY_SOURCES)
             + list(intg.GENRE_SOURCES) + list(discovery.IMAGE_SOURCES)
-            + [spec["id"] for spec in discover.SOURCES]
             + list(cc.credential_ids()))
 ok(sorted(ids) == sorted(expected),
    f"every registered source is reported once ({len(ids)} rows, "
@@ -108,7 +106,7 @@ ok(all(isinstance(r["detail"], str) and r["detail"] for r in rows),
 ok(all(("synced" in r) == (r["kind"] == "lyrics") for r in rows),
    "`synced` is on the lyrics rows only")
 lyrics_rows = [r for r in rows if r["kind"] == "lyrics"]
-ok([r.get("rank") for r in lyrics_rows] == [1, 2, 3, 4, 5, 6],
+ok([r.get("rank") for r in lyrics_rows] == [1, 2, 3, 4, 5],
    f"the lyrics rows carry the registry's 1-based rank in order "
    f"({[r.get('rank') for r in lyrics_rows]})")
 ok(all(isinstance(r.get("notes"), str) and r["notes"] for r in lyrics_rows),
@@ -152,17 +150,11 @@ ok(all(r["label"] for r in rows), "no row has an empty label")
 ok(health["checked_at"].endswith("+00:00"),
    f"`checked_at` is an ISO UTC stamp ({health['checked_at']})")
 
-disc_rows = [r for r in rows if r["kind"] == "discover"]
-ok([r["id"] for r in disc_rows] == [spec["id"] for spec in discover.SOURCES],
-   f"the Discover rows ARE the /api/discover registry, in its own order "
-   f"({[r['id'] for r in disc_rows]})")
-ok(all(r.get("notes") == spec["note"] for r, spec in zip(disc_rows, discover.SOURCES)),
-   "…each carrying what that source can answer (the panel shows it)")
-ok(row({"sources": disc_rows}, "lastfm")["needs"] == ["lastfm_api_key"]
-   and row({"sources": disc_rows}, "spotify")["needs"]
-   == ["spotify_client_id", "spotify_client_secret"]
-   and row({"sources": disc_rows}, "musicbrainz")["configured"] is True,
-   "…with the credential the DISCOVER source itself needs")
+# The Discover kind went with the online discovery feeds (2026-10-17): the
+# panel has no "discover" rows any more, and the provider ids that remain carry
+# their own kinds.
+ok(not [r for r in rows if r["kind"] == "discover"],
+   "no discover-kind rows are left (the feeds they described are gone)")
 
 # The credentials kind is the one that answers a DIFFERENT question from the
 # source rows: is the saved login accepted. `discogs`, `lastfm` and `spotify`
@@ -363,24 +355,10 @@ try:
 finally:
     sh._specs = REAL_SPECS
 
-print("== the discover probes ==")
-discovery.deezer_genre_list = lambda timeout=None: [{"id": 152, "name": "Rock"},
-                                                   {"id": 132, "name": "Pop"}]
-st, detail = sh._probe_discover("deezer", {})
-ok(st == "ok" and detail == "2 genres",
-   f"the Discover probe asks what that source is FOR ({detail})")
-discovery.musicbrainz_genre_list = lambda pages=2: {
-    "genres": [{"name": "rock", "id": "x"}], "count": 1, "loaded": 1, "done": True}
-st, detail = sh._probe_discover("musicbrainz", {})
-ok(st == "ok" and detail == "1 genre",
-   f"…and reports MusicBrainz's own taxonomy ({detail})")
-discovery.audiodb_artist = lambda name, timeout=None: {"genre": "Rock",
-                                                       "mood": "Melancholic"}
-st, detail = sh._probe_discover("audiodb", {})
-ok(st == "ok" and "no list endpoint" in detail,
-   f"a verification source says what it can do instead ({detail})")
-ok(sh._probe_discover("nope", {}) == ("skipped", "unknown source"),
-   "an id this probe does not own is skipped, never guessed at")
+# The Discover kind's probes went with the online discovery feeds
+# (2026-10-17): `_probe_discover` no longer exists, and no row carries the kind.
+ok(not hasattr(sh, "_probe_discover"),
+   "the Discover probe the feeds used is gone")
 
 print("== registry order ==")
 ok(sh.source_ids() == [r["id"] for r in rows],

@@ -186,7 +186,6 @@ export const CONFIG_GROUPS: CfgGroup[] = [
         { k: "lyrics_sources", label: "Lyrics providers (order)", type: "list", catalog: "lyrics", help: "Providers are tried top to bottom when lyrics are fetched from an album, artist or track page. Providers left out of the list are never used." },
         { k: "lyrics_allow_plain", label: "Accept plain (unsynced) lyrics", type: "bool", help: "Off by default: the chain prefers synced lyrics and writes an untimed one only when no source states timestamps, and this install then fails that track's lyrics check (“Plain” on the track's own surfaces). Turn this on to accept untimed text — LRCLIB's plain records — as a good answer here." },
         { k: "lyrics_search_aliases", label: "Search lyrics under alias names", type: "bool", help: "When the first search for a track's lyrics finds nothing, search again under the artist/album/title's other names from MusicBrainz (aliases) — e.g. Hikaru Utada for 宇多田ヒカル. On by default." },
-                { k: "lyrics_youtube_captions", label: "Use YouTube captions (yt-dlp)", type: "bool", help: "Time-synced captions, but only for tracks that carry a YouTube id — the id the video download records — so this never searches YouTube for a track. Automatic captions are used when a video has no typed subtitles and can mishear; needs yt-dlp under Dependencies, otherwise the provider is skipped." },
         { k: "lrc_timestamp_precision", label: "Timestamp precision (decimals)", type: "number", min: 2, max: 3 },
         { k: "lrc_strip_metadata", label: "Strip metadata tags ([ti:], [ar:])", type: "bool" },
         { k: "lrc_collapse_blank_lines", label: "Collapse blank lines", type: "bool" },
@@ -337,18 +336,6 @@ export const CONFIG_GROUPS: CfgGroup[] = [
       title: "Videos (script 11)",
       blurb: "Lossless remux: any video container → MKV with the video copied bit-exact and lossless audio converted to FLAC (level below); lossy audio (AC3/DTS/AAC) is copied rather than inflated into FLAC unless that is turned off. Captions/subtitles are always kept and verified — never removed. If the muxer refuses the video codec, H.264 is a last-resort fallback (off by default: it re-encodes the only copy). The original (e.g. the .VOB) is removed after a verified remux.",
       fields: [
-        { k: "youtube_enabled", label: "Fetch missing music videos from YouTube", type: "bool", help: "The master switch for every YouTube download: the album header's film button and a track's \"Download music video\" action both refuse to search while it is off. Script 11 itself never searches YouTube — it remuxes the video files that are already in the folder." },
-        { k: "youtube_max_height", label: "Maximum video height (px, 0 = best available)", type: "number", min: 0, max: 4320 },
-        {
-          k: "youtube_cookies_mode", label: "Cookies for YouTube", type: "select",
-          options: [["none", "None — anonymous"], ["file", "A cookies file saved below"], ["browser", "Read from a browser"]],
-          help: "Your own YouTube session is the only thing that opens an age-gated or members-only video — without it YouTube answers \"Sign in to confirm your age\" — and it stops the throttling a fresh IP gets. None: yt-dlp asks anonymously and no cookie is ever sent. A cookies file: yt-dlp reads the jar saved in the box below this field — paste it or drop a cookies.txt on it, in Netscape format (a browser-extension exporter like \"Get cookies.txt\" writes exactly that file). Read from a browser: yt-dlp opens that browser's own cookie store, which needs the browser on the same machine and signed in to YouTube — close it first if the store is locked.",
-        },
-        {
-          k: "youtube_cookies_browser", label: "Browser to read cookies from", type: "select",
-          options: [["chrome", "Chrome"], ["chromium", "Chromium"], ["edge", "Edge"], ["firefox", "Firefox"], ["brave", "Brave"], ["opera", "Opera"], ["safari", "Safari"], ["vivaldi", "Vivaldi"], ["whale", "Whale"]],
-          help: "Which browser \"Read from a browser\" opens. It reads the browser's DEFAULT profile, so pick the one you are signed in to YouTube with; a profile the app cannot decrypt (Chrome's cookie encryption on another OS user) simply yields no cookies and the download stays anonymous.",
-        },
         { k: "video_reencode_incompatible", label: "Allow H.264 video fallback (lossy re-encode, last resort)", type: "bool" },
         { k: "video_lossy_audio_copy", label: "Copy lossy audio streams instead of re-encoding to FLAC", type: "bool" },
         { k: "video_crf", label: "H.264 CRF (lower = better)", type: "number", min: 0, max: 51 },
@@ -400,7 +387,7 @@ export const CONFIG_GROUPS: CfgGroup[] = [
     },
     {
       title: "Home",
-      blurb: "The Home section in the sidebar — its shelves are built from the library itself (recently added, best graded, top artists, favorites, needs attention), and below them an Online section pulls from the music services: Trending now (Apple Music's most-played songs, Deezer's chart as its stand-in), New & notable albums (Deezer's current album chart) and For you (recommendations seeded by this library). The Online section is served only when \"Use online discovery providers\" is on in the Discovery tab (discovery_enabled) — off, Home shows the library shelves alone.",
+      blurb: "The Home section in the sidebar — every shelf is built from the library itself: recently added, best graded, top artists, favorites, needs attention. (The Online shelves that pulled from the music services are gone: Home no longer makes a provider request of its own.)",
       fields: [
         { k: "home_recent_count", label: "Recently-added albums shown", type: "number", min: 4, max: 60 },
       ],
@@ -579,6 +566,7 @@ export const CONFIG_GROUPS: CfgGroup[] = [
         { k: "grade_check_sidecar_cover", label: "Sidecar cover", type: "bool" },
         { k: "grade_check_mb_links", label: "MusicBrainz links (album/artist/track)", type: "bool" },
         { k: "grade_check_media", label: "MEDIA tag", type: "bool" },
+        { k: "grade_check_media_evidence", label: "MEDIA agrees with the disc sheets", type: "bool", help: "A rip .log or a .cue exists only for a DISC rip. On, an album carrying one whose MEDIA says anything but a CD (Vinyl, Cassette, Digital Media …) fails: one of the two — the MEDIA tag or the MusicBrainz link — names a different edition of the album." },
         { k: "grade_check_source", label: "SOURCE tag", type: "bool" },
         { k: "grade_check_album_tags", label: "Album-level tags", type: "bool" },
         { k: "grade_check_cd_log", label: "CD log", type: "bool" },

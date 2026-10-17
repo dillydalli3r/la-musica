@@ -365,6 +365,12 @@ def _run(work, on_done=None):
                  "album": album_label,
                  "imported": imported, "failed": failed, "note": note},
             )
+            # The RUN is over: publish its ONE notice NOW instead of waiting out
+            # the coalescer's quiet window (the owner's report: "the import
+            # complete notification can take a while to show up even after it
+            # completes"). A run that keeps going is still batched — the window
+            # is only skipped here, at this run's own last step.
+            events.flush_coalesced()
         elif failed:
             # Nothing was imported: the downloads are still waiting, so the
             # wizard (which lists them) is the page to send the user to.
@@ -372,5 +378,6 @@ def _run(work, on_done=None):
                         f"{failed} of {total} album(s) could not be imported",
                         {"link": "/import",
                          "errors": [str(e)[:300] for e in (_job["errors"] or [])[:3]]})
+            events.flush_coalesced()
     except Exception:
         pass

@@ -1160,7 +1160,7 @@ def write_mb_tags(af, values, config=None, replace=None):
     return written, refused
 
 
-def fill_release_identity(files, release, config=None):
+def fill_release_identity(files, release, config=None, explicit=False):
     """Fill the album-level RELEASE IDENTITY of *files* from *release*.
 
     THE one writer an import uses to make a release carry its own facts. The
@@ -1183,6 +1183,16 @@ def fill_release_identity(files, release, config=None):
     already treats as its own to sharpen: DATE/ORIGINALDATE and RELEASECOUNTRY
     (see `_mb_replace` — the same rule the Auto Tagging stage applies, so an
     album can never be sharpened one way by an import and another by a script).
+
+    `explicit` is the caller saying this release was CHOSEN for the album (a
+    bulk pin, the wizard's link, a download's resolved match), and it adds the
+    third exception the owner asked for (2026-10-17): the release's own MEDIUM
+    lands OVER a differing MEDIA tag. A library copy that arrived tagged
+    "12\" Vinyl" stayed Vinyl through every import of the CD release it names,
+    because MEDIA was fill-only — the release the user picked states CD, so CD
+    is what the album is. Everything else stays fill-only, and the
+    MEDIA/SOURCE family's switch still decides whether the tag may be written
+    at all.
 
     ONLY the album-level half is written: the per-track ids and credits are the
     Auto Tagging stage's, which matches a tracklist to the files. One container
@@ -1223,8 +1233,16 @@ def fill_release_identity(files, release, config=None):
                 # without it being empty — the same one the Auto Tagging stage
                 # passes, so the two can never disagree about a DATE or a
                 # country (and the fill-only rule above is the rest of it).
+                def _replace(tag, have, want):
+                    # The chosen release's own medium lands over a differing
+                    # one (see the docstring's `explicit`); every other tag
+                    # keeps `_mb_replace`'s sharpen/widen-only rule.
+                    if explicit and tag == "MEDIA" and str(want or "").strip():
+                        return want if str(want).strip() != str(have).strip() else ""
+                    return _mb_replace(tag, have, want)
+
                 written, _refused = write_mb_tags(af, values, config,
-                                                  replace=_mb_replace)
+                                                  replace=_replace)
             finally:
                 if defer and af.defer_save(False) is False:
                     return "failed"

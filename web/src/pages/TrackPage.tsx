@@ -22,7 +22,6 @@ import { ratingOf, useRatings, useSetRating, trackWebRating, webStarProps } from
 import TagActionsMenu from "../components/TagActionsMenu";
 import Modal from "../components/Modal";
 import MoreLikeThis from "../components/MoreLikeThis";
-import OnlineRecommendations from "../components/OnlineRecommendations";
 import LockedChip from "../components/LockedChip";
 import { useLockWhy } from "../lib/locks";
 import TrackDetails, { CreditsPanel, creditTagsFrom } from "../components/TrackDetails";
@@ -588,20 +587,9 @@ export default function TrackPage() {
         </div>
       </div>
 
-      {/* Two shelves, side by side: tracks the LOCAL scorer ranks closest to
-          this one from elsewhere in the library (its own album excluded), and
-          what the online providers suggest for this track. The online shelf
-          has its own loading state, so it never delays the page. */}
-      <div className="grid gap-4 lg:grid-cols-2 items-start">
-        <MoreLikeThis kind="track" id={decoded} />
-        <OnlineRecommendations
-          kind="tracks"
-          seedKind="track"
-          seedMbid={tags.MUSICBRAINZ_TRACKID ?? ""}
-          seedName={tags.TITLE ?? fileName}
-          seedArtist={tags.ARTIST ?? ""}
-        />
-      </div>
+      {/* The LOCAL shelf: tracks the library's own tags rank closest to this
+          one, its album excluded. */}
+      <MoreLikeThis kind="track" id={decoded} />
 
       {managerOpen && (
         <LyricsManagerModal

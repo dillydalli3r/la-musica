@@ -324,10 +324,6 @@ const NEVER_CACHE_EXACT: Record<string, true> = {
   "/api/videos/subtitle": true,
   "/api/artist/image": true,
   "/api/jobs/locks": true,
-  // The cookie jar's state is what the user is looking at RIGHT NOW while
-  // pasting a file in: an offline copy would say "4 cookies saved" over a jar
-  // that was just deleted.
-  "/api/youtube/cookies": true,
 };
 const NEVER_CACHE_PREFIX = ["/api/auth/"];
 
@@ -435,65 +431,13 @@ function noteContainerSwap<T extends ContainerSwap>(r: T): T {
   return r;
 }
 
-/** The YouTube cookie jar (`server/api_youtube.py`): the settings that decide
- *  whether yt-dlp sends cookies, plus what the jar on disk actually holds.
- *  `warnings` are the server's own sentences about it (a jar with no
- *  youtube.com cookie cannot sign a download in), shown as-is. */
-export interface YoutubeCookies {
-  mode: "none" | "file" | "browser";
-  browser: string;
-  present: boolean;
-  path: string;
-  bytes: number;
-  /** COOKIE lines that parsed — a jar's comments are not cookies. */
-  lines: number;
-  sites: string[];
-  saved_at: string | null;
-  browsers: string[];
-  max_bytes: number;
-  warnings: string[];
-}
-
-/** What an import answers with: the same state, plus how many cookie lines the
- *  import LEFT OUT because YouTube is never sent them (a browser export is the
- *  whole profile), and — for a file with no youtube.com cookie in it — nothing
- *  at all: that file is refused (400) rather than stored. */
-export interface YoutubeCookiesSaveReply extends YoutubeCookies {
-  filtered: number;
-}
-
-/** One cookie of a credential, as `GET /api/cookies/{source}` states it
- *  (`server/api_cookies.py`) — the row a user reads and writes against. There
+/** One cookie of a credential, as `GET /api/cookies/{source}` states it —
+ *  the row a user reads and writes against. There
  *  is NO value: a session cookie is a live credential. `expires_at` and
  *  `expired` are the server's own reading of the expiry column, so the browser
  *  never has to do date arithmetic on a timestamp. */
-export interface CookieEntry {
-  /** the host this cookie is sent to, lower-cased, no leading dot. */
-  domain: string;
-  path: string;
-  name: string;
-  /** the Netscape expiry column as written; "" is a session cookie. */
-  expiry: string;
-  /** that expiry as an ISO 8601 UTC date, or "" when none is stated. */
-  expires_at: string;
-  expired: boolean;
-  /** the user's own note for this cookie ("" when none). */
-  comment: string;
-  /** when the cookies.txt this row came from was imported, ISO 8601 UTC — ""
-   *  when the credential predates the stamp. One value per import, so the
-   *  panel groups the rows of one import under one dated section. */
-  imported_at: string;
-}
-
 /** The per-cookie view of one cookie login: what it stores, and the hosts its
  *  import keeps cookies for (a browser export is the whole profile). */
-export interface CookieList {
-  source: string;
-  hosts: string[];
-  present: boolean;
-  cookies: CookieEntry[];
-}
-
 /** One credit row of `/api/credits`: who did what on a track or an album.
  *  `role` arrives already lower-cased and grouped-ready, `attributes` are the
  *  instrument / vocal part the relation stated, and `mbid` is empty on rows
@@ -1072,7 +1016,6 @@ export interface JobLocksPayload {
 
 /** Which side of the line a Discover request reads: the library, the online
  *  providers, or both at once. */
-export type DiscoverScope = "library" | "online" | "all";
 
 /** What a Discover row IS — the three shapes every view asks for. */
 export type DiscoverKind = "albums" | "artists" | "tracks";
@@ -1081,7 +1024,6 @@ export type DiscoverKind = "albums" | "artists" | "tracks";
  *  seeds by the artist's MusicBrainz id when its tags carry one (else by its
  *  name), an album page by its release-group/release id (else artist+title),
  *  a track page by its recording id (else artist+title). */
-export type DiscoverSeedKind = "artist" | "album" | "track";
 
 /** One row of the Discover genre / recommendation routes.
  *
@@ -1093,39 +1035,6 @@ export type DiscoverSeedKind = "artist" | "album" | "track";
  *  provider that stated the row (registry-first when several did) and
  *  `source_label` the name to print; `also_from` lists the other sources that
  *  named the same row. */
-export interface DiscoverItem {
-  kind: "album" | "artist" | "track";
-  title: string;
-  artist: string;
-  /** Release year as the provider stated it — "" when it stated none. */
-  year: string;
-  source: string;
-  source_label: string;
-  /** Provider artwork and page, both absolute URLs (the artwork is rendered
-   *  through `artUrl`, never straight from the provider). */
-  cover_url: string | null;
-  page_url: string | null;
-  mbid: string | null;
-  release_group_mbid: string | null;
-  /** Library path — present exactly when the library has this item. */
-  path: string | null;
-  /** The library holds this exact item. */
-  owned?: boolean;
-  /** The library holds something by this artist (not this item). */
-  in_library?: boolean;
-  /** The further sources that named the same row, primary excluded. */
-  also_from?: string[];
-  /** Library album rows: the track titles the folder holds. */
-  tracks?: string[];
-  /** The provider's OWN relevance for the row (Last.fm's match, Deezer's
-   *  fans/rank, ListenBrainz's score) — null when the provider states none.
-   *  The providers' scales are not comparable, so it orders rows within one
-   *  source and is not a cross-provider percentage. */
-  score?: number | null;
-  /** Why this row is here ("genre: shoegaze"). */
-  reason?: string;
-}
-
 /** Why a source said nothing: source id → the server's own words ("skipped:
  *  no lastfm_api_key"). A source absent from this map answered — or was never
  *  asked because no feed of its kind exists for the request (see
@@ -1135,7 +1044,6 @@ export interface DiscoverItem {
  *  verdict on the seed (the one non-source key), and a note beginning
  *  "partial:" is a source answering with part of a long list. A source the
  *  server does not know is keyed by what was asked for, with "unknown source". */
-export type DiscoverNotes = Record<string, string>;
 
 /** A source an ENTITY shelf cannot use at all, with the provider's own reason
  *  (`GET /api/discover/recommended?seed_kind=…`): a similar-ARTISTS feed
@@ -1154,69 +1062,20 @@ export interface DiscoverNotApplicable {
 /** `GET /api/discover/genres` — the genre list of the requested scope, with
  *  the counts each side can state (library counts are tracks, albums and
  *  artists; online ones are what the providers reported). */
-export interface DiscoverGenres {
-  genres: {
-    name: string;
-    track_count: number;
-    album_count: number;
-    artist_count: number;
-    /** Which side(s) contributed this genre — "library", "musicbrainz", … */
-    sources: string[];
-  }[];
-  sources_asked: string[];
-  notes: DiscoverNotes;
-}
-
 /** `GET /api/discover/genre` — one page of rows. `next_offset` is the cursor
  *  for the next page, null/absent at the end. */
-export interface DiscoverItems {
-  genre: string;
-  kind: DiscoverKind;
-  source: string;
-  items: DiscoverItem[];
-  sources_asked: string[];
-  notes: DiscoverNotes;
-  next_offset: number | null;
-}
-
 /** `GET /api/discover/recommended` — an online shelf seeded by the whole
  *  library (`seed=library`) or by one genre. `basis` says what the rows were
  *  built from. The entity seed (`seed_kind`) also returns `not_applicable`:
  *  the sources whose feed cannot answer a page of this kind, reported as
  *  information rather than as a skip. */
-export interface DiscoverRecommended {
-  items: DiscoverItem[];
-  sources_asked: string[];
-  notes: DiscoverNotes;
-  basis: string;
-  not_applicable?: DiscoverNotApplicable[];
-}
-
 /** The four closed windows a chart can be asked for — the vocabulary of the
  *  library's own play history (`/api/top`). */
 export type ChartPeriod = "all" | "year" | "month" | "week";
 
-export interface DiscoverChartItem extends DiscoverItem {
-  rank: number;
-  score: number | null;
-  score_label: string | null;
-}
-
 /** What one provider can chart HERE — the payload's own support matrix, so the
  *  page can say "this source does not publish this week" from the answer it
  *  already has instead of a second request. */
-export interface DiscoverChartSource {
-  id: string;
-  label: string;
-  /** The windows this source really publishes. */
-  periods: ChartPeriod[];
-  /** Whether THIS request's window is one of them. */
-  supports_period: boolean;
-  needs: string[];
-  missing: string[];
-  ready: boolean;
-}
-
 /** `GET /api/discover/charts` — what the online providers rank for one window
  *  and one kind. Rows keep each provider's own order (they are never merged
  *  across providers), `sources_asked` is who was asked in the order they were
@@ -1224,17 +1083,6 @@ export interface DiscoverChartSource {
  *  that was not an answer: `skipped:` (no key), `unsupported:` (no such window)
  *  or `failed:` (the provider's own words). The one non-source key, `charts`,
  *  is the verdict when nobody had anything to rank. */
-export interface DiscoverCharts {
-  period: ChartPeriod;
-  kind: DiscoverKind;
-  source: string;
-  limit: number;
-  items: DiscoverChartItem[];
-  sources_asked: string[];
-  notes: DiscoverNotes;
-  sources: DiscoverChartSource[];
-}
-
 /** One row of `GET /api/top` — a track, an album or an artist from the USER'S
  *  own play history, with how many times it was played in the requested
  *  window. `path` is the library path and `in_library` whether the library
@@ -2073,6 +1921,15 @@ export const api = {
       `${API}/import/scan?path=${encodeURIComponent(path)}`,
       { method: "POST" }
     ),
+  /** Does the chosen release's stated MEDIUM agree with what the folder is?
+   *  (`GET /api/import/media-check`) — the folder's own `.log`/`.cue` say it is
+   *  a disc rip, the files' MEDIA says what it calls itself, and the release
+   *  states its media. `warning` is the sentence to show, empty when they
+   *  agree. */
+  importMediaCheck: (path: string, mbid: string) =>
+    json<ImportMediaCheck>(
+      `${API}/import/media-check?path=${encodeURIComponent(path)}&mbid=${encodeURIComponent(mbid)}`,
+      undefined, 60000),
   /** What a rip log's own TOC says this folder IS, by MusicBrainz Disc ID
    *  (`GET /api/import/log-match`): one row per `.log`, each with the disc id
    *  it computes and the release(s) MusicBrainz holds for that exact disc. */
@@ -2949,56 +2806,6 @@ export const api = {
       `${API}/genres/facets`
     ),
 
-  /** The genre list of one scope — the library's own genres, the online
-   *  providers' (MusicBrainz, Last.fm…), or both. 45 s: the online side walks
-   *  the provider chains, and the answer is TTL-cached server-side. */
-  discoverGenres: (scope: DiscoverScope = "all") =>
-    json<DiscoverGenres>(`${API}/discover/genres?scope=${scope}`, undefined, 45000),
-  /** One page of a genre's albums/artists/tracks from one source or all of
-   *  them. `offset` pages by the previous reply's `next_offset`. */
-  discoverGenre: (p: {
-    genre: string;
-    kind: DiscoverKind;
-    /** Source id, or "all" (the server asks everything it can). */
-    source?: string;
-    limit?: number;
-    offset?: number;
-  }) => {
-    const q = new URLSearchParams({ genre: p.genre, kind: p.kind });
-    if (p.source) q.set("source", p.source);
-    if (p.limit != null) q.set("limit", String(p.limit));
-    if (p.offset != null) q.set("offset", String(p.offset));
-    return json<DiscoverItems>(`${API}/discover/genre?${q}`, undefined, 60000);
-  },
-  /** Online recommendations for the whole library, for one genre, or — with
-   *  `seedKind` — for ONE ENTITY: the artist/album/track page the shelf sits
-   *  on, seeded by its MusicBrainz id when its tags carry one and by
-   *  artist+name when they do not. */
-  discoverRecommended: (p: {
-    seed?: string;
-    kind: DiscoverKind;
-    limit?: number;
-    seedKind?: DiscoverSeedKind;
-    seedMbid?: string;
-    seedName?: string;
-    seedArtist?: string;
-  }) => {
-    const q = new URLSearchParams({ seed: p.seed || "library", kind: p.kind });
-    if (p.limit != null) q.set("limit", String(p.limit));
-    if (p.seedKind) q.set("seed_kind", p.seedKind);
-    if (p.seedMbid) q.set("seed_mbid", p.seedMbid);
-    if (p.seedName) q.set("seed_name", p.seedName);
-    if (p.seedArtist) q.set("seed_artist", p.seedArtist);
-    return json<DiscoverRecommended>(`${API}/discover/recommended?${q}`, undefined, 60000);
-  },
-  discoverCharts: (p: { period: ChartPeriod; kind: DiscoverKind; source?: string; limit?: number }) => {
-    const q = new URLSearchParams({ period: p.period, kind: p.kind });
-    if (p.source) q.set("source", p.source);
-    if (p.limit != null) q.set("limit", String(p.limit));
-    return json<DiscoverCharts>(`${API}/discover/charts?${q}`, undefined, 90000);
-  },
-
-
   /** The LIBRARY's own most-played rows for one window (`GET /api/top`) —
    *  this user's play history, counted server-side, never a provider's chart.
    *  An empty history answers with an empty list and the `note` that explains
@@ -3116,48 +2923,6 @@ export const api = {
    *  music folder, which the caller swallows. */
   videoThumbUrl: (path: string, t: number, w = 160) =>
     media(`${API}/videos/thumb?path=${encodeURIComponent(path)}&t=${Math.max(0, Math.floor(t))}&w=${Math.round(w)}`),
-  /** Download a music video for one track from YouTube. A match is
-   *  downloaded and answers with `file`.
-   *  `ok: false` carries the server's reason in `error` (YouTube off, yt-dlp
-   *  missing, nothing on YouTube) rather than a bare failure. */
-  videosDownloadYoutube: (body: { path?: string; artist: string; title: string; duration?: number }) =>
-    json<{ ok: boolean; file?: string; source?: string; error?: string }>(`${API}/videos/download-youtube`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    }, 900000),
-  /** The YouTube cookie jar: which mode is on and what the file holds. */
-  youtubeCookies: () => json<YoutubeCookies>(`${API}/youtube/cookies`),
-  /** Save a pasted or dropped cookies.txt. The server validates it IS a
-   *  Netscape cookie file first, so junk comes back as a 400 with the reason
-   *  instead of replacing a jar that worked. */
-  youtubeCookiesSave: (text: string) =>
-    json<YoutubeCookiesSaveReply>(`${API}/youtube/cookies`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text }),
-    }, 60000),
-  /** Remove the jar (the mode setting is untouched). */
-  youtubeCookiesDelete: () =>
-    json<YoutubeCookies>(`${API}/youtube/cookies`, { method: "DELETE" }),
-  /** The cookies the yt-dlp jar stores, with each cookie's own comment —
-   *  `GET /api/cookies/{source}` (server/api_cookies.py). Never carries a
-   *  cookie value. */
-  cookieList: (source: "youtube") =>
-    json<CookieList>(`${API}/cookies/${source}`),
-  /** Write (or, with an empty `comment`, clear) one cookie's comment. The
-   *  cookie is named by its IDENTITY — domain, path, name — so the note follows
-   *  the cookie across a re-import instead of the line it sat on. Answers with
-   *  the fresh list. */
-  cookieComment: (
-    source: "youtube",
-    body: { domain: string; path: string; name: string; comment: string }
-  ) =>
-    json<CookieList>(`${API}/cookies/${source}/comments`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    }, 60000),
   /** Write TITLE/TRACKNUMBER/DISCNUMBER onto video files from the match-assist
    *  panel (one assignment per video file). */
   videosMatch: (albumPath: string, assignments: { path: string; title: string; tracknumber?: number; discnumber?: number }[]) =>
@@ -3185,6 +2950,16 @@ export interface DiscIdRelease {
   format: string;
   matches_this_disc: boolean;
   tracks: { position: number | null; title: string }[];
+}
+
+/** `GET /api/import/media-check`: the release's stated formats against the
+ *  copy's own evidence (`log`/`cue` = a disc rip, `digital` = its MEDIA tag). */
+export interface ImportMediaCheck {
+  ok: boolean;
+  release_id: string;
+  formats: string[];
+  evidence: string[];
+  warning: string;
 }
 
 /** `GET /api/import/log-match`: the disc id one rip log states, and the

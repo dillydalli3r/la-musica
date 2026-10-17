@@ -64,7 +64,7 @@ BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
 # (discovery_rec_sources, discovery_search_sources, artist_image_sources,
 # description_sources) is a subset of these, in the user's preferred order.
 SOURCES = ["deezer", "listenbrainz", "itunes", "audiodb", "wikipedia", "musicbrainz",
-           "wikidata", "bandcamp", "lastfm", "discogs"]
+           "wikidata", "bandcamp", "lastfm", "discogs", "spotify"]
 SOURCE_LABELS = {
     "deezer": "Deezer",
     "listenbrainz": "ListenBrainz",
@@ -76,6 +76,7 @@ SOURCE_LABELS = {
     "bandcamp": "Bandcamp",
     "lastfm": "Last.fm",
     "discogs": "Discogs",
+    "spotify": "Spotify",
 }
 SOURCE_NOTES = {
     "deezer": "Popularity-ranked catalogue and 1000px artist photos.",
@@ -92,13 +93,18 @@ SOURCE_NOTES = {
     "bandcamp": "The album's own \u201cabout\u201d text from its Bandcamp page — keyless.",
     "lastfm": "Artist biographies and album wiki summaries (needs an API key).",
     "discogs": "Artist profiles, release notes and press images (needs a token).",
+    "spotify": "Artist photos from Spotify's own catalogue (needs the client id + "
+               "secret); its 640px image is the widest a public artist carries.",
 }
-# The built-in orders, best first. Keyless providers come before the keyed ones
-# so a fresh install still gets an image and a description; the keyed ones are
-# asked the moment their credential is saved (see `_lastfm_json` /
-# `_discogs_release`, which return None and say so when it is missing).
-IMAGE_SOURCES = ["deezer", "audiodb", "wikidata", "discogs", "lastfm", "itunes",
-                 "wikipedia", "bandcamp"]
+# The built-in orders, best first. The owner's rule (2026-10-17): the
+# STREAMING services lead the artist-image chain, Spotify first and Apple
+# after it — Spotify's artist object carries a real 640px photo, while Apple
+# publishes no artist-photo endpoint at all (its entry is the artist's
+# best-known ALBUM artwork, marked `album_art` so the writer knows what it is).
+# A provider with no credential answers None and the walk moves on, so a
+# keyless install still gets Deezer's photo.
+IMAGE_SOURCES = ["spotify", "deezer", "audiodb", "wikidata", "discogs", "lastfm",
+                 "itunes", "wikipedia", "bandcamp"]
 DESCRIPTION_SOURCES = ["wikipedia", "audiodb", "lastfm", "discogs", "bandcamp",
                        "musicbrainz"]
 
@@ -1371,6 +1377,25 @@ def spotify_artist_genres(artist, cfg=None, timeout=None):
             if str(g).strip()]
 
 
+def spotify_artist_image(artist, cfg=None, timeout=None):
+    """The artist's Spotify PHOTO (the widest image the artist object carries).
+
+    The owner's ask: the streaming services are artist-picture sources, with
+    Spotify the primary one. Its artist object states `images` widest-first
+    (640, 300, 64), so the first entry IS the best the public API offers; the
+    identity rule is the search's own (`_spotify_artist_hit` — a hit counts only
+    when its name is the name asked for). Empty without the client id + secret,
+    and empty when the artist has no image, so the walk moves to the next
+    source — never a placeholder.
+    """
+    hit = _spotify_artist_hit(artist, cfg=cfg, timeout=timeout) or {}
+    for image in hit.get("images") or []:
+        url = str((image or {}).get("url") or "").strip()
+        if url:
+            return url
+    return None
+
+
 def spotify_artist_albums(artist, limit=25, cfg=None, timeout=None):
     """A NAMED artist's albums — Spotify's one honest answer about an entity.
 
@@ -2142,7 +2167,12 @@ def artist_image(name, mbid=None, cfg=None, _alias_pass=True):
                     return {"url": exact[key], "source": "audiodb", "label": label,
                             "kind": "photo" if key == "thumb" else "wide"}
     for source in source_order(cfg, "artist_image_sources", IMAGE_SOURCES):
-        if source == "deezer":
+        if source == "spotify":
+            url = spotify_artist_image(name, cfg=cfg)
+            if url:
+                return {"url": url, "source": "spotify",
+                        "label": "Spotify artist photo", "kind": "photo"}
+        elif source == "deezer":
             row = deezer_artist(name)
             if row and row.get("image"):
                 return {"url": row["image"], "source": "deezer",
@@ -2609,6 +2639,9 @@ def metadata_candidates(artist, album="", cfg=None, mbid=None):
                                ("wide_thumb", "TheAudioDB wide thumb"),
                                ("fanart", "TheAudioDB fanart")):
                 add(row.get(key), "audiodb", label, "photo" if key == "thumb" else "wide")
+        sp = spotify_artist_image(artist, cfg=cfg)
+        if sp:
+            add(sp, "spotify", "Spotify artist photo", "photo")
         dz = deezer_artist(artist)
         if dz:
             add(dz.get("image"), "deezer", "Deezer artist photo", "photo")

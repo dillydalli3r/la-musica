@@ -3,9 +3,7 @@ import { Link } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ExternalLink, RotateCcw } from "lucide-react";
 import { api } from "../api";
-import CookieJarPanel from "./CookieJarPanel";
 import { toast } from "../store";
-import { useI18n } from "../lib/i18n";
 import type { SourceHealth, SourceKind, SourcesHealth } from "../types";
 
 /** The provider families, in the order the panel lists them. The rows
@@ -137,24 +135,12 @@ const KEY_HOME: Record<string, string> = {
  *  dependencies folder and on PATH — and it has no field to type, so it is a
  *  note wherever the ROW that needs it is drawn (Settings → Connections) and once
  *  in the panel's own copy wherever it is not (the wizard's Connections step draws
- *  only the rows that ask for a key). Both halves of the YouTube cookie story
- *  are in the note: yt-dlp is what searches, fetches and captions, and its
- *  cookies are a Netscape-format cookies.txt — `tab`/`tabLink` jump to the box
- *  that imports them, where Settings is a page this render can reach (see
- *  KEY_INFO). */
-const TOOL_INFO: Record<string, { label: string; hint: string; tab?: string; tabLink?: string }> = {
-  "yt-dlp": {
-    label: "yt-dlp",
-    hint:
-      "The downloader behind every YouTube path: it searches, fetches the missing music videos (script 11) and reads YouTube captions for lyrics (script 18). Installed from the Tools step (or Settings → Dependencies). " +
-      "Its cookies are a cookies.txt in Netscape format — what a browser-extension exporter like \"Get cookies.txt\" writes — imported by the cookie box below, or by the same box on the Videos tab, into the app's own YouTube cookie jar, which yt-dlp then reads for age-gated, members-only and throttled videos.",
-    tab: "videos",
-    tabLink: "Import its cookies — Settings → Videos",
-  },
-};
+ *  only the rows that ask for a key — a source that needs an installed tool
+ *  names it in `needs` and gets the Dependencies note instead of an input. */
+const TOOL_INFO: Record<string, { label: string; hint: string; tab?: string; tabLink?: string }> = {};
 
-/** `needs` mixes config keys with installed tools (yt-dlp): only the keys get
- *  an input, the tools are a dependency note. */
+/** `needs` mixes config keys with installed tools: only the keys get an
+ *  input, the tools are a dependency note. */
 const promptKeysOf = (row: SourceHealth) => row.needs.filter((k) => k in KEY_INFO);
 
 /** A panel row: one PROVIDER, whatever number of roles it serves. */
@@ -234,7 +220,6 @@ function StatusChip({ row }: { row: SourceHealth }) {
  *  panel was 4,800 px of exactly that on the step that exists to ask for keys. */
 export default function SourcesPanel({ only, askKeys }: { only?: SourceKind | SourceKind[]; askKeys?: boolean } = {}) {
   const qc = useQueryClient();
-  const { t } = useI18n();
   const { data: config } = useQuery({ queryKey: ["config"], queryFn: api.config });
   const { data, isLoading, error } = useQuery({
     queryKey: ["sourcesHealth"],
@@ -364,16 +349,6 @@ export default function SourcesPanel({ only, askKeys }: { only?: SourceKind | So
           ))}
         </div>
       )}
-
-      {/* The YouTube cookie login: its import box lives HERE too, so a first
-          run (this step) and Settings → Connections can hand the file over without
-          hunting for the Videos tab that owns the jar — and so the box that
-          asks for the value is the box that accepts the export for it. ONE
-          component for both, never a second paste box to keep in step. */}
-      <div className="rounded-md border border-border bg-zinc-950/40 px-3 py-2 space-y-1.5">
-        <div className="text-[10px] uppercase tracking-widest text-zinc-500">{t("cookies.sectionTitle")}</div>
-        <CookieJarPanel source="youtube" compact />
-      </div>
 
       {groups.map(([kind, list]) => (
         <div key={kind} className="space-y-1">

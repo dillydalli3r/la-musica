@@ -83,7 +83,6 @@ from server import integrations as intg_mod  # noqa: E402
 from server import library as lib_mod  # noqa: E402
 from server import playlists as pl_mod  # noqa: E402
 from server import streaming_playlists as sp  # noqa: E402
-from server import youtube as yt_mod  # noqa: E402
 
 FAILED = []
 
@@ -191,8 +190,6 @@ CASES = [
     ("https://api.deezer.com/playlist/9", "deezer"),
     ("https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M", "spotify"),
     ("https://open.spotify.com/intl-de/playlist/xyz123", "spotify"),
-    ("https://music.youtube.com/playlist?list=OLAK5uy_abc", "youtube"),
-    ("https://www.youtube.com/playlist?list=PLabc", "youtube"),
     ("https://music.apple.com/us/playlist/todays-hits/pl.f4d106fed2bd41149aaacabb233eb5eb", "apple"),
 ]
 for url, want in CASES:
@@ -200,7 +197,9 @@ for url, want in CASES:
     check(f"service_of({url}) → {want}", got == want, got)
 
 for url in ("https://example.com/playlist/1", "not a url",
-            "https://open.spotify.com/album/1abc", "https://www.youtube.com/watch?v=abc",
+            "https://open.spotify.com/album/1abc",
+            "https://music.youtube.com/playlist?list=OLAK5uy_abc",
+            "https://www.youtube.com/watch?v=abc",
             "https://www.deezer.com/track/116348632"):
     got = sp.service_of(url)
     check(f"service_of({url}) → not a playlist", got == "", got)
@@ -217,8 +216,8 @@ try:
     sp.fetch("https://example.com/x", BASE_CFG)
     check("an unknown host is refused", False, "no error")
 except sp.StreamingError as e:
-    check("an unknown host names all four services",
-          all(s in str(e) for s in ("Deezer", "Spotify", "YouTube Music", "Apple Music")),
+    check("an unknown host names the three services it reads",
+          all(s in str(e) for s in ("Deezer", "Spotify", "Apple Music")),
           str(e))
 
 try:
@@ -414,65 +413,16 @@ ROUTES[SP_API] = ({
 }, "")
 
 # --------------------------------------------------------------------------- #
-# 4. YouTube Music: the app's own yt-dlp probe
+# 4. YouTube Music is GONE (removed with yt-dlp, 2026-10-17)
 # --------------------------------------------------------------------------- #
 print("\n[4] YouTube Music")
-YT_URL = "https://music.youtube.com/playlist?list=OLAK5uy_abc"
-_youtube = {"entries": None, "error": None, "installed": True,
-            "title": "A Music Playlist"}
-yt_mod.ytdlp_available = lambda config=None: _youtube["installed"]
-yt_mod.flat_playlist = lambda url, config=None: (
-    (_youtube["title"], _youtube["entries"]) if _youtube["error"] is None
-    else (_ for _ in ()).throw(RuntimeError(_youtube["error"])))
-_youtube["entries"] = [
-    {"id": "v1", "title": "Two", "channel": "Alpha - Topic", "duration": 200},
-    {"id": "v2", "title": "Nobody - Missing Song", "uploader": "",
-     "duration": 180},
-]
-reset_queues()
-yt_payload = sp.fetch(YT_URL, BASE_CFG)
-check("YouTube: both entries are read", len(yt_payload["tracks"]) == 2,
-      yt_payload["tracks"])
-check("YouTube: the playlist's own title comes back from the probe",
-      yt_payload["title"] == "A Music Playlist", yt_payload["title"])
-check("YouTube: a '- Topic' channel is the artist, and the title is kept",
-      yt_payload["tracks"][0]["artist"] == "Alpha"
-      and yt_payload["tracks"][0]["title"] == "Two", yt_payload["tracks"][0])
-check("YouTube: with no channel, 'Artist - Song' splits into both fields",
-      yt_payload["tracks"][1]["artist"] == "Nobody"
-      and yt_payload["tracks"][1]["title"] == "Missing Song",
-      yt_payload["tracks"][1])
-check("YouTube: the watch URL is derived from the id",
-      yt_payload["tracks"][0]["url"] == "https://www.youtube.com/watch?v=v1",
-      yt_payload["tracks"][0]["url"])
-yt_rows = sp.match_tracks(yt_payload["tracks"], library=LIBRARY)
-check("YouTube: the channel artist is what matches the library",
-      yt_rows[0]["matched"] and not yt_rows[1]["matched"], yt_rows)
-
-_youtube["installed"] = False
+check("YouTube Music is no longer a service", "youtube" not in sp.SERVICES, sp.SERVICES)
 try:
-    sp.fetch(YT_URL, BASE_CFG)
-    check("YouTube without yt-dlp is refused", False, "no error")
+    sp.fetch("https://music.youtube.com/playlist?list=OLAK5uy_abc", BASE_CFG)
+    check("a YouTube Music link is refused", False, "no error")
 except sp.StreamingError as e:
-    check("YouTube without yt-dlp names Dependencies",
-          "yt-dlp" in str(e) and "Dependencies" in str(e), str(e))
-_youtube["installed"] = True
-_youtube["error"] = "ERROR: Private playlist"
-try:
-    sp.fetch(YT_URL, BASE_CFG)
-    check("a failed probe is refused", False, "no error")
-except sp.StreamingError as e:
-    check("a failed probe reports yt-dlp's own words and the cookie jar",
-          "Private playlist" in str(e) and "cookie" in str(e), str(e))
-_youtube["error"] = None
-_youtube["entries"] = []
-try:
-    sp.fetch(YT_URL, BASE_CFG)
-    check("an empty playlist is refused", False, "no error")
-except sp.StreamingError as e:
-    check("an empty playlist says it was read and had no entries",
-          "found no entries" in str(e), str(e))
-_youtube["entries"] = [{"id": "v1", "title": "Two", "channel": "Alpha - Topic"}]
+    check("…and the error says what this import reads instead",
+          "Deezer" in str(e) and "Spotify" in str(e) and "Apple" in str(e), str(e))
 
 # --------------------------------------------------------------------------- #
 # 5. Apple Music: the page's embedded JSON
@@ -638,17 +588,6 @@ check("one album is queued ONCE, though two rows are off it",
 check("...and both rows report the album that was queued",
       [r["queued"] for r in twice["report"]["tracks"]] == ["album", "album"],
       [r["queued"] for r in twice["report"]["tracks"]])
-
-# a row that names no album (a YouTube row) is reported, not silently dropped
-_youtube["entries"] = [{"id": "v9", "title": "Missing Song", "channel": "Nobody"}]
-reset_queues()
-no_album = sp.import_playlist(YT_URL, cfg=dict(BASE_CFG, playlist_import_parent_albums=True))
-check("a row with no album says so instead of queueing nothing quietly",
-      any(q.get("reason") == "the playlist row names no album"
-          for q in no_album["report"]["parent_albums"]["queued"])
-      and not ALBUMS_QUEUED,
-      (no_album["report"]["parent_albums"], ALBUMS_QUEUED))
-_youtube["entries"] = [{"id": "v1", "title": "Two", "channel": "Alpha - Topic"}]
 
 # restore the main Deezer fixture
 ROUTES[DZ_API] = ({

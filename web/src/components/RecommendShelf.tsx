@@ -38,8 +38,9 @@ export default function RecommendShelf({
   children,
 }: {
   icon: LucideIcon;
-  /** "Recommended (Local)" / "Recommended (Online)" — the source is part of
-   *  the name, so the two shelves are never read as one list. */
+  /** The shelf's own title. It used to name its source — "Recommended
+   *  (Local)" beside an online twin — and the online shelves are gone, so the
+   *  title says what the rows ARE and nothing more. */
   title: string;
   /** Where these rows came from, in one line. */
   hint: ReactNode;

@@ -393,15 +393,16 @@ try:
     _mod = __import__("mlo.lyrics_providers", fromlist=["_PROVIDERS"])
     for _pid in list(_mod._PROVIDERS):
         _mod._PROVIDERS[_pid] = _never_called
-    _synced, _plain = _search_chain({}, ["lrclib", "youtube", "kuwo"], "A", "T",
-                                    None, None, None, 0.6, _spent)
+    _synced, _plain = _search_chain({}, ["lrclib", "kuwo"], "A", "T",
+                                    None, None, 0.6, _spent)
     check("a spent budget walks no provider at all",
           (_synced, _plain, _called) == (None, None, []), repr(_called))
+    # (the names are the list's own — the chain no longer has a YouTube source)
     check("…and NAMES every source it never reached",
-          _spent.cut == ["lrclib", "youtube", "kuwo"], str(_spent.cut))
+          _spent.cut == ["lrclib", "kuwo"], str(_spent.cut))
     check("the sentence a row carries names them",
           "the sources left were" in _spent.why()
-          and "YouTube captions" in _spent.why() and "Kuwo" in _spent.why(),
+          and "LRCLIB" in _spent.why() and "Kuwo" in _spent.why(),
           _spent.why())
     from mlo.lyrics_providers import provider_order as _order
     _fresh = Deadline(30.0)          # nothing can spend this

@@ -5,7 +5,6 @@ import { api, type ChartPeriod, type DiscoverKind } from "../api";
 import PageHeader from "../components/PageHeader";
 import Segmented from "../components/Segmented";
 import { EmptyState, PageLoading } from "../components/Badges";
-import DiscoverRow, { NotesChips } from "../components/DiscoverRow";
 import { useI18n } from "../lib/i18n";
 import { albumRef, artistRef, trackRef } from "../lib/refs";
 import { fmtDuration } from "../lib/fmt";
@@ -14,11 +13,10 @@ import { fmtDuration } from "../lib/fmt";
  *  page rather than a catalogue: fifty is what a reader scrolls. */
 const LIMIT = 50;
 
-/** Which half of the page to draw. "library" is the user's own play history
- *  (`/api/top`), "online" the providers' charts (`/api/discover/charts`), and
- *  "all" both — side by side, never merged, because a play count and a
- *  provider's rank are different kinds of number. */
-type Scope = "library" | "online" | "all";
+/* The page is the user's own play history (`GET /api/top`). The providers'
+ *  charts that used to sit beside it (`/api/discover/charts`) are gone with the
+ *  online discovery feeds, so there is no scope to pick: a rank on this page is
+ *  always a play count from THIS library. */
 
 /** The two halves of the payload this page renders, so the row renderers below
  *  are driven by the answer rather than by a second hardcoded table. */
@@ -35,28 +33,18 @@ const KINDS: { id: DiscoverKind; key: "tracks" | "albums" | "artists" }[] = [
   { id: "artists", key: "artists" },
 ];
 
-/** Charts: what has actually been played, and what the world is playing.
+/** Charts: what has actually been played in this library.
  *
- *  Two sources of truth in one page, labelled as such. The library half counts
- *  THIS user's plays in the selected window, server-side (`GET /api/top`), and
- *  every row opens the real track/album/artist page. The online half shows each
- *  provider's own chart, keeps the providers separate (a rank belongs to one
- *  chart), names the provider on every row and offers the same Add action a
- *  Discover row does. Both halves say why they are empty: the library explains
- *  when a play is recorded, and the online side prints every source's own
- *  outcome — answered, skipped for a missing key, unsupported for this window,
- *  or the provider's own refusal, verbatim.
- *
- *  The window, the kind and the scope are query params, so a view someone
- *  found is a link. */
+ *  THIS user's plays in the selected window, counted server-side
+ *  (`GET /api/top`), every row opening the real track/album/artist page, and
+ *  the empty case saying when a play is recorded. The window and the kind are
+ *  query params, so a view someone found is a link. */
 export default function ChartsPage() {
   const { t } = useI18n();
   const [params, setParams] = useSearchParams();
   const period = (params.get("period") as ChartPeriod) || "all";
   const kind = (params.get("kind") as DiscoverKind) || "tracks";
-  const scope = (params.get("scope") as Scope) || "all";
-
-  const write = (patch: Partial<Record<"period" | "kind" | "scope", string>>) => {
+  const write = (patch: Partial<Record<"period" | "kind", string>>) => {
     const next = new URLSearchParams(params);
     for (const [key, value] of Object.entries(patch)) {
       if (value) next.set(key, value);
@@ -65,41 +53,17 @@ export default function ChartsPage() {
     setParams(next, { replace: true });
   };
 
-  const wantLibrary = scope !== "online";
-  const wantOnline = scope !== "library";
 
   // The library's own counts — cheap (one grouped SQL read, TTL-cached client
   // side), and refetched when the window changes rather than recomputed here.
   const libQ = useQuery({
     queryKey: ["topCharts", period, kind],
     queryFn: () => api.topCharts({ period, kind, limit: LIMIT }),
-    enabled: wantLibrary,
     placeholderData: keepPreviousData,
     staleTime: 60_000,
     retry: false,
   });
-  // The providers: slow (a source chain, each provider its own client),
-  // TTL-cached server-side, so a page being read does not re-walk it.
-  const onQ = useQuery({
-    queryKey: ["discoverCharts", period, kind],
-    queryFn: () => api.discoverCharts({ period, kind, limit: LIMIT }),
-    enabled: wantOnline,
-    placeholderData: keepPreviousData,
-    staleTime: 5 * 60_000,
-    retry: false,
-  });
-
   const libRows = libQ.data?.items ?? [];
-  const onRows = onQ.data?.items ?? [];
-  const notes = onQ.data?.notes ?? {};
-  const asked = onQ.data?.sources_asked ?? [];
-  // The one note that is not a source: the server's verdict when nobody had
-  // anything to rank. It is the online half's own sentence, shown in place of
-  // the chip list.
-  const chartNote = (notes as Record<string, string>).charts ?? "";
-  const sourceNotes = Object.fromEntries(
-    Object.entries(notes).filter(([id]) => id !== "charts")
-  );
 
   return (
     <div className="p-6 space-y-5 mx-auto max-w-[1600px]">
@@ -107,17 +71,6 @@ export default function ChartsPage() {
         icon={BarChart3}
         title={t("page.charts")}
         subtitle={t("charts.subtitle")}
-        actions={
-          <Segmented
-            value={scope}
-            onChange={(s) => write({ scope: s })}
-            options={[
-              { id: "library" as Scope, label: t("charts.scope.library") },
-              { id: "online" as Scope, label: t("charts.scope.online") },
-              { id: "all" as Scope, label: t("charts.scope.all") },
-            ]}
-          />
-        }
       >
         <div className="flex flex-wrap items-center gap-3">
           <Segmented
@@ -130,11 +83,9 @@ export default function ChartsPage() {
             onChange={(k) => write({ kind: k })}
             options={KINDS.map((k) => ({ id: k.id, label: t(`charts.kind.${k.key}`) }))}
           />
-          {wantOnline && <NotesChips notes={sourceNotes} sources={asked} />}
         </div>
       </PageHeader>
 
-      {wantLibrary && (
         <section className="space-y-3">
           <div className="flex items-baseline gap-2">
             <h2 className="text-lg font-semibold">{t("charts.your_library")}</h2>
@@ -218,49 +169,8 @@ export default function ChartsPage() {
             </div>
           )}
         </section>
-      )}
 
-      {wantOnline && (
-        <section className="space-y-3">
-          <div className="flex items-baseline gap-2">
-            <h2 className="text-lg font-semibold">{t("charts.online")}</h2>
-            <span className="text-[11px] text-zinc-500">{t("charts.online_note")}</span>
-            {onQ.isFetching && <Loader2 className="h-3.5 w-3.5 animate-spin text-zinc-500" />}
-          </div>
-          {onQ.isLoading ? (
-            <PageLoading label={t("charts.loading_online")} />
-          ) : onQ.error ? (
-            <EmptyState
-              title={t("charts.error_title")}
-              hint={onQ.error instanceof Error ? onQ.error.message : String(onQ.error)}
-              onAction={{ label: t("action.retry"), onClick: () => void onQ.refetch() }}
-            />
-          ) : onRows.length === 0 ? (
-            // Every reason is the server's own: a source that needs a key names
-            // it, one that refused repeats the provider's words, and one with
-            // no such window says which windows it does publish — all in the
-            // chips above.
-            <EmptyState
-              title={chartNote ? t("charts.no_source_title") : t("charts.unsupported_title")}
-              hint={chartNote || t("charts.empty_online")}
-            />
-          ) : (
-            <div className="panel !p-0 overflow-hidden">
-              <div className="px-3 py-2 border-b border-border/60 text-[11px] text-zinc-500">
-                {t("charts.rows", { n: onRows.length })}
-              </div>
-              <ul className="divide-y divide-border/60 stagger">
-                {onRows.map((item, i) => (
-                  <DiscoverRow
-                    key={`${item.source}:${item.kind}:${item.mbid || item.path || item.title}-${i}`}
-                    item={item}
-                  />
-                ))}
-              </ul>
-            </div>
-          )}
-        </section>
-      )}
+
     </div>
   );
 }

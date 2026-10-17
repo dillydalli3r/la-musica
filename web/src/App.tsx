@@ -3,8 +3,8 @@ import type { ReactNode } from "react";
 import { Navigate, NavLink, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Activity, BarChart3, ChevronLeft, ChevronRight, ClipboardCheck, Compass, Disc3, Gauge, HardDriveDownload, Heart, HeartHandshake, Home, Import,
-  Keyboard, Library, ListChecks, ListMusic, Menu, Music2, Music4, PanelLeftClose, Search, Sliders, SlidersHorizontal, Sparkles, Tags, Trash2, User, WifiOff, X,
+  Activity, BarChart3, ChevronLeft, ChevronRight, ClipboardCheck, Disc3, Gauge, HardDriveDownload, Heart, HeartHandshake, Home, Import,
+  Keyboard, Library, ListChecks, ListMusic, Menu, Music2, Music4, PanelLeftClose, Search, Sliders, SlidersHorizontal, Tags, Trash2, User, WifiOff, X,
   Settings as SettingsIcon, Wrench,
 } from "lucide-react";
 import { api, AuthError, getToken, IN_TAURI, onAuthLost, serverUrl } from "./api";
@@ -50,8 +50,6 @@ const InProgressPage = lazy(() => import("./pages/InProgressPage"));
 // and from an episode's own page, so the sidebar needs no entry for them).
 const PodcastPage = lazy(() => import("./pages/PodcastPage"));
 const BrowsePage = lazy(() => import("./pages/BrowsePage"));
-const DiscoverPage = lazy(() => import("./pages/DiscoverPage"));
-const RecommendedPage = lazy(() => import("./pages/RecommendedPage"));
 const ChartsPage = lazy(() => import("./pages/ChartsPage"));
 const CheckStackPage = lazy(() => import("./pages/CheckStackPage"));
 const MBSearchPage = lazy(() => import("./pages/MusicBrainzPage").then((m) => ({ default: m.MBSearchPage })));
@@ -173,10 +171,9 @@ const NAV_GROUPS: { labelKey: MessageKey; items: { to: string; labelKey: Message
   {
     labelKey: "nav.group.discover",
     items: [
-      { to: "/discover", labelKey: "nav.discover", icon: Compass, end: false },
-      { to: "/recommended", labelKey: "nav.recommended", icon: Sparkles, end: false },
-      // Charts sits with Discover: the same sources, ranked, over the windows
-      // the user picked — and beside them the library's own play history.
+      // Charts is the library's own play history, over the windows the user
+      // picked. (The providers' charts that sat beside it are gone with the
+      // online discovery feeds.)
       { to: "/charts", labelKey: "nav.charts", icon: BarChart3, end: false },
       { to: "/import", labelKey: "nav.import", icon: Import, end: false },
       // MusicBrainz sits with acquiring: browsing the database IS how a user
@@ -1332,8 +1329,6 @@ export default function App() {
             <Route path="/grading" element={<GradingPage />} />
             <Route path="/in-progress" element={<InProgressPage />} />
             <Route path="/browse" element={<BrowsePage />} />
-            <Route path="/discover" element={<DiscoverPage />} />
-            <Route path="/recommended" element={<RecommendedPage />} />
             {/* What is being played: the user's own play history beside the
                 providers' charts, one window at a time. */}
             <Route path="/charts" element={<ChartsPage />} />

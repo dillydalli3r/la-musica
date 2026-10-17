@@ -1,7 +1,7 @@
 ﻿import { Fragment, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { ChevronDown, ChevronRight, CircleAlert, Play, Wand2, Trash2, FolderSync, FolderOpen, BarChart3, ImageUp, Image as ImageIcon, FileVideo, FileCheck2, Film, Disc3, CloudDownload, Sparkles, ListPlus, ListStart, ShieldCheck, FileMusic, ListChecks, Info as InfoIcon, Loader2, Pencil, RefreshCw, Tags, Users } from "lucide-react";
+import { ChevronDown, ChevronRight, CircleAlert, Play, Wand2, Trash2, FolderSync, FolderOpen, BarChart3, ImageUp, Image as ImageIcon, FileVideo, FileCheck2, Disc3, CloudDownload, Sparkles, ListPlus, ListStart, ShieldCheck, FileMusic, ListChecks, Info as InfoIcon, Loader2, Pencil, RefreshCw, Tags, Users } from "lucide-react";
 import { api } from "../api";
 import { rescanLayout } from "../lib/layoutScan";
 import { LinkChips, LinkEditorButton } from "../components/Links";
@@ -18,12 +18,10 @@ import { trackRef, entityLinkClick } from "../lib/refs";
 import { invalidateLibrary } from "../lib/invalidate";
 import { auditFails } from "../lib/status";
 import { isVideoFile } from "../lib/fmt";
-import { downloadTrackVideo } from "../lib/videoDownload";
 import { SCRIPT_LABEL } from "../lib/scripts";
 import BulkTagsDialog from "../components/BulkTagsDialog";
 import Modal from "../components/Modal";
 import MoreLikeThis from "../components/MoreLikeThis";
-import OnlineRecommendations from "../components/OnlineRecommendations";
 import LockedChip from "../components/LockedChip";
 import { useLockWhy } from "../lib/locks";
 import OverflowMenu from "../components/OverflowMenu";
@@ -124,7 +122,6 @@ export default function AlbumPage() {
   const [videoAssigned, setVideoAssigned] = useState<Record<string, number>>({});
   const [videoSaving, setVideoSaving] = useState(false);
   // The album-level "download the missing videos" run (one at a time).
-  const [videosBusy, setVideosBusy] = useState(false);
   // album description (description.txt in the album folder): the edit buffer
   // and one busy flag for the fetch/save/clear trio
   const [descEditing, setDescEditing] = useState(false);
@@ -245,15 +242,6 @@ export default function AlbumPage() {
   const issueEntries = Object.entries(data.issues ?? {});
   const verdictTrack = (tr: Track) => !!tr.grade_pass && !auditFails(tr.audit);
 
-  // Web/digital releases hand out a YouTube music video per track; the medium
-  // (album-level tag, then the API's own field) decides whether that is
-  // offered at all.
-  const digitalMedia = /digital|web|download/i.test(`${data.media ?? ""} ${data.meta?.MEDIA ?? ""}`);
-  // YouTube downloads are switchable off (Settings → Videos) and the server
-  // refuses them there, so the album's own button says why instead of firing
-  // a search that can only come back empty.
-  const youtubeOff = config?.youtube_enabled === false;
-
   /** The track a video row defaults to: the one whose length is closest (an
    *  untagged duration leaves the select empty rather than guessing). */
   const suggestedTrack = (duration: number | null) => {
@@ -297,72 +285,6 @@ export default function AlbumPage() {
     } finally {
       setVideoSaving(false);
     }
-  };
-
-  /** Download the music video for one track from YouTube (web/
-   *  digital releases only — see `digitalMedia`), then tag it as THAT track's
-   *  video.
-   *
-   *  The whole flow lives in lib/videoDownload (`downloadTrackVideo`): the
-   *  details menu's own entry on a single track runs the SAME one, so the two
-   *  entry points cannot drift in what they ask for or in what they report.
-   *  This wrapper is only the album page's own refreshing — its payloads are
-   *  the ones that went stale — and it answers whether a video was fetched. */
-  const downloadVideo = async (tr: Track): Promise<boolean> =>
-    downloadTrackVideo(
-      {
-        path: tr.path,
-        artist: tr.tags.ARTIST || albumArtist || undefined,
-        title: tr.tags.TITLE || undefined,
-        duration: tr.tech.length || undefined,
-        tracknumber: tr.tracknumber,
-        discnumber: tr.discnumber,
-      },
-      {
-        onSaved: () => {
-          qc.invalidateQueries({ queryKey: ["videos", decoded] });
-          qc.invalidateQueries({ queryKey: ["album", decoded] });
-        },
-      }
-    );
-
-  /** Tracks of this album that have no music video yet.
-   *
-   *  A video is a track's when it carries the same TITLE — exactly what the
-   *  tag write above (and the matching panel's Save) produces — so a file
-   *  name that happens to look like a title never counts as a match. */
-  const albumVideos = data.tracks.filter((t) => t.is_video);
-  const missingVideos = data.tracks.filter((t) => {
-    const title = (t.tags.TITLE ?? "").trim().toLowerCase();
-    if (t.is_video || !title) return false;
-    return !albumVideos.some((v) => (v.tags.TITLE ?? "").trim().toLowerCase() === title);
-  });
-
-  /** Fetch this album's missing music videos, one at a time.
-   *
-   *  The SAME per-track call the details menu's video entry and the video
-   *  overlay make (lib/videoDownload), so there is one download path and one
-   *  definition of "this track's video".
-   *  Sequential on purpose: each video is a multi-hundred-megabyte download
-   *  plus a tag remux, and firing the whole album at once would put every one
-   *  of them on the same connection. */
-  const downloadMissingVideos = async () => {
-    if (!missingVideos.length) {
-      toast("Every track already has its music video");
-      return;
-    }
-    setVideosBusy(true);
-    let saved = 0;
-    try {
-      for (const [i, tr] of missingVideos.entries()) {
-        toast(`Music video ${i + 1}/${missingVideos.length}: ${tr.tags.TITLE}`);
-        if (await downloadVideo(tr)) saved++;
-      }
-    } finally {
-      setVideosBusy(false);
-      refetchVideos();
-    }
-    toast(`${saved} of ${missingVideos.length} music video(s) saved`);
   };
 
   /** Run *ids* over this album's folder through the app's one script route,
@@ -411,8 +333,6 @@ export default function AlbumPage() {
 
   // Tracks of THIS album that are ticked in the global selection.
   const selectedHere = data.tracks.filter((t) => selection.tracks.includes(t.path));
-  // The track behind the open video overlay — one of the album's own files.
-  const openVideoTrack = videoOpen ? data.tracks.find((t) => t.path === videoOpen) : undefined;
 
   // Quick-select (select mode): everything on the album, or one disc's
   // tracks at a time. Selection is global, so merge / subtract by path.
@@ -1012,32 +932,6 @@ export default function AlbumPage() {
                       current={(data.meta ?? {}) as Record<string, unknown>}
                       iconOnly
                     />
-                    {/* One album-level entry to the video download, for the
-                        whole release: a row's "…" menu and the video overlay
-                        each fetch a SINGLE track's video, and a digital album
-                        is missing every one of them at once. Same per-track
-                        call underneath — one shared implementation, see
-                        lib/videoDownload and downloadMissingVideos — so
-                        nothing here is a second download path. */}
-                    {digitalMedia && (
-                      <button
-                        className="btn-icon"
-                        onClick={downloadMissingVideos}
-                        disabled={videosBusy || youtubeOff || !missingVideos.length}
-                        title={
-                          youtubeOff
-                            ? "YouTube downloads are off (Settings → Videos)"
-                            : !missingVideos.length
-                              ? "No track here is missing a music video"
-                              : `Download ${missingVideos.length} missing music video${
-                                  missingVideos.length === 1 ? "" : "s"
-                                } from YouTube and tag ${missingVideos.length === 1 ? "it" : "them"} as this album's tracks`
-                        }
-                        aria-label="Download missing music videos"
-                      >
-                        {videosBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Film className="h-4 w-4" />}
-                      </button>
-                    )}
                     <TagActionsMenu
                       paths={data.tracks.map((t) => t.path)}
                       albumPath={data.path}
@@ -1292,15 +1186,6 @@ export default function AlbumPage() {
           <div className="w-full max-w-4xl" onClick={(e) => e.stopPropagation()}>
             <SubtitledVideo path={videoOpen} className="w-full max-h-[80vh] rounded-lg border border-border bg-black" />
             <div className="flex justify-end items-center gap-2 mt-2">
-              {digitalMedia && openVideoTrack?.tags.TITLE && (
-                <button
-                  className="btn-ghost !py-1"
-                  onClick={() => downloadVideo(openVideoTrack)}
-                  title={`Download ${openVideoTrack.tags.TITLE} from YouTube`}
-                >
-                  <Film className="h-3.5 w-3.5" /> Download music video
-                </button>
-              )}
               <button className="btn-ghost !py-1" onClick={() => setVideoOpen(null)}>Close</button>
             </div>
           </div>
@@ -1741,16 +1626,7 @@ export default function AlbumPage() {
           the LOCAL scorer ranks closest to this album (this library's own
           tags), and what the online providers suggest for it. The online shelf
           is its own request, so the page is usable before it lands. */}
-      <div className="grid gap-4 lg:grid-cols-2 items-start">
-        <MoreLikeThis kind="album" id={decoded} />
-        <OnlineRecommendations
-          kind="albums"
-          seedKind="album"
-          seedMbid={data.meta?.MUSICBRAINZ_RELEASEGROUPID ?? data.meta?.MUSICBRAINZ_ALBUMID ?? ""}
-          seedName={albumTitle}
-          seedArtist={albumArtist}
-        />
-      </div>
+      <MoreLikeThis kind="album" id={decoded} />
       </div>
 
     </>

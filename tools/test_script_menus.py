@@ -806,8 +806,14 @@ def check_wizard_import_prompts(check):
           "discardStaged" in src and "r.owned" in src
           and "api.removeAlbum(r.path)" in src)
     check("…and always raises the dialog (no early import without it)",
-          bool(begin) and "setIdentify({" in begin.group(1)
+          bool(begin) and "openIdentifyNow(staged, \"auto\")" in begin.group(1)
           and "startAutoImport(staged, {})" not in begin.group(1))
+    check("…and does not wait to READ the rows before it appears",
+          # The dialog opens on the press (`openIdentifyNow` seeds the rows
+          # synchronously) and each row's release is filled in afterwards —
+          # so the click handler must not await `identifyRows` first.
+          "const openIdentifyNow = (" in src
+          and "void identifyRows(staged).then" in src)
     check("a row left on the release it names sends no pin",
           # The row's baseline is `seedOf` — the caller's `current`, else the
           # release its own TAGS state (R433): a row left on either sends

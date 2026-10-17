@@ -1,34 +1,11 @@
 #!/usr/bin/env python3
-"""Charts — the library's own play history (`/api/top`) and the online charts
-(`/api/discover/charts`).
+"""Charts — the library's own play history (`/api/top`).
 
-Offline by construction: every provider is stubbed at `server.discovery`'s ONE
-transport seam (`_json`, which Deezer, Apple, Last.fm and ListenBrainz all go
-through), so nothing here opens a socket. The play store is a temp database
-(`plays.db_path` is monkeypatched) with an injected clock, the library payload
-is handed in, and the config is passed to the plain functions (`cfg=`) rather
-than read from disk.
-
-What this pins:
-
-  * `/api/top` groups and orders per kind — three tracks, two albums and one
-    artist with distinct counts — most played first, each row carrying its
-    `plays`, and an empty history answering with the note that explains it;
-  * the charts registry: which sources chart which kinds, for which windows
-    (ListenBrainz all four; Deezer, iTunes and Last.fm all-time only), and the
-    order they are asked in;
-  * a source that answers (Deezer's, Last.fm's, Apple's and ListenBrainz's real
-    wrappers over the stubbed transport) — rows with their own rank and score;
-  * a source that needs a key: `skipped: no lastfm_api_key`, with `needs`/
-    `ready` on the payload's own source list;
-  * a source that refuses: `failed: <the provider's own words>`, verbatim;
-  * a window a source does not publish: `unsupported: …`, never its all-time
-    chart passed off as this week's;
-  * the library marking: a chart row the library owns carries its path, one it
-    does not offers the add action;
-  * the route's validation and the exact set of paths it serves.
-
-Run:  python tools/test_charts.py
+Offline and deterministic: the play store is a throwaway SQLite file, the
+library payload is handed in and the clock is a constant. The online charts
+the page used to show beside the history are gone with the discovery feeds
+(the provider's rank was never the user's play count), so this suite pins the
+windows, the folds and the empty history's own sentence.
 """
 import os
 import shutil
@@ -41,7 +18,7 @@ sys.path.insert(0, ROOT)
 
 from fastapi import HTTPException  # noqa: E402
 
-from server import api_discover, api_plays, discover, discovery  # noqa: E402
+from server import api_plays  # noqa: E402
 from server import plays  # noqa: E402
 
 passed = 0
@@ -118,12 +95,6 @@ LIB = {"folder": "C:/Music", "artists": [
     ]},
 ]}
 
-# No library walk, no config file: the payload is handed in and the keys travel
-# as arguments.
-discover._library = lambda cfg, lib=None: lib if lib is not None else LIB
-
-FULL_CFG = {"discovery_enabled": True, "lastfm_api_key": "key"}
-NO_KEY_CFG = {"discovery_enabled": True}
 
 # --------------------------------------------------------------------------- #
 # 1) /api/top — the library's own history, by kind
@@ -161,203 +132,6 @@ ok(empty["items"] == [] and empty["note"] == plays.EMPTY_NOTE
    and "actually starts playing" in empty["note"],
    f"an empty history is the note that explains it, never a bare zero "
    f"({empty['note']})")
-
-# --------------------------------------------------------------------------- #
-# 2) The registry: who charts what, for which windows
-# --------------------------------------------------------------------------- #
-print("== the charts registry ==")
-ok(discover.CHART_ORDER[0] == "deezer",
-   f"the registry order leads the chart order ({discover.CHART_ORDER})")
-ok(discover.CHART_PERIODS == ("all", "year", "month", "week"),
-   "the four windows are the app's own")
-cat = discover.catalogue(cfg={})
-specs = {s["id"]: s for s in cat["sources"]}
-ok(specs["listenbrainz"]["chart_periods"] == ["all", "year", "month", "week"],
-   "ListenBrainz answers every window (its stats take the range)")
-ok(specs["deezer"]["chart_periods"] == ["all"]
-   and specs["itunes"]["chart_periods"] == ["all"]
-   and specs["lastfm"]["chart_periods"] == ["all"],
-   "Deezer, Apple and Last.fm publish no window beyond their current chart")
-ok(specs["musicbrainz"]["charts"] == [] and specs["discogs"]["charts"] == [],
-   "a source with no chart capability declares none, so it is never asked")
-ok(cat["chart_periods"] == list(discover.CHART_PERIODS),
-   "the catalogue carries the windows for the settings surface")
-
-# --------------------------------------------------------------------------- #
-# 3) The online charts, one outcome at a time
-# --------------------------------------------------------------------------- #
-print("== /api/discover/charts ==")
-
-DEEZER_TRACKS = {"data": [
-    {"id": 1, "title": "Starless", "artist": {"name": "King Crimson"},
-     "album": {"title": "Red", "cover_xl": "https://cdn.deezer/red.jpg"},
-     "duration": 720, "rank": 900000, "link": "https://www.deezer.com/track/1"},
-    {"id": 2, "title": "Alison", "artist": {"name": "Slowdive"},
-     "album": {"title": "Souvlaki", "cover_xl": "https://cdn.deezer/souvak.jpg"},
-     "duration": 220, "rank": 800000, "link": "https://www.deezer.com/track/2"},
-]}
-APPLE_TRACKS = {"feed": {"results": [
-    {"id": "3", "name": "Seagull", "artistName": "Ride",
-     "artworkUrl100": "https://is1.mzstatic/x/100x100bb.jpg",
-     "releaseDate": "1990-10-15", "url": "https://music.apple.com/album/3"},
-]}}
-LASTFM_TRACKS = {"tracks": {"track": [
-    {"name": "Machine Gun", "artist": {"name": "Slowdive"},
-     "playcount": "1234567", "url": "https://www.last.fm/music/x/_/Machine+Gun",
-     "image": [{"size": "mega", "#text": "https://lastfm/mg.jpg"}]},
-]}}
-LB_TRACKS = {"payload": {"recordings": [
-    {"track_name": "When You Sleep", "artist_name": "my bloody valentine",
-     "release_name": "Loveless", "recording_mbid": "aaaaaaaa-0000-0000-0000-000000000001",
-     "listen_count": 987654,
-     "caa_release_mbid": "bbbbbbbb-0000-0000-0000-000000000001"},
-]}}
-
-ANSWERS = [
-    ("api.deezer.com/chart/0/tracks", DEEZER_TRACKS),
-    ("rss.applemarketingtools.com", APPLE_TRACKS),
-    ("ws.audioscrobbler.com", LASTFM_TRACKS),
-    ("api.listenbrainz.org", LB_TRACKS),
-]
-
-# ── everything answers ──────────────────────────────────────────────────────
-fresh(ANSWERS)
-all_tracks = api_discover.charts_list(period="all", kind="tracks", cfg=FULL_CFG)
-by_source = {}
-for row in all_tracks["items"]:
-    by_source.setdefault(row["source"], []).append(row)
-ok(all_tracks["sources_asked"] == ["deezer", "itunes", "lastfm", "listenbrainz"],
-   f"every chart source that charts tracks is asked, in registry order "
-   f"({all_tracks['sources_asked']})")
-ok([r["source"] for r in all_tracks["items"][:2]] == ["deezer", "deezer"]
-   and all_tracks["items"][0]["rank"] == 1,
-   "and the leading source's rows lead the page in its own order")
-ok(all_tracks["items"][0]["reason"] == "Chart #1 on Deezer",
-   f"a chart row says which chart and where it sits "
-   f"({all_tracks['items'][0]['reason']})")
-ok(set(by_source) == {"deezer", "itunes", "lastfm", "listenbrainz"},
-   f"every chart source that answered contributed ({sorted(by_source)})")
-ok([r["rank"] for r in by_source["deezer"]] == [1, 2],
-   "Deezer rows keep Deezer's order as their rank")
-ok(by_source["lastfm"][0]["score_label"] == "1.2M listens"
-   and by_source["lastfm"][0]["score"] == 1234567,
-   f"a Last.fm row carries Last.fm's own playcount "
-   f"({by_source['lastfm'][0]['score_label']})")
-ok(by_source["listenbrainz"][0]["mbid"]
-   == "aaaaaaaa-0000-0000-0000-000000000001",
-   "a ListenBrainz row is MBID-native, so the add action has a real id")
-ok(by_source["itunes"][0]["score"] is None,
-   "Apple states no number on its feed, so its score is null — not invented")
-ok(by_source["deezer"][1]["owned"] is True
-   and by_source["deezer"][1]["path"] == A1,
-   f"a chart row the library already holds carries its path "
-   f"({by_source['deezer'][1]['path']})")
-ok(by_source["deezer"][0]["owned"] is False
-   and by_source["deezer"][0]["path"] is None,
-   "…and one it does not own offers the add action")
-ok(all_tracks["notes"] == {},
-   f"a full answer carries no notes ({all_tracks['notes']})")
-ok(set(by_source["deezer"][0]) >= {"rank", "score", "score_label"},
-   "every chart row carries its rank and score on top of the shared shape")
-matrix = {s["id"]: s for s in all_tracks["sources"]}
-ok(matrix["deezer"]["supports_period"] is True
-   and matrix["deezer"]["periods"] == ["all"]
-   and matrix["lastfm"]["missing"] == []
-   and matrix["lastfm"]["ready"] is True,
-   f"the payload's source list is the support matrix for THIS request "
-   f"({matrix['deezer']})")
-
-# ── a source that needs a key ───────────────────────────────────────────────
-fresh(ANSWERS)
-keyless = api_discover.charts_list(period="all", kind="tracks", cfg=NO_KEY_CFG)
-ok(keyless["notes"]["lastfm"] == "skipped: no lastfm_api_key",
-   f"an unconfigured source is skipped by name ({keyless['notes']})")
-ok(not any(r["source"] == "lastfm" for r in keyless["items"]),
-   "and contributes no rows")
-ok({s["id"]: s for s in keyless["sources"]}["lastfm"]["missing"]
-   == ["lastfm_api_key"],
-   "while the source list still names what it needs")
-ok(set(keyless["notes"]) == {"lastfm"},
-   f"the keyless sources are all asked and note nothing ({keyless['notes']})")
-
-# ── a source that refuses: the provider's own words, verbatim ───────────────
-def refuse_apple(url, params):
-    discovery._record_http_error("rss.applemarketingtools.com", url, 403,
-                                 "Forbidden: this storefront is not available")
-    return None
-
-
-fresh([("rss.applemarketingtools.com", refuse_apple)]
-      + [(f, a) for f, a in ANSWERS if "rss.applemarketingtools.com" not in f])
-refused = api_discover.charts_list(period="all", kind="tracks", cfg=FULL_CFG)
-ok(refused["notes"]["itunes"].startswith(
-    "failed: HTTP 403: Forbidden: this storefront is not available"),
-   f"a refusal is reported in the provider's own words ({refused['notes']['itunes']})")
-ok(refused["items"] and {r["source"] for r in refused["items"]}
-   == {"deezer", "lastfm", "listenbrainz"},
-   "…and the other sources still answer")
-ok(not any(r["source"] == "itunes" for r in refused["items"]),
-   "a refused source contributes no rows, never a placeholder")
-
-# ── a window a source does not publish ──────────────────────────────────────
-fresh(ANSWERS)
-weekly = api_discover.charts_list(period="week", kind="tracks", cfg=FULL_CFG)
-ok(weekly["notes"]["lastfm"] == "unsupported: Last.fm publishes no weekly chart "
-                               "— it charts all-time",
-   f"a provider with no such window says so ({weekly['notes']['lastfm']})")
-ok(weekly["notes"]["deezer"].startswith("unsupported: Deezer")
-   and weekly["notes"]["itunes"].startswith("unsupported: iTunes"),
-   "…and each of them lists the windows it DOES publish "
-   f"({weekly['notes']['deezer']})")
-ok([r["source"] for r in weekly["items"]] == ["listenbrainz"],
-   f"and the one source with a real weekly window answered "
-   f"({[r['source'] for r in weekly['items']]})")
-ok(weekly["period"] == "week" and weekly["kind"] == "tracks"
-   and weekly["limit"] == 50,
-   "the payload echoes the window it answered")
-ok(supports_period(weekly, "listenbrainz") is True
-   and supports_period(weekly, "deezer") is False,
-   "the support matrix says which source can answer THIS window")
-ok(not [c for c in CALLS if c[0] == "json" and "api.deezer.com" in c[1]],
-   "and no unsupported source was even asked")
-
-# ── a kind a source cannot chart, an unknown source, and nothing at all ─────
-fresh([("api.deezer.com/chart/0/albums", {"data": []})])
-one = api_discover.charts_list(kind="albums", source="itunes", cfg=FULL_CFG)
-ok(one["items"] == [] and one["notes"]["itunes"].startswith("cannot chart albums:"),
-   f"a source asked for a kind it does not chart says so ({one['notes']})")
-missing = api_discover.charts_list(kind="tracks", source="nope", cfg=FULL_CFG)
-ok(missing["items"] == [] and missing["notes"] == {"nope": "unknown source"}
-   and missing["sources_asked"] == [],
-   f"an unknown source is an empty answer that says so ({missing['notes']})")
-
-fresh([("api.deezer.com/chart/0/tracks", {"data": []}),
-       ("rss.applemarketingtools.com", {"feed": {"results": []}}),
-       ("ws.audioscrobbler.com", {"tracks": {"track": []}}),
-       ("api.listenbrainz.org", {"payload": {"recordings": []}})])
-nothing = api_discover.charts_list(period="all", kind="tracks", cfg=FULL_CFG)
-ok(nothing["items"] == []
-   and nothing["notes"]["charts"].startswith("no chart source had anything"),
-   f"an empty page explains itself rather than showing a blank panel "
-   f"({nothing['notes']})")
-
-# --------------------------------------------------------------------------- #
-# 4) the route's own contract
-# --------------------------------------------------------------------------- #
-print("== route validation ==")
-for call, why in (
-        (lambda: api_discover.charts_list(period="decade", cfg=FULL_CFG), "period"),
-        (lambda: api_discover.charts_list(kind="films", cfg=FULL_CFG), "kind")):
-    try:
-        call()
-        raise AssertionError(f"an invalid {why} was accepted")
-    except HTTPException as e:
-        ok(e.status_code == 400 and why in e.detail,
-           f"an invalid {why} is a 400 naming the choices ({e.detail})")
-ok({r.path for r in api_discover.router.routes}
-   == {"/api/discover/genres", "/api/discover/genre", "/api/discover/recommended",
-       "/api/discover/charts"},
-   "the discover router serves the charts route beside the other three")
 
 # --------------------------------------------------------------------------- #
 # done

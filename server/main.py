@@ -50,7 +50,6 @@ from server import tagcache
 from server import exporter
 from server import exportconfigs
 from server import api_discovery
-from server import api_discover
 from server import api_imports
 from server import api_lyrics
 from server import api_media
@@ -66,8 +65,6 @@ from server import api_stack
 from server import script_menu
 from server import api_storage
 from server import api_streaming
-from server import api_youtube
-from server import api_cookies
 from server import api_run
 from server import api_export
 from server import api_playlists
@@ -453,7 +450,6 @@ app.include_router(api_recommend.router)
 app.include_router(api_ratings.router)
 app.include_router(api_plays.router)
 app.include_router(api_query.router)
-app.include_router(api_discover.router)
 app.include_router(api_add.router)
 app.include_router(api_choice.router)
 app.include_router(api_jobs.router)
@@ -462,8 +458,6 @@ app.include_router(api_stack.router)
 app.include_router(script_menu.router)
 app.include_router(api_storage.router)
 app.include_router(api_streaming.router)
-app.include_router(api_youtube.router)
-app.include_router(api_cookies.router)
 app.include_router(api_run.router)
 app.include_router(api_export.router)
 app.include_router(api_playlists.router)
@@ -1029,7 +1023,7 @@ def capabilities_report():
 def sources_health(kind: str = Query(None), probe: int = Query(0)):
     """Which external sources work right now — the wizard's and Settings' one
     answer, for every kind at once (`lyrics`, `advisory`, `genre`, `metadata`,
-    `links`, `discover`, `credentials`).
+    `links`, `credentials`).
 
     `probe=0` (default) reports the CONFIG only and performs no request at
     all: unconfigured sources are `skipped` (with the config keys they need)
@@ -1063,7 +1057,7 @@ def sources_health_source(source_id: str, kind: str = Query(None),
     An id can belong to two kinds (`deezer` and `itunes` are both a genre
     source and a metadata provider, and `discogs`/`lastfm`/`spotify` are also
     credentials), so the row kinds are searched in the payload's own order —
-    lyrics, advisory, genre, metadata, links, discover, credentials — unless
+    lyrics, advisory, genre, metadata, links, credentials — unless
     `kind=` picks one. The row always carries its kind, so a caller that sends
     both ids (`kind=id`) is never guessing.
     """
@@ -1952,85 +1946,6 @@ def videos_tag(req: VideoTagRequest):
     return {"ok": True, "path": final, "renamed": os.path.normcase(final) != os.path.normcase(p),
             "container_changed": bool(af.container_changed),
             "output_path": final, "tech": tech}
-
-
-class YoutubeDownloadRequest(BaseModel):
-    """Grab a music video from YouTube for an album.
-
-    `path` is the album folder to drop it into (or a track path whose folder
-    is used); without it the file lands in the app's downloads dir for
-    review. `duration` is the expected length in seconds — the candidate
-    search uses it to reject live/tribute/cover uploads."""
-    path: Optional[str] = None
-    artist: str
-    title: str
-    duration: Optional[int] = None
-
-
-@app.post("/api/videos/download-youtube")
-def videos_download_youtube(req: YoutubeDownloadRequest):
-    """Grab this artist+title's music video from YouTube.
-
-    The candidate is picked by server/youtube.py (duration window, lyric /
-    cover / tribute filtering) and downloaded here. When that is not available
-    — youtube_enabled off, yt-dlp missing, no acceptable candidate, or a
-    download it could not deliver — the request answers with the reason.
-
-    Returns {ok, file, candidate} for a download, or {ok: false,
-    candidate: null, error} naming why no video was fetched."""
-    from server import youtube
-
-    cfg = load_config()
-    artist = str(req.artist or "").strip()
-    title = str(req.title or "").strip()
-    if not artist or not title:
-        raise HTTPException(400, "artist and title are required")
-    # YouTube's own gates, and they are only YouTube's: a switch that is off —
-    # or a yt-dlp that is not installed — leaves the network as the source it
-    # always was, so neither of them ends the request. What they say is kept
-    # for the error below, which must not report "not on YouTube" about a
-    # lookup the app was never allowed (or able) to make.
-    yt_why = ""
-    if not youtube.ytdlp_available(cfg):
-        yt_why = "yt-dlp is not available — install it under Dependencies"
-    elif not youtube.enabled(cfg):
-        yt_why = "YouTube downloads are disabled in Settings → Videos"
-
-    # A destination is required: the file belongs in the album it is being
-    # fetched FOR (the caller always names it), and the app no longer keeps a
-    # downloads staging area to drop it into instead.
-    if not req.path:
-        raise HTTPException(400, "path is the album folder the video is for")
-    p = os.path.normpath(req.path)
-    dest = p if os.path.isdir(p) else os.path.dirname(p)
-    if not os.path.isdir(dest):
-        raise HTTPException(404, "destination folder not found")
-    if not _in_music_folder(dest, _music_folder(cfg)):
-        raise HTTPException(400, "destination outside music folder")
-
-    candidate = None
-    if not yt_why:
-        candidate = youtube.best_candidate(artist, title,
-                                           want_seconds=req.duration,
-                                           config=cfg)
-        if not candidate:
-            yt_why = "no acceptable YouTube match found"
-    if candidate:
-        try:
-            got = youtube.download(candidate["url"], dest, cfg)
-        except Exception as e:
-            # The upload is there and could not be delivered: that is the same
-            # "YouTube cannot serve this one" the network is asked about
-            # below, so it does not end the request here.
-            yt_why = f"YouTube download failed: {e}"
-        else:
-            tagcache.invalidate_album(dest)
-            return {"ok": True, "file": str(got.get("path") or "").replace("\\", "/"),
-                    "candidate": candidate, "container": got.get("container"),
-                    "height": got.get("height"), "abr": got.get("abr")}
-
-    return {"ok": False, "candidate": None,
-            "error": yt_why or "no acceptable YouTube match found"}
 
 
 class VideoMatchAssignment(BaseModel):
@@ -4680,6 +4595,71 @@ async def import_upload(
 def _write_upload_bytes(dest: str, data: bytes) -> None:
     with open(dest, "wb") as out:
         out.write(data)
+
+
+@app.get("/api/import/media-check")
+def import_media_check(path: str = Query(...), mbid: str = Query(...)):
+    """Does this release's stated MEDIUM agree with what the folder IS?
+
+    The owner's ask (2026-10-17): "the app should warn the user if a track's
+    MBID in tags is in the wrong media format — a release being imported with a
+    .log / .cue file tagged with a MBID for a vinyl / cassette release or
+    digital media release should warn the user."
+
+    The evidence comes from the folder, read once and cheaply: a `.log` or a
+    `.cue` is what a DISC rip carries (nothing else produces those sheets), and
+    the files' own MEDIA tags say what the copy calls itself. The release is
+    `server.integrations.resolve_release`'s payload — a release id, a
+    release-group id or a URL — and `mlo.release_choice.medium_mismatch` is the
+    ONE rule that compares the two (so the import, the grader and any future
+    surface cannot disagree). `warning` is the sentence to show, empty when
+    they agree or when either side states nothing. Read-only: no tag is
+    written, no release is changed — the user decides."""
+    from mlo.release_choice import media_formats, medium_mismatch
+    from server import integrations as intg
+
+    p = os.path.realpath(os.path.normpath(path))
+    if not os.path.isdir(p):
+        raise HTTPException(404, "folder not found")
+    evidence = []
+    for root, dirs, files in os.walk(p):
+        dirs[:] = [d for d in dirs if not d.startswith(".")]
+        for f in files:
+            low = f.lower()
+            if low.endswith((".log", ".cue")):
+                evidence.append("cd")
+                break
+        if evidence:
+            break
+    # The files' own MEDIA tags, from up to five of them: the value is a
+    # release-level fact, so five headers answer it without walking an album.
+    media_values = []
+    from mlo.audio import AudioFile
+    from mlo.paths import AUDIO_EXTS
+    shown = 0
+    for f in sorted(os.listdir(p)):
+        if os.path.splitext(f)[1].lower() not in AUDIO_EXTS:
+            continue
+        af = AudioFile(os.path.join(p, f))
+        if af.audio is None:
+            continue
+        media_values.append(str(af.get_tag("MEDIA") or "").strip())
+        shown += 1
+        if shown >= 5:
+            break
+    try:
+        from mlo import tagtext
+        if any(tagtext.is_digital_media(v) for v in media_values if v):
+            evidence.append("digital")
+    except Exception:
+        pass
+    release, rid = intg.resolve_release(mbid)
+    if not release:
+        raise HTTPException(404, "no MusicBrainz release matches this id")
+    formats = media_formats(release)
+    return {"ok": True, "release_id": rid,
+            "formats": formats, "evidence": sorted(set(evidence)),
+            "warning": medium_mismatch(evidence, formats)}
 
 
 @app.get("/api/import/log-match")

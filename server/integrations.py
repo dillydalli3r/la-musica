@@ -1149,8 +1149,6 @@ def recording_isrcs(recording_mbid):
 #   apple-album    iTunes artist → its albums → THE EXPLICIT EDITION →
 #                  lookup?entity=song                    (verified working)
 #   itunes-song    iTunes song search, exact title only  (last resort)
-#   youtube-age    yt-dlp `age_limit` >= 18 for the track's OWN video id
-#                  (explicit-only, last, never a blind per-track search)
 #
 # NOT a route any more: Discogs' edition `format`/`description`
 # "Parental Advisory". It is an ALBUM/EDITION-level flag, so it could not
@@ -1195,7 +1193,7 @@ def recording_isrcs(recording_mbid):
 # Every value a route may report as `source`. A caller may only write a value
 # it can attribute to one of these.
 ADVISORY_SOURCES = frozenset({"deezer-isrc", "spotify-isrc", "apple-album",
-                              "itunes-song", "youtube-age"})
+                              "itunes-song"})
 
 _ITUNES_LOOKUP = "https://itunes.apple.com"
 _DEEZER_TRACK_ISRC = "https://api.deezer.com/track/isrc:"
@@ -1764,7 +1762,7 @@ def merge_advisory(answers, fallback=None):
     preferred when one exists) and `itunes-song` (a title search) are guesses
     the providers themselves get wrong: the owner's "Just" case is exactly a
     track whose loose Apple match said explicit while Deezer's ISRC said
-    clean. `youtube-age` is video-level and never clears a track either way.
+    clean.
     Two identity routes that disagree still take the rank above (1 wins), and
     a 1 from an identity route is never overruled by a name-route 0.
 
@@ -1876,64 +1874,6 @@ _YOUTUBE_TAG_KEYS = ("YOUTUBEID", "YOUTUBE_ID", "VIDEOID", "SOURCE")
 _YOUTUBE_ID_RX = re.compile(r"[A-Za-z0-9_-]{11}")
 
 
-def youtube_video_id(tags):
-    """The YouTube id a track's OWN tags record, or "".
-
-    Only a recorded origin counts: an `11`-character id, or a URL carrying
-    `v=`/`/shorts/`/`youtu.be/`. Nothing here searches YouTube — a search's
-    first hit is not this track, and rating the wrong video is precisely the
-    failure this rule exists to prevent.
-    """
-    if not isinstance(tags, dict):
-        return ""
-    for key in _YOUTUBE_TAG_KEYS:
-        value = str(tags.get(key) or "").strip()
-        if not value:
-            continue
-        if "youtube.com" in value or "youtu.be" in value:
-            match = re.search(r"(?:v=|/shorts/|youtu\.be/)([A-Za-z0-9_-]{11})",
-                              value)
-            if match:
-                return match.group(1)
-            continue
-        if _YOUTUBE_ID_RX.fullmatch(value):
-            return value
-    return ""
-
-
-def youtube_age_advisory(video_id, cfg=None):
-    """(1, "youtube-age") when YouTube itself flags the video 18+, else None.
-
-    Only asked about a video the caller already knows belongs to this track
-    (see `youtube_video_id`) or passes itself. `age_limit >= 18` states
-    explicit; anything else — a normal video, an unavailable one, yt-dlp not
-    installed, YouTube disabled — states NOTHING, because "no age gate" is not
-    a statement about the music.
-    """
-    from server import youtube
-
-    ident = str(video_id or "").strip()
-    if not _YOUTUBE_ID_RX.fullmatch(ident):
-        return None
-    if not youtube.enabled(cfg):
-        return None
-    module = youtube._load_ytdlp()
-    if module is None:
-        return None
-    try:
-        with module.YoutubeDL(youtube._ydl_opts(cfg)) as ydl:
-            info = ydl.extract_info(youtube._watch_url(ident), download=False)
-    except Exception:
-        return None
-    if not isinstance(info, dict):
-        return None
-    try:
-        limit = int(info.get("age_limit") or 0)
-    except (TypeError, ValueError):
-        return None
-    return (1, "youtube-age") if limit >= 18 else None
-
-
 def _isrc_codes(isrc):
     """Every ISRC the caller named, in ask order, deduplicated.
 
@@ -2037,7 +1977,7 @@ def _advisory_alias_queries(artist, title, album, recording_mbid, tags, cfg):
 
 def resolve_advisory_route(isrc="", recording_mbid="", title="", artist="",
                            album="", disc=None, track=None, track_count=None,
-                           cfg=None, youtube_id="", tags=None):
+                           cfg=None, tags=None):
     """{"value": 0|1|2|None, "source": key|None, "checked": [key, ...],
         "answers": {key: 0|1}}.
 
@@ -2140,18 +2080,6 @@ def resolve_advisory_route(isrc="", recording_mbid="", title="", artist="",
                 _record_advisory(answers, answer)
 
     _ask_names(artist, album, title)
-    # The last one is an extra EXPLICIT-only signal, album/edition level and
-    # silent when its input is missing: YouTube's own 18+ gate for a video the
-    # track already records. It cannot clear a track, and it is named by the
-    # video, not by the track's names — so it is asked once here, outside the
-    # name-based half.
-    video = str(youtube_id or "").strip() or youtube_video_id(tags)
-    if video:
-        checked.append("youtube-age")
-        answer = _advisory_cached(("youtube-age", video),
-                                  lambda: youtube_age_advisory(video, cfg))
-        if answer is not None:
-            _record_advisory(answers, answer)
     value = merge_advisory(answers)
     if value is None:
         # The ORIGINAL names stated nothing anywhere: consult MusicBrainz's

@@ -694,6 +694,10 @@ DEFAULT_CONFIG = {
     "grade_check_lyrics_lang_tags": True,
     "grade_check_sidecar_cover": True,
     "grade_check_media": True,
+    # A .log/.cue exists only for a DISC rip: an album carrying one and
+    # stating any other medium has a wrong MEDIA (or a wrong MusicBrainz link)
+    # and fails here (mlo.grader, the owner's rule 2026-10-17).
+    "grade_check_media_evidence": True,
     "grade_check_source": True,
     "grade_check_album_tags": True,
     "grade_check_cd_log": True,
@@ -960,22 +964,6 @@ DEFAULT_CONFIG = {
     "video_remove_original": True,
     "video_process_mp4": False,
 
-    # Music videos from YouTube (server/youtube.py, yt-dlp). 0 max height =
-    # whatever the source offers (best).
-    "youtube_enabled": True,
-    "youtube_max_height": 0,
-    # Cookies for yt-dlp: the user's own browser session, which is the only
-    # thing that opens an age-gated, members-only or rate-limited video —
-    # YouTube answers "Sign in to confirm your age" without one, and a fresh
-    # IP gets throttled. `none` is the default because a cookie jar is a
-    # credential and sending one is the user's decision, never a default.
-    # `file` reads the ONE jar the app owns (<music>/.mlo/data/cookies.txt,
-    # written by Settings → Videos; see server/api_youtube.py) and `browser`
-    # lets yt-dlp read the browser's own store. Both yt-dlp paths
-    # (server/youtube.py: the importable module and the vendored binary)
-    # honour whichever is set.
-    "youtube_cookies_mode": "none",
-    "youtube_cookies_browser": "chrome",
 
     # Library codec target (script 3 and every import). The library's audio
     # format is a SETTING, not an assumption: `library_codec` names what the
@@ -1080,10 +1068,6 @@ DEFAULT_CONFIG = {
     # for never pays for an extra lookup. Off, the search runs once under the
     # tags as they are.
     "lyrics_search_aliases": True,
-    # YouTube captions through yt-dlp, for tracks that carry a video id (tag or
-    # the "[<id>]" the video download leaves in the file name). Never searches
-    # YouTube on its own. Off = that provider is simply not in the chain.
-    "lyrics_youtube_captions": True,
 
     # AI-assisted lyric transforms (script 17). Any OpenAI-compatible
     # /chat/completions endpoint works (OpenAI, OpenRouter, LM Studio,
@@ -1741,7 +1725,6 @@ _BOOL_KEYS = {
 }
 _INT_RANGES = {
     "video_crf": (0, 51),
-    "youtube_max_height": (0, 4320),
     "video_flac_level": (0, 8),
     "jpegxl_effort": (1, 10),
     "lrc_timestamp_precision": (2, 3),
@@ -1827,14 +1810,6 @@ _CHOICES = {
     # Which copy the player takes when a track is downloaded: the server's
     # stream (the default) or the cached one.
     "playback_source": {"stream", "downloaded"},
-    # How yt-dlp gets the user's cookies, and which browser's store it reads
-    # in browser mode. The browser list is yt-dlp's own (server/youtube.py
-    # holds the same tuple as COOKIES_BROWSERS, so the validator, the settings
-    # field and the module cannot drift apart).
-    "youtube_cookies_mode": {"none", "file", "browser"},
-    "youtube_cookies_browser": {"chrome", "chromium", "edge", "firefox",
-                                "brave", "opera", "safari", "vivaldi",
-                                "whale"},
 }
 
 

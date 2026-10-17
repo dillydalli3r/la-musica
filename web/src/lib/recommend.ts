@@ -1,7 +1,7 @@
 /** The local scorer's own row shape and the queue batch built from it.
  *
  *  `server/recommend.py` answers one item shape for every route in the family
- *  (`_item`) — the "Recommended (Local)" shelf on an artist/album/track page
+ *  (`_item`) — the "Recommended" shelf on an artist/album/track page
  *  (GET/POST `/api/recommend`, fetched by `components/MoreLikeThis.tsx`) and
  *  the batch that keeps a playing queue going (GET/POST
  *  `/api/recommend/queue`). The shape and the queue row it becomes live here,

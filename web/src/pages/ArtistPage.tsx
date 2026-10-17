@@ -2,7 +2,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams } from "react-router-dom";
 import { useState } from "react";
 import {
-  BarChart3, ChevronDown, ChevronRight, Disc3, FileDown, ImagePlus,
+  BarChart3, ChevronDown, ChevronRight, ClipboardCheck, Disc3, FileDown, ImagePlus,
   ListChecks, Loader2, Music2, Pencil, Play, RefreshCw, Square, SquareCheck, Trash2,
 } from "lucide-react";
 import { api } from "../api";
@@ -19,7 +19,6 @@ import ArtistImageModal from "../components/ArtistImageModal";
 import ArtistName from "../components/ArtistName";
 import MetadataReviewModal from "../components/MetadataReviewModal";
 import MoreLikeThis from "../components/MoreLikeThis";
-import OnlineRecommendations from "../components/OnlineRecommendations";
 import OverflowMenu from "../components/OverflowMenu";
 import PageHeader from "../components/PageHeader";
 import SelectAllButton from "../components/SelectAllButton";
@@ -263,7 +262,7 @@ export default function ArtistPage() {
         <div className="relative flex flex-col sm:flex-row items-start gap-5">
           {/* Same cover geometry as the album hero: one square tile, the
               stored image or a plain monogram when there is none. */}
-          <div className="h-40 w-40 shrink-0 mx-auto sm:mx-0 rounded-xl overflow-hidden bg-gradient-to-br from-accent/30 to-accent/5 flex items-center justify-center shadow-2xl">
+          <div className="group relative h-40 w-40 shrink-0 mx-auto sm:mx-0 rounded-xl overflow-hidden bg-gradient-to-br from-accent/30 to-accent/5 flex items-center justify-center shadow-2xl">
             {imageUrl ? (
               <img src={imageUrl} alt={`${name} artist image`} className="h-full w-full object-cover" />
             ) : monogram ? (
@@ -273,6 +272,34 @@ export default function ArtistPage() {
             ) : (
               <Music2 className="h-10 w-10 text-zinc-500" />
             )}
+            {/* The IMAGE actions live ON the image, revealed on hover (and on
+                keyboard focus, so they are reachable without a pointer): the
+                header row kept a "Change image" button whose subject was the
+                picture above it, which read as one more page action. The scrim
+                is what makes the icons legible over any photo. */}
+            <div className="absolute inset-0 flex items-center justify-center gap-1.5 bg-black/55 opacity-0 transition-opacity duration-150 group-hover:opacity-100 group-focus-within:opacity-100 [@media(pointer:coarse)]:opacity-100">
+              <button
+                className="btn-icon"
+                onClick={() => setImageOpen(true)}
+                title={imageUrl ? "Pick a different artist image" : "Find an artist image online, or upload your own"}
+                aria-label={imageUrl ? "Change artist image" : "Find an artist image"}
+              >
+                <ImagePlus className="h-4 w-4" />
+              </button>
+              {imageUrl && (
+                <button
+                  className="btn-icon text-red-300/80 hover:text-red-200"
+                  onClick={removeImage}
+                  disabled={busy === "image-clear"}
+                  title="Delete artist.jpg from the artist folder"
+                  aria-label="Remove artist image"
+                >
+                  {busy === "image-clear"
+                    ? <Loader2 className="h-4 w-4 animate-spin" />
+                    : <Trash2 className="h-4 w-4" />}
+                </button>
+              )}
+            </div>
           </div>
 
           <div className="flex-1 min-w-0 w-full">
@@ -357,15 +384,19 @@ export default function ArtistPage() {
                   block squeezes the title and the counts into a column at
                   1024-1568px. Out of that row they just wrap. */}
               <div className="flex items-center gap-1.5 flex-wrap">
-                  {/* beside the title, but out of its truncating span so a long
-                    name can never clip the heart */}
                 <FavHeart kind="artist" id={data.path} mbid={artistMb} />
-                <button className="btn-primary" onClick={() => playNow(allTracks)} title={`Play all ${allTracks.length} tracks`}>
-                  <Play className="h-4 w-4 fill-current" /> Play all
+                <button
+                  className="btn-icon-primary"
+                  onClick={() => playNow(allTracks)}
+                  title={`Play all ${allTracks.length} tracks`}
+                  aria-label="Play all"
+                >
+                  <Play className="h-4 w-4 fill-current" />
                 </button>
                 <DownloadButton
                   paths={allTracks.map((t) => t.path)}
                   size="md"
+                  iconOnly
                   label="Download all"
                   emptyReason="Nothing to download — this artist has no tracks"
                 />
@@ -373,6 +404,7 @@ export default function ArtistPage() {
                   paths={allTracks.map((t) => t.path)}
                   seconds={allSeconds}
                   size="md"
+                  iconOnly
                   label="Export all"
                   emptyReason="Nothing to export — this artist has no tracks"
                   title="Export this artist's tracks to a drive"
@@ -381,40 +413,32 @@ export default function ArtistPage() {
                 <TagActionsMenu
                   paths={allTracks.map((t) => t.path)}
                   artist={decoded}
-                  // The artist's own folder, so the folder-scoped scripts run on
-                  // the artist (its image, the layout of its subtrees) instead
-                  // of being derived from the tracks one album at a time.
                   artistPath={data.path}
                   onDone={refresh}
+                  buttonClass="btn-icon"
                   buttonTitle="Tag actions on every track of this artist"
                 />
                 <button
-                  className="btn-ghost"
+                  className="btn-icon"
                   onClick={() => setReviewOpen(true)}
                   title="Review candidate artist images and descriptions"
+                  aria-label="Metadata review"
                 >
-                  Metadata review
+                  <ClipboardCheck className="h-4 w-4" />
                 </button>
+                <LinkEditorButton
+                  mode="artist"
+                  paths={allTracks.map((t) => t.path)}
+                  current={artistTags}
+                  iconOnly
+                />
                 <button
-                  className="btn-ghost"
-                  onClick={() => setImageOpen(true)}
-                  title={imageUrl ? "Pick a different artist image" : "Find an artist image online, or upload your own"}
+                  className="btn-icon"
+                  onClick={() => setStatsOpen(true)}
+                  title="Stats"
+                  aria-label="Stats"
                 >
-                  <ImagePlus className="h-4 w-4" /> {imageUrl ? "Change image" : "Find image"}
-                </button>
-                {imageUrl && (
-                  <button
-                    className="btn-ghost !px-2.5 text-red-300/80 hover:text-red-200"
-                    onClick={removeImage}
-                    disabled={busy === "image-clear"}
-                    title="Delete artist.jpg from the artist folder"
-                  >
-                    {busy === "image-clear" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
-                  </button>
-                )}
-                <LinkEditorButton mode="artist" paths={allTracks.map((t) => t.path)} current={artistTags} />
-                <button className="btn-ghost" onClick={() => setStatsOpen(true)}>
-                  <BarChart3 className="h-4 w-4" /> Stats
+                  <BarChart3 className="h-4 w-4" />
                 </button>
               </div>
             </PageHeader>
@@ -667,20 +691,9 @@ export default function ArtistPage() {
         )}
       </section>
 
-      {/* Two shelves side by side, each labelled with where its rows come
-          from: artists the LOCAL scorer ranks closest to this catalogue (the
-          library's own tags — from OTHER artists, since this page already
-          lists its own), and what the online providers suggest for this
-          artist. The online shelf loads on its own, after the page is usable. */}
-      <div className="grid gap-4 lg:grid-cols-2 items-start">
-        <MoreLikeThis kind="artist" id={decoded} />
-        <OnlineRecommendations
-          kind="artists"
-          seedKind="artist"
-          seedMbid={artistMbid(data) ?? ""}
-          seedName={name}
-        />
-      </div>
+      {/* The LOCAL shelf: artists the library's own tags rank closest to this
+          catalogue, from OTHER artists (this page already lists its own). */}
+      <MoreLikeThis kind="artist" id={decoded} />
 
       {imageOpen && (
         <ArtistImageModal

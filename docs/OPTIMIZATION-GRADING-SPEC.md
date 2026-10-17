@@ -9224,6 +9224,70 @@ manual import grows the evidence the pipeline used to provide.
 
 ---
 
+### 7.85 No online discovery, no video downloader, and the medium must match the copy
+
+The owner's decisions (2026-10-17), in one release: *"remove yt-dlp (video
+downloading from the app as well, and all recommendation behavior (online
+sources … basically the Discover tab and all features like it querying online
+sources))"*, plus five follow-ups made the same day: the artist page's header
+condensed to square icon buttons with the image actions on the image, the
+"(Local)" suffix off the recommendation shelf, Spotify and Apple Music as
+artist-picture sources with Spotify primary, a warn/fail rule for a release
+whose stated medium contradicts the copy's own sheets, and the auto-import
+dialog appearing before its rows are read.
+
+- **R443 — nothing in the app recommends by asking a remote service.** The
+  Discover page, the Recommended page, the providers' charts on the Charts
+  page, the Home page's online shelves and the online recommendation shelf on
+  artist/album/track pages are GONE, with `server/discover.py`,
+  `server/api_discover.py` and their `/api/discover/*` routes. What remains is
+  what the library itself can say: the play-history charts (`/api/top`), the
+  genre facets and the tag-scoped browse, and the OFFLINE scorer
+  (`server/recommend.py` — "Recommended" shelves and infinite playback, pure
+  tag arithmetic with no request). The provider layer stays where it does
+  non-recommendation work: artist artwork and descriptions (R35/R36), cover
+  fallbacks, lyrics, genres and web ratings as TAGS, and the sources panel.
+- **R444 — no video downloader, and no yt-dlp.** `server/youtube.py`,
+  `server/api_youtube.py`, the cookie jar (`server/cookies.py`,
+  `server/api_cookies.py`) and `/api/videos/download-youtube` are deleted, with
+  yt-dlp itself (fetchdeps/tools/deps tables, the Dependencies row, its config
+  keys) and the three call sites it had: the YouTube-captions lyrics source
+  (`lyrics_providers`: the chain is LRCLIB, NetEase, QQ, Kuwo, Kugou), the
+  `youtube-age` advisory route, and YouTube Music playlist import (Deezer,
+  Spotify and Apple remain). The video LIBRARY is untouched — probe, remux,
+  subtitles, thumbnails, the match panel — because none of it needs yt-dlp.
+- **R445 — an explicit release choice writes its MEDIUM, and a disc sheet
+  contradicts any other medium.** Two halves of one rule. (1) An import whose
+  release was CHOSEN (a bulk pin, the wizard's link, a download's resolved
+  match) writes the release's own medium OVER a differing MEDIA tag
+  (`mlo.autotag.fill_release_identity(..., explicit=True)`); a release the
+  import merely resolved from the files' own tags keeps fill-only behaviour.
+  The owner's report: a copy tagged `12" Vinyl` stayed Vinyl through every
+  import of the CD release it names — measured on their *MTV Unplugged* album,
+  the pinned release states CD and 14 files were written. (2) Grading: an album
+  carrying a `.log` or a `.cue` (sheets only a DISC rip has) whose MEDIA says
+  anything but a CD family value fails `grade_check_media_evidence` — `MEDIA
+  MISMATCH` — and the import warns the same thing inline in the Links step
+  (`GET /api/import/media-check`, one rule: `mlo.release_choice
+  .medium_mismatch`, both directions — disc sheets against a non-CD release,
+  and a file whose MEDIA says Digital Media against a CD-only release). The
+  warning never blocks: the MEDIA tag or the release link names a different
+  edition, and settling which is the user's call.
+- **R446 — the artist page's header is a row of square icon buttons, and the
+  image actions live on the image.** Every action is `btn-icon` with its
+  wording in the tooltip and `aria-label`; "Change image" (and the remove
+  action, when there is an image) appear as an overlay ON the artist tile on
+  hover or keyboard focus, and are always visible for a coarse pointer. The
+  recommendation shelf's title is "Recommended" — the "(Local)" suffix named a
+  source that no longer has an online twin. The auto-import / bulk-import
+  release dialog OPENS on the press (its rows seeded from the staged name) and
+  fills each row's release from that album's payload afterwards, so the popup
+  no longer waits on one `/api/album` per album. An import run's ONE notice is
+  published at the run's own end (`events.flush_coalesced` after its terminal
+  step) instead of waiting out the coalescer's quiet window.
+
+---
+
 ## 10. Honest limits of this spec
 
 - The check **count** is 70 today; the registry derives it from

@@ -152,7 +152,7 @@ _real_absent = None
 _real_metadata_account = None
 
 
-def _provider(artist, title, album, duration, cfg, yt):
+def _provider(artist, title, album, duration, cfg):
     """One stub provider for the whole chain: what ANSWER says, nothing else."""
     if not (ANSWER.get("synced") or ANSWER.get("plain")):
         return None

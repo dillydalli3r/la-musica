@@ -3399,6 +3399,20 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
         # No enabled tracks — treat as unknown but not failing
         media_summary = None
 
+    # The copy's own EVIDENCE against its stated medium (the owner's rule,
+    # 2026-10-17): a .log or a .cue exists only for a DISC rip, so an album
+    # carrying one and stating anything but a CD has a wrong MEDIA — or a
+    # MusicBrainz link naming another edition. Which of the two is the user's
+    # to settle; the album is not consistent as it stands, so it fails here.
+    if (cfg.get("grade_check_media_evidence", True) and (has_log or has_cue)
+            and media_summary and media_summary != "INCONSISTENT"
+            and not _is_cd(media_summary)):
+        total_checks += 1
+        failed_checks += 1
+        add_issue(f"MEDIA MISMATCH: the folder carries a rip .log/.cue (a CD "
+                  f"rip) but MEDIA says {media_summary} — the MEDIA tag or the "
+                  f"release link names a different edition", "album-wide")
+
     digital = _is_digital(media_summary)
 
     # SOURCE policy per track (skipped if MEDIA_SOURCE disabled for this filetype).

@@ -16,10 +16,7 @@ anything else.
     readable with the app's own ``spotify_client_id`` + ``spotify_client_secret``
     and nothing else; with either of them unset the error names that setting,
     the way ``GET /api/sources/health`` does. ``tracks.next`` paginates.
-  * **YouTube Music** — the app's OWN yt-dlp probe (``server.youtube``: the
-    vendored module/binary, the app's cookie jar, one set of flat-playlist
-    flags). One request, flat: no per-entry page, no second yt-dlp invocation
-    style anywhere in this module.
+  * **YouTube Music** — REMOVED with yt-dlp: no playlist is read from it.
   * **Apple Music** — there is NO public playlist API without a developer
     token, so the public playlist PAGE is read and the JSON Apple embeds in it
     (``<script id="serialized-server-data">``) is parsed. That is fragile by
@@ -64,15 +61,14 @@ from mlo.config import load_config
 # --------------------------------------------------------------------------- #
 # The four services
 # --------------------------------------------------------------------------- #
-SERVICES = ("deezer", "spotify", "youtube", "apple")
+SERVICES = ("deezer", "spotify", "apple")
 SERVICE_LABELS = {"deezer": "Deezer", "spotify": "Spotify",
-                  "youtube": "YouTube Music", "apple": "Apple Music"}
+                  "apple": "Apple Music"}
 # The playlist URL each service's links look like — quoted back when a link
 # names the wrong service, so the sentence says what to paste instead.
 SERVICE_HINTS = {
     "deezer": "deezer.com/playlist/<id>",
     "spotify": "open.spotify.com/playlist/<id>",
-    "youtube": "music.youtube.com/playlist?list=<id>",
     "apple": "music.apple.com/<country>/playlist/<name>/pl.<id>",
 }
 
@@ -168,9 +164,6 @@ def service_of(url):
         return "deezer" if _playlist_id(r"/playlist/(\d+)", path) else ""
     if host == "open.spotify.com":
         return "spotify" if _playlist_id(r"/playlist/([A-Za-z0-9]+)", path) else ""
-    if host == "music.youtube.com" or host in ("youtube.com", "www.youtube.com",
-                                               "m.youtube.com", "youtu.be"):
-        return "youtube" if parse_qs(parts.query).get("list") else ""
     if host == "music.apple.com" or host.endswith(".music.apple.com"):
         return "apple" if "/playlist/" in path else ""
     return ""
@@ -200,19 +193,15 @@ def _unreadable(url):
         return "no playlist URL was given"
     if not parts.netloc:
         return (f"“{text}” is not a link — paste a playlist URL from Deezer, "
-                "Spotify, YouTube Music or Apple Music")
+                "Spotify or Apple Music")
     for suffix, rx, sentence in _WRONG_KIND:
         if host == suffix or host.endswith("." + suffix):
             m = re.search(rx, parts.path or "", re.I)
             if m:
                 return sentence.format(m.group(1))
-    if "youtube.com" in host or host.endswith("youtu.be"):
-        return ("that is a YouTube video link — the import reads a YouTube "
-                "Music PLAYLIST link (music.youtube.com/playlist?list=<id>)")
     return (f"nothing here reads {text} — paste a playlist link from Deezer "
-            f"({SERVICE_HINTS['deezer']}), Spotify ({SERVICE_HINTS['spotify']}), "
-            f"YouTube Music ({SERVICE_HINTS['youtube']}) or Apple Music "
-            f"({SERVICE_HINTS['apple']})")
+            f"({SERVICE_HINTS['deezer']}), Spotify ({SERVICE_HINTS['spotify']}) "
+            f"or Apple Music ({SERVICE_HINTS['apple']})")
 
 
 # --------------------------------------------------------------------------- #
@@ -353,75 +342,6 @@ def _spotify_tracks(page):
 
 
 # --------------------------------------------------------------------------- #
-# YouTube Music — the app's own flat yt-dlp probe
-# --------------------------------------------------------------------------- #
-def _youtube_entries(url, cfg=None):
-    """Flat `(title, entries)` from the app's own yt-dlp probe.
-
-    The seam is a function of its own so the suite can answer with a fixture:
-    `server.youtube.flat_playlist` is the real thing — the vendored yt-dlp,
-    the app's cookie jar, the existing flat-playlist flags.
-    """
-    from server import youtube
-
-    return youtube.flat_playlist(url, cfg)
-
-
-def _youtube_track(entry):
-    """One flat yt-dlp entry as an import row.
-
-    YouTube states no artist and no album: the CHANNEL names the uploader (the
-    official one is "<Artist> - Topic") and a plain upload usually titles
-    itself "Artist - Song". So the channel is the artist, and the title's own
-    "Artist - Song" split is used ONLY when there is no channel at all — never
-    both, and never as a rewrite of a title that came with an artist.
-    """
-    title = str((entry or {}).get("title") or "").strip()
-    channel = str((entry or {}).get("channel") or (entry or {}).get("uploader")
-                  or "").strip()
-    artist = re.sub(r"\s*-\s*Topic$", "", channel, flags=re.I).strip()
-    if not artist and " - " in title:
-        left, _, right = title.partition(" - ")
-        if left.strip() and right.strip():
-            artist, title = left.strip(), right.strip()
-    vid = str((entry or {}).get("id") or "").strip()
-    return {
-        "title": title,
-        "artist": artist,
-        "album": "",
-        "duration": (entry or {}).get("duration") or 0,
-        "isrc": "",
-        "url": str((entry or {}).get("url")
-                   or (f"https://www.youtube.com/watch?v={vid}" if vid else "")).strip(),
-        "mbid": "",
-    }
-
-
-def _fetch_youtube(url, cfg=None):
-    from server import youtube
-
-    if not youtube.ytdlp_available(cfg):
-        raise StreamingError(
-            "YouTube Music is read with yt-dlp — the same copy the video "
-            "downloads use — and it is not installed. Install it under "
-            "Dependencies, then try again.")
-    try:
-        title, entries = _youtube_entries(url, cfg)
-    except Exception as e:
-        raise StreamingError(
-            f"yt-dlp could not read {url}: {e}. A private or region-locked "
-            "playlist reads exactly like this — and the cookie jar under "
-            "Settings → Videos is what a playlist that wants a signed-in "
-            "listener is read with.")
-    tracks = [_youtube_track(e) for e in (entries or []) if e]
-    if not tracks:
-        raise StreamingError(
-            f"yt-dlp read {url} and found no entries in it — an empty or "
-            "private playlist reads exactly like this.")
-    return {"title": str(title or "").strip(), "tracks": tracks}
-
-
-# --------------------------------------------------------------------------- #
 # Apple Music — the page's embedded JSON (no public playlist API)
 # --------------------------------------------------------------------------- #
 def _apple_sections(data):
@@ -522,7 +442,7 @@ def _fetch_apple(url, cfg=None):
 
 
 _FETCHERS = {"deezer": _fetch_deezer, "spotify": _fetch_spotify,
-             "youtube": _fetch_youtube, "apple": _fetch_apple}
+             "apple": _fetch_apple}
 
 
 def fetch(url, cfg=None, service=""):

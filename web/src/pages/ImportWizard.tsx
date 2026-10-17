@@ -548,6 +548,19 @@ export default function ImportWizard() {
   const [searchHits, setSearchHits] = useState<any[]>([]);
   const [release, setRelease] = useState<MBRelease | null>(null);
   const [releaseId, setReleaseId] = useState("");
+  /* The chosen release's stated MEDIUM against the folder's own evidence: a
+     `.log`/`.cue` says the copy came off a disc, so a Vinyl/Cassette/Digital
+     release is a different edition — the owner's rule (2026-10-17), checked
+     server-side by ONE rule (`mlo.release_choice.medium_mismatch`) and shown
+     inline while the user is still deciding. Nothing is written or blocked:
+     the warning names both sides, the choice stays theirs. */
+  const mediaCheck = useQuery({
+    queryKey: ["importMediaCheck", albumPath ?? "", releaseId],
+    queryFn: () => api.importMediaCheck(albumPath as string, releaseId),
+    enabled: !!albumPath && !!releaseId,
+    retry: false,
+    staleTime: 5 * 60_000,
+  });
   const [suggestions, setSuggestions] = useState<MatchSuggestion[]>([]);
   // SOURCE — the one thing a Digital Media release must state and nothing in
   // the audio can tell us: where the rip came from. The server works out what
@@ -2003,7 +2016,7 @@ export default function ImportWizard() {
 /** The dialog's own release-URL/MBID field, AcoustID fingerprint and
    *  catalogue search are the ways a person pins a release. */
   const beginAutoImport = async (staged: { name: string; path: string; owned?: boolean }[]) => {
-    setIdentify({ staged, albums: await identifyRows(staged), mode: "auto" });
+    openIdentifyNow(staged, "auto");
   };
 
   /** Back out of the release dialog: REMOVE what this press's staging placed.
@@ -2055,7 +2068,7 @@ export default function ImportWizard() {
    *  batch whose ids are already tagged is shown too (that is exactly when a
    *  stale id hides). */
   const beginPlainBulk = async (staged: { name: string; path: string; owned?: boolean }[]) => {
-    setIdentify({ staged, albums: await identifyRows(staged), mode: "bulk" });
+    openIdentifyNow(staged, "bulk");
   };
 
   /** One row per staged album, read from the album's own payload: the release
@@ -2070,6 +2083,33 @@ export default function ImportWizard() {
    *  2026-10-13: "should auto-fill if any MBIDs are present in track tags.
    *  Otherwise it should stay blank." The same flag is what the row's AcoustID
    *  Detect needs (it fingerprints the files), so the row carries it. */
+  /** Open the release dialog NOW — the owner's report was that it "takes a
+   *  while" to appear.
+   *
+   *  The rows are seeded from what the press already holds (the staged name and
+   *  path; `current` blank), so the dialog is on screen the same frame; reading
+   *  each album's own payload (`identifyRows`, one `/api/album` per album) fills
+   *  the identity fields in as they land. A row the user has already typed into
+   *  keeps that value (the dialog's `pins` state wins over the seed), so the
+   *  late fill can never overwrite an edit. A dialog that was closed in the
+   *  meantime is left closed. */
+  const openIdentifyNow = (
+    staged: { name: string; path: string; owned?: boolean }[],
+    mode: "auto" | "bulk",
+  ) => {
+    const quick: IdentifyAlbum[] = staged.map((r) => ({
+      path: r.path,
+      artist: "",
+      album: r.name,
+      current: "",
+      staged: !inMusicFolder(r.path, cfg?.music_folder),
+    }));
+    setIdentify({ staged, albums: quick, mode });
+    void identifyRows(staged).then((rows) => {
+      setIdentify((prev) => (prev && prev.staged === staged ? { ...prev, albums: rows } : prev));
+    });
+  };
+
   const identifyRows = async (staged: { name: string; path: string }[]): Promise<IdentifyAlbum[]> => {
     const rows: IdentifyAlbum[] = [];
     await Promise.all(staged.map(async (r) => {
@@ -5015,6 +5055,16 @@ const finish = async (closeByNavigation: boolean, runScripts = true) => {
               <div className="text-sm font-semibold text-zinc-300">
                 MusicBrainz release <span className="text-zinc-500 font-normal">— {currentAlbumName}</span>
               </div>
+              {/* The medium the release states against the copy's own sheets:
+                  amber, persistent (not a toast) — the user is choosing the
+                  release right now, and the sentence says which two things
+                  disagree. */}
+              {!!mediaCheck.data?.warning && (
+                <div className="flex items-start gap-2 rounded-md border border-amber-900/60 bg-amber-950/30 px-2.5 py-2 text-[11px] text-amber-200">
+                  <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+                  <span>{mediaCheck.data.warning}</span>
+                </div>
+              )}
               <div className="flex flex-wrap items-center gap-2">
                 <input
                   className={`input flex-1 ${releaseId ? "!border-emerald-700" : ""} tap`}

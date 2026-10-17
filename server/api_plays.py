@@ -16,10 +16,9 @@ two people on one server never see each other's history.
 
 `GET /api/top` is READ-ONLY and library-scoped: it returns the caller's own
 most-played tracks, albums or artists inside one closed window, with each row's
-play count and the window's bounds. The online charts a provider ranks live at
-`/api/discover/charts` (server/api_discover.py) — the two are separate on
-purpose, because a provider's chart is not the user's history and mixing them
-would make a row's provenance a guess.
+play count and the window's bounds. (The online charts a provider ranked used
+to live at `/api/discover/charts`; they are gone with the discovery feeds, so a
+row here can only ever be the user's own history.)
 """
 from typing import Optional
 

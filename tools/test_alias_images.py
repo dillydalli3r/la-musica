@@ -87,5 +87,41 @@ finally:
     for name, value in _saved.items():
         setattr(discovery, name, value)
 
+# --------------------------------------------------------------------------- #
+# The streaming services lead the artist-image chain (owner's rule, 2026-10-17)
+# --------------------------------------------------------------------------- #
+# Spotify is the PRIMARY source and Apple sits after it: Spotify's artist object
+# carries a real 640px photo, Apple publishes no artist-photo endpoint at all
+# (its entry is the artist's best-known ALBUM artwork). Both are asked only for
+# the sources a config lists, and a provider without its credential answers None
+# so the walk moves on — a keyless install still gets Deezer's photo.
+print()
+ok(discovery.IMAGE_SOURCES[0] == "spotify",
+   f"Spotify leads the built-in artist-image order ({discovery.IMAGE_SOURCES})")
+ok(discovery.IMAGE_SOURCES.index("spotify") < discovery.IMAGE_SOURCES.index("itunes"),
+   "…and is preferred over Apple Music")
+ok("spotify" in discovery.SOURCES and discovery.SOURCE_LABELS.get("spotify") == "Spotify",
+   "Spotify is a catalogue source with its own label")
+ok(discovery.spotify_artist_image("Nirvana", cfg={}) is None,
+   "without the client id + secret the source answers None (never a guess)")
+_saved_hit = discovery._spotify_artist_hit
+try:
+    discovery._spotify_artist_hit = lambda name, cfg=None, timeout=None: {
+        "name": name,
+        "images": [{"url": "https://i.scdn.co/640.jpg", "width": 640},
+                   {"url": "https://i.scdn.co/300.jpg", "width": 300}],
+    }
+    ok(discovery.spotify_artist_image("Nirvana", cfg={"spotify_client_id": "x",
+                                                      "spotify_client_secret": "y"})
+       == "https://i.scdn.co/640.jpg",
+       "with a hit it takes the WIDEST image the artist object states")
+    got = discovery.artist_image("Nirvana", cfg={"artist_image_sources": ["spotify"],
+                                                 "spotify_client_id": "x",
+                                                 "spotify_client_secret": "y"})
+    ok(got and got.get("source") == "spotify" and got.get("kind") == "photo",
+       f"…and the walk returns it as a photo ({got})")
+finally:
+    discovery._spotify_artist_hit = _saved_hit
+
 print(f"alias_images: {PASS} passed, {FAIL} failed")
 raise SystemExit(1 if FAIL else 0)

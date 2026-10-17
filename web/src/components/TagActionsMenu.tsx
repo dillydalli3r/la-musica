@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  ArrowDownToLine, BadgeInfo, Disc3, Ellipsis, ExternalLink, FileOutput, Film, ImagePlus, Info, Music2, Play,
+  ArrowDownToLine, BadgeInfo, Disc3, Ellipsis, ExternalLink, FileOutput, ImagePlus, Info, Music2, Play,
   RefreshCw, Sparkles, Tags, Users, Wand2,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
@@ -20,7 +20,6 @@ import { useI18n } from "../lib/i18n";
 import { CACHED_PATHS_KEY, CACHED_SIZES_KEY } from "../lib/mediaCache";
 import { downloadForOffline } from "../lib/offline";
 import { trackRef } from "../lib/refs";
-import { downloadTrackVideo } from "../lib/videoDownload";
 import { toast } from "../store";
 import type { EntityKind, ScriptRunResult } from "../types";
 
@@ -82,7 +81,6 @@ export default function TagActionsMenu({
   const [confirmRunAll, setConfirmRunAll] = useState<ScriptEntry | null>(null);
   // The video download asks the track's own tags for its title/artist/length
   // before searching, so a press has a moment of work behind it.
-  const [videoBusy, setVideoBusy] = useState(false);
   const viewable = !!albumPath || paths.length === 1;
   const singleTrack = albumPath ? undefined : paths[0];
   const navigate = useNavigate();
@@ -107,48 +105,6 @@ export default function TagActionsMenu({
     staleTime: 5 * 60 * 1000,
   });
   const generated = scriptSections(scripts, entity, { paths, albumPath, artistPath });
-
-  /** Download the music video of the ONE track this menu is on.
-   *
-   *  The menu holds one fact about a listed track — its path — so the title,
-   *  artist and length the search needs are read off the file's own tags at
-   *  the press (the same read the track page makes), not guessed from the list
-   *  the row came from. The download itself is the album page's own
-   *  implementation (lib/videoDownload), so what this asks the server for is
-   *  what the film button beside a row used to. */
-  const downloadVideoHere = async () => {
-    if (!menuTrack || videoBusy) return;
-    setVideoBusy(true);
-    try {
-      const res = await api.tags(menuTrack);
-      const tags = (res?.tags ?? {}) as Record<string, string | null>;
-      const seconds = Number(res?.tech?.length ?? 0);
-      await downloadTrackVideo(
-        {
-          path: menuTrack,
-          artist: tags.ARTIST ?? tags.ALBUMARTIST ?? artist,
-          title: tags.TITLE ?? undefined,
-          duration: seconds > 0 ? Math.round(seconds) : undefined,
-          tracknumber: Number(tags.TRACKNUMBER) || null,
-          discnumber: Number(tags.DISCNUMBER) || null,
-        },
-        {
-          // A saved video changes the album's own tracklist and its video
-          // shelf. Prefix keys: this menu reaches the current page's queries
-          // without holding their album.
-          onSaved: () => {
-            qc.invalidateQueries({ queryKey: ["videos"] });
-            qc.invalidateQueries({ queryKey: ["album"] });
-          },
-        }
-      );
-      onDone?.();
-    } catch (e) {
-      toast.error(String(e));
-    } finally {
-      setVideoBusy(false);
-    }
-  };
 
   // Generic over the reply: each action reports from its OWN payload, so the
   // handler type is the real response shape, not a lowest common denominator.
@@ -319,20 +275,6 @@ export default function TagActionsMenu({
                 disabled: !paths.length,
                 title: "Transcode and save the selection to a drive",
                 onClick: () => setExportOpen(true),
-              },
-              {
-                // The music video of the one track this menu is on. It used to
-                // be a film button beside that track's own row (the album page's
-                // title cell), which read as a file mark rather than an action;
-                // the release-wide version stays the album header's film button,
-                // and the video overlay keeps its own while a video plays. All
-                // three run the ONE implementation in lib/videoDownload.
-                label: t("menu.downloadVideo"),
-                icon: Film,
-                hidden: !menuTrack,
-                disabled: videoBusy,
-                title: t("menu.downloadVideoHint"),
-                onClick: () => void downloadVideoHere(),
               },
             ],
           },

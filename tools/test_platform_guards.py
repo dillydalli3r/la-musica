@@ -82,7 +82,7 @@ LINUX_PACKAGED_NATIVE = tuple(k for k in LINUX_NATIVE if k in fetchdeps.LINUX_PA
 # chromaprint), and then LINUX_PACKAGES is the fallback for the architectures
 # LINUX_BINARIES has no pattern for.
 APT_ONLY = {k: v for k, v in APT_KEYS.items() if k not in fetchdeps.LINUX_BINARIES}
-PLATFORM_FREE = ("librosa", "beets", "yt-dlp", "logchecker")
+PLATFORM_FREE = ("librosa", "beets", "logchecker")
 
 
 class simulated_platform:
@@ -381,14 +381,14 @@ with runners(True), simulated_platform("posix"):
     fetchdeps._install_pip_package = (
         lambda key, log=print, progress=None: routed.append(key) or "pip-routed")
     try:
-        for key in ("librosa", "beets", "yt-dlp"):
+        for key in ("librosa", "beets"):
             version = fetchdeps.install_dependency(key, log=lambda m: None)
             check(f"{key} installs from pip on Linux (got {version!r})",
                   version == "pip-routed")
     finally:
         fetchdeps._install_pip_package = real_pip
     check(f"linux pip routing (routed {routed})",
-          routed == ["librosa", "beets", "yt-dlp"])
+          routed == ["librosa", "beets"])
 
     # The target column has to agree with the install path: a fetched tool shows
     # its release, a distro tool its package.
@@ -437,7 +437,7 @@ with simulated_platform("posix"), tempfile.TemporaryDirectory() as tmp:
     check("a zip asset keeps its own",
           fetchdeps.archive_suffix("CUETools_2.2.6.zip") == ".zip")
     check("a bare-exe asset still gets its name",
-          fetchdeps.archive_suffix("yt-dlp.exe") == ".exe")
+          fetchdeps.archive_suffix("beets.zip") == ".zip")
 
     src = os.path.join(tmp, "oxipng-10.2.0-x86_64-unknown-linux-musl")
     os.makedirs(src)
@@ -618,12 +618,10 @@ with simulated_platform("posix"):
 # --------------------------------------------------------------------------- #
 # Platform-independent installer invariants
 # --------------------------------------------------------------------------- #
-check("yt-dlp's Linux install is the pip package, with its version in PINNED",
-      fetchdeps.PIP_PACKAGES.get("yt-dlp") == "yt-dlp"
-      and bool(fetchdeps.PINNED["yt-dlp"]["version"]))
-check("yt-dlp is pip-on-Linux, not a distro package",
-      "yt-dlp" in fetchdeps.PIP_ON_LINUX
-      and "yt-dlp" not in fetchdeps.LINUX_PACKAGES)
+check("yt-dlp is gone from every installer table (removed 2026-10-17)",
+      "yt-dlp" not in fetchdeps.PIP_PACKAGES
+      and "yt-dlp" not in fetchdeps.PINNED
+      and "yt-dlp" not in fetchdeps.PIP_ON_LINUX)
 for key in fetchdeps.SINGLE_EXE_TOOLS:
     asset = (fetchdeps.PINNED.get(key) or {}).get("asset", "")
     check(f"{key} is pinned to a bare binary, never an archive ({asset})",
@@ -660,7 +658,7 @@ with simulated_platform("darwin"):
           "apt-get" not in str(fetchdeps.install_problem("flac", platform="macos"))
           and "apt-get" not in str(fetchdeps.install_problem("ffmpeg", platform="macos")))
     # The pip-routed tools are platform-independent and still installable.
-    for key in ("librosa", "beets", "yt-dlp"):
+    for key in ("librosa", "beets"):
         check(f"{key}: still fetchable on macOS",
               fetchdeps.install_kind(key, platform="macos") == "deps")
     check("a present-but-behind brew tool offers the brew command",

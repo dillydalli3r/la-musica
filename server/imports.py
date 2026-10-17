@@ -1128,7 +1128,8 @@ def _finish_album(path, cfg, progress=None, force=None, release=None,
         _phase("Stamping the release's identity…")
     try:
         if rel:
-            out["release_identity"] = _stamp_release_identity(path, rel, run_cfg)
+            out["release_identity"] = _stamp_release_identity(
+                path, rel, run_cfg, explicit=explicit_release)
             if out["release_identity"]["failed"]:
                 out["errors"].append(
                     f"{out['release_identity']['failed']} track(s) took no "
@@ -2265,8 +2266,7 @@ def fetch_advisories(paths, cfg=None, force=False):
                 # routes are re-asked under the entity aliases these ids name
                 # (server.integrations._advisory_alias_queries reads exactly
                 # these keys). With none, the route is its old self and asks
-                # nothing; only the four MBID keys travel, so the route's own
-                # youtube_video_id(tags) is untouched.
+                # nothing; only the four MBID keys travel.
                 tags={k: af.get_tag(k) for k in (
                     "MUSICBRAINZ_TRACKID", "MUSICBRAINZ_ARTISTID",
                     "MUSICBRAINZ_ALBUMARTISTID",
@@ -4609,7 +4609,7 @@ def _release_for_stamping(release):
     return rel
 
 
-def _stamp_release_identity(album_dir, release, cfg):
+def _stamp_release_identity(album_dir, release, cfg, explicit=False):
     """Fill the album's own release identity from the release the import holds.
 
     MEDIA (the medium the release is pressed on — CD, Vinyl, SACD, Cassette,
@@ -4629,6 +4629,13 @@ def _stamp_release_identity(album_dir, release, cfg):
     the same values with the same two exceptions the app already sharpens
     (the two dates, and RELEASECOUNTRY's list).
 
+    `explicit` is passed straight through: the caller CHOSE this release (a
+    bulk pin, the wizard's link), so its MEDIUM lands over a differing MEDIA
+    tag — the owner's rule (2026-10-17) for "I can't get this release to
+    become CD even though it's tagged with an mbid of a cd release". A release
+    the import merely resolved from the files' own tags is not explicit and
+    keeps fill-only behaviour.
+
     Returns that writer's counts: ``{"written", "skipped", "failed"}``.
     """
     from mlo.autotag import fill_release_identity
@@ -4636,7 +4643,7 @@ def _stamp_release_identity(album_dir, release, cfg):
     files = _audio_files(album_dir)
     if not files:
         return {"written": 0, "skipped": 0, "failed": 0}
-    return fill_release_identity(files, release, cfg)
+    return fill_release_identity(files, release, cfg, explicit=explicit)
 
 
 def _record_release_manifest(album_dir, release, force=False):

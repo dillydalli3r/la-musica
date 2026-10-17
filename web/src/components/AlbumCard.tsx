@@ -301,7 +301,11 @@ export default function AlbumCard({ al, artistName, selectable, selected, onSele
               containing folder otherwise — lib/refs). */}
           <Link
             to={albumArtistRef(al)}
-            className="truncate min-w-0 hover:text-accent-soft"
+            // The NAME keeps its room (the owner's rule): it does not shrink,
+            // and only a name wider than most of the line truncates at all —
+            // the disambiguation comment beside it takes the remainder and is
+            // the one that ends in an ellipsis (see DisambiguationMark).
+            className="truncate shrink-0 max-w-[65%] hover:text-accent-soft"
             title={artist}
           >
             {artist}

@@ -601,6 +601,7 @@ CHECK_LABELS = {
     "grade_check_alias_excess": "Locale alias only where needed",
     "grade_check_excess_tags": "Excess tags",
     "grade_check_media": "Media type",
+    "grade_check_media_evidence": "MEDIA agrees with the disc sheets",
     "grade_check_source": "Source tag",
     "grade_check_instrumental": "Instrumental consistency",
     "grade_check_disallowed": "Disallowed file types",
