@@ -1096,7 +1096,7 @@ class RunBusy(RuntimeError):
     """
 
 
-def held_paths(cfg, targets):
+def held_paths(cfg, targets, want_albums=False):
     """The library paths a run is about to touch: its claim, and its gate.
 
     A scoped run holds its own targets — an import holds the album it is
@@ -1126,21 +1126,30 @@ def held_paths(cfg, targets):
     not exist: an unscoped run must still hold ONE path, or two library-wide
     runs would have nothing to serialize on and would both walk and rewrite the
     same library.
+
+    *want_albums* returns ``(paths, albums)`` instead: the unpacked album list
+    this call walked for the graph, or None when it walked nothing. The chain's
+    own scope (`_chain_scan`) installs that list rather than walking the library
+    a second time.
     """
     scope = targets if targets is not None else cfg.get("targets")
     paths = [os.path.normpath(str(t)) for t in (scope or []) if str(t).strip()]
     if paths:
-        return paths
+        return (paths, None) if want_albums else paths
     folder = str(cfg.get("music_folder") or "").strip()
     if not folder or not os.path.isdir(folder):
-        return []
+        return ([], None) if want_albums else []
     root = library_root(folder)
     if not (root and os.path.isdir(root)):
-        return [folder]
+        # No library root to scope the walk to: the chain still walks the music
+        # folder for its album list (and this run holds the folder, not it).
+        return ([folder], None) if want_albums else [folder]
     key = os.path.normcase(os.path.abspath(root))
-    return [root] + [d for d in mlo_stats._find_albums(folder)
-                     if not os.path.normcase(os.path.abspath(d)).startswith(
-                         key + os.sep)]
+    albums = mlo_stats._find_albums(folder)
+    paths = [root] + [d for d in albums
+                      if not os.path.normcase(os.path.abspath(d)).startswith(
+                          key + os.sep)]
+    return (paths, albums) if want_albums else paths
 
 
 def _scope_album(targets):
@@ -1498,7 +1507,7 @@ def run_chain(cfg, ids, targets=None, force=None, progress=None, wait=False,
     # The claim (and with it the gate) is taken by claim_paths INSIDE the bar
     # block below, so the refusal is translated there — a PathLocked raised by
     # the body is some other job's collision, not this run's, and stays one.
-    paths = held_paths(cfg, targets)
+    paths, chain_albums = held_paths(cfg, targets, want_albums=True)
     # The run's own name counts its NON-script steps too (the import's advisory
     # and instrumental fetches): they are steps of the run like any other, and
     # a name that said "18 steps" while 20 ran would be the count lying.
@@ -1537,7 +1546,7 @@ def run_chain(cfg, ids, targets=None, force=None, progress=None, wait=False,
                 pos, shown = _run_pos(bar, done, steps[0] if steps else None)
                 _bar_frame(bar, pos, total, text, job=job,
                            steps=(shown, total) if steps else None)
-            with _chain_scan(cfg, targets) as scan_owner:
+            with _chain_scan(cfg, targets, albums=chain_albums) as scan_owner:
                 try:
                     return _run_chain_locked(cfg, ids, targets=targets, force=force,
                                              progress=progress, final=final, job=job,
@@ -1720,11 +1729,16 @@ def _moves_albums(sid, result):
 
 
 @contextlib.contextmanager
-def _chain_scan(cfg, targets):
+def _chain_scan(cfg, targets, albums=None):
     """Resolve the library's album list ONCE for the chain about to run.
 
     Yields whether this run owns the scope (so it — and only it — drops what it
     armed).
+
+    *albums* is the album list the unscoped run's preflight already walked (see
+    :func:`held_paths`): it is installed as the chain's list instead of walking
+    the library a second time. None (a scoped run, or a preflight that walked
+    nothing) leaves `chain_scan_start` to walk.
 
     A run that NAMES its targets never arms the LIBRARY-WIDE album list: its
     scripts read the targets, not the library, and a scoped run must not
@@ -1740,7 +1754,7 @@ def _chain_scan(cfg, targets):
     if scoped:
         mlo_stats.run_scope_start()
     else:
-        mlo_stats.chain_scan_start(cfg.get("music_folder"))
+        mlo_stats.chain_scan_start(cfg.get("music_folder"), albums=albums)
     try:
         yield True
     finally:

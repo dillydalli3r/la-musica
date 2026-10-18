@@ -532,7 +532,7 @@ def _scan_store(root_dir, albums):
             _SCAN["albums"] = list(albums)
 
 
-def chain_scan_start(root_dir):
+def chain_scan_start(root_dir, albums=None):
     """Resolve *root_dir*'s album list once, for the chain that is starting.
 
     Returns the list (empty for a root that does not exist — the same answer a
@@ -540,6 +540,11 @@ def chain_scan_start(root_dir):
     from it until the scope is dropped or ended. The chain's read scope (the
     walk memo and the tag memo, see the section above) is armed here too — a
     chain is what it belongs to, whether or not it also resolves the album list.
+
+    *albums* is a list the caller already walked for the SAME root (an unscoped
+    chain's preflight resolves it to take its claim, see
+    server.script_runners.held_paths): install it instead of walking the library
+    a second time. None means "walk it".
     """
     run_scope_start()
     with _SCAN_LOCK:
@@ -548,6 +553,10 @@ def chain_scan_start(root_dir):
         with _SCAN_LOCK:
             _SCAN["root"] = ""
         return []
+    if albums is not None:
+        with _SCAN_LOCK:
+            _SCAN["albums"] = list(albums)
+        return list(albums)
     albums = _find_albums(root_dir)      # stores itself (the scope is armed)
     return albums
 
@@ -629,6 +638,7 @@ def _collect_targets(targets, extensions):
     if not targets:
         return []
     files = {}
+    dirs = []
     for t in targets:
         if not t:
             continue
@@ -636,24 +646,48 @@ def _collect_targets(targets, extensions):
             if os.path.splitext(t)[1].lower() in extensions:
                 files[os.path.normcase(os.path.normpath(t))] = t
         elif os.path.isdir(t):
-            # Same memo as _find_albums: the walker hands one directory's files
-            # over together, and normcase(normpath(parent + sep + name)) is
-            # normcase(normpath(parent)) + normcase(normpath(sep + name)) — the
-            # parent's two string operations run once per directory, not once
-            # per file. The REMAINDER goes through the same two calls, so a file
-            # selected twice (the folder it sits in AND the file itself, which
-            # is exactly a mixed selection) keys IDENTICALLY either way and is
-            # processed once: with the parent's spelling alone, a target spelled
-            # "F:/…/Album" and the walker's "/1-02 …" remainder produced a key no
-            # file target could match, and the track was scanned twice.
-            last_raw = last_key = None
-            for f in _walk_files(t, extensions):
-                raw = os.path.dirname(f)
-                if raw != last_raw:
-                    last_raw = raw
-                    last_key = os.path.normcase(os.path.normpath(raw))
-                files[last_key
-                      + os.path.normcase(os.path.normpath(f[len(raw):]))] = f
+            dirs.append(t)
+    if len(dirs) > 1:
+        # A selection that names both a folder and something inside it (the
+        # library root AND an album, an artist folder AND its album) walked the
+        # nested subtree twice for the same files. Keep only the OUTERMOST
+        # directory targets; the walk of the parent already yields everything
+        # the child would, so the file set is unchanged. Keys are absolute and
+        # normcased so a relative spelling and an absolute one still compare,
+        # and a target named twice walks once. A pure prefix test on whole path
+        # components (not a bare startswith, which would treat "Album 2" as
+        # inside "Album").
+        keys = [(os.path.normcase(os.path.abspath(d)), d) for d in dirs]
+        seen = set()
+        kept = []
+        for key, d in keys:
+            if key in seen:
+                continue
+            if any(key != other and key.startswith(other.rstrip("\\/") + os.sep)
+                   for other, _ in keys):
+                continue
+            seen.add(key)
+            kept.append(d)
+        dirs = kept
+    for t in dirs:
+        # Same memo as _find_albums: the walker hands one directory's files
+        # over together, and normcase(normpath(parent + sep + name)) is
+        # normcase(normpath(parent)) + normcase(normpath(sep + name)) — the
+        # parent's two string operations run once per directory, not once
+        # per file. The REMAINDER goes through the same two calls, so a file
+        # selected twice (the folder it sits in AND the file itself, which
+        # is exactly a mixed selection) keys IDENTICALLY either way and is
+        # processed once: with the parent's spelling alone, a target spelled
+        # "F:/…/Album" and the walker's "/1-02 …" remainder produced a key no
+        # file target could match, and the track was scanned twice.
+        last_raw = last_key = None
+        for f in _walk_files(t, extensions):
+            raw = os.path.dirname(f)
+            if raw != last_raw:
+                last_raw = raw
+                last_key = os.path.normcase(os.path.normpath(raw))
+            files[last_key
+                  + os.path.normcase(os.path.normpath(f[len(raw):]))] = f
     return sorted(files.values())
 
 

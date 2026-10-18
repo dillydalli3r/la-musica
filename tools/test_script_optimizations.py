@@ -1549,7 +1549,10 @@ def check_chain_reads_each_file_once(tmp):
     real_scan = script_runners._chain_scan
 
     @contextlib.contextmanager
-    def no_scope(cfg_, targets_):
+    def no_scope(cfg_, targets_, albums=None):
+        # `albums` is the preflight's already-walked list (2.2.0: the unscoped
+        # chain resolves its album list ONCE and hands it through). The scope
+        # this stub disables is about the READ scope, not the walk.
         yield False
 
     try:

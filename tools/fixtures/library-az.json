@@ -4672,6 +4672,44 @@
    },
    {
     "kind": "album",
+    "id": "F:/tmp/mlo-lib-az/Artists/Zed Case/First Case",
+    "path": "F:/tmp/mlo-lib-az/Artists/Zed Case/First Case",
+    "mbid": null,
+    "title": "First Case",
+    "subtitle": "Zed Case",
+    "score": 0.6721,
+    "reasons": [
+     "Same family: Rock",
+     "Both 2020"
+    ],
+    "cover_path": "F:/tmp/mlo-lib-az/Artists/Zed Case/First Case",
+    "cover": null,
+    "file": null,
+    "album_path": "F:/tmp/mlo-lib-az/Artists/Zed Case/First Case",
+    "album": "First Case",
+    "artist": "Zed Case"
+   },
+   {
+    "kind": "album",
+    "id": "F:/tmp/mlo-lib-az/Artists/Zed Case/Second Case",
+    "path": "F:/tmp/mlo-lib-az/Artists/Zed Case/Second Case",
+    "mbid": null,
+    "title": "Second Case",
+    "subtitle": "Zed Case",
+    "score": 0.6643,
+    "reasons": [
+     "Same family: Rock",
+     "Both 2020"
+    ],
+    "cover_path": "F:/tmp/mlo-lib-az/Artists/Zed Case/Second Case",
+    "cover": null,
+    "file": null,
+    "album_path": "F:/tmp/mlo-lib-az/Artists/Zed Case/Second Case",
+    "album": "Second Case",
+    "artist": "Zed Case"
+   },
+   {
+    "kind": "album",
     "id": "F:/tmp/mlo-lib-az/Artist Beta/2021 - Vinyl Rip",
     "path": "F:/tmp/mlo-lib-az/Artist Beta/2021 - Vinyl Rip",
     "mbid": null,

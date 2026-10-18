@@ -87,8 +87,14 @@ assert pending[0]["meta"] == {"ALBUM": "New", "ARTIST": "Ar", "DATE": "1999"}, p
 # ------------------------------------------------------------------------- #
 _home = r.build_home({"music_folder": "C:/definitely-not-a-library"})
 assert {"recommended", "popular", "rec_source"}.isdisjoint(_home), sorted(_home)
-assert {"stats", "recent", "top_rated", "favorites", "discover", "top_artists",
-        "pending", "needs_attention", "rated"} <= set(_home), sorted(_home)
+# Home is a LISTENER's page now: genres, moods, stars and play counts. The
+# maintenance shelves (grade strip, needs-attention, pending, top artists by
+# collection size) left the payload with the revamp — their pages own them.
+assert {"stats", "recent", "favorites", "rediscover", "top_artists",
+        "genres", "moods", "top_tracks", "top_albums", "top_playlists",
+        "rated_albums", "rated_tracks", "rated_artists"} <= set(_home), sorted(_home)
+assert {"top_rated", "discover", "pending", "needs_attention", "rated",
+        "grade_warning"}.isdisjoint(_home), sorted(_home)
 assert _home["stats"]["albums"] == 0 and _home["recent"] == [], _home["stats"]
 
 # --------------------------------------------------------------------------- #
@@ -305,8 +311,10 @@ assert (fine_claim_gw["albums_failing"], fine_claim_gw["albums_importing"]) == (
 # The same library with no claim at all is the full three findings (`gw` above):
 # the difference is the claim, not the fixture.
 assert gw["ok"] is False and gw["albums_failing"] == 3, gw
-# …and the Home payload carries THAT object, not a second count of the library.
-assert _home["grade_warning"] == r.grade_warning({"artists": []}), _home["grade_warning"]
+# …and the Home payload no longer carries it: the grading strip lives on the
+# Library page, and `grade_warning` stays one function for the surfaces that
+# do read it.
+assert "grade_warning" not in _home
 
 # --------------------------------------------------------------------------- #
 # The percentage PRINTED beside a list of findings can never round the shortfall

@@ -115,6 +115,7 @@ TAG_FAMILY = {
     "MUSICBRAINZ_RELEASEGROUPID": "release",
     "MUSICBRAINZ_RELEASETRACKID": "release",
     "MUSICBRAINZ_WORKID": "release",
+    "MUSICBRAINZ_UPDATED": "release",
     # What the analysis passes measured on the audio itself.
     "MOOD": "audio", "ENERGY": "audio", "BPM": "audio", "INITIALKEY": "audio",
     "DYNAMIC RANGE": "audio", "ALBUM DYNAMIC RANGE": "audio",
@@ -259,6 +260,7 @@ TAG_INFO = {
     "MUSICBRAINZ_RELEASEGROUPID": ("MB release group id", "The release group the album belongs to."),
     "MUSICBRAINZ_RELEASETRACKID": ("MB release track id", "This track's own position id on this release."),
     "MUSICBRAINZ_WORKID": ("MB work id", "MusicBrainz work id the classical tags sit beside."),
+    "MUSICBRAINZ_UPDATED": ("MB pulled", "When MusicBrainz data for this track was last pulled (ISO-8601 UTC)."),
     "MOOD": ("Mood", "The mood word the classifier derived from the track's own audio."),
     "ENERGY": ("Energy", "0-100 arousal the MOOD verdict was scored from."),
     "BPM": ("BPM", "Tempo in beats per minute."),

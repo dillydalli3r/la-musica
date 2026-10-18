@@ -4,7 +4,7 @@ import { Navigate, NavLink, Route, Routes, useLocation, useNavigate } from "reac
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Activity, BarChart3, ChevronLeft, ChevronRight, ClipboardCheck, Disc3, Gauge, HardDriveDownload, Heart, HeartHandshake, Home, Import,
-  Keyboard, Library, ListChecks, ListMusic, Menu, Music2, Music4, PanelLeftClose, Search, Sliders, SlidersHorizontal, Tags, Trash2, User, WifiOff, X,
+  Keyboard, Library, ListChecks, ListMusic, Menu, Music2, Music4, PanelLeftClose, Search, Sliders, Tag, Tags, Trash2, User, WifiOff, X,
   Settings as SettingsIcon, Wrench,
 } from "lucide-react";
 import { api, AuthError, getToken, IN_TAURI, onAuthLost, serverUrl } from "./api";
@@ -14,6 +14,7 @@ import type { LucideIcon } from "lucide-react";
 import { albumRef, artistRef, trackRef } from "./lib/refs";
 import { progressKey, toast, useStore } from "./store";
 import { withAlias } from "./lib/mbtext";
+import { filesFromDrop, setPendingImport } from "./lib/dropImport";
 import CreditsFooter from "./components/Credits";
 import AccountMenu from "./components/AccountMenu";
 import NotificationBell from "./components/NotificationBell";
@@ -35,6 +36,7 @@ const TrackPage = lazy(() => import("./pages/TrackPage"));
 const PlaylistsPage = lazy(() => import("./pages/PlaylistsPage"));
 const PlaylistDetailPage = lazy(() => import("./pages/PlaylistDetailPage"));
 const FavoritesPage = lazy(() => import("./pages/FavoritesPage"));
+const TagsPage = lazy(() => import("./pages/TagsPage"));
 const SettingsPage = lazy(() => import("./pages/SettingsPage"));
 const SetupPage = lazy(() => import("./pages/SetupPage"));
 const ExportPage = lazy(() => import("./pages/ExportPage"));
@@ -49,7 +51,6 @@ const InProgressPage = lazy(() => import("./pages/InProgressPage"));
 // A podcast SERIES page (route only — podcasts are reached from Home's shelf
 // and from an episode's own page, so the sidebar needs no entry for them).
 const PodcastPage = lazy(() => import("./pages/PodcastPage"));
-const BrowsePage = lazy(() => import("./pages/BrowsePage"));
 const ChartsPage = lazy(() => import("./pages/ChartsPage"));
 const CheckStackPage = lazy(() => import("./pages/CheckStackPage"));
 const MBSearchPage = lazy(() => import("./pages/MusicBrainzPage").then((m) => ({ default: m.MBSearchPage })));
@@ -161,7 +162,6 @@ const NAV_GROUPS: { labelKey: MessageKey; items: { to: string; labelKey: Message
       { to: "/library", labelKey: "nav.library", icon: Library, end: false },
       // Complex browsing (tag/rating/technical queries, facets, grouping) is a
       // view OF the library, so it sits with it rather than under Discover.
-      { to: "/browse", labelKey: "nav.browse", icon: SlidersHorizontal, end: false },
       { to: "/genres", labelKey: "nav.genres", icon: Tags, end: true },
       { to: "/trash", labelKey: "nav.trash", icon: Trash2, end: true },
       { to: "/playlists", labelKey: "nav.playlists", icon: ListMusic, end: false },
@@ -188,6 +188,10 @@ const NAV_GROUPS: { labelKey: MessageKey; items: { to: string; labelKey: Message
     items: [
       { to: "/optimize", labelKey: "nav.optimize", icon: Gauge, end: false },
       { to: "/grading", labelKey: "nav.grading", icon: ClipboardCheck, end: false },
+      // When each album's MusicBrainz data was last pulled — the stamps live
+      // IN the files, so this page is a view of the library itself, beside
+      // the other maintain tools (see server.tag_refresh).
+      { to: "/tags", labelKey: "nav.tags", icon: Tag, end: false },
       // What the library is DOING right now, and what the app is doing it
       // WITH: the two answers a user needs while a run is in flight — which
       // files are locked and by what, and the whole check/script stack the
@@ -501,6 +505,87 @@ export default function App() {
   // ---- navigation history (top-bar back / forward) ------------------------
   const location = useLocation();
   const navigate = useNavigate();
+
+  // ---- a drop ANYWHERE is an import --------------------------------------
+  // Files, folders and archives dropped on any page open the wizard with them
+  // already staged (`lib/dropImport` carries the drop across the route
+  // change; the wizard owns album detection and unpacking). The desktop shell
+  // intercepts OS drops itself and reports PATHS, so the same rule is
+  // installed over its own event; on a page OTHER than the wizard it
+  // navigates there, and on the wizard the wizard's own listener does the
+  // work (this one stays out of its way).
+  const [dropActive, setDropActive] = useState(0);
+  useEffect(() => {
+    const carriesFiles = (e: DragEvent) =>
+      Array.from(e.dataTransfer?.items ?? []).some((i) => i.kind === "file");
+    const onEnter = (e: DragEvent) => {
+      if (!carriesFiles(e)) return;
+      e.preventDefault();
+      setDropActive((n) => n + 1);
+    };
+    // dragover MUST be cancelled for a drop to fire at all.
+    const onOver = (e: DragEvent) => {
+      if (!carriesFiles(e)) return;
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
+    };
+    const onLeave = (e: DragEvent) => {
+      if (!carriesFiles(e)) return;
+      // Leaving the window is the only decrement that matters; moving across
+      // children fires enter/leave pairs, so the counter can drift — clearing
+      // when the pointer leaves the viewport keeps the overlay honest.
+      if (e.relatedTarget === null) setDropActive(0);
+    };
+    const onDrop = async (e: DragEvent) => {
+      if (e.defaultPrevented) return;        // a queue reorder owns this drop
+      if (!carriesFiles(e) || !e.dataTransfer) return;
+      e.preventDefault();
+      setDropActive(0);
+      if (location.pathname.startsWith("/import")) return; // the wizard's own
+      try {
+        const files = await filesFromDrop(e.dataTransfer);
+        if (!files.length) return;
+        setPendingImport({ kind: "files", files });
+        navigate("/import");
+      } catch (err) {
+        toast.error(`Could not read the dropped files: ${String(err)}`);
+      }
+    };
+    window.addEventListener("dragenter", onEnter);
+    window.addEventListener("dragover", onOver);
+    window.addEventListener("dragleave", onLeave);
+    window.addEventListener("drop", onDrop);
+    // The desktop shell's own OS drop (paths, not bytes).
+    let stopShell: (() => void) | undefined;
+    let cancelled = false;
+    if (IN_TAURI) {
+      void (async () => {
+        try {
+          const { getCurrentWebview } = await import("@tauri-apps/api/webview");
+          if (cancelled) return;
+          stopShell = await getCurrentWebview().onDragDropEvent(({ payload }) => {
+            if (payload.type !== "drop" || !payload.paths?.length) return;
+            if (location.pathname.startsWith("/import")) return;
+            setPendingImport({ kind: "paths", paths: payload.paths });
+            navigate("/import");
+          });
+        } catch {
+          /* an older shell with no drag-drop event: the DOM drop still works */
+        }
+      })();
+    }
+    return () => {
+      cancelled = true;
+      window.removeEventListener("dragenter", onEnter);
+      window.removeEventListener("dragover", onOver);
+      window.removeEventListener("dragleave", onLeave);
+      window.removeEventListener("drop", onDrop);
+      stopShell?.();
+    };
+    // `location.pathname` is read at drop time; re-installing per navigation
+    // would drop a drag in flight.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [navigate]);
   // The stack itself lives in a ref (mutations shouldn't re-render), but the
   // position is STATE: a ref-only position never triggers a re-render, so
   // the Back/Forward buttons would render with a stale `disabled` flag.
@@ -1323,12 +1408,12 @@ export default function App() {
             <Route path="/playlist/:id" element={<PlaylistDetailPage />} />
             <Route path="/favorites" element={<Navigate to="/favorites/tracks" replace />} />
             <Route path="/favorites/:kind" element={<FavoritesPage />} />
+            <Route path="/tags" element={<TagsPage />} />
             <Route path="/export" element={<ExportPage />} />
             <Route path="/optimize" element={<OptimizationPage />} />
             <Route path="/equalizer" element={<EqualizerPage />} />
             <Route path="/grading" element={<GradingPage />} />
             <Route path="/in-progress" element={<InProgressPage />} />
-            <Route path="/browse" element={<BrowsePage />} />
             {/* What is being played: the user's own play history beside the
                 providers' charts, one window at a time. */}
             <Route path="/charts" element={<ChartsPage />} />
@@ -1373,6 +1458,18 @@ export default function App() {
 
         <PlayerBar />
       </div>
+
+      {dropActive > 0 && (
+        <div className="fixed inset-0 z-[70] pointer-events-none bg-bg/70 backdrop-blur-sm flex items-center justify-center">
+          <div className="rounded-2xl border-2 border-dashed border-accent/70 bg-panel/90 px-10 py-8 text-center shadow-2xl">
+            <Import className="h-8 w-8 mx-auto text-accent" />
+            <div className="mt-2 text-base font-semibold">Drop to import</div>
+            <div className="text-xs text-zinc-400 mt-1">
+              files, folders or archives — they open in the import wizard
+            </div>
+          </div>
+        </div>
+      )}
 
       {shortcutsOpen && <ShortcutsOverlay onClose={() => setShortcutsOpen(false)} />}
 

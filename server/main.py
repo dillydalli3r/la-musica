@@ -50,6 +50,7 @@ from server import tagcache
 from server import exporter
 from server import exportconfigs
 from server import api_discovery
+from server import api_tags
 from server import api_imports
 from server import api_lyrics
 from server import api_media
@@ -153,6 +154,15 @@ async def _lifespan(app: FastAPI):
         library_refresh.start()
     except Exception as e:
         print(f"[mlo] library refresh worker failed to start: {e}")
+    # MAINTAIN → Tags' scheduler: once a minute it asks whether any album's
+    # MusicBrainz stamps are past `tag_refresh_days`, and starts the bounded,
+    # album-granular refresh queue when they are (`server.tag_refresh`). Off
+    # unless `tag_refresh_enabled` says otherwise; never starts a second job.
+    try:
+        from server import tag_refresh
+        tag_refresh.start()
+    except Exception as e:
+        print(f"[mlo] tag refresh scheduler failed to start: {e}")
     # The storage snapshot (the Home page's own card polls it): its FIRST
     # request after a restart is the one that pays the walk, because only a
     # STALE entry is served off the request path and a fresh process has none.
@@ -468,6 +478,7 @@ app.include_router(api_trash.router)
 app.include_router(api_push.router)
 app.include_router(ws_mod.router)
 app.include_router(api_cover.router)
+app.include_router(api_tags.router)
 
 # Script 8 (Auto tagging) never imports a genre: it derives MOOD/ENERGY from
 # the audio, cross-references INSTRUMENTAL and derives the album advisory.
@@ -511,6 +522,13 @@ class ImportCommit(BaseModel):
     target_dir: str
     mb_link: Optional[str] = None
     staged: bool = False  # the wizard's album folder, wherever the user put it
+    # The release payload the wizard already fetched for `mb_link`. Supplying
+    # it makes the link write ALSO the release's own identity (MEDIA, label,
+    # catalogue number, country, per-track ids) with no MusicBrainz request:
+    # a link that changed the album's release must change what the release
+    # says about it in the same breath (the owner's "the tag still isn't
+    # updated", 2026-10-17). Absent, the server resolves the id itself.
+    release: Optional[dict] = None
 
 
 class ImportExpected(BaseModel):
@@ -5077,7 +5095,17 @@ def import_commit(req: ImportCommit):
             errors = [e for e in ex.map(lambda a: write_one(*a), items) if e]
     if errors:
         raise HTTPException(500, "; ".join(errors))
-    return {"ok": True, "changed": len(changes)}
+    # The release's own facts land WITH the link — the id alone would leave
+    # MEDIA/label/country describing the pressing the album just left.
+    refreshed = None
+    if mb:
+        try:
+            refreshed = imports_svc.refresh_release_tags(target, release=req.release,
+                                                         cfg=cfg)
+        except Exception as e:  # noqa: BLE001 — the link is written either way
+            refreshed = {"skipped": True, "reason": str(e)}
+    return {"ok": True, "changed": len(changes), "release": mb,
+            "refreshed": refreshed}
 
 
 @app.post("/api/import/expected")

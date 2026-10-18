@@ -10,6 +10,7 @@ import {
 import { api, answerSources, replyFor, IN_MOBILE_SHELL, IN_TAURI } from "../api";
 import type { AdvisoryFetchResult, MetadataFetchItem, MetadataItemKind } from "../api";
 import { toast, useStore } from "../store";
+import { PENDING_IMPORT_EVENT, takePendingImport } from "../lib/dropImport";
 import {
   advisoryLine, advisoryOutcome, allowPlainOf, LyricsKindChip,
 } from "../components/Badges";
@@ -1743,6 +1744,25 @@ export default function ImportWizard() {
   };
 
   // ---- Staged batches: the wizard's own worklist --------------------------
+
+  // A drop from ANYWHERE else in the app arrives here (`lib/dropImport`):
+  // App navigates to /import and leaves the files (or the shell's paths) in
+  // the module, and this is the one consumer. A second drop while the wizard
+  // is already open fires the event directly, so the user never has to
+  // navigate away and back.
+  useEffect(() => {
+    const consume = () => {
+      const drop = takePendingImport();
+      if (!drop) return;
+      if (drop.kind === "files") void handleFiles(drop.files);
+      else void handleDropPaths(drop.paths);
+    };
+    consume();
+    window.addEventListener(PENDING_IMPORT_EVENT, consume);
+    return () => window.removeEventListener(PENDING_IMPORT_EVENT, consume);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   /** The batch the user is BUILDING right now, as a bankable snapshot. */
   const activeBatch = (): StagedBatch => ({
     id: `active-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
@@ -2468,7 +2488,13 @@ export default function ImportWizard() {
       if (!rel) return;
       // The release link is the step's ONE pass over the album: MusicBrainz
       // is the app's one identity link, so there is no second link to write.
-      await api.importCommit(albumPath, `https://musicbrainz.org/release/${rel.id}`, staged);
+      // The LINK and the RELEASE'S OWN FACTS land together: the payload is
+      // already in hand (just fetched), and a link that changed the release
+      // must change what the release says — MEDIA included — in the same
+      // write. This is the owner's "the tag still isn't updated" (2026-10-17):
+      // 12" Vinyl stayed Vinyl through a re-point at the CD release because
+      // the link writer was the only writer here.
+      await api.importCommit(albumPath, `https://musicbrainz.org/release/${rel.id}`, staged, rel);
       // The release became this album's, so its OWN tracklist is recorded in
       // the same breath: the album page diffs the folder against it, and a
       // re-link that stopped at the id would leave the gaps of the release
@@ -2868,6 +2894,15 @@ export default function ImportWizard() {
       };
     }
     await api.mbAssign(writes, staged);
+    // The release identity, refreshed from the album's OWN link (cached by
+    // the assign's own lookup): the Matched step writes the release's tags
+    // from its payload, and this is what also stamps MUSICBRAINZ_UPDATED and
+    // fills anything the payload did not carry.
+    try {
+      await api.importRefresh([path], staged);
+    } catch {
+      /* the tag write above is the one that must not be lost */
+    }
     // Record the RELEASE's own tracklist on the folder. A partial import
     // (some of these tracks never brought in) leaves no other trace of what
     // is absent, so the album page diffs against this list and greys out
@@ -4061,13 +4096,29 @@ const runTickedHere = async () => {
     const res = await api.run(runAfterImportIds, targets, force);
     const rows = rowsFromResults(res.results ?? []);
     setRunRows(rows);
+    // THE END-OF-IMPORT REFRESH — always, forced or not. The scripts write
+    // what their own passes write; the release the album names is re-read and
+    // stamped now (MEDIA included), so Finish cannot leave a tag describing
+    // the pressing the album left. Best effort: a refresh that could not run
+    // is said in the step's line, the scripts' own result is kept.
+    let refreshed = "";
+    try {
+      const rf = await api.importRefresh(targets, staged);
+      const wrote = rf.albums.reduce((n, a) => n + (a.identity?.written ?? 0), 0);
+      const skipped = rf.albums.filter((a) => a.skipped).length;
+      refreshed = wrote ? ` · tags refreshed (${wrote} file${wrote === 1 ? "" : "s"})`
+        : skipped ? ` · tags not refreshed (${rf.albums.find((a) => a.skipped)?.reason || "no MusicBrainz link"})`
+        : " · tags up to date";
+    } catch (e) {
+      refreshed = ` · tags not refreshed — ${e}`;
+    }
     const failed = rows.filter((r) => !r.ok && !r.skipped);
     if (failed.length) toast.error(`${failed.length} script(s) failed — see the step`);
     else toast.success(`${runAfterImportIds.length} script(s) finished${force ? " (forced)" : ""}`);
     setFinishMsg(
       failed.length
         ? `Scripts: ${failed.length} of ${runAfterImportIds.length} failed — ${failed[0].error}`
-        : `Scripts: ${runAfterImportIds.length} finished on ${targets.length} album${targets.length > 1 ? "s" : ""}${force ? " (forced)" : ""}`
+        : `Scripts: ${runAfterImportIds.length} finished on ${targets.length} album${targets.length > 1 ? "s" : ""}${force ? " (forced)" : ""}${refreshed}`
     );
   } catch (e) {
     setFinishMsg(startProblem("Scripts", e));
@@ -4202,6 +4253,14 @@ const finish = async (closeByNavigation: boolean, runScripts = true) => {
       forced = !!force;
       try {
         await api.run(runAfterImportIds, targets, force);
+        // ...and the release's own facts, unconditionally (see runTickedHere).
+        // Before the naming/organize pass is NOT enough: the scripts can write
+        // their own values, and MusicBrainz's release is the last word.
+        try {
+          await api.importRefresh(targets, staged);
+        } catch {
+          /* the chain's own result is what the finish line reports */
+        }
       } catch (e) {
         // The album is held by another job finishing it: nothing ran here, and
         // nothing is broken — do not answer a success press with an error.

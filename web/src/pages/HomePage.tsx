@@ -1,28 +1,35 @@
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { AlertTriangle, BarChart3, Clock, Disc3, Heart, ListChecks, Loader2, Radio, RefreshCw, Sparkles, Star, Users } from "lucide-react";
+import {
+  BarChart3, Clock, Disc3, Flame, Headphones, Heart, ListChecks, ListMusic,
+  Moon, Music2, Play, Radio, RefreshCw, Sparkles, Star, Tags,
+  TrendingUp, Users, Waves,
+} from "lucide-react";
 import { api } from "../api";
 import { EmptyState, PageLoading } from "../components/Badges";
 import StorageCard from "../components/StorageCard";
-import GradeWarning, { GradeDot } from "../components/GradeWarning";
 import PageHeader from "../components/PageHeader";
 import AlbumCard, { GRID_COVER_W } from "../components/AlbumCard";
 import CoverImg from "../components/CoverImg";
 import Segmented from "../components/Segmented";
 import SelectAllButton from "../components/SelectAllButton";
 import StatsPanel from "../components/StatsPanel";
-import { useI18n } from "../lib/i18n";
+import StarRating from "../components/StarRating";
 import ArtistAvatar from "../components/ArtistAvatar";
 import ArtistName from "../components/ArtistName";
-import { GRID_SIZE_MIN, releaseCount } from "../lib/fmt";
+import { useI18n } from "../lib/i18n";
+import { GRID_SIZE_MIN, fmtDuration } from "../lib/fmt";
 import { albumRef } from "../lib/refs";
 import { GRID_SIZES, useGridSize, useSelectMode } from "../lib/libraryView";
 import { useStore } from "../store";
 import type { ReactNode } from "react";
-import type { HomeAlbum, HomeArtist, HomePodcast, Track } from "../types";
+import type {
+  HomeAlbum, HomeData, HomeLane, HomePlayedArtist,
+  HomePlaylistRow, HomePodcast, HomeTrack, Track,
+} from "../types";
 
-/** Shelf chip: why a row is here (a favourite's origin, a rediscovered pick). */
+/** Shelf chip: why a row is here. */
 function Chip({ text, title }: { text: string; title?: string }) {
   return (
     <span
@@ -35,33 +42,19 @@ function Chip({ text, title }: { text: string; title?: string }) {
 }
 
 function Shelf<T extends HomeAlbum>({
-  title,
-  icon: Icon,
-  items,
-  blurb,
-  extraOf,
-  gridSize,
-  selectable,
-  selected,
+  title, icon: Icon, items, blurb, extraOf, gridSize, selectable, selected,
   onSelect,
 }: {
   title: string;
   icon: typeof Sparkles;
   items: T[];
   blurb?: string;
-  /** What each card carries under its caption. The shelf's own reason chip
-   *  ("Recently added", "Rediscover") unless the shelf draws its line — the
-   *  rated shelf shows the user's stars, which ARE its reason for a row. */
   extraOf?: (row: T) => ReactNode;
-  /** The shared cover size (lib/libraryView) — Home's shelves and the
-   *  Library's grid draw their covers at the one the user picked. */
   gridSize: "s" | "m" | "l";
   selectable: boolean;
   selected: string[];
   onSelect: (path: string) => void;
 }) {
-  // An empty shelf is hidden outright: the page-level empty state is Home's,
-  // so a shelf never invents an empty look of its own.
   if (!items.length) return null;
   return (
     <section className="space-y-2">
@@ -70,33 +63,21 @@ function Shelf<T extends HomeAlbum>({
         <h2 className="text-sm font-semibold tracking-tight">{title}</h2>
         {blurb && <span className="text-[11px] text-zinc-600">{blurb}</span>}
       </div>
-      {/* The Library's own grid geometry, so a shelf and the Library draw the
-          covers at the same size — and the same shared album card. */}
       <div
         className="grid gap-x-4 gap-y-5 stagger"
         style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${GRID_SIZE_MIN[gridSize]}px, 1fr))` }}
       >
         {items.map((a, i) => {
-          // A shelf row is a library album (the server sends the library's own
-          // row) unless it is a release the library does not hold: that one has
-          // no page to open and nothing to tick.
           const inLibrary = a.owned !== false && !!a.path;
           return (
             <AlbumCard
-              // Identity first: an index in the key remounts a card (and
-              // replays its stagger animation) whenever the shelf order
-              // changes. An unowned row has neither a path nor always an MBID.
               key={a.path || a.mbid || `shelf-${i}`}
               al={a}
               href={inLibrary ? albumRef(a) : null}
               selectable={selectable && inLibrary}
               selected={selected.includes(a.path)}
               onSelect={onSelect}
-              // The shelf's own words for why the row is here, under the
-              // card's caption.
               extraMeta={extraOf ? extraOf(a) : a.reason ? <Chip text={a.reason} /> : undefined}
-              // The shelf's cover size, so the card asks the server for the
-              // thumbnail this grid actually draws instead of the master.
               size={gridSize}
             />
           );
@@ -106,56 +87,33 @@ function Shelf<T extends HomeAlbum>({
   );
 }
 
-function ArtistShelf({ title, artists }: { title: string; artists?: HomeArtist[] }) {
-  const { t } = useI18n();
-  if (!artists?.length) return null;
+/** A genre or mood lane: the name and a few records from it, on one row.
+ *  Deliberately NOT the full grid: Home has several lanes, and a page that
+ *  stacks seven album grids is a page you scroll, not a page you read. */
+function Lane({ lane, icon: Icon }: { lane: HomeLane; icon: typeof Flame }) {
+  if (!lane.albums.length) return null;
   return (
     <section className="space-y-2">
       <div className="flex items-baseline gap-2 px-1">
-        <Users className="h-4 w-4 text-accent self-center" />
-        <h2 className="text-sm font-semibold tracking-tight">{title}</h2>
-        <span className="text-[11px] text-zinc-600">{t("home.shelf.artists_blurb")}</span>
+        <Icon className="h-4 w-4 text-accent self-center" />
+        <h2 className="text-sm font-semibold tracking-tight">{lane.name}</h2>
+        <span className="text-[11px] text-zinc-600">
+          {lane.tracks.toLocaleString()} track{lane.tracks === 1 ? "" : "s"}
+          {lane.plays ? ` · ${lane.plays.toLocaleString()} play${lane.plays === 1 ? "" : "s"}` : ""}
+        </span>
       </div>
-      {/* CONDENSED on purpose: the cards this replaced drew an 80 px circle, a
-          name and a count in a 2/3/4/6 grid with a `p-2` card and a `mt-2`
-          name row, which filled a screen with six artists. Same information,
-          half the box: a smaller square tile (the geometry the artist page's
-          own hero already draws — one square cover, `rounded-xl`), more
-          columns, tighter padding, and a smaller caption. */}
-      <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 xl:grid-cols-8 gap-2 stagger">
-        {artists.map((ar) => (
-          <Link
-            key={ar.path || ar.artist}
-            to={`/artist/${encodeURIComponent(ar.path)}`}
-            className="group rounded-lg p-1.5 flex flex-col items-center text-center transition-all duration-200 hover:bg-panel/70 hover:-translate-y-0.5"
-            title={ar.artist}
-          >
-            {/* A SQUARE, like every other image this app draws of an entity
-                (the album cards, the artist page's hero tile): the circle was
-                the only round shape in the library, and the owner asked for
-                "more rectangular like how album covers are". */}
-            <ArtistAvatar
-              path={ar.path}
-              hasImage={ar.has_image}
-              coverPath={ar.cover_path}
-              coverFile={ar.cover}
-              className="h-16 w-16 rounded-lg bg-raise overflow-hidden shrink-0"
+      <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 xl:grid-cols-8 gap-x-3 gap-y-4 stagger">
+        {lane.albums.slice(0, 8).map((a) => (
+          <Link key={a.path} to={albumRef(a)} className="group min-w-0">
+            <CoverImg
+              albumPath={a.path}
+              coverFile={a.cover_file}
+              w={GRID_COVER_W.s}
+              wrapperClass="aspect-square w-full rounded-lg bg-raise overflow-hidden"
             />
-            {/* The card's own name row carries the artist's OWN verdict too
-                (`top_artists[].grade`, passed through from the library row the
-                shelf is built from) — the same dot, from the same rule, that
-                the artist page draws beside the same name. */}
-            <ArtistName
-              name={ar.artist}
-              pass={ar.grade?.pass}
-              issues={ar.grade?.issues}
-              disambiguation={ar.disambiguation}
-              className="mt-1.5 w-full justify-center text-xs font-medium"
-              nameClassName="truncate"
-            />
-            <div className="text-[10px] text-zinc-500 tabular-nums">
-              {releaseCount(ar.album_count)}
-              {ar.grade_pct != null && <span> · {Math.round(ar.grade_pct)}%</span>}
+            <div className="mt-1.5 px-0.5 text-xs font-medium truncate">{a.meta?.ALBUM || a.path.split("/").pop()}</div>
+            <div className="px-0.5 text-[11px] text-zinc-500 truncate">
+              {a.album_artist || a.meta?.ALBUMARTIST || a.meta?.ARTIST || ""}
             </div>
           </Link>
         ))}
@@ -164,14 +122,159 @@ function ArtistShelf({ title, artists }: { title: string; artists?: HomeArtist[]
   );
 }
 
+/** A track row: click to play, the title opens the track's page. */
+function TrackList({ title, icon: Icon, rows, blurb }: {
+  title: string; icon: typeof Music2; rows: HomeTrack[]; blurb?: string;
+}) {
+  const playNow = useStore((s) => s.playNow);
+  if (!rows.length) return null;
+  const queue = rows.map((r) => ({
+    path: r.path,
+    file: r.file || r.path.split("/").pop() || "",
+    albumPath: r.album_path,
+    artist: r.artist,
+    album: r.album,
+    title: r.title,
+    coverFile: r.cover_file ?? null,
+    albumCover: r.album_cover ?? null,
+  }));
+  return (
+    <section className="space-y-2">
+      <div className="flex items-baseline gap-2 px-1">
+        <Icon className="h-4 w-4 text-accent self-center" />
+        <h2 className="text-sm font-semibold tracking-tight">{title}</h2>
+        {blurb && <span className="text-[11px] text-zinc-600">{blurb}</span>}
+      </div>
+      <div className="panel divide-y divide-border">
+        {rows.map((r, i) => (
+          <div key={r.path} className="group flex items-center gap-3 px-3 py-1.5 hover:bg-panel/70">
+            <span className="w-5 text-right text-[11px] text-zinc-600 tabular-nums">{i + 1}</span>
+            <button
+              className="btn-icon hover:bg-accent/20 tap shrink-0"
+              title="Play"
+              onClick={() => playNow(queue, i)}
+            >
+              <Play className="h-3.5 w-3.5 fill-current" />
+            </button>
+            <CoverImg
+              albumPath={r.album_path}
+              coverFile={r.cover_file ?? r.album_cover}
+              w={80}
+              wrapperClass="h-9 w-9 rounded bg-raise overflow-hidden shrink-0"
+            />
+            <div className="min-w-0 flex-1">
+              <Link
+                to={`/track/${encodeURIComponent(r.path)}`}
+                className="block truncate text-sm font-medium hover:underline"
+                title={r.title}
+              >
+                {r.title}
+              </Link>
+              <div className="truncate text-[11px] text-zinc-500">
+                {r.artist}
+                {r.album && <span className="text-zinc-600"> · {r.album}</span>}
+              </div>
+            </div>
+            {r.rating != null && r.rating > 0 && (
+              <span className="shrink-0 hidden sm:block" title={`Your rating: ${(r.rating / 2).toFixed(1)} / 5`}>
+                <StarRating value={r.rating / 2} readOnly size="sm" />
+              </span>
+            )}
+            {r.plays > 0 && (
+              <span className="shrink-0 text-[11px] text-zinc-500 tabular-nums" title={`${r.plays} play(s)`}>
+                <Headphones className="inline h-3 w-3" /> {r.plays}
+              </span>
+            )}
+            {r.duration ? (
+              <span className="shrink-0 text-[11px] text-zinc-600 tabular-nums">{fmtDuration(r.duration)}</span>
+            ) : null}
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function PlayedArtists({ title, artists }: { title: string; artists?: HomePlayedArtist[] }) {
+  if (!artists?.length) return null;
+  return (
+    <section className="space-y-2">
+      <div className="flex items-baseline gap-2 px-1">
+        <Users className="h-4 w-4 text-accent self-center" />
+        <h2 className="text-sm font-semibold tracking-tight">{title}</h2>
+        <span className="text-[11px] text-zinc-600">ranked by plays</span>
+      </div>
+      <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 xl:grid-cols-8 gap-2 stagger">
+        {artists.map((ar) => (
+          <Link
+            key={ar.path || ar.artist}
+            to={`/artist/${encodeURIComponent(ar.path)}`}
+            className="group rounded-lg p-1.5 flex flex-col items-center text-center transition-all duration-200 hover:bg-panel/70 hover:-translate-y-0.5"
+            title={`${ar.artist} · ${ar.plays} play(s)`}
+          >
+            <ArtistAvatar
+              path={ar.path}
+              hasImage={ar.has_image}
+              coverPath={ar.cover_path}
+              coverFile={ar.cover}
+              className="h-16 w-16 rounded-lg bg-raise overflow-hidden shrink-0"
+            />
+            <ArtistName
+              name={ar.artist}
+              pass={ar.grade?.pass}
+              issues={ar.grade?.issues}
+              disambiguation={ar.disambiguation}
+              className="mt-1.5 w-full justify-center text-xs font-medium"
+              nameClassName="truncate"
+            />
+            <div className="text-[10px] text-zinc-500 tabular-nums flex items-center gap-1">
+              <Headphones className="h-3 w-3" /> {ar.plays.toLocaleString()}
+              {ar.rating != null && ar.rating > 0 && <span> · ★ {(ar.rating / 2).toFixed(1)}</span>}
+            </div>
+          </Link>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function PlaylistRows({ title, rows }: { title: string; rows: HomePlaylistRow[] }) {
+  if (!rows.length) return null;
+  return (
+    <section className="space-y-2">
+      <div className="flex items-baseline gap-2 px-1">
+        <ListMusic className="h-4 w-4 text-accent self-center" />
+        <h2 className="text-sm font-semibold tracking-tight">{title}</h2>
+        <span className="text-[11px] text-zinc-600">where your plays came from</span>
+      </div>
+      <div className="panel divide-y divide-border">
+        {rows.map((p) => (
+          <Link key={p.id} to={p.path} className="flex items-center gap-3 px-3 py-2 hover:bg-panel/70">
+            <ListFilterIcon smart={p.kind_of === "smart"} />
+            <span className="min-w-0 flex-1 truncate text-sm font-medium">{p.name}</span>
+            <span className="text-[11px] text-zinc-500 tabular-nums">
+              {p.track_count ?? 0} track{p.track_count === 1 ? "" : "s"}
+            </span>
+            <span className="text-[11px] text-accent-soft tabular-nums flex items-center gap-1">
+              <Headphones className="h-3 w-3" /> {p.plays.toLocaleString()}
+            </span>
+          </Link>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function ListFilterIcon({ smart }: { smart: boolean }) {
+  return smart
+    ? <Waves className="h-4 w-4 text-accent shrink-0" />
+    : <ListMusic className="h-4 w-4 text-zinc-500 shrink-0" />;
+}
+
 function PodcastShelf({ title, items, gridSize }: {
-  title: string;
-  items?: HomePodcast[];
-  gridSize: "s" | "m" | "l";
+  title: string; items?: HomePodcast[]; gridSize: "s" | "m" | "l";
 }) {
   const { t } = useI18n();
-  // An empty shelf is not drawn at all (see Shelf): a library with no podcast
-  // shows no podcast shelf.
   if (!items?.length) return null;
   return (
     <section className="space-y-2">
@@ -180,11 +283,6 @@ function PodcastShelf({ title, items, gridSize }: {
         <h2 className="text-sm font-semibold tracking-tight">{title}</h2>
         <span className="text-[11px] text-zinc-600">{t("home.shelf.podcasts_blurb")}</span>
       </div>
-      {/* One card per SERIES, not per episode: the shelf answers "what shows
-          do I have", and each card's own line is the newest episode on disk.
-          The card opens the series page, where every episode of it is listed
-          with its own number and date — an episode title alone does not say
-          which show it belongs to. */}
       <div
         className="grid gap-x-4 gap-y-5 stagger"
         style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${GRID_SIZE_MIN[gridSize]}px, 1fr))` }}
@@ -202,16 +300,11 @@ function PodcastShelf({ title, items, gridSize }: {
               <CoverImg
                 albumPath={row.path}
                 coverFile={row.cover_file}
-                // The same grid geometry as the shelves above, so the same
-                // bucket: this card draws a `GRID_SIZE_MIN[gridSize]` square,
-                // never the master.
                 w={GRID_COVER_W[gridSize]}
                 wrapperClass="aspect-square w-full rounded-lg bg-raise overflow-hidden"
               />
               <div className="mt-2 px-1 text-sm font-medium truncate w-full">{row.podcast_series}</div>
-              <div className="px-1 text-[11px] text-zinc-400 truncate w-full" title={newest}>
-                {newest}
-              </div>
+              <div className="px-1 text-[11px] text-zinc-400 truncate w-full" title={newest}>{newest}</div>
               <div className="px-1 text-[11px] text-zinc-600 tabular-nums truncate w-full">
                 {row.podcast_episode_count} {t("podcast.episodes")}
                 {date && <span> · {date}</span>}
@@ -224,74 +317,47 @@ function PodcastShelf({ title, items, gridSize }: {
   );
 }
 
+/** The section header Home's groups share: a plain, quiet label. */
+function SectionTitle({ children }: { children: ReactNode }) {
+  return (
+    <h2 className="text-[10px] uppercase tracking-[0.14em] text-zinc-600 px-1 pt-2">{children}</h2>
+  );
+}
+
 export default function HomePage() {
   const { t } = useI18n();
-  // Refresh means "look at the music folder again", not "ask again": the
-  // server caches this payload and the library tree behind it, so a plain
-  // refetch redrew the same rows for minutes. The flag is one-shot — a ref
-  // rather than a query key, so an ordinary background refetch (window focus)
-  // keeps using the cache instead of forcing a rebuild every time.
   const forceRefresh = useRef(false);
-  const qc = useQueryClient();
-  const { data, isLoading, isError, isFetching, refetch } = useQuery({
+  const { data, isLoading, isError, isFetching, refetch } = useQuery<HomeData>({
     queryKey: ["home"],
     queryFn: () => {
       const force = forceRefresh.current;
       forceRefresh.current = false;
       return api.home(force);
     },
-    // Home is a dashboard and it keeps itself current on its own: the shelves
-    // (recently added, pending, wanted, needs-attention) and the storage panel
-    // all describe a library that changes underneath the reader while a run or
-    // an import is going, and the only way to see that was to press Refresh or
-    // navigate away and back.
-    //
-    // The interval is cheap BECAUSE of the direction this goes: a plain poll
-    // reads the server's cached payload (the `force` flag above is what asks
-    // for a rebuild, and only the button sets it), so a minute of polling costs
-    // one small GET. `refetchIntervalInBackground` is left at its default
-    // (false): a hidden tab stops asking, and react-query's own refetch on
-    // focus covers the moment the reader comes back.
     staleTime: 60_000,
     refetchInterval: 60_000,
   });
   const refresh = () => {
     forceRefresh.current = true;
-    // The walk is SERVER-side (`?refresh=1` drops the library, home and
-    // recommendation caches), so the reads DERIVED from it must be re-asked
-    // too — but only ONCE THAT REQUEST HAS RETURNED. This payload carries
-    // `grade_warning`, but the strip and the dot read their own summary
-    // (`GET /api/grades/summary`, `useGradesSummary`), whose cache this page
-    // only ever SEEDS from that field; asking it in parallel with the press
-    // raced the request that drops the caches, so the summary cached could be
-    // the one from BEFORE the press and the strip quoted the old counts for a
-    // whole staleTime. One key, not `invalidateLibrary`: that helper also
-    // invalidates ["home"], and the refetch below is the one that must carry
-    // `?refresh=1`.
-    void refetch().then(() => {
-      qc.invalidateQueries({ queryKey: ["gradesSummary"] });
-    });
+    void refetch();
   };
   const [gridSize, pickGridSize] = useGridSize();
   const { selectMode, toggleSelectMode } = useSelectMode();
   const [statsOpen, setStatsOpen] = useState(false);
-  // The GLOBAL selection (store.ts): ticking an album here is ticking the
-  // album the Library's batch toolbar acts on.
   const selection = useStore((s) => s.selection);
   const toggleAlbum = useStore((s) => s.toggleAlbum);
   const setSelection = useStore((s) => s.setSelection);
-  // What the Stats panel reads: the albums on this page, in shelf order and
-  // de-duplicated (an album rides on several shelves). Home is a set of
-  // curated shelves rather than the library — the whole-library numbers are
-  // the ones the header above prints — so the panel reads what is on screen.
+
   const shown = useMemo(() => {
     const albums: HomeAlbum[] = [];
     const tracks: Track[] = [];
     const seen = new Set<string>();
     for (const row of [
-      ...(data?.recent ?? []), ...(data?.pending ?? []),
-      ...(data?.top_rated ?? []), ...(data?.rated ?? []), ...(data?.needs_attention ?? []),
-      ...(data?.discover ?? []), ...(data?.favorites ?? []), ...(data?.podcasts ?? []),
+      ...(data?.recent ?? []), ...(data?.top_albums ?? []),
+      ...(data?.rated_albums ?? []), ...(data?.rediscover ?? []),
+      ...(data?.favorites ?? []), ...(data?.podcasts ?? []),
+      ...(data?.genres ?? []).flatMap((g) => g.albums),
+      ...(data?.moods ?? []).flatMap((g) => g.albums),
     ]) {
       const key = row.path || `mb:${row.mbid ?? ""}`;
       if (seen.has(key)) continue;
@@ -302,12 +368,6 @@ export default function HomePage() {
     return { albums, tracks };
   }, [data]);
 
-  /* What Select mode's "Select all" ticks: every album the shelves show that
-   * CAN be ticked — a release the library does not hold has no checkbox (the
-   * card is the same one the Library draws, and Home's rows are only sometimes
-   * library albums) — de-duplicated, because an album rides on several
-   * shelves. The same list the Stats panel reads, filtered the same way the
-   * shelf filters it, so the button cannot tick a row with no box to show. */
   const selectableShown = useMemo(
     () => shown.albums.filter((a) => a.owned !== false && !!a.path),
     [shown]
@@ -322,26 +382,13 @@ export default function HomePage() {
       </div>
     );
   }
-  // A dead or unreachable server answers nothing, so the query only ever ends
-  // in its error state — without this branch the page sat on the spinner for
-  // good. An empty payload is the same dead end (the shelves are all derived
-  // server-side), so both render the error with a way to try again.
-  // Testing `!data` here (rather than `!isLoading && !data`) is also what
-  // narrows `data` for the render below.
   if (isError || !data) {
     return (
       <div className="p-6 mx-auto max-w-[1600px]">
-        <EmptyState
-          title={t("home.error_title")}
-          hint={t("home.error_hint")}
-        />
+        <EmptyState title={t("home.error_title")} hint={t("home.error_hint")} />
         <div className="flex justify-center">
-          <button
-            className="btn-ghost !py-1.5 text-xs tap"
-            onClick={refresh}
-            disabled={isFetching}
-            title={t("home.refresh_title")}
-          >
+          <button className="btn-ghost !py-1.5 text-xs tap" onClick={refresh} disabled={isFetching}
+            title={t("home.refresh_title")}>
             <RefreshCw className={`h-3.5 w-3.5 ${isFetching ? "animate-spin" : ""}`} /> {t("home.refresh")}
           </button>
         </div>
@@ -350,7 +397,6 @@ export default function HomePage() {
   }
 
   const { stats } = data;
-  // The card options every shelf below draws with.
   const shelfProps = {
     gridSize,
     selectable: selectMode,
@@ -359,26 +405,14 @@ export default function HomePage() {
   };
   return (
     <div className="p-6 space-y-5 mx-auto max-w-[1600px]">
-      {/* hero — the gradient and its glow stay; the title block is the shared
-          PageHeader so every page announces itself the same way */}
       <div className="panel-hero relative overflow-hidden bg-gradient-to-br from-panel to-bg">
         <div className="absolute -right-20 -top-20 h-64 w-64 rounded-full bg-accent/10 blur-3xl pointer-events-none" />
         <div className="relative">
           <PageHeader
             overline={t("home.welcome")}
-            title={
-              // The library's grading verdict, as a dot beside the title: the
-              // passing state is colour, and anything that needs saying is
-              // written out by the strip below (the owner's ask — no "all
-              // checks pass" sentence on Home or the Library).
-              <span className="inline-flex items-center gap-2">
-                {t("home.title")}
-                <GradeDot initial={data.grade_warning} />
-              </span>
-            }
+            title={t("home.title")}
             subtitle={
               <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-zinc-400">
-                {/* the counts stay bold, the unit is the part that is translated */}
                 <span><b className="text-zinc-100">{stats.artists}</b> {t("home.stat.artists")}</span>
                 <span className="text-zinc-700">·</span>
                 <span><b className="text-zinc-100">{stats.albums}</b> {t("home.stat.albums")}</span>
@@ -386,36 +420,17 @@ export default function HomePage() {
                 <span><b className="text-zinc-100">{stats.tracks}</b> {t("home.stat.tracks")}</span>
                 <span className="text-zinc-700">·</span>
                 <span><b className="text-zinc-100">{stats.playlists}</b> {t("home.stat.playlists")}</span>
-                {stats.grade_pct != null && (
-                  <>
-                    <span className="text-zinc-700">·</span>
-                    <span><b className="text-zinc-100">{stats.grade_pct}%</b> {t("home.stat.checks")}</span>
-                  </>
-                )}
+                <span className="text-zinc-700">·</span>
+                <span><b className="text-zinc-100">{(stats.plays ?? 0).toLocaleString()}</b> plays</span>
               </div>
             }
             actions={
               <>
-                {/* The Library's own controls, over Home's own content: the
-                    cover size the shelves draw at (the SAME setting the
-                    Library's grid reads — one choice, both pages), Select and
-                    Stats. They carry the Library's labels because they are
-                    the Library's controls.
-
-                    Its view tabs, Sort, quick filter and Group by artist are
-                    deliberately NOT here: all four configure ONE flat album
-                    table (which columns, which rows survive a preset, whether
-                    artist headers are drawn), and a page of curated shelves
-                    has no such table — the shelf IS the grouping. Every
-                    setting of them would produce this same page. */}
                 <span title="Cover size">
                   <Segmented value={gridSize} onChange={pickGridSize} options={GRID_SIZES} />
                 </span>
-                <button
-                  className="btn-ghost !py-1.5 text-xs tap"
-                  onClick={() => setStatsOpen(true)}
-                  title="Statistics for the albums on this page"
-                >
+                <button className="btn-ghost !py-1.5 text-xs tap" onClick={() => setStatsOpen(true)}
+                  title="Statistics for the albums on this page">
                   <BarChart3 className="h-3.5 w-3.5" /> Stats
                 </button>
                 <button
@@ -434,12 +449,8 @@ export default function HomePage() {
                     onClear={() => setSelection({ albums: [] })}
                   />
                 )}
-                <button
-                  className="btn-ghost !py-1.5 text-xs tap"
-                  onClick={refresh}
-                  disabled={isFetching}
-                  title={t("home.refresh_title")}
-                >
+                <button className="btn-ghost !py-1.5 text-xs tap" onClick={refresh} disabled={isFetching}
+                  title={t("home.refresh_title")}>
                   <RefreshCw className={`h-3.5 w-3.5 ${isFetching ? "animate-spin" : ""}`} /> {t("home.refresh")}
                 </button>
               </>
@@ -448,19 +459,6 @@ export default function HomePage() {
         </div>
       </div>
 
-      {/* The library's own grading verdict, above the shelves — the WARNINGS
-          only: a library that passes says so with the dot beside the title
-          above, and this strip exists for the albums and tracks that failed,
-          each linking to the thing it names. It paints from Home's own copy of
-          the summary (the payload's `grade_warning`, the same object
-          `/api/grades/summary` serves), so the strip costs no second walk of
-          the library. */}
-      <GradeWarning initial={data.grade_warning} mode="notice" />
-
-      {/* Home ticks the same albums the Library's batch toolbar acts on (the
-          selection is global), but the actions themselves — play, playlist,
-          trash, scripts, tags, organize — are the Library's toolbar. Saying so
-          is what keeps a tick here from being a dead end. */}
       {selection.albums.length > 0 && (
         <div className="flex items-center gap-2 bg-accent/15 border border-accent/40 rounded-lg px-3 py-2 flex-wrap">
           <span className="text-xs font-medium text-accent-soft">
@@ -472,62 +470,38 @@ export default function HomePage() {
         </div>
       )}
 
-      {/* How much room the library is taking, against what the disk has —
-          the first thing a user checks before importing another batch. */}
-      <StorageCard />
+      {/* What you have been listening to — the page's own opening answer. */}
+      <TrackList title="Most played tracks" icon={TrendingUp} rows={data.top_tracks}
+        blurb="your own play history, all time" />
+      <PlaylistRows title="Most played playlists" rows={data.top_playlists} />
 
-      {/* Every shelf draws the shared album card with the page's own options:
-          one cover size, one selection, one checkbox pass — passed once here
-          instead of at each of the seven shelves. (Sort, the preset filter and
-          Group by artist are not among them: see the header.) */}
+      <Shelf title="Most played albums" icon={Headphones} items={data.top_albums} {...shelfProps} />
+      {data.top_artists.length > 0 && <PlayedArtists title="Most played artists" artists={data.top_artists} />}
 
+      {/* What it sounds like: genres and moods, each with a few records. */}
+      <SectionTitle>By sound</SectionTitle>
+      {data.genres.map((lane) => <Lane key={`g-${lane.name}`} lane={lane} icon={Tags} />)}
+      {data.moods.map((lane) => <Lane key={`m-${lane.name}`} lane={lane} icon={Moon} />)}
+
+      {/* The caller's own stars. */}
+      <SectionTitle>Your stars</SectionTitle>
+      <TrackList title="Rated tracks" icon={Star} rows={data.rated_tracks} blurb="highest first" />
+      <Shelf title="Rated albums" icon={Star} items={data.rated_albums}
+        extraOf={(a) => a.rating > 0
+          ? <StarRating value={a.rating / 2} readOnly size="sm" />
+          : undefined}
+        {...shelfProps} />
+      {data.rated_artists.length > 0 && <PlayedArtists title="Rated artists" artists={data.rated_artists} />}
+
+      {/* The library itself, newest and favourite. */}
       <Shelf title={t("home.shelf.recent")} icon={Clock} items={data.recent} {...shelfProps} />
-      {/* The one shelf that answers "what am I still waiting for": a pending
-          album also rides along where it would otherwise be listed (recent —
-          its folder is the newest thing in the library — and its artist's own
-          page), but a skeleton that is only ever mixed in with complete albums
-          is a skeleton the user has to hunt for. */}
-      <Shelf
-        title={t("home.shelf.pending")}
-        icon={Loader2}
-        items={data.pending ?? []}
-        blurb={t("home.shelf.pending_blurb")}
-        {...shelfProps}
-      />
-      <Shelf title={t("home.shelf.best")} icon={Star} items={data.top_rated} {...shelfProps} />
-      {/* The one shelf that is the READER's verdict rather than the library's:
-          the releases they gave stars to, best first. Releases with NO star are
-          not a shelf — "unrated" says nothing about why a row is here and
-          cannot be ordered (Rediscover already draws a random slice of what has
-          not been looked at). No `extraOf`: the card draws the rating, stars
-          AND value, so a row added here would be the same rating twice. */}
-      <Shelf
-        title={t("home.shelf.rated")}
-        icon={Star}
-        items={data.rated ?? []}
-        {...shelfProps}
-      />
-      <Shelf
-        title={t("home.shelf.attention")}
-        icon={AlertTriangle}
-        items={data.needs_attention ?? []}
-        blurb={t("home.shelf.attention_blurb")}
-        {...shelfProps}
-      />
-      <ArtistShelf title={t("home.shelf.artists")} artists={data.top_artists} />
-      {/* What the library holds that is not an album by a band: one card per
-          podcast series, nothing at all when there is no podcast. */}
-      <PodcastShelf
-        title={t("home.shelf.podcasts")}
-        items={data.podcasts}
-        gridSize={gridSize}
-      />
-      <Shelf title={t("home.shelf.rediscover")} icon={Disc3} items={data.discover} {...shelfProps} />
       <Shelf title={t("page.favorites")} icon={Heart} items={data.favorites} {...shelfProps} />
+      <PodcastShelf title={t("home.shelf.podcasts")} items={data.podcasts} gridSize={gridSize} />
+      <Shelf title={t("home.shelf.rediscover")} icon={Disc3} items={data.rediscover} {...shelfProps} />
 
-      {/* Below the library's own shelves, and independent of them: the online
-          half renders its own loading/error per shelf and is simply absent
-          when discovery is off or the network is. */}
+      {/* How much room the library takes — the one maintenance fact that is
+          also a LISTENER fact (what is safe to download next). */}
+      <StorageCard />
 
       {statsOpen && (
         <StatsPanel

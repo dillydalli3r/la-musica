@@ -238,25 +238,20 @@ if entry:
     eq(entry.get("pending_reason"), "the audio for this release",
        "artist page: why it is pending")
 
-# Home: the shelf that shows everything waiting, plus the album where it would
-# otherwise be listed.
+# Home: since 2.2.0 it is a LISTENER's page — the maintenance shelf that
+# listed everything waiting (and the grade-oriented shelves beside it) left the
+# payload with the revamp. The album is still where a listener meets it: in
+# "recently added" (its folder is the newest thing in the library), and NOT in
+# the rediscovery slice, which is owned music only.
 home_payload = home(CFG)
-shelf = home_rows(home_payload, "pending")
-shelf_row = find(shelf, folder)
-ok(shelf_row is not None, "home: the 'waiting for its audio' shelf lists it",
-   [(r.get("meta") or {}).get("ALBUM") for r in shelf])
-if shelf_row:
-    eq(shelf_row.get("pending"), True, "home shelf: pending")
-    eq(shelf_row.get("pending_reason"), "the audio for this release",
-       "home shelf: why it is pending")
-    eq(shelf_row.get("owned"), True, "home shelf: it links to the album page")
+ok("pending" not in home_payload and "needs_attention" not in home_payload,
+   "home: the maintenance shelves are gone from the listener payload",
+   sorted(home_payload))
 ok(find(home_rows(home_payload, "recent"), folder) is not None,
-   "home: it is in 'recently added' too — its folder is the newest thing there")
+   "home: it is in 'recently added' — its folder is the newest thing there")
 ok(all(norm(r.get("path")) != norm(folder)
-       for r in home_rows(home_payload, "discover")),
+       for r in home_rows(home_payload, "rediscover")),
    "home: 'rediscover' stays the albums whose audio is here")
-ok(find(home_rows(home_payload, "needs_attention"), folder) is None,
-   "home: a pending album is not reported as FAILING its checks")
 
 # A query's album rows come from the same tree — and the field is filterable.
 query_rows = album_query()

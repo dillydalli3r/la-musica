@@ -37,19 +37,19 @@ const VIEWPORTS = [
 ];
 
 /* Every route the shell can reach WITHOUT any data in it, plus (below) the ones
- * a phone user reaches from a list. The tail of this list used to be missing —
- * `/equalizer`, `/charts`, `/recommended`, `/discover`, `/checks`,
+ * a phone user reaches from a list. This list once stopped at the first dozen
+ * entries, leaving `/equalizer`, `/charts`, `/tags`, `/mb/search`, `/checks`,
  * `/in-progress`, and every entity page (`/artist/:path`, `/album/:path`,
- * `/track/:path`, `/playlist/:id`) — and that blind spot is exactly where the
- * playlist hero shipped a row that never folded: 224 px of mosaic beside the
- * title at 390 px, with nothing overflowing, nothing scrolling sideways and no
- * word crushed, so a geometry sweep that never opened the route could not have
- * seen it. */
+ * `/track/:path`, `/playlist/:id`) unvisited — and that blind spot is exactly
+ * where the playlist hero shipped a row that never folded: 224 px of mosaic
+ * beside the title at 390 px, with nothing overflowing, nothing scrolling
+ * sideways and no word crushed, so a geometry sweep that never opened the
+ * route could not have seen it. */
 const ROUTES = [
-  "/", "/library", "/genres", "/favorites/tracks", "/downloads", "/trash",
+  "/", "/library", "/genres", "/favorites/tracks", "/trash",
   "/playlists", "/import", "/export", "/optimize", "/grading",
   "/dependencies", "/settings", "/donations", "/setup", "/equalizer", "/charts",
-  "/recommended", "/discover", "/checks", "/in-progress",
+  "/tags", "/mb/search", "/checks", "/in-progress",
 ];
 
 /* The entity routes only exist against a library that HAS the row, so they are
@@ -165,12 +165,20 @@ const SMALL_AT_PHONE = {
     { match: "write your own", h: 16,
       why: "prose action inside the description sentence" },
   ],
+  /* The track page's line glyphs live in the lyrics EDITOR, which renders its
+   * row list only when the track's stored lyrics parse to timestamped lines
+   * (`LyricsViewer`'s `lines.length`). The track route is DISCOVERED
+   * from the library, so its track may have no lyrics, plain lyrics, or a slow
+   * read; on those pages the list — and these three controls — genuinely is
+   * not part of the page. `surface` says what the controls ride on: when it is
+   * absent they are skipped rather than reported "gone", and when the list is
+   * rendered all three are still required at the sizes below. */
   "/track": [
-    { match: "Seek to", h: 16,
+    { match: "Seek to", h: 16, surface: "[data-lyrictext]",
       why: "a lyrics line's seek glyph, one per line: a 44px box per glyph would triple the height of a 100-line sheet" },
-    { match: "Add line after", h: 14,
+    { match: "Add line after", h: 14, surface: "[data-lyrictext]",
       why: "lyrics line glyph, flush against the remove glyph beside it (overlapping targets would mis-tap)" },
-    { match: "Remove line", h: 14,
+    { match: "Remove line", h: 14, surface: "[data-lyrictext]",
       why: "lyrics line glyph, flush against the add glyph beside it" },
   ],
 };
@@ -219,16 +227,16 @@ const FOLD_MEASURE = `(() => {
  * keeps the centred panel above it. Both forms have to fit, and the desktop
  * one has to stay the desktop one.
  * Two dialogs, reachable without any library data: the shortcut sheet (the `?`
- * binding, on every route) and Browse's "Save as smart playlist" form — a
- * header, a field and a two-button footer, which is the shape every other
- * dialog in the app shares. */
+ * binding, on every route) and Playlists' "Build rules…" builder — a form in
+ * the shared `Modal` shell, which is the shape every other dialog in the app
+ * shares. */
 const DIALOGS = [
   { name: "shortcuts dialog", route: "/", hint: "?", open: (page) => page.keyboard.press("?") },
   {
     name: "form dialog",
-    route: "/browse",
-    hint: "Save as smart playlist",
-    open: (page) => page.locator('.btn:has-text("Save as smart playlist")').first().click(),
+    route: "/playlists",
+    hint: "Build rules…",
+    open: (page) => page.locator('button[title^="Build a rule with the library"]').first().click(),
   },
 ];
 
@@ -554,22 +562,40 @@ const MEASURE = `(() => {
           // "gone", it is an exemption the page no longer needs at THIS scroll
           // position, and failing a release over a scroll position is how this
           // check went red on a green build. A control that really vanished
-          // still fails (nothing carries its class).
-          const present = await page.evaluate((matches) => {
+          // still fails (nothing carries its class or its name).
+          // `surface` is a selector for the page region the entry rides on: when
+          // the region is not rendered at all (the track page with no
+          // timestamped lyrics), the entry is not "gone" — it was never part of
+          // this page's data-dependent surface.
+          const found = await page.evaluate((entries) => {
             const els = [...document.querySelectorAll("button, [role=button], select")];
-            return matches.filter((sel) => els.some((el) => String(el.className || "").startsWith(sel)));
-          }, allowed.map((a) => a.match));
+            const nameOf = (el) => (el.getAttribute("aria-label") || el.getAttribute("title") || el.textContent || "")
+              .trim().replace(/\s+/g, " ");
+            const has = (a) => els.some((el) => String(el.className || "").startsWith(a.match) ||
+              nameOf(el).startsWith(a.match));
+            const surfaces = {};
+            for (const a of entries) {
+              if (a.surface && !(a.surface in surfaces)) surfaces[a.surface] = !!document.querySelector(a.surface);
+            }
+            return { present: entries.filter(has).map((a) => a.match), surfaces };
+          }, allowed);
+          const present = new Set(found.present);
+          let offSurface = 0;
           for (const a of allowed) {
             if (matched.has(a.match)) continue;
-            if (present.includes(a.match)) {
+            if (present.has(a.match)) {
               check(`${label} — the documented small control "${a.match}" is still on the page`,
                 true, `not under the floor in this pass (the viewport could not reach it): ${a.why}`);
+              continue;
+            }
+            if (a.surface && !found.surfaces[a.surface]) {
+              offSurface++;
               continue;
             }
             check(`${label} — the documented small control "${a.match}" is gone (or no longer small)`,
               false, `it used to be ${a.h}px: ${a.why}`);
           }
-          if (!unaccounted && matched.size + present.length >= allowed.length) {
+          if (!unaccounted && matched.size + present.size + offSurface >= allowed.length) {
             check(`${label} — controls: ${m.tinyCount} under the floor, all documented`,
               true, allowed.map((a) => `${a.match} ${a.h}px`).join(", ") || "none");
           }

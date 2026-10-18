@@ -613,23 +613,32 @@ def album_sidecar_of(name):
     return ""
 
 
-def get_sidecar_cover_path(album_dir, track_filename):
+def get_sidecar_cover_path(album_dir, track_filename, entries=None):
     """Return the sidecar cover path for a track if it exists, else None.
 
     Checks for an image file in *album_dir* whose basename matches the track's
     basename (without extension) and whose extension is in SIDECAR_COVER_EXTS.
     Case-insensitive, first match wins in SIDECAR_COVER_EXTS order.
+
+    *entries* is the folder's own listing when the caller already holds it
+    (the grader's per-album pass): the per-extension probes and the listing
+    are then read from it instead of one isfile per extension plus a listdir.
     """
     base = os.path.splitext(track_filename)[0]
     # Also handle track_filename that may already be a full path
     base = os.path.basename(base)
     # The case-insensitive fallback needs the directory listing; fetch it at
     # most once per call instead of once per candidate extension.
-    listing = None
+    listing = list(entries) if entries is not None else None
+    exact = set(listing) if listing is not None else None
     for ext in SIDECAR_COVER_EXTS:
         cand = os.path.join(album_dir, base + ext)
-        # Case-insensitive check on Windows, but be explicit for cross-platform
-        if os.path.isfile(cand):
+        # Case-insensitive check on Windows, but be explicit for cross-platform.
+        # With a held listing the exact spelling is still preferred (a
+        # case-sensitive folder can hold both spellings); it costs one isfile
+        # only on the rare exact hit, never a listdir.
+        if ((entries is None or base + ext in exact)
+                and os.path.isfile(cand)):
             return cand
         # Try case-insensitive match if exact case fails (e.g. .JPG vs .jpg)
         if listing is None:
@@ -640,6 +649,12 @@ def get_sidecar_cover_path(album_dir, track_filename):
         want = (base + ext).lower()
         for f in listing:
             if f.lower() == want:
+                # A held listing skips the up-front exact probe; when the
+                # filesystem resolves the caller's spelling anyway (Windows'
+                # case-insensitive lookup) keep returning it, as that probe
+                # did. This costs one isfile only on a sidecar that exists.
+                if entries is not None and os.path.isfile(cand):
+                    return cand
                 cand2 = os.path.join(album_dir, f)
                 if os.path.isfile(cand2):
                     return cand2
@@ -683,20 +698,27 @@ def _track_covers_path(album_dir):
     return os.path.join(album_dir, TRACK_COVERS_FILE)
 
 
-def _album_file(album_dir, filename):
+def _album_file(album_dir, filename, entries=None):
     """Path of *filename* inside *album_dir* when it exists (case-insensitive
-    on any filesystem), else None."""
+    on any filesystem), else None.
+
+    *entries* short-circuits the listing when the caller already holds it."""
     name = os.path.basename(str(filename or ""))
     if not name:
         return None
     cand = os.path.join(album_dir, name)
-    if os.path.isfile(cand):
+    if (entries is None or name in entries) and os.path.isfile(cand):
         return cand
     low = name.lower()
     try:
-        for f in os.listdir(album_dir):
-            if f.lower() == low and os.path.isfile(os.path.join(album_dir, f)):
-                return os.path.join(album_dir, f)
+        for f in (entries if entries is not None else os.listdir(album_dir)):
+            if f.lower() == low:
+                # Keep the caller's spelling when the filesystem resolves it
+                # (the skipped exact probe did), else the stored one.
+                if entries is not None and os.path.isfile(cand):
+                    return cand
+                if os.path.isfile(os.path.join(album_dir, f)):
+                    return os.path.join(album_dir, f)
     except OSError:
         pass
     return None
@@ -1675,20 +1697,22 @@ def copy_path(src, dst, *, attempts=40, delay=0.5, log=None) -> bool:
     return os.path.exists(dst)
 
 
-def get_track_cover(album_dir, track_filename):
+def get_track_cover(album_dir, track_filename, entries=None):
     """The image that is this track's art, or None.
 
     Manifest entry first (only when the image file is really there), then the
     same-stem sidecar probe; None means the caller falls back to cover.*.
-    """
+
+    *entries* is the album folder's listing when the caller already holds it
+    (the grader grades every track against ONE listing)."""
     name = os.path.basename(str(track_filename))
     low = name.lower()
     for track, image in load_track_covers(album_dir).items():
         if track.lower() == low:
-            found = _album_file(album_dir, image)
+            found = _album_file(album_dir, image, entries)
             if found:
                 return found
-    return get_sidecar_cover_path(album_dir, name)
+    return get_sidecar_cover_path(album_dir, name, entries)
 
 
 def set_track_covers(album_dir, tracks, image_filename):

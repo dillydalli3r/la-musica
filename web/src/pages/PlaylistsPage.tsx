@@ -7,6 +7,8 @@ import { toast, useStore } from "../store";
 import { EmptyState, PageLoading } from "../components/Badges";
 import PageHeader from "../components/PageHeader";
 import Modal from "../components/Modal";
+import QueryBuilder from "../components/QueryBuilder";
+import type { LibraryCondition } from "../api";
 import DownloadButton from "../components/DownloadButton";
 import { ExportButton, usePlaylistTracks } from "../components/ExportDialog";
 import { TrackCover } from "../components/CoverImg";
@@ -25,6 +27,10 @@ export default function PlaylistsPage() {
   const gridSize = (localStorage.getItem("mlo.gridSize") as "s" | "m" | "l" | null) ?? "m";
   const [newName, setNewName] = useState("");
   const [importOpen, setImportOpen] = useState(false);
+  const [builderOpen, setBuilderOpen] = useState(false);
+  const [builderName, setBuilderName] = useState("");
+  const [builderConditions, setBuilderConditions] = useState<LibraryCondition[]>([]);
+  const [builderMatch, setBuilderMatch] = useState<"all" | "any">("all");
   const fileRef = useRef<HTMLInputElement>(null);
 
   // path -> tag-derived info (title/artist/album/duration/cover) shared by
@@ -98,7 +104,7 @@ export default function PlaylistsPage() {
     }
   };
 
-  const queueFor = (paths: string[]) =>
+  const queueFor = (paths: string[], playlist = "") =>
     playNow(
       paths.map((path) => ({
         path,
@@ -110,7 +116,9 @@ export default function PlaylistsPage() {
         coverFile: trackMeta.get(path)?.coverFile ?? null,
         albumCover: trackMeta.get(path)?.albumCover ?? null,
         advisory: trackMeta.get(path)?.advisory ?? null,
-      }))
+      })),
+      0,
+      playlist
     );
 
   if (isLoading) return <PageLoading label="Loading playlists…" />;
@@ -128,7 +136,7 @@ export default function PlaylistsPage() {
           key={p.id}
           playlist={p}
           trackMeta={trackMeta}
-          onPlay={(paths) => paths.length && queueFor(paths.slice(0))}
+          onPlay={(paths) => paths.length && queueFor(paths.slice(0), String(p.id))}
         />
       ))}
     </div>
@@ -158,6 +166,13 @@ export default function PlaylistsPage() {
               title="Create a playlist from rules (genre, year, grade, advisory, …) instead of a hand-picked list"
             >
               <ListFilter className="h-4 w-4" /> Smart
+            </button>
+            <button
+              className="btn-ghost tap"
+              onClick={() => setBuilderOpen(true)}
+              title="Build a rule with the library's own field catalogue and save it as a smart playlist"
+            >
+              <ListFilter className="h-4 w-4" /> Build rules…
             </button>
             <input
               ref={fileRef}
@@ -213,6 +228,58 @@ export default function PlaylistsPage() {
           <h2 className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Smart playlists</h2>
           {cardGrid(smart)}
         </div>
+      )}
+
+      {builderOpen && (
+        <Modal title="Build a smart playlist" onClose={() => setBuilderOpen(false)}>
+          <div className="space-y-3">
+            <p className="text-xs text-zinc-500">
+              A smart playlist IS this query: the playlist page evaluates the same
+              rules against the live library, so it follows tag edits, new imports
+              and rating changes without being rebuilt.
+            </p>
+            <QueryBuilder
+              conditions={builderConditions}
+              match={builderMatch}
+              target="tracks"
+              onChange={({ conditions, match }) => {
+                setBuilderConditions(conditions);
+                setBuilderMatch(match);
+              }}
+              className="rounded-xl border border-border bg-panel/60 p-3"
+            />
+            <div className="flex items-center gap-2">
+              <input
+                className="input flex-1 tap"
+                placeholder="Playlist name…"
+                value={builderName}
+                onChange={(e) => setBuilderName(e.target.value)}
+                autoFocus
+              />
+              <button
+                className="btn-primary tap"
+                disabled={!builderName.trim()}
+                onClick={async () => {
+                  try {
+                    const pl = await api.createPlaylist(builderName.trim(), "smart", {
+                      conditions: builderConditions,
+                      match: builderMatch,
+                    });
+                    setBuilderOpen(false);
+                    setBuilderName("");
+                    setBuilderConditions([]);
+                    refresh();
+                    navigate(`/playlist/${pl.id}`);
+                  } catch (e) {
+                    toast.error(String(e));
+                  }
+                }}
+              >
+                <Plus className="h-4 w-4" /> Save
+              </button>
+            </div>
+          </div>
+        </Modal>
       )}
 
       {importOpen && (

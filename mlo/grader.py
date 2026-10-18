@@ -686,8 +686,12 @@ def _sidecar_ok(path):
         return False
 
 
-def _xlit_stored(af, ap, kind):
+def _xlit_stored(af, ap, kind, entries=None):
     """Language detail of the stored *kind* transforms on this file.
+
+    *entries* is the file's folder listing when the caller already holds it
+    (the grader reads the album folder once per pass), so the translation
+    sidecars are found without listing the folder per track.
 
     One entry per non-empty tag — the language suffix it carries, or "" for
     the bare legacy name — plus the accepted sidecars on disk, read exactly
@@ -717,10 +721,11 @@ def _xlit_stored(af, ap, kind):
     # <stem>.lrc is the lyrics sidecar, not a translation, and .romaji.lrc
     # belongs to the transliteration pass — neither names a target language.
     stem = os.path.basename(base).lower()
-    try:
-        entries = os.listdir(os.path.dirname(base) or ".")
-    except OSError:
-        entries = []
+    if entries is None:
+        try:
+            entries = os.listdir(os.path.dirname(base) or ".")
+        except OSError:
+            entries = []
     for entry in entries:
         low = entry.lower()
         if not low.startswith(stem + ".") or not low.endswith(".lrc") \
@@ -1475,8 +1480,13 @@ def _norm_path_case(p):
     return str(p or "").replace("/", os.sep).replace("\\", os.sep).casefold()
 
 
-def _fs_cased_dir(path, base):
+def _fs_cased_dir(path, base, cache=None):
     """Re-spell *path* with the letter case the filesystem actually stores.
+
+    *cache* is the grade run's shared listing memo ({dir: names-or-None}) when
+    the caller has one: every album below the same artist folder then resolves
+    each directory's stored case once per run instead of listing it again per
+    album. None keeps the per-call listing (the old behaviour).
 
     Only needed because the PATH_CASE grade compares a path against the
     naming script, and on a case-insensitive filesystem (Windows) that
@@ -1506,10 +1516,19 @@ def _fs_cased_dir(path, base):
         return path
     cur = base
     for seg in rel.split(os.sep):
-        try:
-            names = os.listdir(cur)
-        except OSError:
-            return path
+        if cache is not None and cur in cache:
+            names = cache[cur]
+            if names is None:
+                return path
+        else:
+            try:
+                names = os.listdir(cur)
+            except OSError:
+                names = None
+            if cache is not None:
+                cache[cur] = names
+            if names is None:
+                return path
         match = next((n for n in names
                       if os.path.normcase(n) == os.path.normcase(seg)), None)
         if match is None:
@@ -1702,7 +1721,7 @@ def _multi_disc_album(album_dir, all_files):
     try:
         from .discs import album_discs, disc_of_filename
 
-        if len(album_discs(album_dir) or {}) > 1:
+        if len(album_discs(album_dir, entries=all_files) or {}) > 1:
             return True
         if any((disc_of_filename(f) or 1) > 1 for f in all_files):
             return True
@@ -1925,7 +1944,7 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
     # a separate "album" of their own and the album's own list, its expected
     # tracklist diff and the grade all lost them. mlo.discs owns the reading.
     from .discs import album_audio
-    audio_paths = album_audio(album_dir, exts=LIB_AUDIO_EXTS)
+    audio_paths = album_audio(album_dir, exts=LIB_AUDIO_EXTS, entries=all_files)
 
     if not audio_paths:
         return None
@@ -1990,7 +2009,9 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
     # stored as "2020 - ALBUM" used to pass the PATH_CASE check (see
     # _fs_cased_dir). Only the directory segments need it — the file name
     # already comes from os.listdir.
-    naming_dir = _fs_cased_dir(album_dir, library_root(music_folder)) if naming_check else album_dir
+    naming_dir = (_fs_cased_dir(album_dir, library_root(music_folder),
+                                cfg.get("_fs_case_cache"))
+                  if naming_check else album_dir)
 
     lyrics_present_count = 0
     lyrics_expected_count = 0
@@ -2083,6 +2104,12 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
         af = (first_af if index == 0 and first_af is not None
               else AudioFile(ap))
         basename = os.path.basename(ap)
+        # The listing the transforms' sidecar probe reads: the album folder's
+        # own (already held) for a root track; a disc-folder track keeps the
+        # per-call listing because that subfolder is not in all_files.
+        ap_entries = (all_files
+                      if os.path.normcase(os.path.dirname(ap))
+                      == os.path.normcase(album_dir) else None)
         if not multi_disc:
             # The album-wide DISCNUMBER requirement (see _multi_disc_album):
             # any track stating a disc total settles it, and this file is
@@ -3231,7 +3258,7 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
 
             if cfg.get("grade_check_xlit_transliteration", True):
                 total_checks += 1
-                have = _xlit_stored(af, ap, "TRANSLITERATION")
+                have = _xlit_stored(af, ap, "TRANSLITERATION", ap_entries)
                 if need["transliteration"]:
                     if not have:
                         failed_checks += 1
@@ -3249,7 +3276,7 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
 
             if cfg.get("grade_check_xlit_translation", True):
                 total_checks += 1
-                have = _xlit_stored(af, ap, "TRANSLATION")
+                have = _xlit_stored(af, ap, "TRANSLATION", ap_entries)
                 if need["translation"]:
                     missing = [l for l in need["langs"] if l not in have]
                     if missing:
@@ -3284,7 +3311,7 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
         # (cover_target_size, cover_enforce_size/square, cover_crop_threshold, etc.)
         # Shared image => graded per referencing track, same verdict each time.
         try:
-            sidecar = get_track_cover(album_dir, basename)
+            sidecar = get_track_cover(album_dir, basename, all_files)
             track["sidecar_cover"] = sidecar
             track["sidecar_cover_file"] = os.path.basename(sidecar) if sidecar else None
             if sidecar and cfg.get("grade_check_sidecar_cover", True):
@@ -3714,7 +3741,7 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                         "Rip .log has no per-track CRC checksums "
                         "(cannot verify CD integrity)"), "album")
                 else:
-                    discs_map = _album_discs(album_dir)
+                    discs_map = _album_discs(album_dir, entries=all_files)
                     disc_by_path = {p: d for d, paths in (discs_map or {}).items()
                                     for p in paths}
                     single_log = len(log_paths) <= 1
@@ -3967,7 +3994,7 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
             except Exception:
                 _pat_c = "CD-{n}"
             try:
-                _discs_for_csum = _ad_csum(album_dir)
+                _discs_for_csum = _ad_csum(album_dir, entries=all_files)
             except Exception:
                 _discs_for_csum = {}
             has_csum = False
@@ -4129,7 +4156,7 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
             # per-track lookups below used to re-list the folder per track.
             try:
                 from .discs import album_discs as _ad_tracks
-                discs_all_tracks = _ad_tracks(album_dir)
+                discs_all_tracks = _ad_tracks(album_dir, entries=all_files)
             except Exception:
                 discs_all_tracks = {}
             # Per-disc checksum (fixes whole-album FAKE when only one disc's log is bad) and per-track accuraterip
@@ -5649,9 +5676,15 @@ def _find_leftover_folders(root, dirs_out, album_dirs=None):
         if any(part.startswith(".")
                for part in os.path.relpath(d, root).split(os.sep)):
             continue
-        if load_pending(d) or leftovers.import_running(d):
+        try:
+            entries = os.listdir(d)
+        except OSError:
+            # The old two calls both degraded to "no marker, no leftovers"
+            # on an unreadable folder — same skip, one listing.
             continue
-        names = leftovers.leftover_names(d)
+        if load_pending(d) or leftovers.import_running(d, entries):
+            continue
+        names = leftovers.leftover_names(d, entries)
         if names:
             out.append((d, names))
     return sorted(out)
@@ -5825,6 +5858,12 @@ def run_grade_library(config):
     sink = config.get("_grade_sink")
     if not isinstance(sink, dict):
         sink = None
+
+    # One memo for the whole run: the stored case of each directory on the
+    # way to an album is resolved once (the artist folder is shared by every
+    # album under it) instead of listing it again per album. Fresh per run,
+    # so a folder renamed between runs is read from disk again.
+    config["_fs_case_cache"] = {}
 
     # One read of the app's rating store for the WHOLE run — the same private-
     # key pattern as `_grade_sink`, so the per-album RATING check reads this map

@@ -430,8 +430,12 @@ def disc_of_filename(name):
     return int(m.group(1)) if m else None
 
 
-def album_discs(album_dir):
+def album_discs(album_dir, entries=None):
     """Map {disc number: [audio file paths]} for an album folder.
+
+    *entries* is the folder's own listing when the caller already holds it
+    (the grader reads the album folder once per pass), so the call does not
+    list the same directory again.
 
     Only folders where every audio file carries the D-TT convention are
     returned; anything else has no reliable disc structure ({}).
@@ -443,7 +447,7 @@ def album_discs(album_dir):
     back to guessing.
     """
     discs = {}
-    for f in sorted(os.listdir(album_dir)):
+    for f in sorted(entries if entries is not None else os.listdir(album_dir)):
         if not f.lower().endswith(AUDIO_EXTS):
             continue
         d = disc_of_filename(f)
@@ -481,9 +485,12 @@ def disc_subdirs(child_names):
     return out
 
 
-def album_audio(album_dir, exts=None):
+def album_audio(album_dir, exts=None, entries=None):
     """Every audio path an ALBUM holds: its own folder plus its disc
     SUBFOLDERS (:func:`disc_subdirs`).
+
+    *entries* is the album folder's own listing when the caller already holds
+    it (the grader reads it once per pass).
 
     One album is one folder, and a multi-disc release keeps disc 1 at the
     album root and disc 2 in a ``CD2``/``Disc 2`` subfolder (or every disc in
@@ -493,10 +500,13 @@ def album_audio(album_dir, exts=None):
     vocabulary that names those folders. Sorted disc 1's files first, then by
     name, so the album reads in playing order."""
     exts = tuple(AUDIO_EXTS if exts is None else exts)
-    try:
-        entries = sorted(os.listdir(album_dir))
-    except OSError:
-        return []
+    if entries is None:
+        try:
+            entries = sorted(os.listdir(album_dir))
+        except OSError:
+            return []
+    else:
+        entries = sorted(entries)
     found = []
     for n in entries:
         p = os.path.join(album_dir, n)

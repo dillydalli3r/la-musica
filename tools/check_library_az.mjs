@@ -26,7 +26,7 @@
  *     number, and the same button clearing it again. With a name typed, "all"
  *     is what the filter left. The fixture puts one album on two Home shelves
  *     on purpose: the count stays one album.
- *   * The album page's "Recommended (Local)" shelf was a single horizontal row
+ *   * The album page's "Recommended" shelf was a single horizontal row
  *     that ran off the shelf's own width and cut the card at the edge (the
  *     owner's screenshot: six cards, the sixth in halves). It is a wrapped grid
  *     now, and the check measures that: one grid, more than one row, every
@@ -253,7 +253,8 @@ const artistPayload = (row) => {
 /** What Home's artist shelf draws, per row (`recommendations._top_artists`):
  *  the card's own fields plus the artist's grade, which the shelf passes
  *  through from the library row it was built from. */
-const homeArtist = (row) => ({
+const homeArtist = (row, plays) => ({
+  kind: "artist",
   path: row.path,
   artist: row.display_name || row.name,
   album_count: row.albums.length,
@@ -263,6 +264,11 @@ const homeArtist = (row) => ({
   cover: row.albums[0]?.cover_file ?? null,
   has_image: !!row.has_image,
   grade: row.grade,
+  // Home's artist shelf is the LISTENING lane (`_listening_shelves`): a row
+  // only reaches it through a play count, and the card's own `title` and
+  // caption print that number.
+  plays,
+  rating: null,
 });
 /* Home's payload, kept to what the page reads: the shelves the fixture has no
  * rows for answer empty (each shelf draws nothing), and the artist shelf
@@ -276,10 +282,13 @@ const HOME = {
     playlists: 0,
     grade_pct: null,
   },
-  recent: [], top_rated: [], rated: [], favorites: [], discover: [],
-  podcasts: [], pending: [], wanted: [], needs_attention: [],
-  top_artists: served.artists.slice(0, 3).map(homeArtist),
-  grade_warning: null,
+  // Home's payload since the listener rewrite: the shelves it ranks by plays
+  // and stars, and the genre/mood lanes. A lane with no rows draws nothing.
+  recent: [], favorites: [], rediscover: [], podcasts: [],
+  genres: [], moods: [],
+  top_tracks: [], top_albums: [], top_playlists: [],
+  rated_albums: [], rated_tracks: [], rated_artists: [],
+  top_artists: served.artists.slice(0, 3).map((row, i) => homeArtist(row, [12, 7, 3][i])),
 };
 /* Two album shelves, with ONE album on both of them: Home's own rows are
  * library albums, and the same album rides on several shelves — which is what
@@ -746,16 +755,16 @@ try {
   await page.waitForTimeout(60);
   await page.setViewportSize({ width: 1440, height: 900 });
 
-  // ------------------------- 4. the album page's Recommended (Local) shelf
+  // ------------------------- 4. the album page's Recommended shelf
   await page.goto(`${base}/album/${encodeURIComponent(albumPath)}`);
-  await page.waitForSelector("h2:has-text('Recommended (Local)')", { timeout: 30000 });
+  await page.waitForSelector("h2:has-text('Recommended')", { timeout: 30000 });
   // The cards enter on `.stagger`, which animates each one up from below on its
   // own delay: measured mid-animation every card reports a different top and
   // there is no layout to read. Settled first.
   await page.waitForTimeout(800);
   const shelf = await page.evaluate(() => {
     const h = [...document.querySelectorAll("h2")]
-      .find((el) => (el.textContent || "").includes("Recommended (Local)"));
+      .find((el) => (el.textContent || "").includes("Recommended"));
     const section = h.closest("section");
     const grid = [...section.querySelectorAll("div")]
       .find((el) => (el.style.gridTemplateColumns || "").includes("auto-fill"));
@@ -1114,11 +1123,15 @@ const releaseCount = (n) => `${n} Release${n === 1 ? "" : "s"}`;
   // Home's artist shelf — the third place a name is listed, and the one whose
   // rows come off the SAME library row: one dot, two surfaces.
   await page.goto(`${base}/`);
-  await page.waitForSelector(`a[title="${ARTIST_ALPHA}"]`, { timeout: 30000 });
+  // The listener rewrite's card names the artist AND the plays that put it on
+  // the "Most played artists" lane: `title="Artist Alpha · 12 play(s)"`. The
+  // old exact-title lookup stopped finding a card that is still there.
+  await page.waitForSelector(`a[title^="${ARTIST_ALPHA} · "]`, { timeout: 30000 });
   await page.waitForTimeout(250);
   const shelfDots = await page.evaluate(([alpha, beta]) => {
     const read = (name) => {
-      const card = document.querySelector(`a[title="${CSS.escape(name)}"]`);
+      const card = [...document.querySelectorAll("a[title]")].find((el) =>
+        (el.getAttribute("title") || "").startsWith(`${name} · `));
       return card
         ? {
             found: true,
@@ -1425,9 +1438,11 @@ const releaseCount = (n) => `${n} Release${n === 1 ? "" : "s"}`;
     const seen = new Set();
     const out = [];
     for (const row of [
-      ...(HOME.recent ?? []), ...(HOME.pending ?? []), ...(HOME.top_rated ?? []),
-      ...(HOME.rated ?? []), ...(HOME.needs_attention ?? []), ...(HOME.discover ?? []),
+      ...(HOME.recent ?? []), ...(HOME.top_albums ?? []),
+      ...(HOME.rated_albums ?? []), ...(HOME.rediscover ?? []),
       ...(HOME.favorites ?? []), ...(HOME.podcasts ?? []),
+      ...(HOME.genres ?? []).flatMap((g) => g.albums ?? []),
+      ...(HOME.moods ?? []).flatMap((g) => g.albums ?? []),
     ]) {
       const key = row.path || `mb:${row.mbid ?? ""}`;
       if (seen.has(key)) continue;

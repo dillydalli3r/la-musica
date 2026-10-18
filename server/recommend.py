@@ -327,6 +327,33 @@ def _score(src, cand):
     return weighted / total if total else 0.0
 
 
+# The owner's rule (2026-10-17): a shelf must be able to say WHY each row is
+# there, and a list that lists everything ranked by a weak similarity is not a
+# recommendation. A candidate qualifies only on a STRONG listening signal —
+# a shared specific genre, the same mood, close energy, or the same artist —
+# never on era or a family alone; a score floor catches the pairs several
+# weak terms agree on. Below `SHELF_MIN_ROWS` qualifying rows the shelf is
+# EMPTY rather than padded: "nothing in your library sounds like this" is an
+# answer, and a one-row shelf is noise. Two is a shelf (a small library must
+# still get recommendations); one related row beside an unrelated grid is not.
+STRONG_ENERGY = 25.0
+SHELF_MIN_ROWS = 2
+
+
+def _relevant(src, cand, score):
+    """Does this candidate earn a place on a listener's shelf?"""
+    if src["specs"] & cand["specs"]:
+        return True                                   # a shared specific genre
+    if src["mood"] and src["mood"] == cand["mood"]:
+        return True                                   # the same mood
+    if (src["energy"] is not None and cand["energy"] is not None
+            and abs(src["energy"] - cand["energy"]) <= STRONG_ENERGY):
+        return True                                   # close energy
+    if src["artist_key"] and src["artist_key"] == cand["artist_key"]:
+        return True                                   # the same artist
+    return score >= 0.5
+
+
 def _reasons(src, cand):
     """Why this candidate is on the shelf, strongest signal first.
 
@@ -535,7 +562,8 @@ def _target(kind, target):
     return want or _DEFAULT_TARGET[kind]
 
 
-def recommend(cfg, kind, ref="", limit=None, user="", seeds=None, target=None):
+def recommend(cfg, kind, ref="", limit=None, user="", seeds=None, target=None,
+              min_rows=SHELF_MIN_ROWS):
     """Scored library items similar to a seed set.
 
     `kind` picks the seed set: `artist` / `album` / `track` / `playlist` name
@@ -568,7 +596,13 @@ def recommend(cfg, kind, ref="", limit=None, user="", seeds=None, target=None):
         return []
     profile, entries, extra = picked
     candidates = _candidates(idx, entries, target, extra)
-    scored = [(s, c) for s, c in ((_score(profile, c), c) for c in candidates) if s > 0]
+    scored = [(s, c) for s, c in ((_score(profile, c), c) for c in candidates)
+              if s > 0 and _relevant(profile, c, s)]
+    # Below the minimum a shelf is not drawn at all (an empty list is the
+    # page's own "nothing like this" state). Queue extensions pass their own
+    # minimum — one good row still keeps the music going.
+    if len(scored) < (1 if min_rows is None else min_rows):
+        return []
     # Path last, so two rows with the same score always come back in the same
     # order — the shelf must not reshuffle between two identical requests.
     scored.sort(key=lambda pair: (-pair[0], pair[1]["path"]))
@@ -596,4 +630,5 @@ def recommend_for_queue(cfg, paths, limit=None):
     if limit is None:
         limit = QUEUE_DEFAULT_LIMIT
     limit = max(1, min(int(limit), QUEUE_MAX_LIMIT))
-    return recommend(cfg, "tracks", seeds=list(paths or []), limit=limit)
+    return recommend(cfg, "tracks", seeds=list(paths or []), limit=limit,
+                     min_rows=1)

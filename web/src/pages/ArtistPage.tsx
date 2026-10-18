@@ -29,6 +29,7 @@ import { GRID_SIZE_MIN, releaseCount } from "../lib/fmt";
 import { invalidateLibrary } from "../lib/invalidate";
 import StatsPanel from "../components/StatsPanel";
 import { toast, useStore } from "../store";
+import { playWindow } from "../lib/playQueue";
 
 /** Provider id → the name a reader knows ("wikipedia" → Wikipedia). */
 const SOURCE_NAMES: Record<string, string> = {
@@ -387,7 +388,10 @@ export default function ArtistPage() {
                 <FavHeart kind="artist" id={data.path} mbid={artistMb} />
                 <button
                   className="btn-icon-primary"
-                  onClick={() => playNow(allTracks)}
+                  onClick={() => {
+                    const w = playWindow(allTracks, 0);
+                    playNow(w.rows, w.index);
+                  }}
                   title={`Play all ${allTracks.length} tracks`}
                   aria-label="Play all"
                 >

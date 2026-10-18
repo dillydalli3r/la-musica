@@ -550,6 +550,264 @@ def podcast_series_payload(cfg, series):
     return None
 
 
+# --------------------------------------------------------------------------- #
+# The listening shelves (2026-10-17)
+#
+# Home is about the MUSIC, not the maintenance: genres, the user's own stars,
+# moods and what actually gets played. Every shelf is a join of data the app
+# already holds — the library tree, the ratings store, the play store — and a
+# shelf with nothing real behind it is EMPTY (the page hides it), never padded
+# with a low-confidence row to fill the grid.
+# --------------------------------------------------------------------------- #
+def _track_index(lib):
+    """{track path: (album row, track row, artist name)} — one pass."""
+    out = {}
+    for ar in lib.get("artists") or []:
+        artist = str(ar.get("display_name") or ar.get("name") or "")
+        for alb in ar.get("albums") or []:
+            for tr in alb.get("tracks") or []:
+                out[str(tr.get("path") or "")] = (alb, tr, artist)
+    return out
+
+
+def _track_row(album, track, artist="", *, plays=0, rating=None):
+    """One track shelf row: what a listener clicks, not a library table row."""
+    tags = track.get("tags") or {}
+    meta = album.get("meta") or {}
+    return {
+        "kind": "track",
+        "path": str(track.get("path") or "").replace("\\", "/"),
+        "file": track.get("file"),
+        "title": str(tags.get("TITLE") or track.get("file") or ""),
+        "artist": str(tags.get("ARTIST") or artist or ""),
+        "album": str(meta.get("ALBUM") or ""),
+        "album_path": str(album.get("path") or "").replace("\\", "/"),
+        "cover_file": track.get("cover_file") or None,
+        "album_cover": album.get("cover_file") or None,
+        "duration": (track.get("tech") or {}).get("length"),
+        "plays": int(plays or 0),
+        "rating": rating,
+        "in_library": True,
+    }
+
+
+def _album_plays(albums_by_path, counts):
+    """{album path: plays} by summing the plays of the tracks the library
+    holds in it. `plays` already stores an `album` column; this join is the
+    fallback that also serves a payload built without the store's grouping."""
+    out = {}
+    for path, alb in albums_by_path.items():
+        total = 0
+        for tr in alb.get("tracks") or []:
+            total += int(counts.get(str(tr.get("path") or ""), 0))
+        out[path] = total
+    return out
+
+
+def _listening_shelves(lib, user, limit):
+    """The genres, moods, stars and play-count shelves Home draws."""
+    from collections import Counter
+
+    from mlo.genres import display_name, split_stored
+
+    try:
+        from server import plays as plays_store
+        path_plays = plays_store.counts("path", user=user)
+        playlist_plays = plays_store.counts("playlist", user=user)
+    except Exception:
+        path_plays, playlist_plays = {}, {}
+    try:
+        from server import ratings as store
+        track_stars = store.map_for(user=user, scope="track")
+        album_stars = store.map_for(user=user, scope="album")
+        artist_stars = store.map_for(user=user, scope="artist")
+    except Exception:
+        track_stars, album_stars, artist_stars = {}, {}, {}
+
+    albums = [alb for ar in (lib.get("artists") or []) for alb in (ar.get("albums") or [])]
+    albums_by_path = {str(a.get("path") or "").replace("\\", "/"): a for a in albums}
+    index = _track_index(lib)
+
+    # ---- genres ----------------------------------------------------------
+    genre_tracks, genre_plays, genre_albums = Counter(), Counter(), {}
+    mood_tracks, mood_plays, mood_albums = Counter(), Counter(), {}
+    for path, (alb, tr, _artist) in index.items():
+        tags = tr.get("tags") or {}
+        plays = int(path_plays.get(path, 0))
+        names = []
+        raw = tags.get("GENRE")
+        for value in (raw if isinstance(raw, (list, tuple, set)) else [raw] if raw else []):
+            names.extend(split_stored(str(value)))
+        seen = {display_name(n) for n in names if n}
+        for name in seen:
+            genre_tracks[name] += 1
+            genre_plays[name] += plays
+            genre_albums.setdefault(name, set()).add(str(alb.get("path") or "").replace("\\", "/"))
+        mood = str(tags.get("MOOD") or "").strip()
+        if mood:
+            # MOOD is stored as the classifier's own lowercase word; a lane
+            # TITLE is prose ("Melancholic"), while the tag is unchanged.
+            mood = mood[:1].upper() + mood[1:]
+            mood_tracks[mood] += 1
+            mood_plays[mood] += plays
+            mood_albums.setdefault(mood, set()).add(str(alb.get("path") or "").replace("\\", "/"))
+
+    def lanes(counter, plays_counter, album_map):
+        out = []
+        for name, _count in counter.most_common(12):
+            paths = [p for p in album_map.get(name, ()) if p in albums_by_path]
+            if not paths:
+                continue
+            paths.sort(key=lambda p: (-plays_counter.get(name, 0),
+                                      str((albums_by_path[p].get("meta") or {}).get("ALBUM") or "").lower()))
+            out.append({
+                "name": name,
+                "tracks": int(counter[name]),
+                "plays": int(plays_counter.get(name, 0)),
+                "albums": [_owned_row(albums_by_path[p], reason=name)
+                           for p in paths[:limit]],
+            })
+        return out[:6]
+
+    genres = lanes(genre_tracks, genre_plays, genre_albums)
+    moods = lanes(mood_tracks, mood_plays, mood_albums)
+
+    # ---- play counts -----------------------------------------------------
+    played = [(p, int(n)) for p, n in path_plays.items() if p in index and n]
+    played.sort(key=lambda pair: (-pair[1], pair[0]))
+    top_tracks = []
+    for path, n in played[:limit]:
+        alb, tr, artist = index[path]
+        top_tracks.append(_track_row(alb, tr, artist, plays=n,
+                                     rating=track_stars.get(path)))
+
+    album_total = _album_plays(albums_by_path, path_plays)
+    top_album_rows = sorted(
+        ((p, n) for p, n in album_total.items() if n and p in albums_by_path),
+        key=lambda pair: (-pair[1], pair[0]),
+    )[:limit]
+    top_albums = []
+    for path, n in top_album_rows:
+        row = _owned_row(albums_by_path[path], reason="Most played")
+        row["plays"] = n
+        row["rating"] = album_stars.get(path)
+        row["reason"] = f"{n} play{'s' if n != 1 else ''}"
+        top_albums.append(row)
+
+    # Artist play counts fold their albums' plays through the library's own
+    # artist rows — the same fold the artist page's stats do.
+    artist_total = Counter()
+    artist_row = {}
+    for ar in lib.get("artists") or []:
+        name = str(ar.get("display_name") or ar.get("name") or "")
+        if not name:
+            continue
+        total = sum(album_total.get(str(alb.get("path") or "").replace("\\", "/"), 0)
+                    for alb in ar.get("albums") or [])
+        if total:
+            artist_total[name] += total
+            artist_row.setdefault(name, ar)
+    top_artists = []
+    for artist, plays in artist_total.most_common(limit):
+        ar = artist_row.get(artist) or {}
+        albs = ar.get("albums") or []
+        first = sorted(albs, key=lambda a: str(a.get("path") or "").lower())[0] if albs else {}
+        top_artists.append({
+            "kind": "artist",
+            "path": str(ar.get("path") or "").replace("\\", "/"),
+            "artist": artist,
+            "disambiguation": str(ar.get("disambiguation") or "").strip() or None,
+            "plays": int(plays),
+            "rating": artist_stars.get(str(ar.get("path") or "")),
+            "cover_path": first.get("path") or "",
+            "cover": first.get("cover_file"),
+        })
+
+    top_playlists = []
+    if playlist_plays:
+        try:
+            from server import playlists as pl
+            known = {str(p.get("id")): p for p in (pl.list_playlists(user) or [])}
+        except Exception:
+            known = {}
+        for pid, n in sorted(playlist_plays.items(), key=lambda kv: (-kv[1], kv[0]))[:limit]:
+            row = known.get(str(pid))
+            if not row or not n:
+                continue
+            top_playlists.append({
+                "kind": "playlist",
+                "id": row.get("id"),
+                "name": row.get("name"),
+                "kind_of": row.get("kind"),
+                "track_count": row.get("track_count"),
+                "plays": int(n),
+                "path": f"/playlist/{row.get('id')}",
+            })
+
+    # ---- the caller's own stars -----------------------------------------
+    rated_albums = []
+    for path, stars in album_stars.items():
+        alb = albums_by_path.get(path)
+        if not alb or not stars:
+            continue
+        row = _owned_row(alb, reason="Rated")
+        row["rating"] = stars
+        row["plays"] = album_total.get(path, 0)
+        rated_albums.append(row)
+    rated_albums.sort(key=lambda r: (-r["rating"], -(r.get("plays") or 0),
+                                     str(r.get("artist") or "").lower()))
+    rated_tracks = []
+    for path, stars in track_stars.items():
+        hit = index.get(path)
+        if not hit or not stars:
+            continue
+        alb, tr, artist = hit
+        rated_tracks.append(_track_row(alb, tr, artist, plays=path_plays.get(path, 0),
+                                       rating=stars))
+    rated_tracks.sort(key=lambda r: (-r["rating"], -(r.get("plays") or 0), r["title"].lower()))
+    rated_artists = []
+    for ar in lib.get("artists") or []:
+        path = str(ar.get("path") or "")
+        stars = artist_stars.get(path)
+        name = str(ar.get("display_name") or ar.get("name") or "")
+        if not stars or not name:
+            continue
+        albs = ar.get("albums") or []
+        first = sorted(albs, key=lambda a: str(a.get("path") or "").lower())[0] if albs else {}
+        rated_artists.append({
+            "kind": "artist", "path": path.replace("\\", "/"), "artist": name,
+            "rating": stars, "plays": int(artist_total.get(name, 0)),
+            "cover_path": first.get("path") or "", "cover": first.get("cover_file"),
+        })
+    rated_artists.sort(key=lambda r: (-r["rating"], -(r.get("plays") or 0), r["artist"].lower()))
+
+    return {
+        "genres": genres,
+        "moods": moods,
+        "top_tracks": top_tracks,
+        "top_albums": top_albums,
+        "top_artists": top_artists,
+        "top_playlists": top_playlists,
+        "rated_albums": rated_albums[:limit],
+        "rated_tracks": rated_tracks[:limit],
+        "rated_artists": rated_artists[:limit],
+    }
+
+
+def _rediscover(albums, featured, limit):
+    """A random slice of owned albums the other shelves did not name.
+
+    "Rediscover" means "you own it and forgot it": albums whose audio has not
+    arrived are left out (they are not listening material yet), and so is
+    anything already on another shelf.
+    """
+    pool = [a for a in albums
+            if not a.get("pending")
+            and os.path.normcase(os.path.normpath(a.get("path") or "")) not in featured]
+    random.shuffle(pool)
+    return [_owned_row(a, reason="Rediscover") for a in pool[:limit]]
+
+
 def build_home(cfg, user=""):
     """Full Home payload for the given config and user (TTL-cached, SWR).
 
@@ -631,7 +889,14 @@ def warm_home(cfg) -> None:
 
 def _build_home_payload(cfg, user, recent_count):
     """The shelves themselves — the one place that walks the library for
-    Home. `build_home` caches this; `warm_home` fills it at startup."""
+    Home. `build_home` caches this; `warm_home` fills it at startup.
+
+    Since 2026-10-17 Home is a LISTENER's page: genres, moods, the caller's
+    own stars and what actually gets played, built from the library tree, the
+    ratings store and the play store. The maintenance shelves (grade strip,
+    needs-attention, pending albums, most-collected artists) are gone from it
+    — the Library, Grading and the In-progress page are where those belong.
+    """
     from server import library as lib_mod
 
     lib = lib_mod.build_library(cfg)
@@ -648,48 +913,27 @@ def _build_home_payload(cfg, user, recent_count):
         stats["playlists"] = len(pl.list_playlists(user) or [])
     except Exception:
         stats["playlists"] = 0
-    # The grading summary is built once and read twice: the header's percentage
-    # and the warning strip's totals are the same sums, counted in one place.
-    grade = grade_warning(lib)
-    stats["grade_pct"] = grade["grade_pct"]
+    try:
+        from server import plays as plays_store
+        stats["plays"] = plays_store.count(user=user)
+    except Exception:
+        stats["plays"] = 0
 
+    limit = max(4, recent_count)
+    listening = _listening_shelves(lib, user, limit)
     recent = _recent(albums, recent_count)
-    top = _top_rated(albums, max(4, recent_count // 2))
-    rated = _rated(albums, user, max(4, recent_count // 2))
-    favorites = _favorites(lib, max(4, recent_count // 2), user)
-    pending = _pending(albums, max(4, recent_count))
-
-    # Discover: a random slice of the library that isn't already featured.
-    # "Rediscover" means "you own it and forgot it", so the albums whose audio
-    # has not arrived are left out — they have a shelf of their own below.
-    featured = {os.path.normcase(os.path.normpath(r["path"])) for r in recent + top}
-    pool = [a for a in albums
-            if not a.get("pending")
-            and os.path.normcase(os.path.normpath(a.get("path") or "")) not in featured]
-    random.shuffle(pool)
-    discover = [_owned_row(a, reason="Rediscover") for a in pool[:recent_count]]
-
+    favorites = _favorites(lib, limit, user)
+    featured = {os.path.normcase(os.path.normpath(r["path"]))
+                for r in recent + favorites}
     data = {
         "stats": stats,
         "recent": recent,
-        "top_rated": top,
-        # The user's own stars on the releases they gave them to — the one
-        # shelf whose rows the CALLER chose rather than the library's grades.
-        "rated": rated,
         "favorites": favorites,
-        "discover": discover,
+        **listening,
+        "rediscover": _rediscover(albums, featured, limit),
         # One row per podcast SERIES in the library, its newest episode on it —
         # empty (and so the shelf is not drawn) unless the library holds one.
         "podcasts": _podcasts(albums, recent_count),
-        # Every album still waiting for its audio, in one place.
-        "pending": pending,
-        "top_artists": _top_artists(artists, 6),
-        "needs_attention": _needs_attention(albums, max(4, recent_count // 2)),
-        # Whether the library passes its own checks, and what fails — the SAME
-        # object `GET /api/grades/summary` answers with, so Home's strip and
-        # the Library page's can never say different things (the Library page
-        # has no Home payload to read it from).
-        "grade_warning": grade,
     }
     return data
 

@@ -16,7 +16,6 @@ export default {
   "nav.group.maintain": "Maintain",
   "nav.home": "Home",
   "nav.library": "Library",
-  "nav.browse": "Browse",
   "nav.genres": "Genres",
   "nav.trash": "Trash",
   "nav.playlists": "Playlists",
@@ -29,6 +28,7 @@ export default {
   "nav.inProgress": "In progress",
   "nav.checks": "Checks & scripts",
   "nav.grading": "Grading",
+  "nav.tags": "Tags",
   "nav.dependencies": "Dependencies",
   "nav.equalizer": "Equalizer",
   "nav.settings": "Settings",
@@ -264,14 +264,7 @@ export default {
   "home.error_title": "Could not build the Home page",
   "home.error_hint": "Check that your music folder is set.",
   "home.shelf.recent": "Recently added",
-  "home.shelf.pending": "Waiting for its audio",
-  "home.shelf.pending_blurb": "Added to the library — the audio has not landed yet",
-  "home.shelf.best": "Best graded",
-  "home.shelf.rated": "Your ratings",
-  "home.shelf.attention": "Needs attention",
-  "home.shelf.attention_blurb": "Albums failing at least one check",
   "home.shelf.artists": "Top artists",
-  "home.shelf.artists_blurb": "Deepest artist collections",
   // Podcasts: a podcast in MusicBrainz is a SERIES of type Podcast (there is
   // no Podcast release-group type), so these name the show and its episodes,
   // never a release type.
@@ -317,13 +310,6 @@ export default {
   "charts.error_title": "The charts could not be read",
 
   // —— Browse page: what an empty or failed result says ——————————————————
-  "browse.not_asked": "no query run yet",
-  "browse.error_title": "The query could not be read",
-  "browse.zero_title": "Nothing matches this query",
-  "browse.zero_hint": "The engine was asked for {target} matching {n} condition(s) and returned none. Clear the builder to see the whole library, or loosen a row.",
-  "browse.empty_title": "The library is empty",
-  "browse.empty_hint": "No {target} in the library match this target yet — import some music, or pick the other target.",
-  "browse.clear": "Clear the conditions",
 
   // —— Credits footer and dialog ——————————————————————————————————————
   "credits.title": "Credits",

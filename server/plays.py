@@ -40,7 +40,7 @@ _lock = threading.RLock()
 # The four windows the charts offer, and the three row kinds — hidden API
 # vocabulary, not config keys. Both orders are the UI's own order.
 PERIODS = ("all", "year", "month", "week")
-KINDS = ("tracks", "albums", "artists")
+KINDS = ("tracks", "albums", "artists", "playlists")
 ROW_KIND = {"tracks": "track", "albums": "album", "artists": "artist"}
 DEFAULT_LIMIT = 50
 MAX_LIMIT = 200
@@ -124,6 +124,15 @@ def _init():
                 CREATE INDEX IF NOT EXISTS plays_by_path
                     ON plays (user, path);
                 """)
+            # WHICH PLAYLIST a play came from ("" for a play started from the
+            # library, an album, a chart). Added after the table shipped, so an
+            # existing history gains the column empty — those plays stay
+            # countable per track/album/artist and simply do not attribute a
+            # playlist. No backfill is possible or wanted: the old rows never
+            # recorded one.
+            cols = {r["name"] for r in c.execute("PRAGMA table_info(plays)")}
+            if "playlist" not in cols:
+                c.execute("ALTER TABLE plays ADD COLUMN playlist TEXT NOT NULL DEFAULT ''")
 
 
 # --------------------------------------------------------------------------- #
@@ -175,7 +184,7 @@ def _prune(c, cfg=None, now=None):
                      (cutoff,)).rowcount
 
 
-def record(path, user="", at=None):
+def record(path, user="", at=None, playlist=""):
     """Store ONE play of *path* and answer what was written.
 
     Deliberately ONE insert (plus the optional retention sweep, which reads the
@@ -192,8 +201,9 @@ def record(path, user="", at=None):
     album = album_of(p)
     with _lock:
         with _conn() as c:
-            c.execute("INSERT INTO plays (user, path, album, started_at) "
-                      "VALUES (?, ?, ?, ?)", (str(user or ""), p, album, started))
+            c.execute("INSERT INTO plays (user, path, album, started_at, playlist) "
+                      "VALUES (?, ?, ?, ?, ?)", (str(user or ""), p, album, started,
+                                                  str(playlist or "")))
             pruned = _prune(c)
         # AFTER the `with` commits: `PRAGMA incremental_vacuum` is a no-op
         # inside a transaction, and reclaiming the pruned rows' pages is the
@@ -403,6 +413,25 @@ def _folder_of(path):
     return head if sep else ""
 
 
+def counts(column="path", user=""):
+    """{group: plays} over the caller's WHOLE history, for one grouping.
+
+    The Home shelves join these to library rows, so they need a count for
+    every path/album/playlist — not the `limit` rows a chart prints. One
+    indexed group-by; no window arithmetic (the shelves name their window in
+    the label they print).
+    """
+    column = str(column or "path")
+    if column not in ("path", "album", "playlist"):
+        raise ValueError("column must be path, album or playlist")
+    with _lock:
+        with _conn() as c:
+            rows = c.execute(
+                "SELECT %s AS grp, COUNT(*) AS plays FROM plays WHERE user = ? "
+                "GROUP BY grp" % column, (str(user or ""),)).fetchall()
+    return {str(r["grp"]): int(r["plays"]) for r in rows}
+
+
 def _window_paths(conn, start, end, user):
     """Every play the window holds, as `(path, at)` — the raw rows behind the
     totals (`plays_total`, `listened_seconds`), which must cover the WHOLE
@@ -482,6 +511,8 @@ def top(period="all", kind="tracks", limit=DEFAULT_LIMIT, user="", cfg=None,
         groups = _grouped(conn, "path", start, end, user, limit)
     elif kind == "albums":
         groups = _grouped(conn, "album", start, end, user, limit)
+    elif kind == "playlists":
+        groups = _grouped(conn, "playlist", start, end, user, limit)
     else:
         # Artists fold through the library's album-artist map, so the SQL
         # groups by album (the only grouping a path can state) and the fold
@@ -521,6 +552,28 @@ def top(period="all", kind="tracks", limit=DEFAULT_LIMIT, user="", cfg=None,
                 "artist": known.get("artist") or _folder_name(_folder_of(path)),
                 "plays": plays,
                 "in_library": bool(known),
+            })
+    elif kind == "playlists":
+        try:
+            from server import playlists as pl_mod
+            names = {str(p.get("id")): p for p in (pl_mod.list_playlists(user) or [])}
+        except Exception:
+            names = {}
+        for pid, plays in groups:
+            if not pid:
+                # Plays from before the column existed, or from a queue that
+                # was not a playlist. Named, never dropped: the count is real.
+                out["items"].append({"kind": "playlist", "id": "",
+                                     "name": "Not from a playlist", "plays": plays,
+                                     "in_library": True})
+                continue
+            row = names.get(pid) or {}
+            out["items"].append({
+                "kind": "playlist", "id": pid,
+                "name": row.get("name") or f"Playlist {pid}",
+                "path": f"/playlist/{pid}",
+                "plays": plays,
+                "in_library": bool(row),
             })
     else:
         folded, order = {}, []

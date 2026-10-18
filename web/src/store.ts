@@ -176,7 +176,10 @@ interface Store {
    *  the same track too, and restarting the song for them would be the bug this
    *  token exists to separate from the press. */
   playToken: number;
-  playNow: (q: QueueTrack[], i?: number) => void;
+  playNow: (q: QueueTrack[], i?: number, playlist?: string) => void;
+  /** The playlist id the current queue came from ("" for anything else) —
+   *  what the play report attributes to `GET /api/top?kind=playlists`. */
+  playSource: string;
   query: string;
   setQuery: (q: string) => void;
   sort: { key: string; dir: 1 | -1 } | null;
@@ -331,9 +334,22 @@ function playerSnapshot(): PlayerState | null {
   // still the outgoing track's; resuming the neighbour in the middle would be
   // the bug this guard exists for.
   const time = playerPos.path === track.path ? playerPos.time : 0;
+  // The restore record carries a WINDOW of the queue, not all of it: a
+  // 20 000-track queue is megabytes of JSON written on every queue mutation
+  // (lib/playQueue explains the press path). 60 rows behind and 200 ahead is
+  // everything a reload needs to come back to the same song and keep playing;
+  // the player extends the queue itself when it nears the end.
+  const BACK = 60, AHEAD = 200;
+  let queue = st.queue;
+  let index = st.index;
+  if (queue.length > BACK + AHEAD + 1) {
+    const start = Math.max(0, Math.min(index - BACK, queue.length - (BACK + AHEAD + 1)));
+    queue = queue.slice(start, start + BACK + AHEAD + 1);
+    index -= start;
+  }
   return {
-    queue: st.queue,
-    index: st.index,
+    queue,
+    index,
     path: track.path,
     time: Math.round(time * 10) / 10,
   };
@@ -421,6 +437,7 @@ export const useStore = create<Store>((set) => ({
   // `PLAYER_STATE_KEY`): a reload comes back to the same list, on the same
   // track, paused. `playing` above stays null through every one of these.
   queue: RESTORED?.queue ?? [],
+  playSource: "",
   setQueue: (queue) => set((st) => ({ queue, queueId: st.queueId + 1 })),
   // Deliberately does NOT bump queueId: the player reloads audio on queueId
   // changes, and appending "next"/"end" must not interrupt the playing track.
@@ -469,7 +486,7 @@ export const useStore = create<Store>((set) => ({
   setIndex: (index) => set({ index }),
   queueId: 0,
   playToken: 0,
-  playNow: (queue, index = 0) => {
+  playNow: (queue, index = 0, playlist = "") => {
     // A file a job is rewriting RIGHT NOW does not play: the server refuses the
     // stream (409) and the element would just sit there silent. Say what the
     // registry says — the same sentence the route answers with — and leave
@@ -481,7 +498,7 @@ export const useStore = create<Store>((set) => ({
       toast(held.held.why);
       return;
     }
-    set((st) => ({ queue, index, queueId: st.queueId + 1, playToken: st.playToken + 1, playing: queue[index]?.path ?? null }));
+    set((st) => ({ queue, index, queueId: st.queueId + 1, playToken: st.playToken + 1, playing: queue[index]?.path ?? null, playSource: playlist }));
   },
   // The restore's own two values, read once by the player bar. They are store
   // state rather than module constants so the bar can clear them the moment

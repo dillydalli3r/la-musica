@@ -671,7 +671,7 @@ export default function PlayerBar() {
     // Fire and forget: a play is a statistic, and playback never waits on one.
     // A server that is away — or older than this build, with no route at all —
     // costs the play and nothing else.
-    void api.recordPlay(path).catch(() => {});
+    void api.recordPlay(path, useStore.getState().playSource).catch(() => {});
     // Now-playing, at exactly the same moment and for exactly the same reason.
     // The server refuses it politely unless a session is saved and scrobbling
     // is on, so nothing here has to know.
@@ -1733,6 +1733,52 @@ export default function PlayerBar() {
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [index, queueId, playToken]);
+
+  // The NEXT COUPLE OF SONGS, warmed by default — not only the one the
+  // gapless slot holds near the end of a track. A paused, muted pair of
+  // elements buffers the next two rows through the same `playbackSource`
+  // resolution the audible load uses, so a skip or a handover starts on bytes
+  // the browser already has and a tag write or a script run on the server
+  // cannot make the next track stutter. Elements are reused per path and
+  // released when the queue moves past them; `preload="auto"` is the only
+  // mechanism (nothing is decoded or played).
+  const warmRef = useRef<Map<string, HTMLAudioElement>>(new Map());
+  useEffect(() => {
+    const warm = warmRef.current;
+    if (!gapless) {
+      for (const el of warm.values()) { el.src = ""; el.load(); }
+      warm.clear();
+      return;
+    }
+    const want = queue.slice(index + 1, index + 3).map((t) => t.path).filter(Boolean);
+    const wanted = new Set(want);
+    for (const [path, el] of warm) {
+      if (!wanted.has(path)) {
+        el.src = "";
+        el.load();
+        warm.delete(path);
+      }
+    }
+    let cancelled = false;
+    for (const path of want) {
+      if (warm.has(path) || heldBy(path)) continue;
+      const el = new Audio();
+      el.preload = "auto";
+      el.muted = true;
+      el.volume = 0;
+      warm.set(path, el);
+      void playbackSource(path).then((source) => {
+        if (cancelled || warm.get(path) !== el) return;
+        el.src = source.src;
+      }).catch(() => {
+        warm.delete(path);
+      });
+    }
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [index, queueId, gapless, queue]);
 
   // Preload the next sequential track into the idle element as the current
   // one approaches its end — this is what makes the handover gapless. Skipped

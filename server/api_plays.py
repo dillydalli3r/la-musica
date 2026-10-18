@@ -34,13 +34,17 @@ router = APIRouter(tags=["plays"])
 
 class PlayPost(BaseModel):
     path: str = ""
+    # Which playlist the queue came from, when it did — the id the play is
+    # attributed to (`GET /api/top?kind=playlists`). Absent means "not a
+    # playlist" and is stored empty, never guessed from the track's paths.
+    playlist: str = ""
 
 
-def record_play(path, user="", cfg=None, now=None):
+def record_play(path, user="", cfg=None, now=None, playlist=""):
     """Store one play of *path* for *user* (the plain function the route
     wraps, so the seam is testable without an app)."""
     try:
-        return plays.record(path, user=user, at=now)
+        return plays.record(path, user=user, at=now, playlist=playlist)
     except ValueError as e:
         raise HTTPException(400, str(e))
 
@@ -67,7 +71,8 @@ def plays_post(req: PlayPost, request: Request = None):
     """
     user = auth_mod.current_user(request)
     return {"ok": True, **record_play(req.path, user=user,
-                                      cfg=load_config())}
+                                      cfg=load_config(),
+                                      playlist=req.playlist)}
 
 
 @router.get("/api/top")

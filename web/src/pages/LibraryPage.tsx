@@ -12,6 +12,7 @@ import { api } from "../api";
 import { LAYOUT_REPORT_KEY, rescanLayout } from "../lib/layoutScan";
 import { SCRIPTS, DEFAULT_RUN_ALL, isScriptId } from "../lib/scripts";
 import { toast, useStore } from "../store";
+import { playWindow } from "../lib/playQueue";
 import {
   sortRows, SortHeader, groupByDisc, byDiscThenTrack,
 } from "../lib/sort.tsx";
@@ -1011,7 +1012,10 @@ export default function LibraryPage() {
     for (const tr of sortedTracks)
       if (selTrackSet.has(tr.path))
         out.push({ path: tr.path, file: tr.file, albumPath: tr.path.split("/").slice(0, -1).join("/"), artist: tr.artist, album: tr.album, title: tr.tags.TITLE || undefined, coverFile: tr.cover_file ?? null, albumCover: tr.albumCover ?? null, advisory: tr.tags.ITUNESADVISORY ?? null });
-    if (out.length) playNow(out);
+    if (out.length) {
+      const w = playWindow(out, 0);
+      playNow(w.rows, w.index);
+    }
   };
 
   const runScriptsOnSelection = async (ids: number[], force = false) => {
@@ -2310,12 +2314,14 @@ export default function LibraryPage() {
                       style={ROW_CV}
                       className={`table-row group cursor-pointer ${sel ? "bg-accent/15" : ""}`}
                       title={selectMode ? "Click to select" : "Click to play"}
-                      onClick={selectMode ? () => toggleTrack(tr.path) : () =>
-                        playNow(
-                          sortedTracks.map((t) => ({ path: t.path, file: t.file, albumPath: t.path.split("/").slice(0, -1).join("/"), artist: t.artist, album: t.album, title: t.tags.TITLE || undefined, coverFile: t.cover_file ?? null, albumCover: t.albumCover ?? null, advisory: t.tags.ITUNESADVISORY ?? null })),
-                          sortedTracks.findIndex((t) => t.path === tr.path)
-                        )
-                      }
+                      onClick={selectMode ? () => toggleTrack(tr.path) : () => {
+                        // A press queues a WINDOW, not the library: the
+                        // whole-list queue was one object per track, copied
+                        // and persisted on every click (lib/playQueue).
+                        const rows = sortedTracks.map((t) => ({ path: t.path, file: t.file, albumPath: t.path.split("/").slice(0, -1).join("/"), artist: t.artist, album: t.album, title: t.tags.TITLE || undefined, coverFile: t.cover_file ?? null, albumCover: t.albumCover ?? null, advisory: t.tags.ITUNESADVISORY ?? null }));
+                        const w = playWindow(rows, sortedTracks.findIndex((t) => t.path === tr.path));
+                        playNow(w.rows, w.index);
+                      }}
                     >
                       {selectMode && (
                         <td className="td pr-0" onClick={(e) => e.stopPropagation()}>
@@ -2742,17 +2748,16 @@ function AlbumRowGroup({
                           key={t.path}
                           className={`table-row group cursor-pointer ${selTracks.has(t.path) ? "bg-accent/15" : ""}`}
                           title={selectMode ? "Click to select" : "Click to play"}
-                          onClick={selectMode ? () => onToggleTrack(t.path) : () =>
-                            useStore.getState().playNow(
-                              tracks.map((x) => ({
-                                path: x.path, file: x.file, albumPath: album.path,
-                                artist: album.artist, album: album.meta?.ALBUM ?? undefined, title: x.tags.TITLE || undefined,
-                                coverFile: x.cover_file ?? null, albumCover: album.cover_file ?? null,
-                                advisory: x.tags.ITUNESADVISORY ?? null,
-                              })),
-                              tracks.findIndex((x) => x.path === t.path)
-                            )
-                          }
+                          onClick={selectMode ? () => onToggleTrack(t.path) : () => {
+                            const rows = tracks.map((x) => ({
+                              path: x.path, file: x.file, albumPath: album.path,
+                              artist: album.artist, album: album.meta?.ALBUM ?? undefined, title: x.tags.TITLE || undefined,
+                              coverFile: x.cover_file ?? null, albumCover: album.cover_file ?? null,
+                              advisory: x.tags.ITUNESADVISORY ?? null,
+                            }));
+                            const w = playWindow(rows, tracks.findIndex((x) => x.path === t.path));
+                            useStore.getState().playNow(w.rows, w.index);
+                          }}
                         >
                           {selectMode && (
                             <td className="td pr-0" onClick={(e) => e.stopPropagation()}>

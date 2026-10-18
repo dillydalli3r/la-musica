@@ -667,7 +667,11 @@ def lyrics_absent(paths, cfg=None):
         out["skipped"] = "instrumental_auto_fetch is off"
         return out
 
-    written = []
+    # Read and filter the eligible tracks first, then cross-reference them in
+    # ONE `detect_instrumental` call: that function pools its sources across
+    # the whole list, so a call per path re-parsed every file and serialized
+    # asks the module already knows how to overlap.
+    eligible = []
     for p in paths or []:
         path = os.path.normpath(str(p))
         try:
@@ -679,7 +683,20 @@ def lyrics_absent(paths, cfg=None):
             if _lyrics_present(af, path):
                 out["reason"][path] = "the file carries lyrics — vocals"
                 continue
-            got = detect_instrumental([path], cfg).get(path) or {}
+            eligible.append((path, af))
+        except Exception:
+            continue
+    detected = {}
+    if eligible:
+        try:
+            detected = detect_instrumental([p for p, _ in eligible], cfg)
+        except Exception:
+            detected = {}
+
+    written = []
+    for path, af in eligible:
+        try:
+            got = detected.get(path) or {}
             value = got.get("value")
             if value == 0:
                 out["reason"][path] = (

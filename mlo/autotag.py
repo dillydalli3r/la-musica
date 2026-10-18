@@ -46,6 +46,7 @@ the run is forced.
 import os
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 
 from .audio import ALIAS_TAG_SUBJECTS, AudioFile
 from .config import DEFAULT_CONFIG, should_write_audio_tag
@@ -1100,7 +1101,20 @@ def mb_track_tags(release, slot, disc=1, album_artist_mbid="", config=None):
     return values
 
 
-def write_mb_tags(af, values, config=None, replace=None):
+def mb_updated_stamp():
+    """Now, as the ``MUSICBRAINZ_UPDATED`` tag spells it (ISO-8601 UTC).
+
+    ONE spelling for every writer that lands MusicBrainz data (script 8's
+    per-track pass, the import's release stamp, a scheduled tag refresh): an
+    album's age is its OLDEST track's stamp, so a reader comparing two files
+    must compare the same format. UTC on purpose — a stamp that moved with the
+    machine's timezone would age backwards twice a year.
+    """
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def write_mb_tags(af, values, config=None, replace=None, stamp=True,
+                  stamp_if_older_than=0.0):
     """Write MusicBrainz-derived values onto ONE open file.
 
     The one writer both MusicBrainz paths use — this stage and the beets
@@ -1157,10 +1171,32 @@ def write_mb_tags(af, values, config=None, replace=None):
                 refused.append((tag, str(getattr(af, "error", "") or "refused")))
         except Exception as e:  # noqa: BLE001 — one tag never stops the rest
             refused.append((tag, f"{type(e).__name__}: {e}"))
+    # WHEN this pull happened, on every file the pull touched. Written in the
+    # same container save as the values above, so a deferred writer pays
+    # nothing for it. `stamp_if_older_than` is the refresh path's guard: a file
+    # whose stamp is already that recent and which gained nothing is not
+    # rewritten at all (no byte is written for a date that is already there).
+    if stamp:
+        fresh = False
+        if stamp_if_older_than > 0:
+            have = str(af.get_tag("MUSICBRAINZ_UPDATED") or "").strip()
+            try:
+                seen = datetime.strptime(have, "%Y-%m-%dT%H:%M:%SZ").replace(
+                    tzinfo=timezone.utc).timestamp()
+                fresh = bool(seen) and (
+                    datetime.now(timezone.utc).timestamp() - seen < stamp_if_older_than)
+            except (TypeError, ValueError):
+                fresh = False
+        if written or not fresh:
+            try:
+                af.set_tag("MUSICBRAINZ_UPDATED", mb_updated_stamp())
+            except Exception as e:  # noqa: BLE001
+                refused.append(("MUSICBRAINZ_UPDATED", f"{type(e).__name__}: {e}"))
     return written, refused
 
 
-def fill_release_identity(files, release, config=None, explicit=False):
+def fill_release_identity(files, release, config=None, explicit=False,
+                          always_stamp=False, fresh_within=0.0):
     """Fill the album-level RELEASE IDENTITY of *files* from *release*.
 
     THE one writer an import uses to make a release carry its own facts. The
@@ -1199,10 +1235,21 @@ def fill_release_identity(files, release, config=None, explicit=False):
     rewrite per file (the deferral `write_mb_tags` callers use), files written
     side by side.
 
+    ``always_stamp`` is the REFRESH path's own flag: even a file this release
+    had nothing to add to gets ``MUSICBRAINZ_UPDATED`` written, because the age
+    a scheduled refresh keeps must move forward on every track (an album is
+    due at its OLDEST stamp). Without it, a file with nothing to fill is left
+    byte for byte alone, as an import requires.
+
+    ``fresh_within`` (seconds, 0 = always) skips a file whose existing
+    ``MUSICBRAINZ_UPDATED`` is newer than that — a second press, or a queue
+    that already covered the album, must not rewrite every container again for
+    a date it just wrote.
+
     Returns ``{"written", "skipped", "failed"}`` — files that gained at least
-    one tag, files this release had nothing to add to, and files whose tags
-    could not be read or written (counted, never swallowed: an import that
-    stamped nothing has to be able to say so).
+    one tag (or, refreshed, a pull stamp), files this release had nothing to
+    add to, and files whose tags could not be read or written (counted, never
+    swallowed: an import that stamped nothing has to be able to say so).
     """
     paths = [p for p in (files or []) if p]
     rel = dict(release or {})
@@ -1222,8 +1269,9 @@ def fill_release_identity(files, release, config=None, explicit=False):
                 return "failed"
             values = album_release_tags(rel, disc=_track_position(af, path)[0],
                                         config=config)
-            if not values:
+            if not values and not always_stamp:
                 return "skipped"
+            stamp_before = str(af.get_tag("MUSICBRAINZ_UPDATED") or "").strip()
             defer = hasattr(af, "defer_save")
             if defer:
                 af.defer_save(True)
@@ -1241,12 +1289,23 @@ def fill_release_identity(files, release, config=None, explicit=False):
                         return want if str(want).strip() != str(have).strip() else ""
                     return _mb_replace(tag, have, want)
 
-                written, _refused = write_mb_tags(af, values, config,
-                                                  replace=_replace)
+                written, _refused = write_mb_tags(
+                    af, values, config, replace=_replace,
+                    stamp=True,
+                    stamp_if_older_than=fresh_within)
             finally:
                 if defer and af.defer_save(False) is False:
                     return "failed"
-            return "written" if written else "skipped"
+            # A refresh counts the FILE it stamped (the stamp moved, or a
+            # value landed); an import keeps counting files that gained a
+            # value (a stamp alone is not a value).
+            if written:
+                return "written"
+            if always_stamp:
+                return ("written"
+                        if str(af.get_tag("MUSICBRAINZ_UPDATED") or "").strip()
+                        != stamp_before else "skipped")
+            return "skipped"
         except Exception:
             return "failed"
 

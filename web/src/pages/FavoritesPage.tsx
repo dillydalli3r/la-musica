@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { Disc3, FileVideo, Heart, HeartOff, ListChecks, ListMusic, Mic2, Play } from "lucide-react";import { api } from "../api";
+import { playWindow } from "../lib/playQueue";
 import { useStore } from "../store";
 import { toast } from "../store";
 import { unfavoriteMany, useFavorites, useTrackLikes, type FavKind } from "../lib/favs";
@@ -420,7 +421,8 @@ function LikedTracks({ selectMode, picked, onPick }: {
     const playable = view.filter((r) => !r.missing).map((r) => r.queue);
     if (!playable.length) return;
     const idx = view.slice(0, i).filter((r) => !r.missing).length;
-    playNow(playable, Math.min(idx, playable.length - 1));
+    const w = playWindow(playable, Math.min(idx, playable.length - 1));
+    playNow(w.rows, w.index);
   };
 
   if (isLoading) return <PageLoading />;

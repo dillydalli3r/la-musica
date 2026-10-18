@@ -104,6 +104,11 @@ class AcoustidSubmitRequest(BaseModel):
     confirm: bool = False
 
 
+class RefreshRequest(BaseModel):
+    paths: List[str] = []
+    staged: bool = False
+
+
 class FinishRequest(BaseModel):
     paths: List[str] = []
     # script id -> force flag; a supplied dict is authoritative (see
@@ -253,6 +258,33 @@ def _matched_paths(match):
         if isinstance(rec, dict) and str(rec.get("path") or "").strip():
             out.append(rec["path"])
     return out
+
+
+@router.post("/api/import/refresh")
+def import_refresh(req: RefreshRequest):
+    """Re-read each album's MusicBrainz release and land its facts.
+
+    The wizard's own runs (Finish / Run all, forced or not) go straight to
+    `/api/run`, which runs SCRIPTS — it never re-reads the release. So a link
+    changed in the Links step, or a release updated since the last pull, had
+    no writer after the chain: this route is that writer (see
+    `server.imports.refresh_release_tags`). It stamps the release identity
+    (MEDIA included), corrects per-track ids that contradict it, and writes
+    MUSICBRAINZ_UPDATED on every file.
+
+    Albums with no MusicBrainz id in their tags answer `skipped` with the
+    reason; one album's failure never stops the rest.
+    """
+    _require_manual()
+    _cap(len(req.paths), MAX_PATHS, "paths")
+    _guard(req.paths, req.staged)
+    albums = []
+    for p in req.paths:
+        try:
+            albums.append({"path": p, **imports.refresh_release_tags(p)})
+        except Exception as e:  # noqa: BLE001 — reported per album
+            albums.append({"path": p, "skipped": True, "reason": str(e)})
+    return {"albums": albums}
 
 
 @router.post("/api/import/finish")

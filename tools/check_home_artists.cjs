@@ -1,25 +1,21 @@
 #!/usr/bin/env node
-/* Home's artist shelf and its ratings shelf, measured in a real browser.
+/* Home's "Most played artists" lane and its "Rated albums" shelf, measured in
+ * a real browser.
  *
  * What it proves, in order:
  *   1. an artist folder named the way the naming script writes it
  *      ("Artist Alpha [<mbid>]") reaches the page as "Artist Alpha" — the
- *      on-disk folder name with its MusicBrainz id is what the shelf used to
- *      draw (the owner-reported bug);
- *   2. the avatar is the ARTIST picture (`GET /api/artist/image`) when the
- *      folder holds one — seeded here through the upload route — and the
- *      artist's album cover when it does not;
- *   3. a picture that goes away after the payload was built (the URL answers
- *      404) falls back to the cover, so the shelf never shows a broken image;
- *   4. the rated shelf lists the ratings the store holds, best first, each
- *      card carrying its own stars.
+ *      on-disk folder name with its MusicBrainz id is never drawn;
+ *   2. plays recorded through the app's own route (`POST /api/plays`) put that
+ *      artist on "Most played artists", and the card's title carries the play
+ *      count the payload reports;
+ *   3. the "Rated albums" shelf lists `rated_albums` best first, each card
+ *      carrying its own stars.
  *
  * The fixture is this script's own: it renames two folders of the scratch
- * library to carry an [mbid] suffix and adds a third artist whose only album
- * folder is EMPTY — the one row whose display name has no tag to come from, so
- * the stripped folder name is the only answer. Point LIB at a throwaway
- * library (`python tools/make_test_library.py` prints one), never a real one:
- * this script writes and deletes an artist image in it.
+ * library to carry an [mbid] suffix. Point LIB at a throwaway library
+ * (`python tools/make_test_library.py` prints one), never a real one: this
+ * script records plays and ratings in it.
  *
  * Needs a live backend serving the built app (`web/dist`), against LIB:
  *   npm --prefix web run build
@@ -47,23 +43,17 @@ const path = require("path");
 const BASE = process.argv[2] || process.env.BASE || "http://127.0.0.1:8011";
 const LIB = process.env.LIB || process.env.MLO_MUSIC_FOLDER || "";
 const SHOTS = path.join(".pi", "shots-home-artists");
-// A real photo for the seeded artist picture: an album cover out of the
-// fixture would be the same purple square the fallback draws, and the two
-// would be indistinguishable in the screenshot.
-const PHOTO = process.env.PHOTO || path.join(__dirname, "..", "kitten-headphones.jpg");
 
 const results = [];
 const check = (name, pass, detail) => results.push({ name, pass: !!pass, detail: String(detail) });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// The two name sources the shelf has to draw from, and the folder names that
-// make each one the only thing that can answer.
+// The two name sources the shelves have to draw from, and the folder names
+// that make the [mbid] suffix something the page could wrongly show.
 const MBID_ALPHA = "a74b1b7f-71a5-4011-9441-d0b5e4122711";
 const MBID_BETA = "a16371b9-4f1c-4b0d-9c53-8f2b1b4c9d10";
-const MBID_DELTA = "b2c3d4e5-1111-2222-3333-444455556666";
 const ALPHA = `Artist Alpha [${MBID_ALPHA}]`;
 const BETA = `Artist Beta [${MBID_BETA}]`;
-const DELTA = `Artist Delta [${MBID_DELTA}]`;
 
 function prepareFixture() {
   const rename = (from, to) => {
@@ -73,16 +63,6 @@ function prepareFixture() {
   };
   rename("Artist Alpha", ALPHA);
   rename("Artist Beta", BETA);
-  // Delta: an artist folder holding one EMPTY album folder. The library's
-  // empty-folder sweep lists it, and no album under it carries an
-  // album_artist — the fallback (folder name minus the id) is all that is left.
-  // The stray file is what keeps the ARTIST folder itself out of that sweep:
-  // a folder with nothing in it at all is reported as an empty album of the
-  // music folder above it, which would put the library root's own name on the
-  // shelf beside the artists.
-  const delta = path.join(LIB, DELTA);
-  fs.mkdirSync(path.join(delta, "2023 - Nothing"), { recursive: true });
-  fs.writeFileSync(path.join(delta, "notes.txt"), "no tags on the audio here\n");
 }
 
 const api = async (route, init) => {
@@ -97,51 +77,22 @@ const json = (method) => async (route, payload) =>
 const putJSON = json("PUT");
 const postJSON = json("POST");
 
-/** Seed the artist's own picture through the app's own route — the manual
- *  upload (`POST /api/artist/image/upload`), so the bytes are the app's to
- *  validate, crop and store and no provider is asked for anything. */
-async function seedArtistImage(artistPath) {
-  const fd = new FormData();
-  fd.append("artist", artistPath);
-  fd.append("file", new Blob([fs.readFileSync(PHOTO)], { type: "image/jpeg" }), path.basename(PHOTO));
-  return await api("/api/artist/image/upload", { method: "POST", body: fd });
-}
-
 /** One shelf's rows, read from the live DOM: the section whose heading is
- *  `title` — the artist links (name, avatar src, whether that avatar is a
- *  circle) and the album cards (title, the stars' own accessible name, href). */
+ *  `title` — its artist cards (the link's own title, which carries the play
+ *  count) and its album cards (title, the stars' accessible name, href). */
 const readShelf = (page, title) => page.evaluate((want) => {
   const sec = [...document.querySelectorAll("section")]
     .find((s) => s.querySelector("h2")?.textContent?.trim() === want);
   if (!sec) return null;
   return {
-    artists: [...sec.querySelectorAll("a")].map((a) => {
-      const img = a.querySelector("img");
-      return {
-        name: a.getAttribute("title") || "",
-        // The name is drawn by the shared artist-name render
-        // (components/ArtistName): the NAME span is `min-w-0` + the caller's
-        // `truncate` (read off a class that does not move when a page rescales
-        // its shelf — a font-size class stopped finding it the moment the
-        // shelf was condensed), holding the name, with the artist's own verdict
-        // mark beside it (no text of its own).
-        caption: a.querySelector("span.min-w-0")?.textContent?.trim() || "",
-        src: img?.getAttribute("src") || null,
-        decoded: img ? img.naturalWidth > 0 : null,
-        // The tile's own shape. It was a CIRCLE while the owner's report
-        // ("artist images should be more rectangular like how album covers
-        // are") stands: the card draws the artist page's own hero geometry
-        // now — a square tile with rounded corners — so no avatar may be a
-        // circle, and every one of them must be square.
-        tile: (() => {
-          const el = img?.parentElement || a.querySelector("div");
-          if (!el) return null;
-          const r = el.getBoundingClientRect();
-          const cs = getComputedStyle(el);
-          return { w: Math.round(r.width), h: Math.round(r.height), radius: cs.borderRadius };
-        })(),
-      };
-    }),
+    artists: [...sec.querySelectorAll("a")].map((a) => ({
+      title: a.getAttribute("title") || "",
+      // The name is drawn by the shared artist-name render
+      // (components/ArtistName): the NAME span is `min-w-0` + the caller's
+      // `truncate`, holding the name, with the artist's own verdict mark beside
+      // it (no text of its own).
+      caption: a.querySelector("span.min-w-0")?.textContent?.trim() || "",
+    })),
     cards: [...sec.querySelectorAll("div.group")].map((c) => ({
       title: c.querySelector("a.text-sm, span.text-sm")?.textContent?.trim() || "",
       stars: c.querySelector('[role="img"]')?.getAttribute("aria-label") || null,
@@ -175,14 +126,33 @@ async function shelf(page, title, timeout = 45000) {
   // would render the setup page instead of Home.
   await postJSON("/api/config", { first_run_done: true });
 
+  // The rename above is a FILE change: re-walk the folder so the library rows
+  // (and Home, built from them) are the folders as they now sit on disk.
+  await api("/api/library?refresh=1");
   const lib = (await api("/api/library")).body;
-  const albums = (lib?.artists || []).flatMap((ar) => ar.albums || []);
   const byArtist = (folder) => (lib?.artists || []).find((ar) => path.basename(ar.path) === folder);
   const alpha = byArtist(ALPHA);
   const beta = byArtist(BETA);
   check("fixture: renamed artist folders are in the library",
-    !!alpha && !!beta && !!byArtist(DELTA),
-    `alpha=${!!alpha} beta=${!!beta} delta=${!!byArtist(DELTA)} of ${(lib?.artists || []).length} artists`);
+    !!alpha && !!beta,
+    `alpha=${!!alpha} beta=${!!beta} of ${(lib?.artists || []).length} artists`);
+
+  // Plays are what puts an artist on the lane. Seed a few of Alpha's own
+  // tracks through the same route the player bar calls, then ask the payload
+  // to rebuild from that history.
+  const alphaTracks = (alpha?.albums || [])
+    .flatMap((alb) => alb.tracks || [])
+    .map((tr) => tr.path)
+    .filter(Boolean)
+    .slice(0, 3);
+  const playStatuses = [];
+  for (const track of alphaTracks) {
+    playStatuses.push((await postJSON("/api/plays", { path: track })).status);
+  }
+  const seededPlays = alphaTracks.length;
+  check("store: POST /api/plays recorded the artist's plays",
+    seededPlays > 0 && playStatuses.every((s) => s === 200),
+    `${seededPlays} track(s): ${playStatuses.join(", ")}`);
 
   // Two ratings the shelf has to order between: 9 half-stars over 6.
   const rate = [];
@@ -194,50 +164,49 @@ async function shelf(page, title, timeout = 45000) {
   }
   check("store: the album ratings were accepted", rate.length === 2 && / → 200/.test(rate.join(" ")), rate.join(", "));
 
-  const seeded = await seedArtistImage(path.join(LIB, ALPHA));
-  const imageFile = seeded.body?.file ? path.join(LIB, ALPHA, seeded.body.file) : "";
-  check("api: POST /api/artist/image/upload stored the picture",
-    seeded.status === 200 && !!imageFile && fs.existsSync(imageFile),
-    `${seeded.status} ${JSON.stringify(seeded.body).slice(0, 160)}`);
-
-  // A payload built AFTER the picture exists: `has_image` is what keeps the
-  // shelf from asking for a URL that 404s.
   await api("/api/home?refresh=1");
   const home = (await api("/api/home")).body;
-  const shelfArtists = home?.top_artists || [];
+  const played = home?.top_artists || [];
+  const rated = home?.rated_albums || [];
   // A scratch port is shared real estate: another agent's server answers on it
   // just as readily, and its payload would be graded as this run's failures.
-  // The two fields this check is about say which tree is answering.
-  if (!home || !("rated" in home) || !shelfArtists.every((a) => "has_image" in a)) {
+  // `top_artists[].plays` and `rated_albums` are the fields this check is
+  // about, and they say which tree is answering.
+  if (!home || !Array.isArray(home.top_artists) || !Array.isArray(home.rated_albums)
+      || !played.every((a) => "plays" in a)) {
     console.error(`[home-artists] the server on ${BASE} is not serving this tree's ` +
-      "payload (no `rated` shelf / `has_image`) — start one against LIB on a free port.");
+      "payload (no `top_artists[].plays` / `rated_albums`) — start one against LIB on a free port.");
     process.exit(2);
   }
-  console.log("artist entries:", JSON.stringify(shelfArtists.map(
-    (a) => ({ artist: a.artist, albums: a.album_count, has_image: a.has_image }))));
-  console.log("rated entries:", JSON.stringify((home?.rated || []).map(
+  console.log("played artists:", JSON.stringify(played.map(
+    (a) => ({ artist: a.artist, plays: a.plays }))));
+  console.log("rated albums:", JSON.stringify(rated.map(
     (r) => ({ album: r.meta?.ALBUM, artist: r.artist, rating: r.rating }))));
+
   check("payload: no artist entry carries an [mbid] suffix",
-    shelfArtists.length > 0 && shelfArtists.every((a) => !/\[[0-9a-f-]{8,}\]/i.test(a.artist)),
-    shelfArtists.map((a) => a.artist).join(" | "));
-  check("payload: the tag-derived name wins and the folder name is the fallback",
-    shelfArtists.some((a) => a.artist === "Artist Alpha" && a.path.endsWith(ALPHA))
-      && shelfArtists.some((a) => a.artist === "Artist Delta"),
-    shelfArtists.map((a) => `${a.artist}${a.has_image ? " (picture)" : ""}`).join(", "));
-  check("payload: has_image is true only for the artist that has one",
-    shelfArtists.find((a) => a.path.endsWith(ALPHA))?.has_image === true
-      && shelfArtists.find((a) => a.path.endsWith(DELTA))?.has_image === false,
-    JSON.stringify(shelfArtists.map((a) => [a.artist, a.has_image])));
+    played.length > 0 && played.every((a) => !/\[[0-9a-f-]{8,}\]/i.test(a.artist)),
+    played.map((a) => a.artist).join(" | "));
+  const alphaRow = played.find((a) => a.artist === "Artist Alpha");
+  check("payload: the seeded artist is on the most-played lane with its plays",
+    !!alphaRow && alphaRow.path.endsWith(ALPHA) && alphaRow.plays >= seededPlays,
+    JSON.stringify(played.map((a) => [a.artist, a.plays])));
+  // The scratch library is shared: it may already rate other albums, so the
+  // shelf is not expected to hold only these two. Locate the fixture's own
+  // rows and grade those; their order relative to each other is the rule.
+  const alphaRated = rated.find((r) => r.artist === "Artist Alpha");
+  const betaRated = rated.find((r) => r.artist === "Artist Beta");
+  const alphaAt = rated.indexOf(alphaRated);
+  const betaAt = rated.indexOf(betaRated);
+  check("payload: rated_albums carries the two fixture ratings, best first",
+    alphaRated?.rating === 9 && betaRated?.rating === 6
+      && alphaAt >= 0 && betaAt >= 0 && alphaAt < betaAt,
+    JSON.stringify(rated.map((r) => [r.artist, r.rating])));
 
   const browser = await chromium.launch({ headless: true });
   const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 } });
   const page = await ctx.newPage();
   const errors = [];
-  const imageCalls = [];
   page.on("pageerror", (e) => errors.push(e.message));
-  page.on("response", (r) => {
-    if (r.url().includes("/api/artist/image")) imageCalls.push(`${r.status()} ${r.url()}`);
-  });
 
   // The scratch scope boots with its first-run wizard open ("/" renders the
   // setup page, so every shelf below would be measured as missing). Flipped
@@ -253,132 +222,55 @@ async function shelf(page, title, timeout = 45000) {
     await browser.close();
     process.exit(2);
   }
-  const artists = await shelf(page, "Top artists");
-  const rated = await shelf(page, "Your ratings");
+  const artists = await shelf(page, "Most played artists");
+  const albums = await shelf(page, "Rated albums");
   await page.waitForTimeout(1500);
   await page.screenshot({ path: path.join(SHOTS, "home-1440x900.png") });
   await page.screenshot({ path: path.join(SHOTS, "home-full.png"), fullPage: true });
 
-  check("page: the artist shelf rendered",
-    (artists?.artists || []).length >= 3, JSON.stringify(artists?.artists || []));
+  check("page: the most-played-artists lane rendered",
+    (artists?.artists || []).length > 0, JSON.stringify(artists?.artists || []));
   check("page: captions are clean names, not folder names",
-    (artists?.artists || []).every((a) => !/\[[0-9a-f-]{8,}\]/i.test(a.name) && !/\[[0-9a-f-]{8,}\]/i.test(a.caption)),
+    (artists?.artists || []).every((a) => !/\[[0-9a-f-]{8,}\]/i.test(a.caption)),
     (artists?.artists || []).map((a) => a.caption).join(" | "));
-  check("page: the artist picture is drawn for the artist that has one",
-    (artists?.artists || []).some((a) => a.src?.includes("/api/artist/image?") && a.decoded === true),
-    (artists?.artists || []).map((a) => `${a.name} → ${a.src}`).join(" | "));
-  check("page: that picture really came from the endpoint (200, one request)",
-    imageCalls.some((c) => c.startsWith("200 ")), JSON.stringify(imageCalls));
-  check("page: every avatar is a square tile, not a circle",
-    (artists?.artists || []).length >= 3
-      && (artists?.artists || []).every((a) => a.tile && a.tile.w === a.tile.h
-        && !/^50%|9999px/.test(a.tile.radius)),
-    JSON.stringify((artists?.artists || []).map((a) => a.tile)));
-  // Beta has a cover on disk, Delta has neither a picture nor a cover: the
-  // cover stands in for one, the placeholder for the other.
-  check("page: a folder with no picture falls back to its album cover",
-    (artists?.artists || []).some((a) => a.name === "Artist Beta"
-      && a.src?.includes("/api/cover?") && a.decoded === true),
-    (artists?.artists || []).map((a) => `${a.name} → ${a.src}`).join(" | "));
-  check("page: a folder with neither shows the placeholder, never a broken image",
-    (artists?.artists || []).every((a) => a.src === null || a.decoded === true),
-    (artists?.artists || []).map((a) => `${a.name} → ${a.src}${a.decoded === false ? " (BROKEN)" : ""}`).join(" | "));
 
-  check("page: the rated shelf rendered with the user's stars, best first",
-    (rated?.cards || []).length === 2 && /4\.5/.test(rated?.cards?.[0]?.stars || "")
-      && /3/.test(rated?.cards?.[1]?.stars || ""),
-    JSON.stringify(rated?.cards || []));
+  // The card's own title is `"<artist> · <n> play(s)"` — the same count the
+  // payload reports.
+  const card = (artists?.artists || []).find((a) => /^Artist Alpha · /.test(a.title));
+  const cardPlays = Number((card?.title || "").match(/ · ([\d,]+) play\(s\)$/)?.[1]?.replace(/,/g, ""));
+  check("page: the seeded artist's card carries its play count",
+    !!card && cardPlays === alphaRow?.plays,
+    `title=${JSON.stringify(card?.title)} payload plays=${alphaRow?.plays}`);
+
+  // The payload's `rating` is the API's 0-10 integer; StarRating draws half of
+  // it ("Album rating: 4.5 of 5"). Find the fixture's own cards — other rated
+  // albums may sit between them — and read their stars and their order.
+  const cards = albums?.cards || [];
+  const alphaCard = cards.find((c) => c.title && c.title === alphaRated?.meta?.ALBUM);
+  const betaCard = cards.find((c) => c.title && c.title === betaRated?.meta?.ALBUM);
+  const alphaCardAt = cards.indexOf(alphaCard);
+  const betaCardAt = cards.indexOf(betaCard);
+  check("page: the rated shelf rendered the fixture's stars, Alpha before Beta",
+    !!alphaRated && !!betaRated && !!alphaCard && !!betaCard
+      // StarRating prints ONE decimal ("3.0 of 5"), so the expected text is
+      // the same spelling — a bare "3 of 5" never matches a whole value.
+      && alphaCard.stars.includes(`${(alphaRated.rating / 2).toFixed(1)} of 5`)
+      && betaCard.stars.includes(`${(betaRated.rating / 2).toFixed(1)} of 5`)
+      && alphaCardAt < betaCardAt,
+    `alpha=${JSON.stringify(alphaCard)} beta=${JSON.stringify(betaCard)} ` +
+      `got=${JSON.stringify(cards)}`);
+  check("page: no uncaught page error", errors.length === 0, errors.join(" | "));
 
   // Frame the two shelves on their own, since a 900px window cannot hold every
-  // shelf Home draws (three albums alone fill a row).
-  for (const [name, title] of [["home-rated-shelf.png", "Your ratings"],
-                               ["home-artist-shelf.png", "Top artists"]]) {
+  // shelf Home draws.
+  for (const [name, title] of [["home-rated-shelf.png", "Rated albums"],
+                               ["home-artist-shelf.png", "Most played artists"]]) {
     const heading = page.locator("section h2", { hasText: title }).first();
     if (!(await heading.count())) continue;   // an empty shelf is hidden by design
     await heading.scrollIntoViewIfNeeded({ timeout: 10000 });
     await page.waitForTimeout(700);
     await page.screenshot({ path: path.join(SHOTS, name) });
   }
-
-  // Both shelves in ONE 1440×900 frame — the acceptance for this change — and
-  // measured from their own boxes rather than assumed: Home scrolls its main
-  // column, so the rated shelf has to be scrolled to the TOP of that column
-  // for the two to share a window.
-  await page.evaluate(() => {
-    const sec = [...document.querySelectorAll("section")]
-      .find((s) => s.querySelector("h2")?.textContent?.trim() === "Your ratings");
-    sec?.scrollIntoView({ block: "start" });
-  });
-  await page.waitForTimeout(700);
-  await page.screenshot({ path: path.join(SHOTS, "home-rated-and-artists.png") });
-  const framed = await page.evaluate(() => {
-    const box = (title) => {
-      const sec = [...document.querySelectorAll("section")]
-        .find((s) => s.querySelector("h2")?.textContent?.trim() === title);
-      if (!sec) return null;
-      const r = sec.getBoundingClientRect();
-      return { top: Math.round(r.top), bottom: Math.round(r.bottom) };
-    };
-    return { viewport: window.innerHeight, rated: box("Your ratings"), artists: box("Top artists") };
-  });
-  check("page: the rated shelf and the artist shelf share one 1440x900 frame",
-    !!framed.rated && !!framed.artists
-      && framed.rated.top >= 0 && framed.artists.bottom <= framed.viewport,
-    JSON.stringify(framed));
-
-  // The picture goes away AFTER the payload that promised it was built: the
-  // shelf asks for it, the server answers 404, and the cover has to take over.
-  // Read in a FRESH context — with its own empty Cache Storage — so the cover
-  // is the one the network serves and not an offline copy a previous load
-  // warmed, which is the state a browser reaching this shelf for the first
-  // time is in.
-  fs.rmSync(imageFile);
-  const reloadCalls = [];
-  const page2 = await (await browser.newContext({ viewport: { width: 1440, height: 900 } })).newPage();
-  page2.on("response", (r) => {
-    if (r.url().includes("/api/artist/image")) reloadCalls.push(r.status());
-  });
-  await page2.goto(BASE + "/", { waitUntil: "networkidle", timeout: 60000 });
-  const after = await shelf(page2, "Top artists");
-  await page2.waitForTimeout(1500);
-  const fallbackHeading = page2.locator("section h2", { hasText: "Top artists" }).first();
-  if (await fallbackHeading.count()) {
-    await fallbackHeading.scrollIntoViewIfNeeded({ timeout: 10000 });
-    await page2.waitForTimeout(700);
-    await page2.screenshot({ path: path.join(SHOTS, "home-artist-fallback.png") });
-  }
-
-  check("fallback: the deleted picture was asked for and answered 404",
-    reloadCalls.includes(404), `reload=${JSON.stringify(reloadCalls)}`);
-  // What the avatar actually paints, byte for byte: the artist's cover as
-  // /api/cover serves it, whether it arrived over the network or out of the
-  // offline copy the app warms (those entries are the only artwork in Cache
-  // Storage — an artist picture is never warmed). A `blob:` src is therefore
-  // the cover, and hashing both ends settles it without trusting the URL.
-  const alphaCard = (after?.artists || []).find((a) => a.name === "Artist Alpha");
-  const alphaSrc = String(alphaCard?.src || "");
-  const firstAlbum = (alpha?.albums || [])[0] || {};
-  const coverUrl = `/api/cover?album=${encodeURIComponent(firstAlbum.path || "")}` +
-    `&file=${encodeURIComponent(firstAlbum.cover_file || "")}`;
-  const pixels = alphaSrc ? await page2.evaluate(async ([src, cover]) => {
-    const digest = async (u) => {
-      const r = await fetch(u);
-      const buf = await r.arrayBuffer();
-      const sha = await crypto.subtle.digest("SHA-256", buf);
-      return { ok: r.ok, len: buf.byteLength, sha: [...new Uint8Array(sha)].map((b) => b.toString(16).padStart(2, "0")).join("") };
-    };
-    return { avatar: await digest(src), cover: await digest(cover) };
-  }, [alphaSrc, coverUrl]) : null;
-  check("fallback: the avatar is no longer the artist picture",
-    !!alphaSrc && !alphaSrc.includes("/api/artist/image") && alphaCard?.decoded === true,
-    `src=${alphaSrc} decoded=${alphaCard?.decoded}`);
-  check("fallback: what it paints is that album's cover, byte for byte",
-    !!pixels && pixels.cover.ok && pixels.avatar.ok && pixels.avatar.sha === pixels.cover.sha,
-    JSON.stringify(pixels));
-  check("fallback: nothing on the shelf is left undecoded",
-    (after?.artists || []).every((a) => a.src === null || a.decoded === true),
-    (after?.artists || []).map((a) => `${a.name} → ${a.src}`).join(" | "));
-  check("page: no uncaught page error", errors.length === 0, errors.join(" | "));
 
   await browser.close();
 

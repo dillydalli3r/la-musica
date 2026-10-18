@@ -7903,8 +7903,9 @@ adds no check. The release-choice, YouTube and locale keys are not grade keys
 either — they choose
 which file a verdict is later computed on, never the verdict itself:
 `prefer_disc_streams` and the other release-choice keys (R84/R85, including
-`auto_import_medium_order` — R246), `youtube_*`
-(R76), and `locale` (R87).
+`auto_import_medium_order` — R246) and `locale` (R87). The `tag_refresh_*` keys
+(R448) schedule when MusicBrainz data is re-pulled; they never change a
+verdict, only how fresh the values a verdict reads are.
 
 Three keys that write outside the grade are not in the table for the same
 reason: `playlist_import_parent_albums`, `playlist_import_unmatched` and
@@ -9285,6 +9286,81 @@ dialog appearing before its rows are read.
   no longer waits on one `/api/album` per album. An import run's ONE notice is
   published at the run's own end (`events.flush_coalesced` after its terminal
   step) instead of waiting out the coalescer's quiet window.
+
+### 7.86 An import's last word is the release, Home is for listening, and a drop anywhere imports
+
+- **R447 — an import refreshes the release's tags at its END, forced or not.**
+  The owner's report (2026-10-17): an album tagged `12" Vinyl` was re-pointed
+  at its CD release in Import & Link, the chain ran with Force, and MEDIA stayed
+  Vinyl. The link writer writes the LINK; the release identity was an
+  import-only step that the wizard's Finish/Run all path (which runs SCRIPTS)
+  never reached. Now: `/api/import/commit` stamps the release identity from the
+  payload the wizard already fetched (MEDIA included, `explicit=True`), and
+  every import — and the wizard's own runs through `POST /api/import/refresh`
+  — ends by re-reading the release the album NAMES and stamping it. A refresh
+  with no MusicBrainz link answers `skipped` with its reason, never invents a
+  release. The same refresh also corrects per-track ids that contradict the
+  release and writes the pull stamp below.
+- **R448 — MusicBrainz freshness lives IN THE FILES, and refreshes are
+  album-granular.** Every writer that lands MusicBrainz values (script 8's
+  per-track pass, the import's release stamp, a scheduled refresh) writes
+  `MUSICBRAINZ_UPDATED` — ISO-8601 UTC — on the file. An album's age is its
+  OLDEST track's stamp, and one missing stamp makes the whole album due; a
+  refresh re-reads the release once and stamps every track, so an album can
+  never be half-updated. No SQL table: a moved or restored library keeps its
+  history with it. MAINTAIN → Tags shows the library, per artist and per
+  album (expanding to every track), with `tag_refresh_enabled` /
+  `tag_refresh_days` / `tag_refresh_workers` /
+  `tag_refresh_interval_minutes` deciding a scheduler that is OFF until the
+  user asks. SPEED IS PART OF THE CONTRACT: a refresh opens each file once and
+  writes its identity and the pull stamp in ONE container save (no second
+  stamping pass); a file whose stamp is under an hour old and that gained
+  nothing is not rewritten at all; and a job ending does not rebuild the
+  library tree — the page's rows take the job's own fresh stamps, while the
+  per-album tag caches mark the assembled tree for its ordinary
+  stale-while-revalidate pass. Measured on a scratch album: 0.17 s for a
+  3-track first refresh, 3 ms for an immediate repeat, and a Tags read in
+  0.24 s. The queue is bounded: albums are taken a few at a time
+  (`tag_refresh_workers`, default 4), each under the library's own per-album
+  claim, and a refresh never starts the whole library at once or a second job
+  beside one already running. MusicBrainz's own 1 req/s etiquette still holds
+  globally.
+- **R449 — Home is a listener's page.** It is built from what people listen
+  to: most-played tracks / albums / artists / playlists (the play store, with
+  the playlist a queue came from recorded on the play), genres and MOOD lanes
+  (the library's own tags, ranked by plays), the caller's own rated tracks /
+  albums / artists (the ratings store), then recent, favourites, podcasts and
+  a rediscovery slice. The maintenance shelves left it — no grade strip, no
+  needs-attention, no pending albums, no most-collected-artists — because the
+  Library, Grading and In-progress pages own those questions. A shelf with
+  nothing real behind it is not drawn.
+- **R450 — Browse is gone, and smart playlists are built where playlists
+  live.** The sidebar has no Browse entry; the query builder opens from the
+  Playlists page ("Build rules…") and saves the same `{conditions, match}`
+  spec a saved smart playlist stores, so the rule editor and the playlist page
+  evaluate one query model.
+- **R451 — a play press queues a WINDOW, not the library.** The Library,
+  artist and favourites surfaces hand `playWindow` (40 back / 260 ahead) to the
+  player instead of mapping every track (the owner's "track view lags the
+  machine" with a moderately large library: three copies of the library per
+  press, including the persisted restore record, which now also carries a
+  window). The player itself warms the NEXT TWO queue rows through the same
+  `playbackSource` resolution the audible load uses — a skip or a handover
+  starts on bytes already fetched, and a tag write or a script run cannot
+  stutter the next track.
+- **R452 — a drop ANYWHERE is an import.** Files, folders, nested folders and
+  archives dropped on any page are read during the drop event (the browser
+  API goes stale afterwards), carried across the route change, and handed to
+  the wizard's own album detection; the desktop shell's OS drop reports PATHS
+  and takes the same route. The wizard's own listener keeps its page-local
+  behaviour.
+- **R453 — a recommendation must be able to say WHY it is there.** A candidate
+  qualifies only on a strong listening signal — a shared SPECIFIC genre, the
+  same MOOD, energy within 25, or the same artist — never on era or a family
+  alone (a score floor catches the pairs several weak terms agree on). Fewer
+  than two qualifying rows means the shelf is EMPTY rather than padded; a
+  queue extension asks for its own minimum (one row still keeps the music
+  going).
 
 ---
 

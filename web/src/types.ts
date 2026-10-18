@@ -1270,36 +1270,72 @@ export interface WishesPayload {
 }
 
 /** Home page payload: library highlights. */
+/** One Home track row: what a listener clicks (MAINTAIN-free — the shelves
+ *  rank by plays and the caller's own stars). */
+export interface HomeTrack {
+  kind: "track";
+  path: string;
+  file?: string;
+  title: string;
+  artist: string;
+  album: string;
+  album_path: string;
+  cover_file?: string | null;
+  album_cover?: string | null;
+  duration?: number | null;
+  plays: number;
+  rating?: number | null;
+  in_library: boolean;
+}
+
+/** One artist lane on Home, ranked by PLAYS (not by how many albums the
+ *  library happens to hold — that was the maintenance shelf). */
+export interface HomePlayedArtist extends HomeArtist {
+  plays: number;
+  rating?: number | null;
+}
+
+export interface HomePlaylistRow {
+  kind: "playlist";
+  id: number;
+  name: string;
+  kind_of?: string;
+  track_count?: number;
+  plays: number;
+  path: string;
+}
+
+/** A genre or mood lane: the name, its footprint, and a few album cards. */
+export interface HomeLane {
+  name: string;
+  tracks: number;
+  plays: number;
+  albums: HomeAlbum[];
+}
+
 export interface HomeData {
   stats: {
     artists: number;
     albums: number;
     tracks: number;
     playlists: number;
-    grade_pct: number | null;
+    plays?: number;
   };
   recent: HomeAlbum[];
-  top_rated: HomeAlbum[];
-  /** The user's own rated releases, highest rating first. The row carries the
-   *  stored rating in HALF-STARS — the API's own unit (0-10), which
-   *  `lib/ratings.ts` is the one place to turn into the 0-5 a reader sees — so
-   *  the shelf's order and the stars on its cards come from one number. */
-  rated?: (HomeAlbum & { rating: number })[];
   favorites: HomeAlbum[];
-  discover: HomeAlbum[];
-  top_artists: HomeArtist[];
-  /** One row per podcast SERIES the library holds, its newest episode on it.
-   *  Empty (and so the shelf is not drawn) unless the library has a podcast:
-   *  the identity comes from the episodes' own tags, never from MusicBrainz. */
+  rediscover: HomeAlbum[];
   podcasts?: HomePodcast[];
-  needs_attention: HomeAlbum[];
-  /** Every album added but not downloaded yet, newest first — the one shelf a
-   *  user can read to see everything still waiting. */
-  pending?: HomeAlbum[];
-  /** Whether the library passes its grading checks, and what fails — the SAME
-   *  object `/api/grades/summary` serves, so the strip on Home and the one on
-   *  the Library page cannot disagree about the library's own verdict. */
-  grade_warning?: GradeWarning;
+  /** Genres, most listened first, each with a handful of its albums. */
+  genres: HomeLane[];
+  /** MOOD lanes, same shape. */
+  moods: HomeLane[];
+  top_tracks: HomeTrack[];
+  top_albums: (HomeAlbum & { plays: number })[];
+  top_artists: HomePlayedArtist[];
+  top_playlists: HomePlaylistRow[];
+  rated_albums: (HomeAlbum & { rating: number; plays?: number })[];
+  rated_tracks: HomeTrack[];
+  rated_artists: HomePlayedArtist[];
 }
 
 export interface HomeArtist {
@@ -2092,3 +2128,33 @@ export interface LastfmWriteResult {
   reason?: string;
   error?: string;
 }
+
+/** One album's MusicBrainz freshness (MAINTAIN → Tags). */
+export type TagAlbum = {
+  path: string; artist: string; album: string; release: string;
+  tracks: number; missing: number; oldest: string | null;
+  newest: string | null; due: boolean; pending: boolean;
+};
+export type TagArtist = {
+  artist: string; albums: number; due: number; tracks: number;
+  oldest: string | null; newest: string | null; missing: number;
+};
+export type TagJob = {
+  id: string; source: string; status: "running" | "done" | "error";
+  started: number; finished: number | null; total: number; done: number;
+  refreshed: number; written: number; current: string; workers: number;
+  skipped: { path: string; reason: string }[];
+  errors: { path: string; error: string }[];
+};
+export type TagAlbumDetail = {
+  path: string; artist: string; album: string; release: string;
+  oldest: string | null; newest: string | null; missing: number; due: boolean;
+  tracks: { path: string; title: string; pulled: string }[];
+};
+export type TagStatus = {
+  days: number; cutoff: string;
+  albums: TagAlbum[]; artists: TagArtist[];
+  counts: { albums: number; tracks: number; due: number; never: number; unlinked: number };
+  oldest: string | null; job: TagJob | null; scheduled: boolean;
+  interval_minutes: number; last_auto: number;
+};

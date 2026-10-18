@@ -21,6 +21,9 @@ import type {
   ImportPrompt,
   ImportScriptsPreview,
   ImportSession,
+  TagAlbumDetail,
+  TagJob,
+  TagStatus,
   ImportSettleResult,
   ImportSourceResult,
   LastfmConnect,
@@ -1946,12 +1949,42 @@ export const api = {
     ),
   /** Store the album's MusicBrainz link — the Links step's one pass over the
    *  album. */
-  importCommit: (targetDir: string, mbLink?: string, staged = false) =>
-    json<{ ok: boolean; changed: number }>(`${API}/import/commit`, {
+  importCommit: (targetDir: string, mbLink?: string, staged = false, release?: unknown) =>
+    json<{
+      ok: boolean; changed: number; release?: string | null;
+      refreshed?: { release?: string | null; identity?: { written: number; skipped: number; failed: number } | null; tracks?: number; skipped?: boolean; reason?: string };
+    }>(`${API}/import/commit`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ target_dir: targetDir, mb_link: mbLink || null, staged }),
+      body: JSON.stringify({ target_dir: targetDir, mb_link: mbLink || null, staged, release: release ?? null }),
     }),
+  /** Refresh the release identity of albums whose MusicBrainz link changed —
+   *  the end-of-run stamp the wizard sends after its scripts, forced or not.
+   *  The album's OWN link names the release; nothing is invented. */
+
+  /** MAINTAIN → Tags: the MusicBrainz freshness read off the files' own
+   *  MUSICBRAINZ_UPDATED stamps (server.tag_refresh). */
+  tagsStatus: (days?: number, refresh = false) =>
+    json<TagStatus>(`${API}/tags/status?${days ? `days=${days}&` : ""}${refresh ? "refresh=1" : ""}`),
+  tagsAlbum: (path: string) =>
+    json<TagAlbumDetail>(`${API}/tags/album?path=${encodeURIComponent(path)}`),
+  tagsRefresh: (paths: string[] = [], due = true) =>
+    json<{ job: TagJob | null; started: boolean; reason: string }>(`${API}/tags/refresh`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ paths, due }),
+    }),
+  tagsJob: () => json<{ job: TagJob | null }>(`${API}/tags/job`),
+  importRefresh: (paths: string[], staged = false) =>
+    json<{ albums: { path: string; release?: string | null; identity?: { written: number; skipped: number; failed: number } | null; tracks?: number; skipped?: boolean; reason?: string }[] }>(
+      `${API}/import/refresh`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ paths, staged }),
+      },
+      300000
+    ),
   /** Record the release's full tracklist on the album, so a PARTIAL import
    *  can grey out the tracks that never came in. Empty tracks clears it. */
   importExpected: (
@@ -2819,13 +2852,13 @@ export const api = {
    *  reports a play to, called when a track actually starts (never on a seek
    *  or a resume; a repeat is a play). Deliberately not awaited by the player:
    *  the row is a statistic, and a slow server must not delay the audio. */
-  recordPlay: (path: string) =>
+  recordPlay: (path: string, playlist = "") =>
     json<{ ok: boolean; path: string; album: string; started_at: number }>(
       `${API}/plays`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path }),
+        body: JSON.stringify({ path, playlist }),
       },
       20000
     ),

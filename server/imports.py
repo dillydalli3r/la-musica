@@ -1334,6 +1334,13 @@ def _finish_album(path, cfg, progress=None, force=None, release=None,
         # user can never clear is a trap, not a warning.
         out["note"] = _with_families(_chain_off_note(cfg), out["skipped_families"])
         _invalidate_caches(path)        # the steps above wrote tags/files
+        # ...and the release the album names, refreshed at the END like every
+        # other exit (see `refresh_release_tags`): a chain that is switched off
+        # must not be the one path that leaves a stale MEDIA behind.
+        try:
+            out["refreshed"] = refresh_release_tags(path, release=release, cfg=cfg)
+        except Exception:
+            traceback.print_exc()
         _clear_pending(path, cfg, chained=False, chain_off=True)
         return out
 
@@ -1431,6 +1438,19 @@ def _finish_album(path, cfg, progress=None, force=None, release=None,
     # a script may have moved it): the tag and cover caches for anything else in
     # the library are still valid, so they stay.
     _invalidate_caches(path, out["path"])
+    # THE RELEASE'S OWN DATA, refreshed at the END, always — forced or not.
+    # The chain writes what its scripts write; the release the album names is
+    # the identity every reader (grader, naming script, album page) compares
+    # against, so the last word on an import is MusicBrainz's own payload.
+    # Resolved from the FINAL folder's tags: a re-pointed link, or a script
+    # that moved the album, is exactly what this has to see.
+    try:
+        out["refreshed"] = refresh_release_tags(out["path"], release=release,
+                                                cfg=cfg)
+        if out["refreshed"].get("skipped") and out["refreshed"].get("reason"):
+            print(f"[mlo] import: refresh skipped — {out['refreshed']['reason']}")
+    except Exception:
+        traceback.print_exc()
     # The configured chain has run, over the folder it left the album at — only
     # now is a framework album finished (`chained=True`), and only on the FINAL
     # path: the marker lives inside the album, so clearing it on a stale one
@@ -4609,7 +4629,8 @@ def _release_for_stamping(release):
     return rel
 
 
-def _stamp_release_identity(album_dir, release, cfg, explicit=False):
+def _stamp_release_identity(album_dir, release, cfg, explicit=False,
+                            always_stamp=False, fresh_within=0.0):
     """Fill the album's own release identity from the release the import holds.
 
     MEDIA (the medium the release is pressed on — CD, Vinyl, SACD, Cassette,
@@ -4643,7 +4664,109 @@ def _stamp_release_identity(album_dir, release, cfg, explicit=False):
     files = _audio_files(album_dir)
     if not files:
         return {"written": 0, "skipped": 0, "failed": 0}
-    return fill_release_identity(files, release, cfg, explicit=explicit)
+    return fill_release_identity(files, release, cfg, explicit=explicit,
+                                 always_stamp=always_stamp,
+                                 fresh_within=fresh_within)
+
+REFRESH_IDLE_SECONDS = 3600
+
+
+def refresh_release_tags(album_dir, release=None, cfg=None):
+    """Pull this album's release from MusicBrainz and land its facts — THE
+    end-of-import refresh, and the scheduled tag update's worker body.
+
+    The owner's report (2026-10-17): an album tagged ``12" Vinyl`` was
+    re-pointed at its CD release in Import & Link, the chain ran with Force,
+    and MEDIA stayed Vinyl. The link writer only writes the LINK; the release
+    identity is an import step, and the wizard's Finish/Run all path runs
+    SCRIPTS — so nothing re-read the release the album now named. This function
+    is that re-read, called at the end of every import and after the wizard's
+    own runs: the release the album names is fetched (cached) and
+
+    * its identity is stamped FORCE (the link IS the user's choice — MEDIA,
+      label, catalogue number, barcode, country), and
+    * its per-track ids/titles are corrected when they contradict it, and
+    * every file gets ``MUSICBRAINZ_UPDATED`` — the "when this album's data
+      was pulled" stamp MAINTAIN → Tags reads.
+
+    ``release`` skips the lookup when the caller already holds the payload (the
+    wizard has it: the album's link was just fetched). An album with no
+    MusicBrainz id in its tags is left alone and says so — there is nothing to
+    refresh from, and inventing a release is worse than none.
+
+    Returns ``{"release", "identity", "tracks", "skipped", "reason"}``;
+    never raises for a missing folder or a MusicBrainz outage — the caller
+    reports it.
+    """
+    cfg = cfg or load_config()
+    path = os.path.normpath(str(album_dir or ""))
+    if not path or not os.path.isdir(path):
+        return {"release": None, "identity": None, "tracks": 0,
+                "skipped": True, "reason": "album folder not found"}
+    rel = release
+    if not rel:
+        try:
+            album_mbid, album_rgid = _album_mbids(path)
+        except Exception:
+            album_mbid = album_rgid = ""
+        if not (album_mbid or album_rgid):
+            return {"release": None, "identity": None, "tracks": 0,
+                    "skipped": True,
+                    "reason": "the album's tags name no MusicBrainz release"}
+        try:
+            from server import integrations as intg
+            rel, _rid = intg.resolve_release(album_mbid or album_rgid)
+        except Exception as e:  # noqa: BLE001 — reported, never fatal
+            return {"release": None, "identity": None, "tracks": 0,
+                    "skipped": True,
+                    "reason": f"MusicBrainz did not answer: {e}"}
+        if not rel:
+            return {"release": None, "identity": None, "tracks": 0,
+                    "skipped": True,
+                    "reason": "MusicBrainz knows no such release"}
+    # A repeat press over an album this process just refreshed: ONE file's
+    # stamp answers it, without opening (or rewriting) the rest. The album id
+    # check keeps a re-pointed link from taking the fast path — those files
+    # must be stamped from the new release.
+    files = _audio_files(path)
+    if files:
+        try:
+            from mlo.audio import AudioFile
+            first = AudioFile(files[0])
+            have = str(first.get_tag("MUSICBRAINZ_UPDATED") or "").strip()
+            same = str(first.get_tag("MUSICBRAINZ_ALBUMID") or "").strip() == str(rel.get("id") or "")
+            from datetime import datetime, timezone
+            seen = datetime.strptime(have, "%Y-%m-%dT%H:%M:%SZ").replace(
+                tzinfo=timezone.utc).timestamp()
+            if same and seen and (
+                    datetime.now(timezone.utc).timestamp() - seen < REFRESH_IDLE_SECONDS):
+                return {"release": rel.get("id"), "identity": None,
+                        "tracks": 0, "skipped": True,
+                        "reason": "refreshed moments ago"}
+        except (TypeError, ValueError):
+            pass
+    identity = None
+    try:
+        # FILL-ONLY except the medium, in ONE container write per file: the
+        # owner's report is about a tag that kept describing the pressing the
+        # album left, so the release's own MEDIUM is the one value a refresh
+        # may replace. A catalogue number or label the user typed stays theirs
+        # (`fill_release_identity`), which is also why this does NOT use
+        # `_stamp_mb_tags` — that writer FORCES the whole identity block,
+        # right for an import, wrong for a scheduled pass over hand-edited
+        # tags. `always_stamp` writes MUSICBRAINZ_UPDATED in the SAME save
+        # (the pull happened even when the release had nothing new to say),
+        # and `fresh_within` makes a repeat press a no-op instead of rewriting
+        # every file for a date it just wrote.
+        identity = _stamp_release_identity(
+            path, rel, cfg, explicit=True, always_stamp=True,
+            fresh_within=REFRESH_IDLE_SECONDS)
+    except Exception:
+        traceback.print_exc()
+    tracks = int((identity or {}).get("written") or 0)
+    _invalidate_caches(path)
+    return {"release": rel.get("id"), "identity": identity, "tracks": tracks,
+            "skipped": False, "reason": ""}
 
 
 def _record_release_manifest(album_dir, release, force=False):

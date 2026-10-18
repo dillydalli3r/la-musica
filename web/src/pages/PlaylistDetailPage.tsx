@@ -167,7 +167,7 @@ export default function PlaylistDetailPage() {
   const enqueue = (position: "next" | "end") => {
     if (!queueTracks.length) return;
     if (!queue.length) {
-      playNow(queueTracks);
+      playNow(queueTracks, 0, String(pid));
       return;
     }
     queueAdd(queueTracks, position);
@@ -383,7 +383,7 @@ export default function PlaylistDetailPage() {
                     )}
                     <button
                       className="btn-icon-primary"
-                      onClick={() => queueTracks.length && playNow(queueTracks)}
+                      onClick={() => queueTracks.length && playNow(queueTracks, 0, String(pid))}
                       title="Play the playlist from the top"
                       aria-label="Play playlist"
                     >
@@ -561,7 +561,7 @@ export default function PlaylistDetailPage() {
                       onClick={() =>
                         selectMode
                           ? togglePick(t)
-                          : queueTracks.length && playNow(queueTracks, Math.min(i, queueTracks.length - 1))
+                          : queueTracks.length && playNow(queueTracks, Math.min(i, queueTracks.length - 1), String(pid))
                       }
                     >
                       {selectMode && (

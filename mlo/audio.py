@@ -491,6 +491,16 @@ TAG_MAP = {
         "mp3": ("TXXX", "MusicBrainz Release Group Id"),
         "mp4": ("freeform", "com.apple.iTunes", "MusicBrainz Release Group Id"),
     },
+    # WHEN MusicBrainz's own data for this track was last pulled and applied.
+    # An ISO-8601 UTC stamp, written by every writer that lands MB values
+    # (script 8's per-track pass, the import's release stamp, a scheduled tag
+    # refresh). MAINTAIN -> Tags reads it: an album's age is its OLDEST
+    # track's stamp, and the scheduler updates whole albums, never tracks.
+    "MUSICBRAINZ_UPDATED": {
+        "flac": "MUSICBRAINZ_UPDATED",
+        "mp3": ("TXXX", "MusicBrainz Updated"),
+        "mp4": ("freeform", "com.apple.iTunes", "MusicBrainz Updated"),
+    },
     # The id of this track's POSITION on this release (distinct from
     # MUSICBRAINZ_TRACKID, the recording): the naming script offers both, and
     # beets/Picard write this one to every file they touch.

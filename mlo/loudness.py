@@ -155,7 +155,7 @@ def _scan_replaygain(rsgain_exe, files, skip_existing):
     return per_file, album, ""
 
 
-def _album_rg_complete(files):
+def _album_rg_complete(opened):
     """True when EVERY track already carries all four ReplayGain tags.
 
     rsgain's ``-S`` skips a file that carries ANY ReplayGain tag — track only
@@ -164,10 +164,15 @@ def _album_rg_complete(files):
     "Missing REPLAYGAIN_ALBUM_GAIN" on an album every file of which already
     carried track values). Skipping is therefore a per-ALBUM decision: only
     when all four tags are already on every file is there nothing to compute.
+
+    *opened* is the album's {path: AudioFile | None} map from
+    _open_album_files: the DR pass then reuses these same handles instead of
+    opening every container a second time just to read its tags.
     """
-    for path in files:
+    for af in opened.values():
+        if af is None:
+            return False
         try:
-            af = AudioFile(path)
             for tag in ("REPLAYGAIN_TRACK_GAIN", "REPLAYGAIN_TRACK_PEAK",
                         "REPLAYGAIN_ALBUM_GAIN", "REPLAYGAIN_ALBUM_PEAK"):
                 if not str(af.get_tag(tag) or "").strip():
@@ -249,7 +254,7 @@ def _album_needs_dr(opened):
 
 
 def _dr_album(album, ffmpeg_exe, force, write_tags=True, config=None, rg=None,
-              lanes=1, names=None):
+              lanes=1, names=None, opened=None):
     """Measure the album's tracks in process; write the DR tags.
 
     *rg* is ``{path: {tag: value}}`` from _scan_replaygain, already filtered by
@@ -269,6 +274,11 @@ def _dr_album(album, ffmpeg_exe, force, write_tags=True, config=None, rg=None,
     (the walk that found the album — see _album_dirs), so the folder is listed
     once per run, not once here on top of it.
 
+    *opened* is the album's {path: AudioFile | None} map the caller already
+    holds. The skip-existing ReplayGain check has to parse every track anyway,
+    so handing those handles over keeps the DR pass from opening every
+    container a second time; without it the album is opened here as before.
+
     Returns (files_modified, [(name, reason)]). A track the meter has no value
     for — silent, shorter than two blocks — is logged by name and simply
     carries no per-track tag, which is a skip and not a failure of the run;
@@ -279,11 +289,15 @@ def _dr_album(album, ffmpeg_exe, force, write_tags=True, config=None, rg=None,
     counting the album as finished with a tag missing.
     """
     rg = rg or {}
-    opened = _open_album_files(album, names)
-    if not opened or not (force or rg or _album_needs_dr(opened)):
+    if opened is None:
+        opened = _open_album_files(album, names)
+    if not opened:
+        return 0, []
+    missing_dr = _album_needs_dr(opened)
+    if not (force or rg or missing_dr):
         return 0, []
 
-    measure = bool(force or _album_needs_dr(opened))
+    measure = bool(force or missing_dr)
     values = {}
     failures = []
     album_value = None
@@ -558,13 +572,23 @@ def run_calc_dr_replaygain(config):
         # second listing of the folder here, ever (see _album_dirs): the
         # ReplayGain scan and the DR pass work on the SAME list.
         files = albums.get(album_path) or []
+        names = [os.path.basename(p) for p in files]
+        # The skip-existing check parses every track, and the DR pass writes
+        # through the same containers: open the album ONCE and hand the
+        # handles to both, instead of opening it again for every tag question.
+        opened = None
         if rsgain:
             # Skip the album only when ALL FOUR tags are already on every file:
             # rsgain's own -S skips a track that carries any ReplayGain tag, so
             # handing it an album that has track values but no album ones made
             # it print nothing and the album tags were never written.
-            if skip_existing and _album_rg_complete(files):
-                per_file, album_rg, err = {}, {}, ""
+            if skip_existing:
+                opened = _open_album_files(album_path, names)
+                if _album_rg_complete(opened):
+                    per_file, album_rg, err = {}, {}, ""
+                else:
+                    per_file, album_rg, err = _scan_replaygain(
+                        rsgain["rsgain_exe"], files, False)
             else:
                 per_file, album_rg, err = _scan_replaygain(
                     rsgain["rsgain_exe"], files, False)
@@ -585,7 +609,7 @@ def run_calc_dr_replaygain(config):
             dr_modified, dr_failures = _dr_album(
                 album_path, ffmpeg["ffmpeg_exe"], force,
                 write_tags=write_dr, config=config, rg=rg, lanes=workers,
-                names=[os.path.basename(p) for p in files])
+                names=names, opened=opened)
             amod += dr_modified
             failures = dr_failures
         elif rg:

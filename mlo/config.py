@@ -1441,6 +1441,18 @@ DEFAULT_CONFIG = {
 
     # Home — the library highlight shelves on the sidebar's Home section.
     "home_recent_count": 12,
+
+    # MAINTAIN → Tags: the MusicBrainz pull stamps every writer puts in the
+    # files (MUSICBRAINZ_UPDATED). The scheduler is OFF until the user asks:
+    # a background pass that calls MusicBrainz is a decision, and turning it on
+    # by default would start one on the first launch of every install.
+    # `tag_refresh_days` is the AGE at which an album is due (its oldest
+    # track's stamp), `tag_refresh_workers` how many albums the queue refreshes
+    # at once, `tag_refresh_interval_minutes` how often the scheduler looks.
+    "tag_refresh_enabled": False,
+    "tag_refresh_days": 7,
+    "tag_refresh_workers": 4,
+    "tag_refresh_interval_minutes": 60,
     # How often the library refreshes ITSELF, in minutes (server.library_refresh).
     # A refresh re-walks the library, re-runs the file-structure (layout) scan
     # and stores its report — the same full pass the Home/Library Refresh button
@@ -1747,6 +1759,9 @@ _INT_RANGES = {
     "cover_png_target_size": (0, 4000),
     "cover_jxl_target_size": (0, 4000),
     "home_recent_count": (4, 60),
+    "tag_refresh_days": (1, 3650),
+    "tag_refresh_workers": (1, 16),
+    "tag_refresh_interval_minutes": (5, 1440),
     # The self-refresh interval (0 = off, see DEFAULT_CONFIG).
     "library_refresh_minutes": (0, 1440),
     "artist_image_target_size": (0, 4000),

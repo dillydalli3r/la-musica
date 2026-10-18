@@ -169,6 +169,16 @@ export default function AlbumPage() {
   // Whether the album-description check grades this folder (Settings →
   // Grading). The config is already in the app-wide cache, so this is free.
   const { data: config } = useQuery({ queryKey: ["config"], queryFn: api.config });
+  // WHEN this album's MusicBrainz data was last pulled — read from the files'
+  // own MUSICBRAINZ_UPDATED stamps (server.tag_refresh). The row is the
+  // album's OLDEST track (one unfilled track makes the album due), and the
+  // chip links to MAINTAIN → Tags where it can be refreshed on demand.
+  const tagPull = useQuery({
+    queryKey: ["tagsAlbum", data?.path ?? ""],
+    queryFn: () => api.tagsAlbum(data?.path ?? ""),
+    enabled: !!data?.path && !!data?.meta?.MUSICBRAINZ_ALBUMID,
+    staleTime: 60_000,
+  });
   // One GET /api/ratings per scope for the whole page (react-query dedupes it
   // across every row) and the optimistic setters the star controls share. The
   // header needs the ALBUM scope beside the track one: the user's verdict on
@@ -791,6 +801,27 @@ export default function AlbumPage() {
                       "MUSICBRAINZ_ALBUMID",
                     ]}
                   />
+                  {/* MusicBrainz freshness: the OLDEST track's pull stamp.
+                      No stamp on an album that names a release is "never
+                      pulled" — said outright, because an import that skipped
+                      the refresh must not look current. */}
+                  {data.meta?.MUSICBRAINZ_ALBUMID && tagPull.data && (
+                    <Link
+                      to="/tags"
+                      className={`text-[11px] inline-flex items-center gap-1 rounded-full border px-2 py-0.5 tap ${
+                        tagPull.data.due
+                          ? "border-amber-800/60 bg-amber-950/30 text-amber-200/90"
+                          : "border-border text-zinc-500 hover:text-zinc-300"
+                      }`}
+                      title={`MusicBrainz data last pulled: oldest track ${tagPull.data.oldest ?? "never"}${tagPull.data.missing ? ` · ${tagPull.data.missing} track(s) never pulled` : ""}. Click to manage tag freshness.`}
+                    >
+                      <Tags className="h-3 w-3" />
+                      {tagPull.data.oldest
+                        ? `MB ${new Date(tagPull.data.oldest).toLocaleDateString()}`
+                        : "MB never pulled"}
+                      {tagPull.data.due && <span>· due</span>}
+                    </Link>
+                  )}
                 </div>
                 {/* WHAT AN IMPORT COULD NOT SUPPLY (server.import_autonomy):
                     the album is IN the library either way — this is a warning,
