@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import type { ReactNode } from "react";
 import { AlertTriangle, Cloud, HardDrive, Loader2, Server } from "lucide-react";
 import PageHeader from "../components/PageHeader";
 import { useI18n } from "../lib/i18n";
@@ -23,12 +24,35 @@ import SetupRail from "../components/SetupRail";
  *  shell spawn the server and navigate this window once it answers — so this
  *  page must never navigate or reload itself: it just shows that starting is
  *  under way. The remote path hands off to the existing wizard via `onDone`.
+ *
+ *  `starting` is the same screen for a shell that has ALREADY answered the
+ *  question and is simply bringing its built-in backend up (a later launch,
+ *  a cold Python start): there is nothing to decide, so the buttons give way
+ *  to the body `startingScreen` supplies — the frame, the title and the rail
+ *  stay, which is what makes the boot read as the same flow rather than as a
+ *  blank window.
  */
-export default function BackendChoice({ onDone, starting: startingProp = false }: { onDone: () => void; starting?: boolean }) {
+export default function BackendChoice({
+  onDone,
+  starting: startingProp = false,
+  failed: failedProp = false,
+  startingScreen,
+}: {
+  onDone: () => void;
+  starting?: boolean;
+  /** The shell's backend is known to be down (the chooser is being shown for
+   *  that reason rather than for an unanswered question): the failure panel
+   *  opens instead of the buttons. */
+  failed?: boolean;
+  /** What a shell in LOCAL mode shows while its backend boots — App hands it
+   *  the app's own splash body. Omitted, the built-in "starting" body is
+   *  drawn. */
+  startingScreen?: ReactNode;
+}) {
   const { t } = useI18n();
   const [busy, setBusy] = useState<"local" | "remote" | null>(null);
   const [starting, setStarting] = useState(startingProp);
-  const [failed, setFailed] = useState(false);
+  const [failed, setFailed] = useState(failedProp);
   const [error, setError] = useState("");
 
   // The shell's own answer arrives as an event, and this page may be the one
@@ -52,6 +76,10 @@ export default function BackendChoice({ onDone, starting: startingProp = false }
     };
   }, []);
 
+  // The shell is starting its own backend: nothing to choose, and a start the
+  // shell reports does not need this page's record of it.
+  const booting = starting && !failed;
+
   const pick = async (mode: "local" | "remote") => {
     if (busy) return;
     setBusy(mode);
@@ -71,29 +99,44 @@ export default function BackendChoice({ onDone, starting: startingProp = false }
     onDone();
   };
 
+  const rail = (
+    <SetupRail
+      steps={STEP_IDS}
+      current="server"
+      labels={{
+        server: t("client.step_server"),
+        account: t("client.step_account"),
+        notifications: t("client.step_notifications"),
+        done: t("client.step_done"),
+      }}
+    />
+  );
+
   return (
     <div className="safe-shell min-h-full bg-bg text-zinc-100 flex flex-col items-center justify-center">
       <div className="w-full max-w-2xl space-y-4 p-6">
-        <PageHeader icon={Server} title={t("backend.title")} subtitle={t("backend.subtitle")} />
+        <PageHeader
+          icon={Server}
+          title={booting ? t("backend.starting_title") : t("backend.title")}
+          subtitle={booting ? t("backend.starting_hint") : t("backend.subtitle")}
+        />
 
         {/* The SAME rail as the wizard this leads into, so answering the
             question reads as step 1 of one flow rather than as a screen with
             its own menu: "a server" continues on step 2, and the
             built-in path leaves the shell for the app's own first run, whose
             rail is drawn by the same component. */}
-        <SetupRail
-          steps={STEP_IDS}
-          current="server"
-          labels={{
-            server: t("client.step_server"),
-            account: t("client.step_account"),
-            notifications: t("client.step_notifications"),
-            done: t("client.step_done"),
-          }}
-        />
+        {rail}
 
         <div className="panel p-6 space-y-4">
-          {failed ? (
+          {booting ? (
+            startingScreen ?? (
+              <div className="flex flex-col items-center gap-3 py-6 text-center">
+                <Loader2 className="h-6 w-6 animate-spin text-accent" />
+                <p className="text-xs text-zinc-400 leading-relaxed max-w-md">{t("backend.starting_hint")}</p>
+              </div>
+            )
+          ) : failed ? (
             /* The shell was in local mode and its backend did not come up (no
                bundled server, no free loopback port) — or it died while this
                screen was waiting. Staying on the spinner forever was the old
@@ -126,12 +169,6 @@ export default function BackendChoice({ onDone, starting: startingProp = false }
                 </button>
               </div>
               {error && <p className="text-xs text-amber-300 break-words">{error}</p>}
-            </div>
-          ) : starting ? (
-            <div className="flex flex-col items-center gap-3 py-6 text-center">
-              <Loader2 className="h-6 w-6 animate-spin text-accent" />
-              <p className="text-sm font-semibold">{t("backend.starting_title")}</p>
-              <p className="text-xs text-zinc-400 leading-relaxed max-w-md">{t("backend.starting_hint")}</p>
             </div>
           ) : (
             <>

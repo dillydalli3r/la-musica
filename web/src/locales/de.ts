@@ -145,6 +145,7 @@ export default {
   "auth.changed": "Passwort geändert",
   "auth.setup_done": "Passwort festgelegt — willkommen",
   "auth.signed_in": "Angemeldet",
+  "auth.starting": "Der lokale Server startet…",
   "auth.server": "Dieser Server",
   "settings.security": "Sicherheit",
   "settings.security_help": "Die Anmeldesperre und die Sitzung dieses Clients.",

@@ -598,6 +598,7 @@ group still renders (section *Other checks*).
 | Check id | Label | Default | Asserts |
 | --- | --- | --- | --- |
 | `grade_check_mb_links` | MusicBrainz release link | ON | `MUSICBRAINZ_ALBUMID` (or a release-group id) is tagged (`MB_LINK`) |
+| `grade_check_mb_updated` | MusicBrainz pull date | ON | every track carries `MUSICBRAINZ_UPDATED` (ISO-8601 UTC), the stamp every MusicBrainz writer lands (`MB_UPDATED_MISSING`): a track without it cannot say when its MusicBrainz data was pulled, so MAINTAIN → Tags cannot date the album — its age is its OLDEST track's stamp |
 | `grade_check_rym_links` | — | REMOVED | the check and its `RYM_LINK` issue code were removed on 2026-10-12, when `RATEYOURMUSIC_*` left the app's vocabulary: there is no key, no migration flip and no grader presence check, nothing reads, writes or displays a RateYourMusic link, and a file still carrying one of the tags fails `grade_check_excess_tags` until the strip pass (script 10 / Optimize) removes it |
 | `grade_check_cover` | Cover art | ON | the album has a cover (`cover.jpg`/`jpeg`/`png`/`jxl`) meeting the size rules (`COVER`) |
 | `grade_check_cover_crop` | Cover aspect ratio (squareness) | ON | `|w/h − 1| ≤ cover_crop_threshold` (an aspect test, not crop detection) |
@@ -741,13 +742,13 @@ already has, and pressing it on an edited config restores it.
 **R19 — Balanced** is the pre-strict set: the defaults with `grade_check_audit`
 and `grade_include_other` off — the one-click way back to the old behaviour for
 a collection nobody has audited.
-**R20 — Relaxed** loads the defaults and then switches these 17 keys **off**:
+**R20 — Relaxed** loads the defaults and then switches these 18 keys **off**:
 `grade_check_tag_spaces`, `grade_check_tag_case`, `grade_check_lyrics_spaces`,
 `grade_check_cue_spaces`, `grade_check_cover_crop`, `grade_check_lyrics_zero`,
 `grade_check_tag_blank_lines`, `grade_check_lyrics_blank_lines`,
 `grade_check_cue_blank_lines`, `grade_check_filename_case`,
 `grade_check_ext_case`, `grade_check_excess_tags`, `grade_check_mb_links`,
-`grade_check_replaygain`,
+`grade_check_mb_updated`, `grade_check_replaygain`,
 `grade_check_album_description`, `grade_check_artist_image`,
 `grade_check_artist_description`.
 
@@ -897,7 +898,7 @@ The default writer of everything else is *Beets tagging (14) · import*.
 | `TRANSLITERATION`, `TRANSLATION` | lyrics | Lyrics transliterate (AI) (17) | `grade_check_xlit_transliteration`, `_xlit_translation`, `_lyrics_lang_tags` |
 | `ACOUSTID_ID`, `ACOUSTID_FINGERPRINT` | provenance | the import wizard's AcoustID apply (fingerprint match) — the PAIR in one save, verified by re-read — and Fix AcoustID pairs (21), which every import chain runs over the album it just imported: it completes a half pair, and creates the pair for a file that names its recording but carries none (the id from the file, the fingerprint local) | `grade_check_acoustid` ; the pair is REQUIRED on every audio track (`grade_check_acoustid`), and BOTH spellings a tagger writes are read — this app's `ACOUSTID_ID` and beets/mediafile's `Acoustid Id` / `Acoustid Fingerprint`, the spelling its chroma plugin writes and this app's own import runs |
 | `ENCODER_PROGRAM`, `ENCODER_QUALITY`, `ENCODER_VERSION` | provenance | Optimize FLACs (3) | `grade_check_encoder` |
-| `MUSICBRAINZ_*`, `RELEASETYPE`, `CATALOGNUMBER`, `LABEL`, `BARCODE`, `ISRC`, `WORK`, `MOVEMENT`, … | release | Beets tagging (14) · import · MusicBrainz writes | `grade_check_album_tags`, `grade_check_mb_links`, `grade_check_naming` — the `RATEYOURMUSIC_*` tags left the vocabulary on 2026-10-12 (a file still carrying one is an EXCESS tag until the strip pass removes it) |
+| `MUSICBRAINZ_*`, `RELEASETYPE`, `CATALOGNUMBER`, `LABEL`, `BARCODE`, `ISRC`, `WORK`, `MOVEMENT`, … | release | Beets tagging (14) · import · MusicBrainz writes | `grade_check_album_tags`, `grade_check_mb_links`, `grade_check_mb_updated` (the pull stamp, per track), `grade_check_naming` — the `RATEYOURMUSIC_*` tags left the vocabulary on 2026-10-12 (a file still carrying one is an EXCESS tag until the strip pass removes it) |
 | `PERFORMER`, `PRODUCER`, `ENGINEER`, `MIXER`, `ARRANGER`, `DJMIXER`, `CONDUCTOR`, `WRITER`, `DIRECTOR`, `COMPOSERSORT`, `MUSICBRAINZ_COMPOSERID` | release | Beets tagging (14, `beets_credits`) · Auto tagging (8) — the release's own artist/recording/work relations, fetched in ONE request per album | `grade_check_excess_tags` (allowlisted, never foreign) |
 | `ASIN`, `LANGUAGE`, `DISCSUBTITLE`, `LICENSE`, `ENCODEDBY` | release | Beets tagging (14) · Auto tagging (8) | `grade_check_excess_tags` |
 
@@ -9361,6 +9362,41 @@ dialog appearing before its rows are read.
   than two qualifying rows means the shelf is EMPTY rather than padded; a
   queue extension asks for its own minimum (one row still keeps the music
   going).
+
+### 7.87 The whole script/import/tag-refresh stack, made concurrent where it is safe
+
+- **R454 — a MusicBrainz request never holds the gate while it is on the
+  wire.** `mb_get` keeps one global 1 req/s budget (MetaBrainz's etiquette,
+  and `mb_reserve_slot` shares it for writes), but it now RESERVES the next
+  slot under the lock and sleeps OUTSIDE it: a slow answer no longer blocks
+  every other MB caller for its latency on top of the gap, and N queued
+  callers each book a distinct slot instead of waking together.
+- **R455 — an import writes each file ONCE per stage, and does not stamp the
+  same release twice.** The release identity is one per-file pass that runs
+  with the GENRE in the SAME deferred container save (the genre network
+  lookup happens for the whole album BEFORE the pass); the bulk path no
+  longer stamps the identity a second time before the naming script; and every
+  writer is idempotent — `fill_release_identity` plans the exact writes first
+  and touches zero bytes for a file that already holds them, so the
+  end-of-import refresh finds nothing to write. The two dates are still
+  sharpened and the country list widened (the rule the Auto Tagging stage
+  keeps), MEDIUM/link still follow an explicit release choice.
+- **R456 — a track without a MusicBrainz pull date fails grading.**
+  `grade_check_mb_updated` (issue `MB_UPDATED_MISSING`, ON by default) requires
+  `MUSICBRAINZ_UPDATED` on every parsed track, in the same sweep as GENRE and
+  MOOD: the album's age is its oldest stamp (R448), so a file without one
+  cannot be dated and the scheduled refresh cannot act on it. Off, the check is
+  neither graded nor counted.
+- **R457 — the tag refresh queue is as parallel as its one rate limit
+  allows.** Default workers 8 (`tag_refresh_workers`, 1-16); each album is one
+  MB lookup (R454's gate) plus one idempotent write pass; a job resets the
+  status memo once at start and once at end, never per album, and marks the
+  assembled tree for its normal stale-while-revalidate pass rather than
+  rebuilding it.
+- **R458 — per-provider throttles, stamped-then-released.** `discovery`'s
+  host gate reserves a slot under the lock and sleeps outside it, and a host
+  waits only its own documented interval — scripts 25/26 (the free lane) no
+  longer queue behind every genre/advisory ask at a flat 1.05 s.
 
 ---
 

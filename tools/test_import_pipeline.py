@@ -1081,13 +1081,15 @@ finally:
     _intg.resolve_release = _real_resolve
     imports._stamp_release = _real_stamp
 assert pinned_out["ok"] == 1 and pinned_out["items"][0]["status"] == "imported", pinned_out
-# resolved ONCE from the item's link, and every stamp used that release — the
-# identity pass AND the chain's genre step, which is why the count is pinned: a
-# bulk path that took `resolve_release`'s pair for the release itself stamped
-# neither (each raised inside `dict(release)` into a swallowed note) and the
-# album arrived genre-less while the album's own Import genres button worked.
+# resolved ONCE from the item's link, and the stamp that used that release is
+# the chain's own genre step — the ONE per-file pass that writes identity and
+# genre together (2.2.1). `_bulk_one` no longer stamps a second time before the
+# naming script; a bulk path that took `resolve_release`'s pair for the release
+# itself stamped NEITHER (each raised inside `dict(release)` into a swallowed
+# note) and the album arrived genre-less while the album's own Import genres
+# button worked.
 assert stamped[0] == ("resolved", PIN_LINK), stamped
-assert [v for k, v in stamped if k == "stamped"] == [PIN_ID, PIN_ID], stamped
+assert [v for k, v in stamped if k == "stamped"] == [PIN_ID], stamped
 assert os.path.isdir(os.path.join(LIB, "Pinned Album")), os.listdir(LIB)
 
 # …and a link that cannot be resolved fails THAT row, naming MusicBrainz: an
@@ -1228,6 +1230,11 @@ from server import integrations as _intg
 
 _stamp_album = staging_album("Stamp Album")
 _written = {}
+# The stamp's test double KEEPS only GENRE: the step's "written" count is the
+# genre's, so a double that cannot hold one would report every file as
+# skipped. The identity tags still accumulate in the writer below (keyed by
+# file name), which is what the assertions read.
+_KEEP_TAGS = {"GENRE"}
 
 
 class _FakeAudio:
@@ -1251,7 +1258,12 @@ class _FakeAudio:
         return self.tags.get(key, "")
 
     def set_tag(self, key, value):
-        self.tags[key] = value
+        # The GENRE gate above is the only tag this double keeps on the
+        # instance; every tag still lands in the file-keyed record the
+        # assertions read (one pass, one record).
+        _written[os.path.basename(self.path)][key] = value
+        if key in _KEEP_TAGS:
+            self.tags[key] = value
         return True
 
 
@@ -1336,11 +1348,20 @@ try:
     _written["01 - track.wav"]["DATE"] = "1990"
     _link_rel = {"id": "rel-9", "release_group_id": "rg-9", "date": "1994-05-06",
                  "title": "Stamp", "artists": [], "media": []}
-    imports._stamp_mb_tags(_stamp_lib, _link_rel)
-    assert _written["01 - track.wav"]["MUSICBRAINZ_ALBUMID"] == "user-picked-release", _written["01 - track.wav"]
-    assert _written["01 - track.wav"]["MUSICBRAINZ_RELEASEGROUPID"] == "user-picked-group", _written["01 - track.wav"]
-    assert _written["01 - track.wav"]["DATE"] == "1994-05-06", _written["01 - track.wav"]
-    imports._stamp_mb_tags(_stamp_lib, _link_rel, force_ids=True)
+    # The identity is written by `_stamp_release` (identity + genre in one
+    # pass since 2.2.1); `_stamp_mb_tags` was folded into it. The genres the
+    # stub answers are kept pointless here — this block is about the identity
+    # — and the MANUAL path is the one that builds the values itself.
+    _real_chain = _intg.genre_chain
+    _intg.genre_chain = lambda **kw: {"per_track": {}, "sources": {}, "levels": {}}
+    try:
+        imports._stamp_release(_stamp_lib, _link_rel, CFG)
+        assert _written["01 - track.wav"]["MUSICBRAINZ_ALBUMID"] == "user-picked-release", _written["01 - track.wav"]
+        assert _written["01 - track.wav"]["MUSICBRAINZ_RELEASEGROUPID"] == "user-picked-group", _written["01 - track.wav"]
+        assert _written["01 - track.wav"]["DATE"] == "1994-05-06", _written["01 - track.wav"]
+        imports._stamp_release(_stamp_lib, _link_rel, CFG, force_ids=True)
+    finally:
+        _intg.genre_chain = _real_chain
     assert _written["01 - track.wav"]["MUSICBRAINZ_ALBUMID"] == "rel-9", _written["01 - track.wav"]
     assert _written["01 - track.wav"]["MUSICBRAINZ_RELEASEGROUPID"] == "rg-9", _written["01 - track.wav"]
     _intg.resolve_advisory_route = lambda **kw: {
@@ -2410,13 +2431,45 @@ assert landed_tags["MUSICBRAINZ_ALBUMID"] == LANDED["id"], landed_tags
 import server.discovery as discovery
 
 ARTIST_ID = "a94a7155-c79d-4409-9fcf-220cb0e4dc3a"
+
+
+def _stamp_identity(album_dir, release):
+    """The import's identity stamp, applied to every file of *album_dir*.
+
+    `_stamp_mb_tags` was folded into `_stamp_release` (identity + GENRE in ONE
+    per-file pass), so the check this block makes — which ids a stamp WRITES —
+    now goes through the two halves that writer actually uses: the values
+    `_import_identity_values` builds for the release, applied per file by
+    `_apply_identity`. Returns the number of files stamped, the old count.
+    """
+    from mlo.audio import AudioFile
+    from server.imports import _apply_identity, _import_identity_values, \
+        _release_for_stamping
+
+    values = _import_identity_values(album_dir, _release_for_stamping(release))
+    n = 0
+    for path in sorted(values):
+        af = AudioFile(path)
+        if af.audio is None:
+            continue
+        af.defer_save(True)
+        try:
+            _apply_identity(af, values[path], CFG, False)
+        finally:
+            # ONE container rewrite for the whole block, exactly as the
+            # import's own pass does (defer on, every tag, one flush).
+            af.defer_save(False)
+        n += 1
+    return n
+
+
 _real_resolve = discovery.resolve_artist_mbid
 discovery.resolve_artist_mbid = lambda name, cfg=None, timeout=None, exact_only=False: (
     ARTIST_ID if name == "Talking Heads" else None)
 try:
     bare_dir, bare_files = ident_album("Remain in Light (no match)")
     GUESS = {"title": "Remain in Light", "artists": [{"name": "Talking Heads"}]}
-    assert imports._stamp_mb_tags(bare_dir, GUESS) == 2
+    assert _stamp_identity(bare_dir, GUESS) == 2
 
     from mlo.audio import AudioFile
     from mlo.naming import DEFAULT_NAMING_SCRIPT, eval_script, track_variables
@@ -2432,7 +2485,7 @@ try:
     # up: nothing is asked, nothing is written, and the folder stays bare — a
     # name lookup there would bracket the album with a stranger's id.
     split_dir, split_files = ident_album("Remain in Light (split)")
-    assert imports._stamp_mb_tags(split_dir, {
+    assert _stamp_identity(split_dir, {
         "title": "Remain in Light",
         "artists": [{"name": "Talking Heads", "joinphrase": " & "},
                     {"name": "Brian Eno"}]}) == 2
@@ -2440,7 +2493,7 @@ try:
     # An artist MusicBrainz does not know stays bare as well — the resolver
     # answers nothing, and no id is invented.
     unknown_dir, unknown_files = ident_album("Remain in Light (unknown)")
-    assert imports._stamp_mb_tags(unknown_dir, {
+    assert _stamp_identity(unknown_dir, {
         "title": "Remain in Light",
         "artists": [{"name": "Nobody At All"}]}) == 2
     assert not AudioFile(unknown_files[0]).get_tag("MUSICBRAINZ_ALBUMARTISTID")
@@ -2459,7 +2512,7 @@ try:
     integrations.search_mb = lambda kind, query, **kw: {
         "rows": [{"title": "Test Artist Tribute Band", "id": "someone-else"}]}
     fuzzy_dir, fuzzy_files = ident_album("Remain in Light (fuzzy)")
-    assert imports._stamp_mb_tags(fuzzy_dir, {
+    assert _stamp_identity(fuzzy_dir, {
         "title": "Remain in Light", "artists": [{"name": "Test Artist"}]}) == 2
     assert not AudioFile(fuzzy_files[0]).get_tag("MUSICBRAINZ_ALBUMARTISTID"), \
         "a fuzzy neighbour must never bracket the folder"
@@ -2467,7 +2520,7 @@ try:
     integrations.search_mb = lambda kind, query, **kw: {
         "rows": [{"title": "Test Artist", "id": "exact-artist-id"}]}
     exact_dir, exact_files = ident_album("Remain in Light (exact)")
-    assert imports._stamp_mb_tags(exact_dir, {
+    assert _stamp_identity(exact_dir, {
         "title": "Remain in Light", "artists": [{"name": "test artist"}]}) == 2
     assert AudioFile(exact_files[0]).get_tag("MUSICBRAINZ_ALBUMARTISTID") \
         == "exact-artist-id", "an exact name IS the artist MusicBrainz carries"
@@ -3361,7 +3414,10 @@ finally:
     _intg.resolve_release, imports._stamp_release = _real_resolve_p, _real_stamp_p
 assert _pin_out["items"][0]["status"] == "imported", _pin_out
 assert _pin_out["items"][0]["picked"] == 1, _pin_out["items"][0]
-assert _pin_stamps == [PIN_ID, PIN_ID], _pin_stamps
+# ONE stamp: the pinned release's identity lands in `finish_album`'s genre
+# step, which writes identity + GENRE in the same per-file save. Stamping a
+# second time from `_bulk_one` wrote every file twice for nothing.
+assert _pin_stamps == [PIN_ID], _pin_stamps
 assert os.path.exists(os.path.join(_pick_lib, "Pinned Pick", "02 - q.wav"))
 assert sorted(os.listdir(_pin_stage)) == ["01 - p.wav"], os.listdir(_pin_stage)
 print("picked files: only the chosen set moves into one album, the rest stays "

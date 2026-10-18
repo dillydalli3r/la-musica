@@ -575,6 +575,7 @@ export const CONFIG_GROUPS: CfgGroup[] = [
         { k: "grade_check_lyrics_format", label: "Lyrics format", type: "bool" },
         { k: "grade_check_sidecar_cover", label: "Sidecar cover", type: "bool" },
         { k: "grade_check_mb_links", label: "MusicBrainz links (album/artist/track)", type: "bool" },
+        { k: "grade_check_mb_updated", label: "MusicBrainz pull date", type: "bool" },
         { k: "grade_check_media", label: "MEDIA tag", type: "bool" },
         { k: "grade_check_media_evidence", label: "MEDIA agrees with the disc sheets", type: "bool", help: "A rip .log or a .cue exists only for a DISC rip. On, an album carrying one whose MEDIA says anything but a CD (Vinyl, Cassette, Digital Media …) fails: one of the two — the MEDIA tag or the MusicBrainz link — names a different edition of the album." },
         { k: "grade_check_source", label: "SOURCE tag", type: "bool" },

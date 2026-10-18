@@ -355,8 +355,10 @@ ok(all([v for t, v in _VALUES if t == k] for k in _WANT),
 def write(path, values=None):
     af = AudioFile(path)
     af.defer_save(True)
+    # `stamp=False`: the pull stamp records WHEN — a value assertion is not
+    # about it (its own rule is exercised in the preserve block above).
     written, refused = write_mb_tags(af, values if values is not None else _VALUES,
-                                     None)
+                                     None, stamp=False)
     af.defer_save(False)
     return af, written, refused
 
@@ -596,11 +598,14 @@ ok(_bare_tags.get("LABEL") == "American Recordings",
    "…while the release facts it does state are still written")
 
 # A SCALAR tag that already holds ANOTHER tagger's value is kept — a re-run
-# over the same file must change nothing at all.
+# over the same file must change nothing at all. The pull stamp is the one
+# exception by design (it records WHEN this pull happened, and there is no
+# stamp file next to it yet) — `stamp=False` here so the assertion is about
+# the VALUES, which is the rule under test.
 _af = AudioFile(flac)
 _af.set_tag("LABEL", "Some Other Label")
 _af.defer_save(True)
-_done, _ref = write_mb_tags(_af, _VALUES, None)
+_done, _ref = write_mb_tags(_af, _VALUES, None, stamp=False)
 _af.defer_save(False)
 ok(_done == 0 and not _ref,
    f"a second run writes NOTHING: every tag is already filled ({_done})")
@@ -617,8 +622,11 @@ _af.set_tag("LABEL", _WANT["LABEL"])
 # whichever single credit the file happened to arrive with.
 _af = AudioFile(flac)
 _af.set_tag("ENGINEER", "A Third Engineer")
+# `stamp=False`: the pull stamp's own rule is exercised above; these counts
+# are about VALUES (and the stamp would add one write of its own).
+_af.set_tag("MUSICBRAINZ_UPDATED", "2026-01-01T00:00:00Z")
 _af.defer_save(True)
-_done, _ref = write_mb_tags(_af, _VALUES, None)
+_done, _ref = write_mb_tags(_af, _VALUES, None, stamp=False)
 _af.defer_save(False)
 _eng = AudioFile(flac).tag_values("ENGINEER")
 ok(_done == 1 and not _ref,
@@ -631,7 +639,7 @@ ok(_eng == ["A Third Engineer"] + _WANT["ENGINEER"],
 # to fill" report line rely on.
 _af = AudioFile(flac)
 _af.defer_save(True)
-_again, _ref2 = write_mb_tags(_af, _VALUES, None)
+_again, _ref2 = write_mb_tags(_af, _VALUES, None, stamp=False)
 _af.defer_save(False)
 ok(_again == 0 and not _ref2,
    f"a re-run over the completed list writes nothing ({_again})")

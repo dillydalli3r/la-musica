@@ -108,6 +108,10 @@ BASE_TAGS = {
     "DISCNUMBER": "1",
     "GENRE": "shoegaze",
     "INSTRUMENTAL": "0",
+    # The MusicBrainz pull stamp every MB writer lands (`mb_updated_stamp`).
+    # Its own presence check fails a track without one (grade_check_mb_updated),
+    # so a fixture meant to fail NO other check must carry it.
+    "MUSICBRAINZ_UPDATED": "2026-10-01T00:00:00Z",
 }
 
 _MBID = "12345678-1234-1234-1234-123456789abc"

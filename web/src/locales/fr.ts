@@ -145,6 +145,7 @@ export default {
   "auth.changed": "Mot de passe modifié",
   "auth.setup_done": "Mot de passe défini — bienvenue",
   "auth.signed_in": "Connecté",
+  "auth.starting": "Démarrage du serveur local…",
   "auth.server": "Ce serveur",
   "settings.security": "Sécurité",
   "settings.security_help": "Le contrôle d'accès et la session de ce client.",

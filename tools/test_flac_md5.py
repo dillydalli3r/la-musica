@@ -870,6 +870,9 @@ def grade_cfg(lib, **over):
         "grade_check_excess_tags": False,
         "grade_check_audit": False,
         "grade_check_mb_links": False,
+        # The pull stamp is the same family's own presence check (2.2.1):
+        # these fixtures were never through a MusicBrainz pull.
+        "grade_check_mb_updated": False,
         "grade_check_mood": False,
         "grade_check_energy": False,
         "grade_check_genre": False,

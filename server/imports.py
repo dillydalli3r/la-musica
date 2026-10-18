@@ -155,14 +155,15 @@ def _release_country_tag(release):
 
 
 # The MusicBrainz link ids a user owns: when a file already states one,
-# `_stamp_mb_tags` leaves it alone unless the caller explicitly chose the
-# release (force_ids). Every other identity slot is still force-written.
+# `_import_identity_values` leaves it alone unless the caller explicitly chose
+# the release (force_ids). Every other identity slot is still force-written.
 _MB_LINK_KEYS = ("MUSICBRAINZ_ALBUMID", "MUSICBRAINZ_RELEASEGROUPID")
 
 
-def _stamp_mb_tags(album_dir, release, force_ids=False):
-    """Write the exact MusicBrainz release identity into the tags so beets /
-    grading work with the release the import is for.
+def _import_identity_values(album_dir, release, force_ids=False):
+    """``{file path: [(tag, value)]}`` — the exact MusicBrainz release identity
+    the album's files should carry, so beets / grading work with the release
+    the import is for.
 
     Identity tags (release/group/artist IDs, date, country, status, type,
     catalog number, label) are FORCE-written: an album that arrived carrying
@@ -181,8 +182,11 @@ def _stamp_mb_tags(album_dir, release, force_ids=False):
     (`/api/mb/assign`, `/api/import/commit`) remain the ways to change a link
     by hand.
 
-    Every track is ONE container rewrite, and the tracks are stamped side by
-    side — see `_stamp_one`."""
+    This BUILDS the values and writes nothing: `_stamp_release` applies them
+    in the same container save as the genres, through
+    `mlo.autotag.write_mb_tags`. An album's files share nothing but this
+    read-only payload.
+    """
     from mlo.audio import AudioFile
 
     tracks_meta = release.get("media") or []
@@ -258,114 +262,52 @@ def _stamp_mb_tags(album_dir, release, force_ids=False):
             used.add(hit)
             assign[hit] = t
 
-    def _missing(af, path):
-        """The tags THIS file is missing or contradicts, as one mapping.
+    # The identity block every file repeats, as (tag, value) pairs for
+    # `mlo.autotag.write_mb_tags` — the one writer of these rules, so the
+    # import and the Auto Tagging stage can never apply a different one.
+    # A LINK id is decided PER FILE, not here: the writer keeps whatever a
+    # file already states (`write_mb_tags`' scalar rule — the user's own link),
+    # and the caller's replace rule decides whether the release it CHOSE may
+    # still land over it (`_stamp_release`'s `_replace`, `force_ids`).
+    values = [(k, v) for k, v in identity.items() if k not in _MB_LINK_KEYS]
+    links = [(k, identity[k]) for k in _MB_LINK_KEYS if identity.get(k)]
+    # LANGUAGE is the release's own TEXT REPRESENTATION (`language` off
+    # MusicBrainz's release lookup: `jpn`, `eng`, …), which script 17's
+    # transliteration/translation decision reads when the letters alone
+    # cannot say (two Latin-script languages is the case that matters).
+    # FILLED only, never forced: a tag the user set, or the script's own
+    # answer for this track, is a statement about the LYRICS and the
+    # release's language does not replace it — and a code that states
+    # nothing (`mul` on a compilation, `und`, `zxx`) is not written at all
+    # (`mlo.lyrics_xlit.normalize_lang` is the one place that decides what
+    # states nothing, and it also maps `jpn` -> `ja`).
+    from mlo.lyrics_xlit import normalize_lang
 
-        A value the file already carries is left alone (a matching uploader's
-        spelling survives), an empty one is never written.
-        """
-        want = {}
+    lang = normalize_lang(release.get("language"))
+    if lang:
+        values.append(("LANGUAGE", lang))
+    # Album-level spelling of the chosen release (corrected when the
+    # uploader's tags say something else).
+    values.append(("ALBUM", album_title))
+    values.append(("ALBUMARTIST", artist_name))
 
-        def add(key, value):
-            value = "" if value is None else str(value).strip()
-            if not value:
-                return
-            if str(af.get_tag(key) or "").strip() == value:
-                return
-            want[key] = value
-
-        for k, v in identity.items():
-            if (k in _MB_LINK_KEYS and not force_ids
-                    and str(af.get_tag(k) or "").strip()):
-                # The file already names a release/group: that is the user's
-                # link (or a previous import's), and this run's resolved
-                # edition does not get to replace it. See the docstring.
-                continue
-            add(k, v)
-        # LANGUAGE is the release's own TEXT REPRESENTATION (`language` off
-        # MusicBrainz's release lookup: `jpn`, `eng`, …), which script 17's
-        # transliteration/translation decision reads when the letters alone
-        # cannot say (two Latin-script languages is the case that matters).
-        # FILLED only, never forced: a tag the user set, or the script's own
-        # answer for this track, is a statement about the LYRICS and the
-        # release's language does not replace it — and a code that states
-        # nothing (`mul` on a compilation, `und`, `zxx`) is not written at all
-        # (`mlo.lyrics_xlit.normalize_lang` is the one place that decides what
-        # states nothing, and it also maps `jpn` -> `ja`).
-        from mlo.lyrics_xlit import normalize_lang
-
-        lang = normalize_lang(release.get("language"))
-        if lang and not normalize_lang(af.get_tag("LANGUAGE")):
-            want["LANGUAGE"] = lang
-        # Album-level spelling of the chosen release (corrected when the
-        # uploader's tags say something else).
-        add("ALBUM", album_title)
-        add("ALBUMARTIST", artist_name)
+    out = {}
+    for path in audio:
+        # This file's own half: the track the release slots into it. A file
+        # the release does not list gets the album-level values only.
+        per_file = list(values) + list(links)
         t = assign.get(path)
         if t:
-            add("MUSICBRAINZ_TRACKID", t.get("recording_mbid"))
-            add("TRACKNUMBER", t.get("position"))
-            add("DISCNUMBER", t.get("disc"))
-            add("TITLE", t.get("title"))
-            add("ARTIST", t.get("artist_credit"))
-        return want
+            per_file.extend([
+                ("MUSICBRAINZ_TRACKID", t.get("recording_mbid")),
+                ("TRACKNUMBER", t.get("position")),
+                ("DISCNUMBER", t.get("disc")),
+                ("TITLE", t.get("title")),
+                ("ARTIST", t.get("artist_credit")),
+            ])
+        out[path] = per_file
+    return out
 
-    def _stamp_one(path):
-        """Stamp ONE track's tags and land them in a SINGLE rewrite.
-
-        Each of these tags used to be its own write, and every write was a
-        whole-file copy: mutagen saves beside the original and that temp is
-        renamed over it (mlo.atomic.rewrite_via), so ~18 tags meant ~18 copies
-        of the track, per track, one after another. The deferral holds them
-        for the one flush at the end instead. It is turned off even when a
-        write raised, so a file is never left holding changes nobody saved.
-
-        A VIDEO container has no deferral to lean on — every set_tag on one is
-        an ffmpeg stream copy of its own, eighteen of them for this stamp, on a
-        file that can be gigabytes — so its whole block goes through
-        set_video_tags, the one-pass writer the video pipeline uses. That path
-        can also re-emit a raw container as MKV (af.tag_output_path), which is
-        the file the album now holds.
-
-        True = this file carries the release identity now. The flush's own
-        verdict IS that answer: deferred, a write that cannot land (a full
-        disk, a read-only file) no longer raises out of set_tag, so calling it
-        stamped would report a tag the file does not have."""
-        try:
-            af = AudioFile(path)
-            if af.audio is None:
-                return False
-            want = _missing(af, path)
-            if not want:
-                return True
-            if str(getattr(af, "kind", "")) == "video":
-                return bool(af.set_video_tags(want))
-            # A stand-in for AudioFile (a test double) cannot defer: it writes
-            # per tag, exactly as it did before. Same guard mlo.autotag,
-            # mlo.audiometa and mlo.moods keep.
-            defer = hasattr(af, "defer_save")
-            if defer:
-                af.defer_save(True)
-            stamped = False
-            try:
-                for k, v in want.items():
-                    af.set_tag(k, v)
-                stamped = True
-            finally:
-                if defer and af.defer_save(False) is False:
-                    stamped = False
-            return stamped
-        except Exception:
-            return False
-
-    # Distinct FILES are independent — each rewrite_via works on a temp of its
-    # own beside its target and swaps it in with os.replace — so an album's
-    # tracks stamp side by side instead of one after another; nothing here is
-    # shared but the read-only identity above. Inside one file the writes stay
-    # strictly ordered.
-    workers = worker_count(load_config(), maximum=8, items=len(audio))
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        return sum(1 for ok in ex.map(_stamp_one, audio) if ok)
 
 # The import chain IS the Run All order, taken from the one place that keeps it
 # (`mlo.config.DEFAULT_RUN_ALL_ORDER`) — one order, one list, so a script added
@@ -1140,7 +1082,11 @@ def _finish_album(path, cfg, progress=None, force=None, release=None,
     # GENRES: the family's own automatic action — the same writer the wizard's
     # Genres step and the bulk release stamp call (`_stamp_release`), and the
     # ONLY thing that FETCHES a genre (script 8 trims and caps what is already
-    # there, `mlo/autotag.py`). Without this step an unattended import landed
+    # there, `mlo/autotag.py`). The stamp ABOVE and this step are two stages
+    # on purpose; they are not two writes of the identity — with this step on,
+    # the identity lands here, in the same per-file save as the genre, from
+    # the very payload the stamp above was handed (see `_stamp_release`).
+    # Without this step an unattended import landed
     # with no genre at all and graded GENRE_MISSING however many sources the
     # chain was allowed to ask: the acquisition paths never reached the one
     # automatic writer. `run_cfg`'s `genre_autofill` is False when the family is
@@ -1159,6 +1105,10 @@ def _finish_album(path, cfg, progress=None, force=None, release=None,
     # nothing; it used to skip the step for a missing release id, which left an
     # untagged hand-download genre-less while the manual button on the same
     # album answered by name.
+    #
+    # This step writes the album's identity in the SAME per-file save as
+    # the genre (one pass, one container save) whenever it runs; with
+    # `genre_autofill` off the stamp above is the only identity writer.
     if run_cfg.get("genre_autofill", True):
         if not rel and album_mbid:
             # A release-GROUP id resolves to its best edition through the same
@@ -1171,9 +1121,25 @@ def _finish_album(path, cfg, progress=None, force=None, release=None,
                 rel, _rid = intg.resolve_release(album_mbid)
             except Exception:
                 rel = None
+        # The identity this step writes in the SAME per-file save as the
+        # genre, built from the release in hand. Only built when there is a
+        # release to build it from: with `genre_autofill` off the identity was
+        # `_stamp_release_identity`'s above, and a second copy here would have
+        # nobody to write it. A release only the GENRE lookup below resolves
+        # is built by `_stamp_release` itself, which fetches the genres
+        # BEFORE it opens a file either way.
+        _ident = None
+        try:
+            if rel:
+                _ident = _import_identity_values(
+                    path, _release_for_stamping(rel),
+                    force_ids=explicit_release)
+        except Exception:
+            traceback.print_exc()
         try:
             written, failed = _stamp_release(path, rel, run_cfg,
-                                             force_ids=explicit_release)
+                                             force_ids=explicit_release,
+                                             identity=_ident)
             out["genres"] = {"written": written, "failed": failed}
             if failed:
                 out["errors"].append(
@@ -1443,7 +1409,17 @@ def _finish_album(path, cfg, progress=None, force=None, release=None,
     # the identity every reader (grader, naming script, album page) compares
     # against, so the last word on an import is MusicBrainz's own payload.
     # Resolved from the FINAL folder's tags: a re-pointed link, or a script
-    # that moved the album, is exactly what this has to see.
+    # that moved the album, is exactly what this has to see — which is why a
+    # payload resolved from the folder's tags BEFORE the chain is not handed
+    # on here (a script may have re-pointed the link since), and a release
+    # the CALLER chose (`release`) is: that choice is this import's, and the
+    # refresh must not go and ask for the album's own link instead.
+    #
+    # On this path the refresh finds the identity already stamped (`fill_
+    # release_identity` is idempotent), so it costs the reads and NO container
+    # save: the one thing it still writes is MUSICBRAINZ_UPDATED, and
+    # `fresh_within` skips even that for files stamped within the hour — the
+    # stamp `_stamp_release` just wrote.
     try:
         out["refreshed"] = refresh_release_tags(out["path"], release=release,
                                                 cfg=cfg)
@@ -4629,6 +4605,59 @@ def _release_for_stamping(release):
     return rel
 
 
+def _apply_identity(af, values, cfg, force_ids, replace=None):
+    """Write ONE file's identity ``values`` through the writer's own rules.
+
+    Returns ``(written, refused)`` exactly as `mlo.autotag.write_mb_tags`
+    does: how many tags landed and the ``(tag, reason)`` pairs the file's
+    writer refused — a container that cannot hold one, a read-only file, a
+    full disk. That is the one answer "did this file take its identity" is
+    read from, so a file whose every value it already states comes back
+    ``(0, [])`` and is not a failure.
+
+    An album's release identity is FORCE-written (the old `_stamp_mb_tags`'
+    rule): a file that arrived carrying another pressing's DATE, label or
+    barcode would otherwise drive beets, the naming script and grading off
+    the wrong release, so every slot the release states lands over whatever
+    differs — except the two LINK ids, which are the USER's unless this run's
+    release was explicitly chosen for the album (``force_ids``).
+
+    *replace* is an optional extra rule for a tag the file already states,
+    asked AFTER the force rules have declined it (the manual pass can require
+    the two dates be sharpened and the country list widened through
+    `_mb_replace`, the same rule the Auto Tagging stage keeps). ``None``
+    leaves the force rules as the whole story. A video container has no
+    deferral to lean on (each write is an ffmpeg stream copy), so it takes the
+    one-pass `set_video_tags` route, and only with the values it does not
+    already hold.
+    """
+    from mlo.autotag import write_mb_tags
+
+    def forced(tag, have, want):
+        """The value this identity forces over a differing one ("" to keep)."""
+        want = str(want or "").strip()
+        if not want or want == str(have or "").strip():
+            return ""
+        # The two link ids a file already carries are the user's: never
+        # replaced by the edition this run resolved, unless it was CHOSEN.
+        if tag in _MB_LINK_KEYS:
+            return want if force_ids else ""
+        return want
+
+    def rule(tag, have, want):
+        return forced(tag, have, want) or (
+            replace(tag, have, want) if replace is not None else "")
+
+    if str(getattr(af, "kind", "")) == "video":
+        already = [(k, v) for k, v in (values or [])
+                   if forced(k, af.get_tag(k), v)]
+        if not already:
+            return 0, []
+        return len(af.set_video_tags(dict(already)) or {}), []
+    return write_mb_tags(af, list(values or []), cfg, replace=rule,
+                         stamp=False)
+
+
 def _stamp_release_identity(album_dir, release, cfg, explicit=False,
                             always_stamp=False, fresh_within=0.0):
     """Fill the album's own release identity from the release the import holds.
@@ -4764,6 +4793,12 @@ def refresh_release_tags(album_dir, release=None, cfg=None):
     except Exception:
         traceback.print_exc()
     tracks = int((identity or {}).get("written") or 0)
+    # ALBUM-SCOPED, and the same helper every other writer in this module uses:
+    # the folder itself, never the library. A refresh rewrites one album's
+    # tags, so only that album's cached tags went stale — the library-wide drop
+    # made the next page re-parse every track in the library for it. The
+    # resolved-release cache goes with it, which is right: this pass just read
+    # the release, but a re-pointed link must never be answered from a cache.
     _invalidate_caches(path)
     return {"release": rel.get("id"), "identity": identity, "tracks": tracks,
             "skipped": False, "reason": ""}
@@ -4803,7 +4838,7 @@ def _record_release_manifest(album_dir, release, force=False):
     return save_expected_tracks(album_dir, rid or None, rows)
 
 
-def _stamp_release(album_dir, release, cfg, force_ids=False):
+def _stamp_release(album_dir, release, cfg, force_ids=False, identity=None):
     """Write the release identity into the album's tags.
 
     Returns ``(written, failed)`` — a file whose tags cannot be written is
@@ -4813,16 +4848,29 @@ def _stamp_release(album_dir, release, cfg, force_ids=False):
     GENRE actually landed ("skipped" files — nothing to say about them — are
     in neither number, as before).
 
-    The MusicBrainz ids (+ per-track recording ids) come from
-    ``_stamp_mb_tags`` — the one writer of the release identity, so every
-    import path tags identically. On top:
-    GENRE from the full per-track genre chain (the configured sources —
+    The MusicBrainz ids (+ per-track recording ids) are the ``identity``
+    pass — ``_import_identity_values``, built from the release the import
+    holds. ``identity=None`` is the MANUAL path (the wizard's own release
+    stamp, a bulk pin) and builds it here, exactly as it always did; an import
+    hands in the same values it has already used, so this function never
+    builds a second copy of the identity block.
+
+    ONE per-file pass: the genre NETWORK lookup for the whole album happens
+    BEFORE it (`integrations.genre_chain`), so a file is opened, given its
+    identity AND its genre, and saved once. It used to be network → identity
+    pass → genre pass: two host opens and two container saves per track.
+
+    On top: GENRE from the full per-track genre chain (the configured sources —
     MusicBrainz alone on a shipped install; see ``integrations.genre_chain``),
     already merged per track and capped at ``mb_genre_count``. ITUNESADVISORY
     is not written here — ``finish_album`` resolves it from the ISRCs
     (``fetch_advisories``) before the chain runs, which is the only path that
     can state a real rating
     instead of echoing one.
+
+    ``written``'s NAME predates the identity half: the counts stay the
+    GENRE's (the row every caller reads is the genres step's), so a file that
+    gained an identity tag and no genre is still "skipped" there.
 
     GENRE is written only into a track that carries none, which is what keeps
     a genre the user typed (the wizard's step, the tag editor) — and it is also
@@ -4880,10 +4928,13 @@ def _stamp_release(album_dir, release, cfg, force_ids=False):
         # unchanged (a framework/tagless folder reached here before and did
         # nothing; it still does).
         return (0, 0)
-    try:
-        _stamp_mb_tags(album_dir, rel, force_ids=force_ids)
-    except Exception:
-        traceback.print_exc()
+    if identity is None:
+        try:
+            identity = _import_identity_values(album_dir, rel,
+                                               force_ids=force_ids)
+        except Exception:
+            traceback.print_exc()
+            identity = None
     # The release's OWN tracklist is recorded here, where the identity is
     # settled — the rule and the fill/re-point conditions are in
     # `_record_release_manifest`'s own docstring.
@@ -4942,7 +4993,18 @@ def _stamp_release(album_dir, release, cfg, force_ids=False):
             traceback.print_exc()
 
     def _stamp_one(path):
-        """One track: its GENRE, the cap, and a SINGLE container rewrite.
+        """One track: its MB identity, its GENRE, the cap — and a SINGLE
+        container rewrite.
+
+        The identity block is the values the callers already hold for this
+        album (`identity`, one (tag, value) list per FILE — see
+        `_import_identity_values`), written through `mlo.autotag.write_mb_tags`
+        with the import's own replace rule: a value the file already states is
+        kept unless the rule changes it (the chosen release's MEDIUM, a link it
+        may replace, the dates/share country the app sharpens), a blank value
+        is not written, and the write gates are honoured. It used to be a
+        second pass of its own (`_stamp_mb_tags`), so a file was opened,
+        stamped and saved before this step opened it again for the genre.
 
         "written" is the flush's own verdict, because a deferred write that
         cannot land (a full disk, a read-only file) no longer raises out of
@@ -4956,13 +5018,35 @@ def _stamp_release(album_dir, release, cfg, force_ids=False):
             if af.audio is None:
                 return "failed"
             # A stand-in for AudioFile (a test double) cannot defer: it writes
-            # per tag, exactly as it did before.
+            # per tag, exactly as it did before. When it does not, EVERY set_tag
+            # is its own landed write, so the genre half below is what answers
+            # "written" for it (its get_tag may not read back what it was given).
             defer = hasattr(af, "defer_save")
             if defer:
                 af.defer_save(True)
             wrote = False
             ok = True
             try:
+                identity_ok = True
+                ident = (identity or {}).get(path) or []
+                if ident:
+                    # ONE identity block, written through the same rules as
+                    # every other identity writer (`_apply_identity`, whose
+                    # default rule IS `_mb_replace` on top of the chosen
+                    # release's MEDIUM / explicit links): the dates sharpened,
+                    # the country list widened, everything else fill-only.
+                    written, refused = _apply_identity(
+                        af, ident, cfg, force_ids)
+                    # The writer's own ``(written, refused)`` is the verdict:
+                    # a file that refused ANY value (a container that cannot
+                    # hold it, a read-only file) is the "failed" the old
+                    # identity pass reported, while one that wrote nothing
+                    # because it already states every value is not a failure
+                    # at all. Counting the tags written is not the answer —
+                    # this step's "written" is the GENRE's (below), so an
+                    # already-stamped file that gains a genre still counts.
+                    identity_ok = not refused
+                    wrote = wrote or bool(written)
                 tags = {}
                 disc, pos = _parse_trackno(path)
                 names = genres.get((disc, pos)) or []
@@ -4984,7 +5068,7 @@ def _stamp_release(album_dir, release, cfg, force_ids=False):
                     tags["GENRE"] = normalize_genres(names, cap)
                 for key, value in tags.items():
                     af.set_tag(key, value)
-                wrote = bool(tags)
+                wrote = wrote or bool(tags)
                 try:
                     # Cap on EVERY track, not just the ones written above: an
                     # album that arrived carrying more genres than the setting
@@ -4993,6 +5077,10 @@ def _stamp_release(album_dir, release, cfg, force_ids=False):
                     trim_genres(af, cap)
                 except Exception:
                     pass
+                # One flush covers both halves: a file that would not take its
+                # identity is the "failed" the old identity pass reported, and
+                # one that flushed cleanly but took nothing is "skipped".
+                ok = identity_ok
             except Exception:
                 ok = False
             finally:
@@ -5430,20 +5518,14 @@ def _bulk_one(item, cfg):
                 return row
             album = dest
 
-    stamp_error = None
-    if release:
-        try:
-            # The release was PINNED by the user for this album (the bulk
-            # item's own `mbid`/`release`), so its link ids land even over an
-            # existing one — this is the explicit choice `force_ids` is for.
-            written, failed = _stamp_release(album, release, cfg, force_ids=True)
-            if failed:
-                stamp_error = (f"release tags written to {written} file(s); "
-                               f"{failed} file(s) could not be tagged")
-        except Exception as e:
-            traceback.print_exc()
-            stamp_error = f"release stamping failed: {e}"
-
+    # The release was PINNED by the user for this album (the bulk item's own
+    # `mbid`/`release`), so its link ids land even over an existing one — this
+    # is the explicit choice `force_ids` is for. The stamp itself happens ONCE,
+    # inside `finish_album`'s genre step (which fetches the genres first and
+    # writes identity + genre in one container save per file); stamping here
+    # too wrote every file a second time before the naming script had even
+    # renamed the folder.
+    #
     # The naming script names the album BEFORE the chain reads it. The grade
     # inside the chain checks every path against the script, and beets (script
     # 14) is not the only namer — a library whose chain is off, without 14, or
@@ -5455,9 +5537,11 @@ def _bulk_one(item, cfg):
     # artist/album is left where it is — there is nothing to name it by.
     album = _organize_import(album, cfg)
 
+    stamp_error = None
     try:
         # The release this row carries goes on to `finish_album` too. Its
-        # genres step is the one that stamps GENRE, and the import's own pass
+        # genres step is the one that stamps GENRE — and, on this path, the
+        # identity with it (one pass, one save) — and the import's own pass
         # has just cleared whatever the album arrived with (see
         # `drop_arrived_values`), so that step has to stamp from the release in
         # hand: re-resolving it from the album's own MBID would be a second

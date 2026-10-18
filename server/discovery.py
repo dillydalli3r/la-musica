@@ -258,18 +258,31 @@ def invalidate(prefix=None):
 
 
 def _throttle(host):
+    """Wait for this host's next slot, then RESERVE it.
+
+    One gate per host, and two rules about it that matter on a busy run:
+
+    * the slot is booked as ``now + wait`` while the lock is held and the sleep
+      happens AFTER the lock is released — so a request in flight does not hold
+      every other caller of the same host behind its latency, and two callers
+      can never wake on the same slot;
+    * a host whose provider does not publish a 1 req/s policy waits only for
+      its own documented limit (see `_HOST_WAIT`). The artist-image and
+      description steps (scripts 25/26, the free lane) used to queue behind
+      every genre/advisory ask on the same host at a flat 1.05 s; those
+      services' own limits are far looser, so the gate is per-provider now.
+    """
     with _THROTTLE_LOCK:
         entry = _THROTTLE.get(host)
         if entry is None:
-            entry = [threading.Lock(), 0.0]
+            entry = [0.0]
             _THROTTLE[host] = entry
-    lock, _ = entry
-    wait = _HOST_WAIT.get(host, 0.0)
-    with lock:
-        elapsed = time.time() - entry[1]
-        if wait and elapsed < wait:
-            time.sleep(wait - elapsed)
-        entry[1] = time.time()
+        wait = _HOST_WAIT.get(host, 0.0)
+        now = time.time()
+        due = max(now, entry[0] + wait) if wait else now
+        entry[0] = due
+    if due > now:
+        time.sleep(due - now)
 
 
 def _json(url, params=None, headers=None, timeout=None, ttl=TTL_META, host=None):

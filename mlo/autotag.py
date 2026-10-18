@@ -1101,7 +1101,7 @@ def mb_track_tags(release, slot, disc=1, album_artist_mbid="", config=None):
     return values
 
 
-def mb_updated_stamp():
+def mb_updated_stamp(at=None):
     """Now, as the ``MUSICBRAINZ_UPDATED`` tag spells it (ISO-8601 UTC).
 
     ONE spelling for every writer that lands MusicBrainz data (script 8's
@@ -1109,8 +1109,15 @@ def mb_updated_stamp():
     album's age is its OLDEST track's stamp, so a reader comparing two files
     must compare the same format. UTC on purpose — a stamp that moved with the
     machine's timezone would age backwards twice a year.
+
+    ``at`` is a ``datetime`` the caller already took (the start of its pass),
+    so every file of one pass is stamped with the SAME instant rather than
+    each at the moment its own container happened to be opened.
     """
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    moment = at if isinstance(at, datetime) else datetime.now(timezone.utc)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def write_mb_tags(af, values, config=None, replace=None, stamp=True,
@@ -1138,37 +1145,105 @@ def write_mb_tags(af, values, config=None, replace=None, stamp=True,
     cannot hold, a read-only file, a full disk. The caller reports them per
     file; swallowing them is what makes a file that was never tagged read
     exactly like a release with nothing to say.
+
+    A value the file already holds in the form the write would store it in is
+    not written at all (see `_same_written_value`); the pull stamp still is,
+    because it records WHEN this pull happened.
     """
+    plan, refused = _mb_write_plan(
+        af, values, config, replace=replace, stamp=stamp,
+        stamp_if_older_than=stamp_if_older_than)
     written = 0
+    for tag, value in plan:
+        try:
+            if af.set_tag(tag, value):
+                written += 1
+            else:
+                refused.append((tag, str(getattr(af, "error", "") or "refused")))
+        except Exception as e:  # noqa: BLE001 — one tag never stops the rest
+            refused.append((tag, f"{type(e).__name__}: {e}"))
+    return written, refused
+
+
+def _same_written_value(tag, have, value):
+    """True when writing *value* would leave a tag reading *have* unchanged.
+
+    mlo.audio stores a single-line value through `canonical_text` and reads
+    exactly that back, so the question is whether the CANONICAL spelling of
+    *value* is what the file already holds. (Comparing spellings instead is
+    how a MEDIA of "Vinyl" looked "already stored" for a value of "CD": the
+    vocabulary knows both, and only the comparison can tell them apart.)
+
+    A tag the file holds as several fields — a list — is NOT the same even
+    when the joined string reads equal: set_tag would rewrite them as one
+    repeated field per value, which is a real change.
+
+    Only what is knowable before the write: the word-split grammar, MP4's
+    per-atom junk filter and a user's free-form atoms are not modelled, so
+    they are simply planned (the write then decides, as before).
+    """
+    try:
+        from .tagtext import canonical_text
+    except Exception:  # noqa: BLE001 — no vocabulary, no claim to make
+        return False
+    return have == canonical_text(tag, value)
+
+
+def _mb_write_plan(af, values, config, replace=None, stamp=True,
+                   stamp_if_older_than=0.0):
+    """The exact ``(tag, value)`` writes :func:`write_mb_tags` would make.
+
+    The same rules, asked BEFORE any write: an empty value is skipped, a tag
+    already holding a value keeps it unless *replace* answers (or a LIST
+    answer completes it), and the per-tag gate decides. A pull stamp is
+    planned only when a value is being written or the file's existing stamp is
+    too old — the exact rule the write applies.
+
+    Returned as ``(plan, refused)``, and the plan omits a write whose result
+    the file already states (see `_same_written_value`): a caller that only
+    writes the plan therefore leaves an already-stamped album byte for byte
+    alone instead of saving every container to write the values it holds.
+
+    ``stamp=False`` plans the values only; the pull stamp's rule depends on
+    whether anything was written (and on the file's age), which is the
+    caller's to apply — see `fill_release_identity`.
+    """
+    plan = []
     refused = []
-    for tag, value in values:
+    for tag, value in values or []:
         try:
             value = _clean_value(value)
             if value is None:
                 continue
             have = str(af.get_tag(tag) or "").strip()
+            is_list = isinstance(value, list)
             if have:
-                wanted = (_clean_value(replace(tag, have, value))
-                          if replace is not None else None)
+                wanted = None
+                if replace is not None:
+                    wanted = _clean_value(replace(tag, have, value))
                 if wanted is not None:
                     value = wanted
-                elif isinstance(value, list):
-                    # The answer is a LIST (several performers, several
-                    # ISRCs) and the file already states values for this tag:
-                    # COMPLETE them rather than leaving the tag alone. The old
-                    # blanket ``continue`` cut a release's two engineers down
-                    # to whichever single credit the file happened to hold.
+                    is_list = isinstance(value, list)
+                elif is_list and replace is None:
+                    # No rule answered, and the answer is a LIST (several
+                    # performers, several ISRCs) on a tag the file already
+                    # states: COMPLETE it rather than leaving the tag alone.
+                    # The old blanket ``continue`` cut a release's two
+                    # engineers down to whichever single credit the file
+                    # happened to hold.
                     value = _complete_list(tag, have, value)
                     if value is None:
                         continue
+                    is_list = True
                 else:
+                    # A tag with a value is KEPT (or a LIST is not completed
+                    # with a rule that already answered) — nothing to write.
                     continue
             if not should_write_audio_tag(config, tag, filepath=af.path):
                 continue
-            if af.set_tag(tag, value):
-                written += 1
-            else:
-                refused.append((tag, str(getattr(af, "error", "") or "refused")))
+            if not is_list and _same_written_value(tag, have, value):
+                continue
+            plan.append((tag, value))
         except Exception as e:  # noqa: BLE001 — one tag never stops the rest
             refused.append((tag, f"{type(e).__name__}: {e}"))
     # WHEN this pull happened, on every file the pull touched. Written in the
@@ -1187,12 +1262,9 @@ def write_mb_tags(af, values, config=None, replace=None, stamp=True,
                     datetime.now(timezone.utc).timestamp() - seen < stamp_if_older_than)
             except (TypeError, ValueError):
                 fresh = False
-        if written or not fresh:
-            try:
-                af.set_tag("MUSICBRAINZ_UPDATED", mb_updated_stamp())
-            except Exception as e:  # noqa: BLE001
-                refused.append(("MUSICBRAINZ_UPDATED", f"{type(e).__name__}: {e}"))
-    return written, refused
+        if plan or not fresh:
+            plan.append(("MUSICBRAINZ_UPDATED", mb_updated_stamp()))
+    return plan, refused
 
 
 def fill_release_identity(files, release, config=None, explicit=False,
@@ -1264,6 +1336,7 @@ def fill_release_identity(files, release, config=None, explicit=False,
     def _one(path):
         """One file: "written" / "skipped" / "failed"."""
         try:
+            started = datetime.now(timezone.utc)  # the pull's instant, one per file
             af = AudioFile(path)
             if af.audio is None:
                 return "failed"
@@ -1272,27 +1345,55 @@ def fill_release_identity(files, release, config=None, explicit=False,
             if not values and not always_stamp:
                 return "skipped"
             stamp_before = str(af.get_tag("MUSICBRAINZ_UPDATED") or "").strip()
+            # `replace` is the pass's own rule for a tag it may change
+            # without it being empty — the same one the Auto Tagging stage
+            # passes, so the two can never disagree about a DATE or a
+            # country (and the fill-only rule above is the rest of it).
+            def _replace(tag, have, want):
+                # The chosen release's own medium lands over a differing
+                # one (see the docstring's `explicit`); every other tag
+                # keeps `_mb_replace`'s sharpen/widen-only rule.
+                if explicit and tag == "MEDIA" and str(want or "").strip():
+                    return want if str(want).strip() != str(have).strip() else ""
+                return _mb_replace(tag, have, want)
+
+            # What would actually change, asked BEFORE any write — the stamp's
+            # own rule depends on the outcome, so it is planned here below. A
+            # file already carrying every value (and, refreshed, a current
+            # stamp) is left alone byte for byte: no container save.
+            plan, _refused = _mb_write_plan(
+                af, values, config, replace=_replace, stamp=False)
+            have_stamp = str(af.get_tag("MUSICBRAINZ_UPDATED") or "").strip()
+            fresh = False
+            if fresh_within > 0 and have_stamp:
+                try:
+                    seen = datetime.strptime(
+                        have_stamp, "%Y-%m-%dT%H:%M:%SZ").replace(
+                        tzinfo=timezone.utc).timestamp()
+                    fresh = bool(seen) and (
+                        datetime.now(timezone.utc).timestamp() - seen
+                        < fresh_within)
+                except (TypeError, ValueError):
+                    fresh = False
+            # The stamp's rule is `write_mb_tags`': planned WITH the values
+            # (one save), so an import that changes nothing saves nothing. The
+            # refresh path's promise to move it forward on every track is
+            # `always_stamp`'s, and `fresh_within` is what keeps a repeat
+            # refresh from re-stamping a file it just covered.
+            if always_stamp and not fresh and not any(
+                    tag == "MUSICBRAINZ_UPDATED" for tag, _v in plan):
+                # The instant this file's pass began: a file already stamped
+                # within this second is left alone instead of rewritten to
+                # move its stamp by those moments.
+                plan.append(("MUSICBRAINZ_UPDATED", mb_updated_stamp(started)))
             defer = hasattr(af, "defer_save")
             if defer:
                 af.defer_save(True)
             written = 0
             try:
-                # `replace` is the pass's own rule for a tag it may change
-                # without it being empty — the same one the Auto Tagging stage
-                # passes, so the two can never disagree about a DATE or a
-                # country (and the fill-only rule above is the rest of it).
-                def _replace(tag, have, want):
-                    # The chosen release's own medium lands over a differing
-                    # one (see the docstring's `explicit`); every other tag
-                    # keeps `_mb_replace`'s sharpen/widen-only rule.
-                    if explicit and tag == "MEDIA" and str(want or "").strip():
-                        return want if str(want).strip() != str(have).strip() else ""
-                    return _mb_replace(tag, have, want)
-
-                written, _refused = write_mb_tags(
-                    af, values, config, replace=_replace,
-                    stamp=True,
-                    stamp_if_older_than=fresh_within)
+                for tag, value in plan:
+                    if af.set_tag(tag, value):
+                        written += 1
             finally:
                 if defer and af.defer_save(False) is False:
                     return "failed"
@@ -1507,12 +1608,28 @@ def _fill_release_tags(info, config, album_dir):
         # twelve times; the flush below is where all of them land. A handle
         # that only implements the get/set contract (a caller's stub) simply
         # writes per tag, like before.
-        defer = hasattr(af, "defer_save")
+        # Only what the file does not already hold is planned — a second
+        # release-tag pass over a filled album must not rewrite every file
+        # and must not report values it did not write.
+        planned, _plan_refused = _mb_write_plan(
+            af, per_track, config, replace=_mb_replace, stamp=False)
+        defer = hasattr(af, "defer_save") and bool(planned)
         if defer:
             af.defer_save(True)
         try:
-            pending, refusals = write_mb_tags(af, per_track, config,
-                                              replace=_mb_replace)
+            # `planned` is already the decided (tag, value) list: apply it
+            # through the writer's own guard path (a refused tag is reported
+            # per file), without asking the rules a second time.
+            pending, refusals = (0, [])
+            if planned:
+                for tag, value in planned:
+                    try:
+                        if af.set_tag(tag, value):
+                            pending += 1
+                        else:
+                            refusals.append((tag, str(getattr(af, "error", "") or "refused")))
+                    except Exception as e:  # noqa: BLE001 — one tag never stops the rest
+                        refusals.append((tag, f"{type(e).__name__}: {e}"))
         finally:
             # The one write of this file. A failed flush wrote nothing, so the
             # tags never reached the disk and must not be reported as written;

@@ -145,6 +145,7 @@ export default {
   "auth.changed": "パスワードを変更しました",
   "auth.setup_done": "パスワードを設定しました。ようこそ",
   "auth.signed_in": "サインインしました",
+  "auth.starting": "ローカルサーバーを起動しています…",
   "auth.server": "このサーバー",
   "settings.security": "セキュリティ",
   "settings.security_help": "ログインゲートとこのクライアントのセッション。",

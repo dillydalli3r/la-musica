@@ -449,6 +449,8 @@ print("== a rated album is no ratings gap, and the prompt lands on Ratings ==")
 _GAP_CFG = {
     "music_folder": MF, "web_ratings_enabled": True, "grade_check_web_rating": True,
     "grade_check_mb_links": False, "grade_check_source": False,
+    # the MB pull stamp is its own presence check (2.2.1)
+    "grade_check_mb_updated": False,
     "grade_check_cover": False, "grade_check_genre": False,
     "grade_check_genre_count": False, "grade_check_genre_order": False,
     "grade_check_genre_vocab": False, "grade_check_lyrics": False,

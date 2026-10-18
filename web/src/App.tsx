@@ -93,6 +93,7 @@ import { EmptyState, PendingMark } from "./components/Badges";
 // The shell's own presentational islands live in their own folder: App.tsx is
 // the layout (sidebar, top bar, routes, player), not a drawer of components.
 import PageLoading from "./shell/PageLoading";
+import ShellSplash from "./shell/ShellSplash";
 import SearchHit from "./shell/SearchHit";
 import SetupLoading from "./shell/SetupLoading";
 import Toasts from "./shell/Toasts";
@@ -105,6 +106,17 @@ import Toasts from "./shell/Toasts";
  *  re-read: long enough that an import chain's several outcomes cost one
  *  refetch, short enough that the page is live to the eye. */
 const LIVE_LIBRARY_MS = 1500;
+
+/** How long a desktop shell waits for an answer to `/api/auth/status` before
+ *  its waiting screen yields to the sign-in page's address field: a local
+ *  backend answers in well under a second once it is up, so this is only
+ *  reached when the ask is still in flight (a pointer that was never set, a
+ *  backend that hung) — and then "where is the server?" is the one question
+ *  the user can do anything about. */
+const AUTH_WAIT_MS = 8000;
+
+/** How often a shell with no answer re-asks `/api/auth/status`. */
+const AUTH_RETRY_MS = 2000;
 
 /** The tag families a locale alias rides on: the bare key (`TITLEALIAS`) — the
  *  ONE spelling every writer produces, for a name the configured locale cannot
@@ -429,6 +441,37 @@ export default function App() {
     refetchIntervalInBackground: false,
   });
   useEffect(() => onAuthLost(() => setSignedOut(true)), []);
+  // A shell whose status ask failed, or never landed, asks again by itself:
+  // the shell navigates only after `/api/health`, so one failed ask at boot is
+  // the LAST one — the 60s poll would leave a starting screen (or the address
+  // field) up for a minute over a backend that is answering RIGHT NOW.
+  //
+  // `isPending` is react-query's own name for "nothing has answered yet", so
+  // a first frame that lost the race with the shell's navigation is asked at
+  // once rather than a poll interval later.
+  const authBooting = IN_TAURI && auth.isPending;
+  useEffect(() => {
+    if (!authBooting) return;
+    if (!auth.isFetching) void auth.refetch();
+    const id = window.setInterval(() => void auth.refetch(), AUTH_RETRY_MS);
+    return () => window.clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authBooting]);
+  // Past AUTH_WAIT_MS the waiting screen gives the ask to the sign-in page
+  // (its own probe retries, and its splash turns into the address field): the
+  // shell cannot tell a slow local backend from a pointer that was never set,
+  // so it stops being the one to guess. Only an ask still IN FLIGHT ever
+  // reaches this — a failed one (`null`) is the address wizard's turn at once.
+  const authNoAnswer = IN_TAURI && auth.data === undefined;
+  const [authGaveUpAt, setAuthGaveUpAt] = useState<number | null>(null);
+  useEffect(() => {
+    if (!authNoAnswer) {
+      setAuthGaveUpAt(null);
+      return;
+    }
+    const id = window.setTimeout(() => setAuthGaveUpAt(Date.now()), AUTH_WAIT_MS);
+    return () => window.clearTimeout(id);
+  }, [authNoAnswer]);
   useEffect(() => {
     if (signedOut) void auth.refetch();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -440,18 +483,45 @@ export default function App() {
   // request erroring and no way to point it anywhere. Once an address answers,
   // the 60s poll resolves `isError` and the gate opens by itself.
   //
-  // `!auth.data` is what makes that gate MONOTONE, and it is the difference
-  // between a usable app and one that looks like it reloads itself: `isError`
-  // goes true for any failed request, so once the server HAD answered, one
-  // dropped poll — Wi-Fi hiccup, backend restarting on a config save, a phone
-  // coming back from the lock screen — used to tear the entire shell out of
-  // the DOM (sidebar, page, player, scroll position) and remount it as this
-  // screen, and the next successful poll put it back. A network failure is not
-  // a lost session: it must not gate. Only a real answer may — a 401 from the
-  // server (`signedOut`, which stays latched until a sign-in), or the server
-  // saying it wants a password this client does not have.
-  const needsLogin = signedOut
-    || (IN_TAURI && auth.data === null)
+  // The answer (`auth.data`) is what makes that gate MONOTONE, and it is the
+  // difference between a usable app and one that looks like it reloads
+  // itself: `isError` goes true for any failed request, so once the server
+  // HAD answered, one dropped poll — Wi-Fi hiccup, backend restarting on a
+  // config save, a phone coming back from the lock screen — used to tear the
+  // entire shell out of the DOM (sidebar, page, player, scroll position) and
+  // remount it as this screen, and the next successful poll put it back. A
+  // network failure is not a lost session: it must not gate. Only a real
+  // answer may — a 401 from the server (`signedOut`, which a later answer
+  // overrules), or the server saying it wants a password this client does not
+  // have.
+  //
+  // `signedOut` is the latched 401, and a server that then answers "no login
+  // is needed for THIS request" has overruled it: the host's own desktop app
+  // gets `required: false` from its own backend (`auth_mode: auto`, a local
+  // request) even while a stale token is still stored, and holding the
+  // sign-in screen there asked for a password nothing had demanded. Any such
+  // answer clears the latch — not only `local: true` — because `required`
+  // is the server's answer to the gate question itself. It is cleared in an
+  // effect (so the shared cache write from LoginPage's own probe lands the
+  // same way), and `needsLogin` already ignores a latch the answer
+  // contradicts, so no frame shows the form while that effect runs.
+  const openAnswer = !!auth.data && !auth.data.required;
+  useEffect(() => {
+    if (signedOut && openAnswer) setSignedOut(false);
+  }, [signedOut, openAnswer, auth.dataUpdatedAt]);
+
+  // A client shell whose status ask has NOT ANSWERED (first frame, in flight)
+  // is a fourth state: the waiting screen, never a form. Its bound
+  // (`authGaveUpAt`, above) is what hands it over to the sign-in page, whose
+  // address field is the only thing a user can act on — see the gate below.
+  //
+  // (The other shell branch: a status ask that ANSWERED "no server", i.e.
+  // `auth.data === null`.)
+  const authFailed = IN_TAURI && auth.data === null;
+
+  const needsLogin = (signedOut && !openAnswer)
+    || authNoAnswer
+    || authFailed
     || (!!auth.data?.required && !auth.data.authenticated);
 
   // ---- offline ------------------------------------------------------------
@@ -495,6 +565,89 @@ export default function App() {
   const configQuery = useQuery({ queryKey: ["config"], queryFn: api.config });
   const config = configQuery.data;
 
+  // The shell's own first-run question — run the built-in backend, or connect
+  // to one the user runs — asked ONCE (no polling), before the address wizard.
+  // Outside a client shell (the web/Docker build) the effect returns at the
+  // first line, so this adds no work at all there.
+  //
+  // These answers live here, ABOVE the gate that combines them: the progress
+  // socket effect keys on `gated` and runs earlier in the component body.
+  const inClientShell = isClientShell();
+  const clientSetupDone = isClientSetupDone();
+  const [backendChoiceNeeded, setBackendChoiceNeeded] = useState<boolean | null>(null);
+  // `location` is read by the gate below; the router's location is a hook,
+  // and the socket effect that keys on the gate runs earlier in the body.
+  const location = useLocation();
+
+  // True from the moment the shell says it is bringing up the local backend
+  // until it answers. The chooser owns the screen for that window: without it
+  // the page falls through to the client wizard and asks for a SERVER ADDRESS
+  // in local mode — the wrong question, shown for as long as the backend takes
+  // to boot (seconds, on a cold start with a frozen Python server).
+  //
+  // Until the shell has been ASKED (`backendChoiceNeeded === null`) the shell's
+  // own starting flag is in doubt — a shell may be booting a backend the page
+  // has not been told about yet — so both read as "starting", which is the
+  // splash below rather than a screen that would ask the wrong question. A
+  // later answer replaces it: `unset` opens the chooser, `remote` the wizard.
+  const shellQuestioned = backendChoiceNeeded !== null;
+  const [backendStarting, setBackendStarting] = useState(() => shellQuestioned || backendStartingUp());
+
+  // Is a gate (rather than the library) owning the screen right now? The
+  // progress socket and the gate-closing invalidation key on THIS, not on the
+  // login gate alone: a shell that never answers its server is gated from its
+  // very first frame, and treating that window as "signed in" opened a socket
+  // against a server that was not there. Kept in step with the returns below.
+  const gated =
+    needsLogin
+    || (inClientShell && (backendStarting || backendChoiceNeeded !== false))
+    || (inClientShell && !clientSetupDone)
+    || !config
+    || !config.first_run_done
+    || location.pathname === "/setup"
+    || configQuery.isPending;
+
+  useEffect(() => {
+    if (!inClientShell) return;
+    let alive = true;
+    // The shell may also announce it on the event; the command below is the
+    // authoritative one-shot ask. A mobile/browser shell has neither and the
+    // command resolves null, which leaves the classic wizard in charge.
+    //
+    // This runs even when THIS DEVICE's own flag says setup is done, and that
+    // is the whole point: `mlo.clientSetup` lives in the webview's
+    // localStorage, which two shells of the same app SHARE (WebView2 keys its
+    // profile by the app identifier), so a flag written by a different install
+    // — or an earlier build, or the same install before the shell learned to
+    // ask — used to hide the question the SHELL has never been told the answer
+    // to. The shell is the authority on whether it was asked; the flag is a
+    // convenience for everything after that.
+    const off = subscribeBackendChoice(() => {
+      if (alive && backendNeedsChoice()) setBackendChoiceNeeded(true);
+    });
+    // The failure signal is its own channel (it is true for a local shell that
+    // already answered the question), so it gets its own subscription.
+    const offFailure = subscribeBackendFailure(() => {
+      if (alive) setBackendChoiceNeeded(true);
+    });
+    const offStarting = subscribeBackendStarting(() => {
+      if (alive) setBackendStarting(backendStartingUp());
+    });
+    void shellBackendChoice().then((choice) => {
+      if (!alive) return;
+      // A shell in LOCAL mode whose backend is not up (it never started, or it
+      // died) is shown the chooser as well — that screen is where the reason
+      // and the two ways out live. Anything else would walk a user into the
+      // address wizard while the shell still believes it runs its own server.
+      setBackendChoiceNeeded(choice?.mode === "unset" || (!!choice && backendUnavailable()));
+    });
+    return () => {
+      alive = false;
+      off();
+      offFailure();
+      offStarting();
+    };
+  }, [inClientShell]);
   // The server's `ui_locale` is the app-wide language; this browser's own pick
   // (if any) wins, and i18n.ts owns that precedence — this only hands it the
   // config once it arrives.
@@ -503,7 +656,6 @@ export default function App() {
   }, [config]);
 
   // ---- navigation history (top-bar back / forward) ------------------------
-  const location = useLocation();
   const navigate = useNavigate();
 
   // ---- a drop ANYWHERE is an import --------------------------------------
@@ -762,12 +914,41 @@ export default function App() {
     applyAccent(localStorage.getItem("mlo.accent"));
   }, []);
 
+
+  // The gate CLOSING is a server-and-session change, and everything the login
+  // screen blocked was fetched while there was nothing to answer — react-query
+  // does not refetch on a re-render, so `config` (which decides the first-run
+  // wizard) and every page's payload would stay empty until the user happened
+  // to navigate. The login screen's own probe can now close the gate with no
+  // sign-in click at all (a backend that was still booting when the shell
+  // opened), so this cannot rely on the sign-in callback alone.
+  const wasGated = useRef(gated);
+  useEffect(() => {
+    if (wasGated.current && !gated) void qc.invalidateQueries();
+    wasGated.current = gated;
+  }, [gated, qc]);
+
+  // Every gate below can raise a toast (a failed backend choice, a refused
+  // sign-in, a config save). Render through this so the stack is on screen —
+  // the toasts used to live only in the shell's return, so a message from any
+  // screen before it was stored and shown to nobody.
+  const withToasts = (node: ReactNode) => (
+    <>
+      <Toasts />
+      {node}
+    </>
+  );
+
   useEffect(() => {
     // Nothing to talk to: the login screen is up, which means the shell has no
     // server (or no session). Opening a socket it cannot complete — and worse,
     // restarting that socket on a fixed timer — is request churn on a client
     // that is still being told where its server is.
-    if (needsLogin) return;
+    // The progress socket must not open while a gate owns the screen: the
+    // sign-in form, the backend splash and the first-run wizard have no
+    // library to keep live, and the socket is what the gate-closing
+    // invalidation below then re-answers.
+    if (gated) return;
     // The progress socket must reach the SAME server the API does — the
     // shell's configured address, or this page's own origin. Hardcoding
     // 127.0.0.1:8000 (as this did) left every phone pointed at a LAN server
@@ -836,102 +1017,43 @@ export default function App() {
     // Re-run when the gate changes: the socket belongs to a signed-in shell,
     // and re-entering one must not wait for the backoff to expire.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [needsLogin]);
-
-  // The gate CLOSING is a server-and-session change, and everything the login
-  // screen blocked was fetched while there was nothing to answer — react-query
-  // does not refetch on a re-render, so `config` (which decides the first-run
-  // wizard) and every page's payload would stay empty until the user happened
-  // to navigate. The login screen's own probe can now close the gate with no
-  // sign-in click at all (a backend that was still booting when the shell
-  // opened), so this cannot rely on the sign-in callback alone.
-  const wasGated = useRef(needsLogin);
-  useEffect(() => {
-    if (wasGated.current && !needsLogin) void qc.invalidateQueries();
-    wasGated.current = needsLogin;
-  }, [needsLogin, qc]);
-
-  // The shell's own first-run question — run the built-in backend, or connect
-  // to one the user runs — asked ONCE (no polling), before the address wizard.
-  // Outside a client shell (the web/Docker build) the effect returns at the
-  // first line, so this adds no work at all there.
-  const inClientShell = isClientShell();
-  const clientSetupDone = isClientSetupDone();
-  const [backendChoiceNeeded, setBackendChoiceNeeded] = useState<boolean | null>(null);
-  // True from the moment the shell says it is bringing up the local backend
-  // until it answers. The chooser owns the screen for that window: without it
-  // the page falls through to the client wizard and asks for a SERVER ADDRESS
-  // in local mode — the wrong question, shown for as long as the backend takes
-  // to boot (seconds, on a cold start with a frozen Python server).
-  const [backendStarting, setBackendStarting] = useState(backendStartingUp());
-  useEffect(() => {
-    if (!inClientShell) return;
-    let alive = true;
-    // The shell may also announce it on the event; the command below is the
-    // authoritative one-shot ask. A mobile/browser shell has neither and the
-    // command resolves null, which leaves the classic wizard in charge.
-    //
-    // This runs even when THIS DEVICE's own flag says setup is done, and that
-    // is the whole point: `mlo.clientSetup` lives in the webview's
-    // localStorage, which two shells of the same app SHARE (WebView2 keys its
-    // profile by the app identifier), so a flag written by a different install
-    // — or an earlier build, or the same install before the shell learned to
-    // ask — used to hide the question the SHELL has never been told the answer
-    // to. The shell is the authority on whether it was asked; the flag is a
-    // convenience for everything after that.
-    const off = subscribeBackendChoice(() => {
-      if (alive && backendNeedsChoice()) setBackendChoiceNeeded(true);
-    });
-    // The failure signal is its own channel (it is true for a local shell that
-    // already answered the question), so it gets its own subscription.
-    const offFailure = subscribeBackendFailure(() => {
-      if (alive) setBackendChoiceNeeded(true);
-    });
-    const offStarting = subscribeBackendStarting(() => {
-      if (alive) setBackendStarting(backendStartingUp());
-    });
-    void shellBackendChoice().then((choice) => {
-      if (!alive) return;
-      // A shell in LOCAL mode whose backend is not up (it never started, or it
-      // died) is shown the chooser as well — that screen is where the reason
-      // and the two ways out live. Anything else would walk a user into the
-      // address wizard while the shell still believes it runs its own server.
-      setBackendChoiceNeeded(choice?.mode === "unset" || (!!choice && backendUnavailable()));
-    });
-    return () => {
-      alive = false;
-      off();
-      offFailure();
-      offStarting();
-    };
-  }, [inClientShell]);
-
-  // Every gate below can raise a toast (a failed backend choice, a refused
-  // sign-in, a config save). Render through this so the stack is on screen —
-  // the toasts used to live only in the shell's return, so a message from any
-  // screen before it was stored and shown to nobody.
-  const withToasts = (node: ReactNode) => (
-    <>
-      <Toasts />
-      {node}
-    </>
-  );
+  }, [gated]);
 
   // The shell's own first-run question — run the built-in backend, or connect
   // to one the user runs — comes FIRST, before the device's own bookkeeping
   // and before the address wizard. A shell that reports `mode: "unset"` has
   // never been given an answer, whatever this webview's localStorage says.
-  if (inClientShell && (backendChoiceNeeded || backendStarting)) {
-    return withToasts(<BackendChoice onDone={() => window.location.reload()} starting={backendStarting} />);
+  //
+  // A shell whose mode WAS chosen and whose built-in backend is simply still
+  // booting gets the chooser's frame with the splash in its body: the rail and
+  // layout stay put while the server comes up, and nothing here ever renders
+  // `null` (the old blank frame between the shell's window and this app). A
+  // shell known to be DOWN (mode chosen, backend unavailable) is the chooser
+  // proper — that screen owns the reason and the two ways out.
+  //
+  // The first condition is the shell's UNANSWERED question (`null`): the same
+  // frame for the same reason — it is a wait, not a decision, and the rail
+  // keeps the following wizard's shape on screen instead of a bare skeleton.
+  if (inClientShell && (backendChoiceNeeded === null || backendStarting)) {
+    // A backend known to be DOWN opens on the failure panel (the reason and
+    // the two ways out) rather than on a spinner that would never stop.
+    return withToasts(
+      <BackendChoice
+        onDone={() => window.location.reload()}
+        starting={backendStarting}
+        failed={backendUnavailable()}
+        startingScreen={<ShellSplash />}
+      />,
+    );
   }
 
   // The shell's own first-run wizard, before every other gate: it needs no
   // server and no token, and it is what asks which server this device talks
   // to. Re-runnable from Settings → Security (which clears the flag).
+  //
+  // A shell still waiting on the shell's own answer never reaches here: the
+  // chooser's frame above holds that window with the splash in its body.
   if (inClientShell && !clientSetupDone) {
-    // A shell that has answered the question above still waits one ask for its
-    // mode (`unset` renders the chooser instead).
-    if (backendChoiceNeeded === null) return <PageLoading />;
     // A reload rather than an in-place re-render: finishing the wizard changes
     // the API base URL and the token, and module-level state (the event
     // socket, the media-cache keys, every cached query) was built against the
@@ -942,9 +1064,27 @@ export default function App() {
 
   // The gate comes before the first-run wizard: an unclaimed remote server has
   // no config to show anyone yet, and every route below would answer 428.
+  //
+  // Two of its arms are not a form. A client shell with NO answer yet shows
+  // the splash alone (nothing to sign in to: the server may be a second away,
+  // and on the host it never wants a password) — and the LoginPage shows that
+  // same splash, bounded, for the first moments of its own probe. A pointer
+  // that was never set (no address, nothing listening) ends in the address
+  // wizard's turn: the page's own probe offers the address field, which is the
+  // one action that helps a desktop shell whose backend never came up, and its
+  // retry clears the setup flag the shell gates on so a fresh wizard can name
+  // another server.
   if (needsLogin) {
+    // An ask still in flight keeps the neutral frame — and past its bound the
+    // sign-in page takes it over: its own probe retries, and `now` starts IT
+    // past the splash, so the next thing on screen is the address field (the
+    // only thing to do when nothing answers) rather than the password form.
+    if (authNoAnswer && authGaveUpAt === null) return withToasts(<ShellSplash />);
     return withToasts(
       <LoginPage
+        // The shell already waited `authGaveUpAt` past the ask: the page
+        // mounts past ITS splash, so one boot window is never drawn twice.
+        now={authGaveUpAt ?? 0}
         onSignedIn={() => {
           setSignedOut(false);
           void auth.refetch();
@@ -984,7 +1124,7 @@ export default function App() {
   // beat later, which is the library UI flashing through setup. An ERRORED
   // query is not held: a server that did not answer must still leave the shell
   // (and its error surfaces) reachable.
-  if (configQuery.isPending) return <SetupLoading />;
+  if (configQuery.isPending) return withToasts(<SetupLoading />);
 
   return (
     // The sidebar owns the entire left edge, top to bottom (brand header, nav,

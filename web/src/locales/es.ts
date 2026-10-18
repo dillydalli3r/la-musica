@@ -145,6 +145,7 @@ export default {
   "auth.changed": "Contraseña cambiada",
   "auth.setup_done": "Contraseña establecida: bienvenido",
   "auth.signed_in": "Sesión iniciada",
+  "auth.starting": "Iniciando el servidor local…",
   "auth.server": "Este servidor",
   "settings.security": "Seguridad",
   "settings.security_help": "El control de acceso y la sesión de este cliente.",

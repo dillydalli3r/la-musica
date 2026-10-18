@@ -1194,6 +1194,7 @@ export default function SettingsPage() {
     { k: "grade_check_lyrics_format", label: "Lyrics format", type: "bool" },
     { k: "grade_check_sidecar_cover", label: "Sidecar cover", type: "bool" },
     { k: "grade_check_mb_links", label: "MusicBrainz links (album/artist/track)", type: "bool" },
+    { k: "grade_check_mb_updated", label: "MusicBrainz pull date", type: "bool" },
     { k: "grade_check_media", label: "MEDIA tag", type: "bool" },
     { k: "grade_check_media_evidence", label: "MEDIA agrees with the disc sheets", type: "bool" },
     { k: "grade_check_source", label: "SOURCE tag", type: "bool" },

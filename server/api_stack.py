@@ -171,7 +171,7 @@ _GROUP_KEYS = {
     "auditing": ("grade_check_audit", "grade_check_flac_md5",
                  "grade_check_log_checksum",
                  "grade_check_accuraterip", "grade_check_log_grade"),
-    "links": ("grade_check_mb_links",),
+    "links": ("grade_check_mb_links", "grade_check_mb_updated"),
     "covers": ("grade_check_cover", "grade_check_cover_crop",
                "grade_check_sidecar_cover"),
     # The formatting family is named by what it compares, not by what it

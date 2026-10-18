@@ -414,6 +414,7 @@ export default {
   "backend.starting_title": "Starting the built-in server…",
   "backend.starting_hint": "This can take a few seconds. This window opens the app by itself once the server answers.",
   "backend.error": "That choice did not take effect. Try again.",
+  "auth.starting": "Starting the local server…",
 "backend.failed_title": "The built-in server did not start",
 "backend.failed_hint": "This install bundles its own server, and it did not come up — most often the packaged files are missing or the port range is taken. You can retry, or connect to a la musica server you run elsewhere.",
 "backend.failed_retry": "Try again",

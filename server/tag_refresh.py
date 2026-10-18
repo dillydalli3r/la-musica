@@ -15,7 +15,8 @@ leave one album half-updated.
 
 The queue is bounded and multi-threaded on purpose: a large library must not
 start a walk of every album at once. Callers name paths or "everything due";
-workers take albums off the queue (default 4), each under the library's own
+workers take albums off the queue (default 8, since the MusicBrainz client no
+longer serializes its callers behind the socket), each under the library's own
 per-album claim, so a refresh can never race an import or a script run. The
 MusicBrainz client's own 1 req/s etiquette still holds globally.
 """
@@ -28,7 +29,12 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor
 
 DEFAULT_DAYS = 7
-DEFAULT_WORKERS = 4
+# 8, not 4: MusicBrainz is one request a second and (since the client reserves
+# its slot and releases the lock before the socket, `integrations.mb_get`) a
+# slow answer no longer serializes the other callers behind it — so a worker
+# blocked in a lookup costs no sibling anything, and the extra workers overlap
+# the tag reads/writes that used to be the queue's real width.
+DEFAULT_WORKERS = 8
 DEFAULT_INTERVAL_MINUTES = 60
 
 # The stamp every MusicBrainz writer puts on a file (mlo.autotag
@@ -256,10 +262,10 @@ def invalidate():
     with _lock:
         _status_cache.update({"t": 0.0, "data": None})
     # NOTHING else: the per-album tag caches were already invalidated by
-    # `refresh_release_tags` (which is what marks the assembled tree dirty for
-    # its own stale-while-revalidate pass). Dropping every payload here would
-    # make the next read rebuild the WHOLE library synchronously — the exact
-    # cost a large install pays once already, with nothing new to learn: the
+    # `refresh_release_tags` (which marks the assembled tree dirty too — see
+    # `tagcache.invalidate_album`), so dropping every payload here would make
+    # the next read rebuild the WHOLE library synchronously — the exact cost a
+    # large install pays once already, with nothing new to learn: the
     # freshness the page shows comes from `_fresh`, not the tree.
 
 
@@ -379,7 +385,6 @@ def _run_job(job, paths, cfg):
                     stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
                     with _lock:
                         _fresh[os.path.normcase(os.path.normpath(path))] = stamp
-                        _status_cache.update({"t": 0.0, "data": None})
                     with _job_lock:
                         job["refreshed"] += 1
                         job["written"] += int((out.get("identity") or {}).get("written") or 0)
@@ -408,6 +413,10 @@ def _run_job(job, paths, cfg):
             job["finished"] = time.time()
             job["errors"].append({"path": "", "error": str(e)})
     finally:
+        # ONE status-cache reset (and one `_fresh` sweep) per job, at its end,
+        # not per album: `refresh` already dropped it when the job started and
+        # the page polls the job state while it runs, so a per-album reset
+        # bought nothing and only made the next read rebuild the status.
         invalidate()
         with _job_lock:
             _job_pool = None

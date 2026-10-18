@@ -81,6 +81,35 @@ class MusicBrainzError(RuntimeError):
         self.status = status
 
 
+def _reserve_mb_slot(max_wait=None):
+    """Reserve this process's next MusicBrainz request slot, sleeping for it
+    OUTSIDE the lock. -> the time the reservation is scheduled for.
+
+    The lock is held for the stamping arithmetic only, never across the sleep
+    or the request: held across the call (the shape this and `mb_get` had) a
+    slow MusicBrainz answer stalled every other caller for its latency ON TOP
+    of the 1 s gap. Publishing the reservation time under the lock — rather
+    than stamping "now" after waking — is what keeps two threads from waking
+    together and bursting: each one books a distinct slot, and the gap between
+    reservations is `_MB_MIN_INTERVAL` because a later reservation sleeps until
+    its own slot, which is at least one interval after the previous one.
+
+    `max_wait` caps the sleep (for a caller with an overall deadline).
+    """
+    global _last_request
+    now = time.time()
+    with _mb_lock:
+        due = max(now, _last_request + _MB_MIN_INTERVAL)
+        wait = due - now
+        if max_wait is not None and wait > max_wait:
+            due = now + max_wait
+            wait = max_wait
+        _last_request = due
+    if wait > 0:
+        time.sleep(wait)
+    return due
+
+
 def mb_reserve_slot():
     """Take this process's MusicBrainz request slot: wait until one second has
     passed since the last MB request made here, then stamp it.
@@ -88,15 +117,13 @@ def mb_reserve_slot():
     ONE budget for READS (`mb_get`) and WRITES (`mb_submit._post_rating`):
     MusicBrainz's etiquette is per client, not per verb. The slot is reserved
     BEFORE the request — so two writers queue behind each other instead of
-    bursting — and it is the same `_last_request` `mb_get` stamps after its own
-    call, so a write and a read can never land inside one second either.
+    bursting, and the reserved time is what the next caller's wait is measured
+    from, so waiting never leaves the budget unstamped — and it is the same
+    `_last_request` `mb_get` reserves its own call against, so a write and a
+    read can never land inside one second either. The sleep happens outside
+    `_mb_lock`, so a queued writer never blocks anybody else.
     """
-    global _last_request
-    with _mb_lock:
-        elapsed = time.time() - _last_request
-        if elapsed < _MB_MIN_INTERVAL:
-            time.sleep(_MB_MIN_INTERVAL - elapsed)
-        _last_request = time.time()
+    _reserve_mb_slot()
 
 
 _MB_MIN_INTERVAL = 1.0     # MusicBrainz etiquette: one request per second
@@ -152,41 +179,46 @@ def mb_get(endpoint, params=None, timeout=30.0, retries=3, deadline=MB_RETRY_DEA
     while attempts < max(1, int(retries)):
         attempts += 1
         retry_after = None
-        with _mb_lock:
-            elapsed = time.time() - _last_request
-            if elapsed < _MB_MIN_INTERVAL:
-                time.sleep(min(_MB_MIN_INTERVAL - elapsed,
-                               max(0.0, deadline - (time.time() - started))))
+        # The throttle is the RESERVATION, not a lock: the slot is booked
+        # under `_mb_lock` (see `_reserve_mb_slot`) and slept for outside it,
+        # then the request runs unlocked. It used to be made inside the lock
+        # with the stamp taken on the way out, so one slow MusicBrainz answer
+        # (a browse with `inc=` can take seconds) held every other caller for
+        # its whole latency ON TOP of the 1 s gap — the gap became a ceiling
+        # for the whole client. The booking still covers every way out of the
+        # attempt, the successful one included: MB etiquette is one request
+        # per second however the socket answers.
+        slot = _reserve_mb_slot(
+            max_wait=max(0.0, deadline - (time.time() - started)))
+        try:
             try:
-                try:
-                    r = httpx.get(
-                        f"{MB_BASE}/{endpoint}",
-                        params=params or {},
-                        headers=headers,
-                        # never sit on the socket past the deadline either
-                        timeout=min(timeout, max(1.0, deadline - (time.time() - started))),
-                    )
-                except httpx.HTTPError as e:
-                    status, reason = None, f"connection error ({e.__class__.__name__})"
-                else:
-                    if r.status_code not in _MB_RETRY_STATUS:
-                        _raise_mb_refusal(r)
-                        r.raise_for_status()
-                        return r.json()
-                    status, reason = r.status_code, f"HTTP {r.status_code}"
-                    retry_after = r.headers.get("Retry-After")
-            finally:
-                # The stamp IS the throttle, so it is set on EVERY way out of
-                # this block — the successful one included. Stamping it only on
-                # the retry/error path left `_last_request` at 0.0 for a whole
-                # run of successful reads, which is MusicBrainz's documented
-                # one-request-per-second etiquette turned into "as fast as the
-                # socket answers": an artist walk (four pages of release groups
-                # plus a browse each) or a rated-library pass fired every
-                # request back to back, and MetaBrainz answers that burst with
-                # 429/503 — or blocks the user agent. `finally` also covers the
-                # 4xx raises below, which cost the same request budget.
-                _last_request = time.time()
+                r = httpx.get(
+                    f"{MB_BASE}/{endpoint}",
+                    params=params or {},
+                    headers=headers,
+                    # never sit on the socket past the deadline either
+                    timeout=min(timeout, max(1.0, deadline - (time.time() - started))),
+                )
+            except httpx.HTTPError as e:
+                status, reason = None, f"connection error ({e.__class__.__name__})"
+            else:
+                if r.status_code not in _MB_RETRY_STATUS:
+                    _raise_mb_refusal(r)
+                    r.raise_for_status()
+                    return r.json()
+                status, reason = r.status_code, f"HTTP {r.status_code}"
+                retry_after = r.headers.get("Retry-After")
+        finally:
+            # The slot is a reservation time, while the next request counts
+            # from when THIS one actually went out. They differ only when the
+            # sleep was capped by the deadline and the socket still left after
+            # it; push the book forward then (never backwards — a writer may
+            # have reserved a later slot meanwhile) so two requests are still
+            # a full second apart.
+            sent = time.time()
+            if sent - slot > _MB_MIN_INTERVAL:
+                with _mb_lock:
+                    _last_request = max(_last_request, sent)
         if attempts >= retries:
             break
         wait = min(_MB_BACKOFF_BASE * (2 ** (attempts - 1)), _MB_BACKOFF_MAX)

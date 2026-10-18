@@ -248,6 +248,10 @@ PER_TRACK_TAGS = [
     "REPLAYGAIN_ALBUM_PEAK",
     "DYNAMIC RANGE",
     "INSTRUMENTAL",
+    # The MusicBrainz pull date (see TAG_PRESENCE_CHECKS): a per-track fact
+    # every MB writer stamps, so a track carrying none fails while its check
+    # is on.
+    "MUSICBRAINZ_UPDATED",
 ]
 
 # Tags whose PRESENCE is graded by a toggle of its own instead of the
@@ -255,7 +259,8 @@ PER_TRACK_TAGS = [
 # without the whole sweep: mood/genre/energy are auto-filled by script 8,
 # WEBRATING by script 24 (the public verdict), and the grader is what says a
 # track may not ship without them; ReplayGain is the opt-in loudness family
-# (see REPLAYGAIN_TAGS). Value: (config key, per-track issue code). Every
+# (see REPLAYGAIN_TAGS), and MUSICBRAINZ_UPDATED is the pull date MAINTAIN →
+# Tags dates an album by. Value: (config key, per-track issue code). Every
 # entry defaults ON.
 TAG_PRESENCE_CHECKS = {
     "GENRE": ("grade_check_genre", "GENRE_MISSING"),
@@ -275,6 +280,15 @@ TAG_PRESENCE_CHECKS = {
     "REPLAYGAIN_TRACK_PEAK": ("grade_check_replaygain", "REPLAYGAIN_TRACK_PEAK"),
     "REPLAYGAIN_ALBUM_GAIN": ("grade_check_replaygain", "REPLAYGAIN_ALBUM_GAIN"),
     "REPLAYGAIN_ALBUM_PEAK": ("grade_check_replaygain", "REPLAYGAIN_ALBUM_PEAK"),
+    # MUSICBRAINZ_UPDATED — the ISO-8601 UTC pull date every MusicBrainz
+    # writer stamps (mlo.autotag.mb_updated_stamp / write_mb_tags). A track
+    # without it is failed because the app cannot say when its MusicBrainz
+    # data was pulled, so MAINTAIN → Tags (the age-based refresh, see
+    # tag_refresh_days) cannot date the album — and an undatable album is
+    # refreshed on every pass or never. Graded per track like GENRE above,
+    # gated by its own switch, so an install that never pulls MusicBrainz
+    # turns the check off instead of failing the library.
+    "MUSICBRAINZ_UPDATED": ("grade_check_mb_updated", "MB_UPDATED_MISSING"),
 }
 
 # The ReplayGain family is OPT-IN, like the AcoustID pair below: a file

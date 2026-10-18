@@ -533,6 +533,9 @@ TAG_CHECKS = {
     "TRANSLATION": ("grade_check_xlit_translation",),
     "TRANSLITERATION": ("grade_check_xlit_transliteration",),
     "MUSICBRAINZ_ALBUMID": ("grade_check_mb_links",),
+    # The pull date every MusicBrainz writer stamps: graded per track by its
+    # own presence check (see mlo.grader.TAG_PRESENCE_CHECKS).
+    "MUSICBRAINZ_UPDATED": ("grade_check_mb_updated",),
     # Tags whose VALUE has a canonical spelling (mlo.tagtext.CANONICAL_CASE)
     # are graded by grade_check_tag_case, beside whatever checks already
     # graded them.
@@ -627,6 +630,7 @@ CHECK_LABELS = {
     "grade_check_accuraterip": "AccurateRip verified (audit only)",
     "grade_check_log_grade": "Log grade present & in range",
     "grade_check_mb_links": "MusicBrainz release link",
+    "grade_check_mb_updated": "MusicBrainz pull date (MUSICBRAINZ_UPDATED)",
     "grade_check_cover": "Cover art",
     "grade_check_cover_crop": "Cover aspect ratio (squareness)",
     "grade_check_sidecar_cover": "Per-track sidecar covers",

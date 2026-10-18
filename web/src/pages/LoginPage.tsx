@@ -1,10 +1,17 @@
 import { useEffect, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { KeyRound, Loader2, Lock, Server, ShieldCheck } from "lucide-react";
 import { api, normalizeServerUrl, setServerUrl, setToken, serverUrl, IN_MOBILE_SHELL, IN_TAURI } from "../api";
 import { toast } from "../store";
 import { useI18n } from "../lib/i18n";
 import PageHeader from "../components/PageHeader";
+import ShellSplash from "../shell/ShellSplash";
+
+/** How long a client shell may show the splash before the address field
+ *  appears instead: long enough for a cold backend to boot (see
+ *  BackendChoice's own "few seconds"), short enough that a server that never
+ *  answers leaves the user something they can act on. */
+const SPLASH_MAX_MS = 8000;
 
 /** The sign-in screen, and the first-run screen behind it.
  *
@@ -19,12 +26,30 @@ import PageHeader from "../components/PageHeader";
  *    desktop shell finds its own on 127.0.0.1; a phone has to be told.
  *
  * The screen therefore renders whichever of those the server's own
- * `/api/auth/status` describes, rather than assuming "sign in".
+ * `/api/auth/status` describes, rather than assuming "sign in". A fourth
+ * window — mounted while nothing has answered yet — is the splash, not a form:
+ * see `splash` below.
  */
-export default function LoginPage({ onSignedIn }: { onSignedIn: () => void }) {
+export default function LoginPage({
+  onSignedIn,
+  now = 0,
+}: {
+  onSignedIn: () => void;
+  /** The shell's "the user asked for the address field" clock: non-zero once
+   *  the shell has shown the same splash for its own bound, so the page starts
+   *  past ITS splash and the address field is the first thing drawn. Only the
+   *  SPLASH reads it. */
+  now?: number;
+}) {
   const { t } = useI18n();
+  const qc = useQueryClient();
   const status = useQuery({
     queryKey: ["auth", "status"],
+    // The same entry the shell gates on (`App`'s own status query): when THIS
+    // ask succeeds it writes the shell's answer directly. That is what opens
+    // the app — a latched `signedOut` is cleared by the shell when the answer
+    // says this client needs no login, instead of waiting up to a minute for
+    // the shell's own poll.
     queryFn: api.authStatus,
     retry: 1,
     // The address field changes what this query points at, and the user may
@@ -49,10 +74,75 @@ export default function LoginPage({ onSignedIn }: { onSignedIn: () => void }) {
 
   const needsSetup = !!status.data && !status.data.has_password;
   const hint = status.data?.setup_hint || "";
+  // This server just said it wants no login from this client (a local one).
+  // The answer is shared cache, so the shell's gate already has it (and opens
+  // on its own); this hands the page the fresh data the gate unblocked, the
+  // same way a sign-in does — the cache was filled while there was a gate up,
+  // so what it holds was fetched from behind it.
+  const opened = !!status.data && !status.data.required;
+  useEffect(() => {
+    if (opened) void qc.invalidateQueries();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [opened]);
 
+  // The screen was mounted with NO server to describe (still asking, or the
+  // ask failed). A client shell asks for a password on this screen, and a
+  // desktop shell whose own backend is a second away from answering must not
+  // be handed a password box for a localhost server that never wants one — so
+  // that window is a neutral splash with NO form in it at all (not even the
+  // username row: an empty name box reads as a password prompt). It is
+  // BOUNDED: past SPLASH_MAX_MS the address field and the form take over (the
+  // only things a user can act on when nothing answers), and any real answer
+  // replaces the splash at once.
+  //
+  // A 401/428 from the server is already an ANSWER — the shell only gets here
+  // on a real one — so `status.data` can stay empty on an unclaimed server
+  // (428) and the setup form must not be held behind the splash. `isError` is
+  // react-query's carrier for those two (the query function IS
+  // `api.authStatus`, so a status error is an AuthError) — and it ends the
+  // splash either way: after two failed asks, the address field is what the
+  // user needs, not a third wait.
+  const answered = status.data !== undefined || status.isError;
+  const splash = !answered;
+  // Right after a retry (e.g. the splash's "connect to a different server"
+  // giving way to the address field) the LAST answer is the failure that
+  // ended the splash — usually "nothing is listening on 127.0.0.1:8015" — and
+  // isError has gone false while the new ask is in flight. Carrying it forward
+  // keeps the address screen saying "no answer" instead of a form that looks
+  // like a password prompt for a server nobody has found.
+  const [noAnswer, setNoAnswer] = useState(false);
+  useEffect(() => {
+    if (status.isError) setNoAnswer(true);
+    else if (status.data !== undefined) setNoAnswer(false);
+  }, [status.data, status.isError]);
+  // Bounded by its own clock: mounting or a re-ask restarts it, the timer
+  // re-renders the page exactly when the cap is reached — `Date.now()` alone
+  // never re-renders — and the shell's `now` starts it past the cap at once
+  // (the shell already spent the same bound on ITS splash).
+  const [splashStarted, setSplashStarted] = useState(() => Date.now());
+  const splashCap = now > 0 || Date.now() - splashStarted >= SPLASH_MAX_MS;
+  const [, tick] = useState(0);
+  useEffect(() => {
+    if (!splash || splashCap) return;
+    const id = window.setTimeout(
+      () => tick((n) => n + 1),
+      Math.max(0, SPLASH_MAX_MS - (Date.now() - splashStarted)),
+    );
+    return () => window.clearTimeout(id);
+  }, [splash, splashStarted, splashCap]);
+  useEffect(() => {
+    if (!splash) setSplashStarted(Date.now());
+  }, [splash]);
   useEffect(() => {
     if (status.data?.username) setUsername((u) => u || status.data!.username);
   }, [status.data]);
+
+  // Every hook is declared ABOVE this return, in the same order on every
+  // render: an early return among them (a splash, first draft) would change
+  // the hook count between renders and React rejects that outright.
+  if (splash && !splashCap) {
+    return <ShellSplash />;
+  }
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -136,7 +226,7 @@ export default function LoginPage({ onSignedIn }: { onSignedIn: () => void }) {
             </label>
           )}
 
-          {status.isError && (
+          {noAnswer && (
             <p className="text-xs text-amber-300">
               {t("auth.no_answer")}
             </p>

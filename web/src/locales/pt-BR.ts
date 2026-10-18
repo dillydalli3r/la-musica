@@ -145,6 +145,7 @@ export default {
   "auth.changed": "Senha alterada",
   "auth.setup_done": "Senha definida — bem-vindo",
   "auth.signed_in": "Sessão iniciada",
+  "auth.starting": "Iniciando o servidor local…",
   "auth.server": "Este servidor",
   "settings.security": "Segurança",
   "settings.security_help": "A barreira de login e a sessão deste cliente.",

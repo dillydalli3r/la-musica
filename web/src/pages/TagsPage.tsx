@@ -175,8 +175,8 @@ export default function TagsPage() {
               type="number"
               min={1}
               max={16}
-              value={Number(cfg.data?.tag_refresh_workers ?? 4)}
-              onChange={(e) => void save({ tag_refresh_workers: Math.max(1, Math.min(16, Number(e.target.value) || 4)) })}
+              value={Number(cfg.data?.tag_refresh_workers ?? 8)}
+              onChange={(e) => void save({ tag_refresh_workers: Math.max(1, Math.min(16, Number(e.target.value) || 8)) })}
             />
           </label>
           <label className="flex items-center gap-2" title="How often the background scheduler looks for due albums (minutes)">

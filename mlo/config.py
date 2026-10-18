@@ -764,6 +764,12 @@ DEFAULT_CONFIG = {
     # script 11 to normalize them to MKV. Remuxed MKV/MP4 videos are fine.
     "grade_check_raw_video": True,
     "grade_check_mb_links": True,   # MusicBrainz release (or group) link required
+    # The MusicBrainz PULL DATE (MUSICBRAINZ_UPDATED, ISO-8601 UTC) is required
+    # per track: every MB writer stamps it, and MAINTAIN → Tags refreshes an
+    # album by its age, so a track without it cannot say when its MusicBrainz
+    # data was pulled and the album cannot be dated. Off, tracks are never
+    # failed for the stamp (an install that pulls nothing turns this off).
+    "grade_check_mb_updated": True,
     # Lossless but uncompressed sources (WAV/AIFF/APE/WV/SHN) fail grading —
     # script 3 converts them to FLAC.
     "grade_check_lossless_source": True,
@@ -1449,9 +1455,12 @@ DEFAULT_CONFIG = {
     # `tag_refresh_days` is the AGE at which an album is due (its oldest
     # track's stamp), `tag_refresh_workers` how many albums the queue refreshes
     # at once, `tag_refresh_interval_minutes` how often the scheduler looks.
+    # Workers 8: MusicBrainz's 1 req/s is enforced in the client, which no
+    # longer holds its lock across the socket, so a worker waiting on a lookup
+    # does not delay the others — extra workers overlap tag reads/writes only.
     "tag_refresh_enabled": False,
     "tag_refresh_days": 7,
-    "tag_refresh_workers": 4,
+    "tag_refresh_workers": 8,
     "tag_refresh_interval_minutes": 60,
     # How often the library refreshes ITSELF, in minutes (server.library_refresh).
     # A refresh re-walks the library, re-runs the file-structure (layout) scan
