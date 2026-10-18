@@ -31,6 +31,15 @@
  *     owner's screenshot: six cards, the sixth in halves). It is a wrapped grid
  *     now, and the check measures that: one grid, more than one row, every
  *     card's right edge inside the shelf's, and no horizontal overflow in it.
+ *   * EVERY album Home draws is the shared card (components/AlbumCard) — the
+ *     shelves, the genre and mood lanes alike: each cover sits in a caption
+ *     with the artist's own link, the ORIGINAL year and the rating row, where
+ *     Home used to draw a bare cover + title + artist of its own (the owner's
+ *     report: Home's Gorillaz wore its cover's text where the Library's card
+ *     said "Gorillaz · (virtual band) · 2001 · 4.1 stars"). The lanes are the
+ *     case with no shelf around them, so both are counted, and the rating row
+ *     is counted once per card — the reason line the shelf used to add under
+ *     it put a SECOND row of stars under a card that already had one.
  *   * The two shelves on that page are read as a PAIR and the reader counts
  *     them, so the local shelf must ask for the same 12 rows the online shelf
  *     asks for and print the count it got (issue #54) — the request body is
@@ -754,6 +763,69 @@ try {
   await clearField.click();
   await page.waitForTimeout(60);
   await page.setViewportSize({ width: 1440, height: 900 });
+
+  // ---------------------------- 3b. Home draws albums with the ONE card
+  /* Every album on Home is the shared album card, so the caption carries what
+   * the Library's card carries: the theme title, the artist's own LINK, the
+   * original year, and ONE rating row. Read off the DOM precisely because the
+   * page could render and still have drawn a reduced copy — a bare cover and
+   * two lines of text is exactly what a check on the payload cannot see. */
+  await page.goto(`${base}/`);
+  await page.waitForSelector("section h2", { timeout: 30000 });
+  const homeCards = await page.evaluate(() => {
+    const captionOf = (el) => el.querySelector(".mt-2.px-0\\.5") || el.querySelector(".mt-2");
+    const cardOf = (el) => {
+      let n = el;
+      for (let i = 0; i < 8 && n; i++) {
+        if (n.querySelector(".aspect-square") && captionOf(n)) return n;
+        n = n.parentElement;
+      }
+      return null;
+    };
+    const out = [];
+    for (const sec of document.querySelectorAll("section")) {
+      const covers = [...sec.querySelectorAll(".aspect-square")];
+      if (!covers.length) continue;
+      const cards = [...new Set(covers.map(cardOf).filter(Boolean))];
+      out.push({
+        section: (sec.querySelector("h2")?.innerText || "").trim(),
+        covers: covers.length,
+        cards: cards.length,
+        stars: cards.filter((c) => captionOf(c)?.querySelector(".tabular-nums")).length,
+        artistLinks: cards.filter((c) => captionOf(c)?.querySelectorAll("a").length).length,
+        years: cards.filter((c) => /\b(19|20)\d\d\b/.test(captionOf(c)?.innerText || "")).length,
+      });
+    }
+    return out;
+  });
+  const at = (name) => homeCards.find((b) => b.section === name);
+  /* The shelves the fixture's payload fills, and the other two SHAPES of album
+   * row Home draws: a favourites row the library still holds (a card) and one
+   * it does not (`owned: false`, identity only). `extraMeta` is gone from the
+   * shelves, so nothing in HomePage still renders a line under the caption. */
+  for (const name of ["Recently added", "Favorites"])
+    check(`Home draws its "${name}" shelf`, !!at(name), JSON.stringify(homeCards.map((b) => b.section)));
+  const homeSource = readFileSync(path.join(webDir, "src/pages/HomePage.tsx"), "utf8");
+  check("no Home shelf adds a line of its own under the card", !/extraMeta=/.test(homeSource),
+        "HomePage still passes extraMeta to the shared card");
+  /* The only hand-drawn covers Home keeps are OUTSIDE the album surfaces: a
+   * TrackList row's 36 px sleeve and the podcast tile (a SERIES, not an
+   * album). Everything between the shelf component and the podcast shelf — the
+   * shelves, the lanes — must go through AlbumCard. */
+  const albumSurfaces = homeSource.slice(homeSource.indexOf("/** Every album Home draws"),
+                                          homeSource.indexOf("function TrackList"));
+  check("every Home album surface draws through AlbumCard", !/<CoverImg/.test(albumSurfaces),
+        "an album on Home is still drawn by hand instead of AlbumCard");
+  for (const b of homeCards) {
+    check(`Home/${b.section}: every album is the shared card`, b.cards === b.covers,
+          `${b.cards} of ${b.covers} covers sit in a card`);
+    check(`Home/${b.section}: each card's artist is its own link`, b.artistLinks === b.cards,
+          `${b.artistLinks} of ${b.cards}`);
+    check(`Home/${b.section}: each card carries the rating row once`, b.stars === b.cards,
+          `${b.stars} of ${b.cards}`);
+    check(`Home/${b.section}: each card states its original year`, b.years === b.cards,
+          `${b.years} of ${b.cards}`);
+  }
 
   // ------------------------- 4. the album page's Recommended shelf
   await page.goto(`${base}/album/${encodeURIComponent(albumPath)}`);

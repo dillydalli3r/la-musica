@@ -9471,6 +9471,21 @@ Found by a whole-app audit (backend and frontend, measured on the 12-album /
   several tools at once on a cold detection pass (measured **708 → 419 ms**,
   with every version identical). Each cache is keyed on the thing that makes it
   true: the payload object, the exact names asked, the binary's own stat.
+- **R469 — an album is drawn by ONE card, on every page that lists one.** Home's
+  shelves and its genre/mood lanes had a reduced row of their own (a bare cover,
+  the title and the artist) while the Library drew the shared card, so the same
+  album said "Gorillaz" on Home and "Gorillaz · (virtual band) · 2001 · 4.1
+  stars", with its pressing and codec chips, in the Library — and the "Rated
+  albums" shelf put a SECOND row of stars under a card that already carried one
+  (its own `extraOf`), which is the one thing a reader must never have to
+  arbitrate. Both now render `web/src/components/AlbumCard`, at the lane's own
+  cover size, and no shelf passes `extraMeta`: the reason a shelf exists is the
+  shelf's HEADING ("Best graded", "Recently added"), never a badge under the
+  album. A recommendation is an album like any other, so it wears the same card
+  wherever it appears. Pinned by `tools/check_library_az.mjs`: every cover on
+  Home sits in a card whose caption carries the artist's own link, the original
+  year and exactly one rating row, and no album surface in `HomePage.tsx` draws
+  a `<CoverImg>` of its own.
 
 ---
 

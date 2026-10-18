@@ -29,27 +29,27 @@ import type {
   HomePlaylistRow, HomePodcast, HomeTrack, Track,
 } from "../types";
 
-/** Shelf chip: why a row is here. */
-function Chip({ text, title }: { text: string; title?: string }) {
-  return (
-    <span
-      className="truncate rounded-full px-1.5 py-0.5 text-[10px] leading-tight bg-accent/10 text-accent-soft"
-      title={title ?? text}
-    >
-      {text}
-    </span>
-  );
-}
-
+/** Every album Home draws is drawn by the shared card (`AlbumCard`) — the one
+ *  the Library grid, Favorites, the artist page and Trash use — so a shelf can
+ *  never say a different thing about the same album than the grid does: the
+ *  title with its advisory mark, the status dot, the artist and ORIGINAL year,
+ *  the rating row, the playing/pending marks, and the cover's own ADR, medium,
+ *  country and format chips.
+ *
+ *  It used to draw a reduced copy of its own (a bare cover, the title, the
+ *  artist), which is how Home listed an album with nothing but its name while
+ *  the Library showed the same album's pressing, its year and its stars (the
+ *  owner's report: "all entries in the home menu, and all recommendations for
+ *  albums, should use the proper formatting"). The shelf's REASON is not
+ *  printed on the card: it is the heading's sentence ("Best graded"), and the
+ *  card has no room for a second caption — the reader wants the album. */
 function Shelf<T extends HomeAlbum>({
-  title, icon: Icon, items, blurb, extraOf, gridSize, selectable, selected,
-  onSelect,
+  title, icon: Icon, items, blurb, gridSize, selectable, selected, onSelect,
 }: {
   title: string;
   icon: typeof Sparkles;
   items: T[];
   blurb?: string;
-  extraOf?: (row: T) => ReactNode;
   gridSize: "s" | "m" | "l";
   selectable: boolean;
   selected: string[];
@@ -77,7 +77,6 @@ function Shelf<T extends HomeAlbum>({
               selectable={selectable && inLibrary}
               selected={selected.includes(a.path)}
               onSelect={onSelect}
-              extraMeta={extraOf ? extraOf(a) : a.reason ? <Chip text={a.reason} /> : undefined}
               size={gridSize}
             />
           );
@@ -89,7 +88,10 @@ function Shelf<T extends HomeAlbum>({
 
 /** A genre or mood lane: the name and a few records from it, on one row.
  *  Deliberately NOT the full grid: Home has several lanes, and a page that
- *  stacks seven album grids is a page you scroll, not a page you read. */
+ *  stacks seven album grids is a page you scroll, not a page you read — the
+ *  lane caps its row at eight records, and the shelf view is where a whole
+ *  genre is browsed. The CARDS are the shared album cards, like every other
+ *  album on the page (they were a bare cover + title + artist of their own). */
 function Lane({ lane, icon: Icon }: { lane: HomeLane; icon: typeof Flame }) {
   if (!lane.albums.length) return null;
   return (
@@ -104,18 +106,7 @@ function Lane({ lane, icon: Icon }: { lane: HomeLane; icon: typeof Flame }) {
       </div>
       <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 xl:grid-cols-8 gap-x-3 gap-y-4 stagger">
         {lane.albums.slice(0, 8).map((a) => (
-          <Link key={a.path} to={albumRef(a)} className="group min-w-0">
-            <CoverImg
-              albumPath={a.path}
-              coverFile={a.cover_file}
-              w={GRID_COVER_W.s}
-              wrapperClass="aspect-square w-full rounded-lg bg-raise overflow-hidden"
-            />
-            <div className="mt-1.5 px-0.5 text-xs font-medium truncate">{a.meta?.ALBUM || a.path.split("/").pop()}</div>
-            <div className="px-0.5 text-[11px] text-zinc-500 truncate">
-              {a.album_artist || a.meta?.ALBUMARTIST || a.meta?.ARTIST || ""}
-            </div>
-          </Link>
+          <AlbumCard key={a.path} al={a} size="s" />
         ))}
       </div>
     </section>
@@ -303,9 +294,9 @@ function PodcastShelf({ title, items, gridSize }: {
                 w={GRID_COVER_W[gridSize]}
                 wrapperClass="aspect-square w-full rounded-lg bg-raise overflow-hidden"
               />
-              <div className="mt-2 px-1 text-sm font-medium truncate w-full">{row.podcast_series}</div>
-              <div className="px-1 text-[11px] text-zinc-400 truncate w-full" title={newest}>{newest}</div>
-              <div className="px-1 text-[11px] text-zinc-600 tabular-nums truncate w-full">
+              <div className="mt-2 px-0.5 text-sm font-medium truncate w-full">{row.podcast_series}</div>
+              <div className="px-0.5 text-[11px] text-zinc-400 truncate w-full" title={newest}>{newest}</div>
+              <div className="px-0.5 text-[11px] text-zinc-600 tabular-nums truncate w-full">
                 {row.podcast_episode_count} {t("podcast.episodes")}
                 {date && <span> · {date}</span>}
               </div>
@@ -486,11 +477,7 @@ export default function HomePage() {
       {/* The caller's own stars. */}
       <SectionTitle>Your stars</SectionTitle>
       <TrackList title="Rated tracks" icon={Star} rows={data.rated_tracks} blurb="highest first" />
-      <Shelf title="Rated albums" icon={Star} items={data.rated_albums}
-        extraOf={(a) => a.rating > 0
-          ? <StarRating value={a.rating / 2} readOnly size="sm" />
-          : undefined}
-        {...shelfProps} />
+      <Shelf title="Rated albums" icon={Star} items={data.rated_albums} {...shelfProps} />
       {data.rated_artists.length > 0 && <PlayedArtists title="Rated artists" artists={data.rated_artists} />}
 
       {/* The library itself, newest and favourite. */}
