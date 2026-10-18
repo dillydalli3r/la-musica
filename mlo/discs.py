@@ -430,6 +430,19 @@ def disc_of_filename(name):
     return int(m.group(1)) if m else None
 
 
+def track_of_filename(name):
+    """Track number from the 'D-TT Title' filename convention, else None.
+
+    The position half of :func:`disc_of_filename` — the same two digits a rip
+    writes after the disc — so a file whose NAME is "6-06 5_4 (P.45).flac"
+    states track 6 of disc 6 even when its TRACKNUMBER tag says "06"."""
+    m = DISC_PREFIX_RE.match(os.path.basename(name))
+    if not m:
+        return None
+    nums = re.findall(r"\d+", m.group(0))
+    return int(nums[1]) if len(nums) > 1 else None
+
+
 def album_discs(album_dir, entries=None):
     """Map {disc number: [audio file paths]} for an album folder.
 

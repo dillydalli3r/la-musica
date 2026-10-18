@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { CloudDownload, PenLine, Play, Square, Plus, Trash2, Undo2, Keyboard } from "lucide-react";
+import { CloudDownload, ListMusic, PenLine, Play, Square, Plus, Trash2, Undo2, Keyboard } from "lucide-react";
 import { api, isOffline } from "../api";
 import { toast, useStore } from "../store";
 import { LyricsKindChip } from "./Badges";
@@ -306,6 +306,22 @@ export function serializeLrc(lines: LrcLine[], decimals = 2): string {
     .join("\n");
 }
 
+/** One row of the candidate list (`GET /api/lyrics/search?all=1`): a version
+ *  of the song a provider holds, with what tells them apart — its own length
+ *  against the file's, its match score, and whether it is timestamped. */
+interface LyricsCandidate {
+  id: number;
+  artist: string;
+  track: string;
+  album?: string;
+  duration?: number;
+  synced: string;
+  plain: string;
+  provider?: string;
+  score?: number;
+  instrumental: boolean;
+}
+
 export default function LyricsViewer({
   path,
   initialLyrics,
@@ -373,7 +389,10 @@ export default function LyricsViewer({
   });
   const historyRef = useRef<LrcLine[][]>([]);
   const pendingWords = useRef<{ idx: number; parts: string[]; times: number[]; done: number } | null>(null);
-  const [searchHits, setSearchHits] = useState<{ id: number; artist: string; track: string; duration?: number }[] | null>(null);
+  /** The reader's candidate list (`?all=1`): every version the providers
+   *  hold, best first — what the Auto-import button opens when it is asked
+   *  to SHOW the choices instead of taking the top one. */
+  const [candidates, setCandidates] = useState<LyricsCandidate[] | null>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
   /** Embedded in a surface that already plays the song (the fullscreen
    *  player): the pane then drives THAT playback, and the preview element
@@ -782,24 +801,74 @@ export default function LyricsViewer({
   }, [playing, selIdx, lines, activeLine, playTime, keys, capturing, onSave, speed]);
 
   // ---- provider import -----------------------------------------------------
+  /** Open the candidate list: every version the providers hold for this
+   *  track, best match first, so a reader can pick the one their file is
+   *  (a remaster, an edit, a live take) rather than take the automatic pick. */
+  const openCandidates = async () => {
+    if (!artist || !track) {
+      toast("Track needs ARTIST and TITLE tags first");
+      return;
+    }
+    setLoading(true);
+    try {
+      // The CREDIT is what a provider files the track under: "Gorillaz
+      // feat. X" matched nothing until the primary performer was asked
+      // (`_alias_queries`' own rule). The exact credit is asked first, and
+      // only when NOTHING came back is the primary name asked too — so the
+      // list is the whole search, not one spelling of it.
+      let rows = await api.lyricsSearch(artist, track, album, duration, true);
+      const primary = artist.split(/\s+(?:feat\.?|ft\.?|featuring)\s+/i)[0]
+        .split(/\s*[&,]\s*/)[0].trim();
+      if ((!Array.isArray(rows) || !rows.length) && primary && primary !== artist) {
+        rows = await api.lyricsSearch(primary, track, album, duration, true);
+      }
+      const list: LyricsCandidate[] = (Array.isArray(rows) ? rows : [])
+        .filter((h) => h && (h.syncedLyrics || h.plainLyrics))
+        .map((h) => ({
+          id: Number(h.id),
+          artist: String(h.artist ?? ""),
+          track: String(h.track ?? ""),
+          album: h.albumName ? String(h.albumName) : undefined,
+          duration: h.duration ? Number(h.duration) : duration,
+          synced: String(h.syncedLyrics ?? ""),
+          plain: String(h.plainLyrics ?? ""),
+          provider: h.provider_label ? String(h.provider_label) : undefined,
+          score: typeof h.score === "number" ? h.score : undefined,
+          instrumental: !!h.instrumental,
+        }));
+      setCandidates(list);
+      if (!list.length) toast("No lyrics found in any provider");
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const takeCandidate = (c: LyricsCandidate) => {
+    const lrc = c.synced || c.plain;
+    if (!lrc) {
+      toast("That result has no lyrics");
+      return;
+    }
+    setCandidates(null);
+    applyImport(lrc, c.provider ? `Imported from ${c.provider}` : "Imported");
+  };
+
+  /** Auto-import: the chain's own pick, written straight in. When it finds
+   *  nothing, the candidate list opens so the reader can still choose. */
   const importFromProviders = async () => {
     if (!artist || !track) {
       toast("Track needs ARTIST and TITLE tags first");
       return;
     }
     setLoading(true);
-    setSearchHits(null);
+    setCandidates(null);
     try {
       const res = await api.lyricsGet(artist, track, album, duration);
       const lrc = res?.syncedLyrics ?? res?.plainLyrics;
       if (!lrc) {
-        const hits = await api.lyricsSearch(artist, track, album, duration);
-        setSearchHits(
-          Array.isArray(hits) && hits.length
-            ? hits.map((h) => ({ id: h.id, artist: String(h.artist ?? ""), track: String(h.track ?? ""), duration: h.duration ? Number(h.duration) : undefined }))
-            : []
-        );
-        if (!hits?.length) toast("No lyrics found in any provider");
+        await openCandidates();
         return;
       }
       const from = res?.provider_label ? `Imported from ${res.provider_label}` : "Imported";
@@ -825,24 +894,6 @@ export default function LyricsViewer({
         ? `${message} — ${parsed.length} lines, ${wordCount} word-synced (ELRC)`
         : `${message} — ${parsed.length} lines`,
     );
-  };
-
-  const importSearchHit = async (hit: { artist: string; track: string; duration?: number }) => {
-    setSearchHits(null);
-    setLoading(true);
-    try {
-      const res = await api.lyricsGet(hit.artist, hit.track, undefined, hit.duration);
-      const lrc = res?.syncedLyrics ?? res?.plainLyrics;
-      if (!lrc) {
-        toast("That result has no lyrics");
-        return;
-      }
-      applyImport(lrc, `Imported "${hit.artist} — ${hit.track}"`);
-    } catch (e) {
-      toast.error(String(e));
-    } finally {
-      setLoading(false);
-    }
   };
 
   return (
@@ -879,8 +930,13 @@ export default function LyricsViewer({
             {playing ? <Square className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
             {playing ? "Stop" : embedded ? "Play from here" : "Preview"}
           </button>
-          <button className="btn-ghost !py-1 text-xs" onClick={importFromProviders} disabled={loading}>
+          <button className="btn-ghost !py-1 text-xs" onClick={importFromProviders} disabled={loading}
+            title="Fetch the best lyric the configured providers have and load it here">
             <CloudDownload className="h-3.5 w-3.5" /> Auto-import
+          </button>
+          <button className="btn-ghost !py-1 text-xs" onClick={() => void openCandidates()} disabled={loading}
+            title="Show every candidate the providers hold for this track, best match first — pick the version this file is">
+            <ListMusic className="h-3.5 w-3.5" /> Candidates
           </button>
           {onEnhancedEditor && (
             <button
@@ -982,23 +1038,52 @@ export default function LyricsViewer({
         />
       )}
 
-      {searchHits && (
+      {candidates && (
         <div className="rounded-md border border-border bg-panel p-3 mb-2">
-          <div className="text-[11px] text-zinc-400 mb-1.5">
-            {searchHits.length ? "Multiple matches — pick one:" : "No exact match — nothing found in any provider."}
+          <div className="flex items-baseline gap-2 mb-1.5">
+            <span className="text-[11px] text-zinc-400">
+              {candidates.length
+                ? `${candidates.length} candidate${candidates.length === 1 ? "" : "s"} — best match first. Pick the version this file is:`
+                : "No lyrics found in any provider."}
+            </span>
+            <button className="ml-auto text-[11px] text-zinc-500 hover:text-zinc-200" onClick={() => setCandidates(null)}>
+              Close
+            </button>
           </div>
-          {searchHits.length > 0 && (
-            <div className="space-y-1 max-h-40 overflow-auto">
-              {searchHits.map((h) => (
-                <div key={h.id} className="flex items-center gap-2 text-xs">
-                  <span className="flex-1 truncate text-zinc-300">
-                    {h.artist} — <span className="text-zinc-400">{h.track}</span>
-                  </span>
-                  <button className="btn-ghost !py-0.5 text-[11px]" onClick={() => importSearchHit(h)}>
-                    Import
-                  </button>
-                </div>
-              ))}
+          {candidates.length > 0 && (
+            <div className="space-y-1 max-h-72 overflow-auto">
+              {candidates.map((c) => {
+                const off = duration && c.duration ? Math.round(c.duration - duration) : null;
+                return (
+                  <div key={`${c.id}-${c.provider}`} className="flex items-center gap-2 text-xs py-0.5">
+                    <span
+                      className={`chip text-[9px] shrink-0 ${c.synced ? "text-emerald-300/90" : "text-zinc-400"}`}
+                      title={c.synced ? "Timestamped lyrics" : "Untimed lyrics — written only when nothing synced is found"}
+                    >
+                      {c.synced ? "Synced" : "Plain"}
+                    </span>
+                    <span className="min-w-0 flex-1 truncate text-zinc-300">
+                      {c.artist} — <span className="text-zinc-400">{c.track}</span>
+                      {c.album && <span className="text-zinc-600"> · {c.album}</span>}
+                    </span>
+                    <span className="shrink-0 tabular-nums text-[10px] text-zinc-500" title="This result's own length against this file's">
+                      {c.duration ? fmtDuration(c.duration) : "—"}
+                      {off !== null && off !== 0 && <span className={Math.abs(off) > 15 ? " text-amber-400" : ""}> ({off > 0 ? "+" : ""}{off}s)</span>}
+                    </span>
+                    {c.score !== undefined && (
+                      <span className="shrink-0 text-[10px] text-zinc-600 tabular-nums" title="Match confidence — title, artist and length together">
+                        {Math.round(c.score * 100)}%
+                      </span>
+                    )}
+                    <span className="shrink-0 text-[10px] text-zinc-600 w-20 truncate" title={`From ${c.provider ?? "a provider"}`}>
+                      {c.provider}
+                    </span>
+                    <button className="btn-ghost !py-0.5 text-[11px] shrink-0" onClick={() => takeCandidate(c)}>
+                      Use
+                    </button>
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>

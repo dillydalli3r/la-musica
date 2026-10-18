@@ -4800,8 +4800,14 @@ def refresh_release_tags(album_dir, release=None, cfg=None):
     # resolved-release cache goes with it, which is right: this pass just read
     # the release, but a re-pointed link must never be answered from a cache.
     _invalidate_caches(path)
+    # `mb` is the payload the identity was stamped from, for the caller that
+    # has MORE of the release to land (the tag refresh's rating and genre
+    # pass, `mlo.web_ratings.refresh_musicbrainz_tags`): the one lookup covers
+    # everything MusicBrainz states about this release, so nothing downstream
+    # asks it again.
     return {"release": rel.get("id"), "identity": identity, "tracks": tracks,
-            "skipped": False, "reason": ""}
+            "skipped": False, "reason": "",
+            "mb": {"genres": list(rel.get("genres") or [])}}
 
 
 def _record_release_manifest(album_dir, release, force=False):

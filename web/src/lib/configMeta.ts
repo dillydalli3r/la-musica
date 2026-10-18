@@ -394,12 +394,13 @@ export const CONFIG_GROUPS: CfgGroup[] = [
     },
     {
       title: "Tags (MusicBrainz freshness)",
-      blurb: "Every writer that lands MusicBrainz data stamps MUSICBRAINZ_UPDATED on the file, so an album's age is its OLDEST track's stamp and a refresh updates the WHOLE album. MAINTAIN → Tags shows the library, artist and album levels, and can refresh on demand; these rows decide the scheduled pass.",
+      blurb: "Every writer that lands MusicBrainz data stamps MUSICBRAINZ_UPDATED on the file, so an album's age is its OLDEST track's stamp and a refresh updates the WHOLE album — its release identity, its genre and its public score (and, if you turn it on below, lyrics it lacks). MAINTAIN → Tags shows the library, artist and album levels, and can refresh on demand; these rows decide the scheduled pass.",
       fields: [
         { k: "tag_refresh_enabled", label: "Refresh MusicBrainz tags on a schedule", type: "bool", help: "Off by default. On, a background pass looks at the library on the interval below and refreshes whole albums whose oldest track is past the age set here — one album at a time per worker, never the whole library at once." },
         { k: "tag_refresh_days", label: "Refresh albums older than (days)", type: "number", min: 1, max: 3650, help: "An album is due when the OLDEST MUSICBRAINZ_UPDATED stamp of its tracks is older than this, or when any track has none. MusicBrainz data changes rarely; a week is a good default for a library being actively curated." },
         { k: "tag_refresh_workers", label: "Albums refreshed in parallel", type: "number", min: 1, max: 16, help: "The queue's worker count. MusicBrainz itself is one request a second, so more workers mostly overlap tag reads and writes rather than lookups." },
         { k: "tag_refresh_interval_minutes", label: "Check the schedule every (minutes)", type: "number", min: 5, max: 1440, help: "How often the background scheduler looks for due albums. It starts nothing while a refresh is already running, and nothing at all when no album is due." },
+        { k: "lyrics_auto_fetch", label: "Also fetch missing lyrics when refreshing", type: "bool", help: "Off by default. The genre and the public score are the release's own MusicBrainz facts and always ride the refresh; a lyric is a second provider and a second decision, so a refresh only fetches one for an album whose tracks lack it when this is on. Fill-only — a line the file states is never replaced." },
       ],
     },
     {

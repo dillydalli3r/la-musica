@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import math
 import os
+import traceback
 
 from .audio import AudioFile
 from .config import should_write_audio_tag
@@ -534,7 +535,8 @@ def _file_aliases(af):
         return {}
 
 
-def write_ratings(path, album=None, track=None, cfg=None, force=False):
+def write_ratings(path, album=None, track=None, cfg=None, force=False,
+                  stamp="", replace=None):
     """Fill the four tags on ONE file; never replace a value unless *force*.
 
     The app's fill-only rule (the one every writer but an import's first pass
@@ -553,6 +555,18 @@ def write_ratings(path, album=None, track=None, cfg=None, force=False):
     turned the family off gets nothing written and an honest ``gated`` note
     instead of a silent no-op.
 
+    ``replace`` is the REFRESH's narrowing of *force*: the tags whose existing
+    value the APP ITSELF wrote (the refresh plan's record, see
+    ``refresh_musicbrainz_tags``). A tag named there is overwritten; every
+    other tag keeps the plain fill-only rule even under *force*, because the
+    score it holds was put there by somebody whose number is theirs. ``None``
+    is "force means force", the behaviour every other caller has.
+
+    ``stamp`` is the ISO pull time a REFRESH states for the values it lands
+    (``MUSICBRAINZ_UPDATED``), written AFTER them in the same save, and only
+    when at least one value landed: a score and the pull it came from are one
+    fact, so the tag refresh stamps one moment for both.
+
     Returns ``{"path", "wrote": {tag: value}, "skipped": {tag: why}}`` and
     never raises on a file it cannot open.
     """
@@ -570,13 +584,16 @@ def write_ratings(path, album=None, track=None, cfg=None, force=False):
         result["error"] = str(getattr(af, "error", "") or "unreadable")
         return result
 
+    def _may_replace(tag):
+        return bool(force) if replace is None else tag in replace
+
     for kind, answer in (("album", album), ("track", track)):
         value_tag, source_tag = LEVEL_TAGS[kind]
         if not answer:
             result["skipped"][value_tag] = "no answer"
             continue
         current = _existing(af, value_tag)
-        if current and not force:
+        if current and not _may_replace(value_tag):
             # A value the file already holds: left exactly as it is, and the
             # pairing rule above is why the SOURCE line is left with it.
             result["skipped"][value_tag] = "already set"
@@ -606,7 +623,311 @@ def write_ratings(path, album=None, track=None, cfg=None, force=False):
                 result["skipped"][source_tag] = "write failed"
         else:
             result["skipped"][source_tag] = "no sources named"
+    if stamp and result["wrote"] and should_write_audio_tag(
+            cfg, "MUSICBRAINZ_UPDATED", filepath=af.path):
+        try:
+            if af.set_tag("MUSICBRAINZ_UPDATED", stamp):
+                result["wrote"]["MUSICBRAINZ_UPDATED"] = stamp
+        except Exception:
+            result["skipped"]["MUSICBRAINZ_UPDATED"] = "write failed"
     return result
+
+
+# The four tags this pass owns, and the ENTIRE set it may rewrite: a refresh
+# crawls the library on a schedule, so it may widen a missing genre but never
+# re-ask about or replace anything else a file states.
+def _refresh_fields(af):
+    return {
+        "web": {
+            "WEBRATING": (_existing(af, "WEBRATING"), False),
+            "WEBRATING_SOURCE": (_existing(af, "WEBRATING_SOURCE"), False),
+            "ALBUMWEBRATING": (_existing(af, "ALBUMWEBRATING"), False),
+            "ALBUMWEBRATING_SOURCE": (_existing(af, "ALBUMWEBRATING_SOURCE"), False),
+        },
+        "genre": _existing(af, "GENRE"),
+    }
+
+
+MEMO_KEY = "_tag_refresh_web"
+
+
+def _musicbrainz_answers(cache):
+    """The rating fetchers, with the answer of each entity remembered for the
+    length of ONE refresh run.
+
+    MusicBrainz is asked at most once per second, so a queued album would
+    otherwise pay a rung's rate-limited request again for an answer the run
+    already holds — the artist's score, most of all, since every album of that
+    artist asks it. Keyed on the exact identity asked (`source` + `kind` +
+    id), and held in the dict the JOB owns: the whole run shares it, and it is
+    gone when the job ends.
+    """
+    from server.integrations import web_rating_fetchers
+
+    real = web_rating_fetchers()
+
+    def fetch(source, kind, ident, cfg):
+        key = (source, kind, ident)
+        if key not in cache:
+            cache[key] = real(source, kind, ident, cfg)
+        return cache[key]
+
+    return fetch
+
+
+def _lyrics_answered(album_dir):
+    """Whether EVERY track of this album holds lyrics already."""
+    try:
+        names = sorted(f for f in os.listdir(album_dir) if is_audio_file(f))
+    except OSError:
+        return False
+    if not names:
+        return False
+    for name in names:
+        try:
+            af = AudioFile(os.path.join(album_dir, name))
+            if getattr(af, "audio", None) is None:
+                return False
+            if not (str(af.get_tag("LYRICS") or "").strip()
+                    or str(af.get_tag("UNSYNCEDLYRICS") or "").strip()):
+                return False
+        except Exception:
+            return False
+    return True
+
+
+def _refresh_lyrics(album_dir, cfg):
+    """Fetch the lines for an album whose tracks lack them, if the user keeps
+    their lyrics current automatically.
+
+    Script 13 is the one auto-writing family left with a network answer
+    (``lyrics_sources``), and it runs over the album's own files through the
+    SAME runner the chain calls (``mlo.lyrics_fetch.run_fetch_lyrics``, scoped
+    by ``targets``), so the format, the provider order and the fill-only rule
+    are the script's. It is OFF unless the user turns ``lyrics_auto_fetch`` on:
+    pulling a line nobody asked for is a choice, not maintenance. The album is
+    skipped whole when every track already holds one — the runner would open
+    every container to learn it.
+
+    Never raises: returns how many tracks gained a written line.
+    """
+    if not bool((cfg or {}).get("lyrics_auto_fetch", False)):
+        return 0
+    if _lyrics_answered(album_dir):
+        return 0
+    try:
+        from . import lyrics_fetch
+        scoped = dict(cfg)
+        scoped["targets"] = [os.path.join(album_dir, f)
+                             for f in sorted(os.listdir(album_dir))
+                             if is_audio_file(f)]
+        stats = lyrics_fetch.run_fetch_lyrics(scoped) or {}
+        # `modified_count` is the runner's own word for files whose lyrics
+        # landed (the chain-wide counter the script reports beside skipped
+        # and failed).
+        return int(stats.get("modified_count") or 0)
+    except Exception:
+        traceback.print_exc()
+        return 0
+
+
+def refresh_musicbrainz_tags(album_dir, cfg=None, stamp=None, genres=None,
+                             fields=None, cache=None):
+    """Bring ONE album's MusicBrainz-derived tags up to the release they name.
+
+    THE tag-refresh half (MAINTAIN → Tags, programmed and manual alike): the
+    scheduled pass re-read the release's IDENTITY and nothing else, so a
+    release MusicBrainz has since given a new public score — or a track whose
+    genre was never pulled — kept its old value forever or its gap until a
+    manual script run. This writes the two families whose ANSWERS live on
+    MusicBrainz and whose slots the app owns:
+
+    * ``WEBRATING`` / ``WEBRATING_SOURCE`` and the album pair, through script
+      24's own ladder and writer (`run_web_ratings` scoped to this folder, so
+      the tiers, the order and the provenance are the script's, not a second
+      copy of them). This half is FORCED: the pull happened, and a public score
+      is a fact of the release that a newer answer corrects — an album whose
+      number was fetched a year ago must be able to move. It is a no-op when
+      ``web_ratings_enabled`` is off, because the writer's own gate refuses it.
+    * ``GENRE`` into an EMPTY slot, from the release group's own genres (the
+      album tier of the app's one ladder, R92/R360; the per-track rungs are
+      script 8's to trim and cap, and a name the file states stays the file's).
+      The caller hands the payload over in ``genres`` — the release it already
+      fetched — and a track that already holds a genre costs no read.
+
+    ``stamp`` is the ISO pull time to put beside the values, so every tag this
+    pass writes and the refresh's own ``MUSICBRAINZ_UPDATED`` describe one pull
+    rather than two moments a second apart; absent, the writer takes now.
+
+    Returns ``{"ratings", "genres", "genres_written"}`` — the script's own stats
+    dict for the ratings, and how many tracks gained a genre. Never raises: an
+    album that cannot be refreshed is the caller's to report.
+    """
+    from .config import load_config
+
+    cfg = dict(cfg or load_config() or {})
+    path = os.path.normpath(str(album_dir or ""))
+    out = {"ratings": None, "genres": [], "genres_written": 0,
+           "lyrics_written": 0, "fields": None}
+    if not path or not os.path.isdir(path):
+        return out
+    if not bool(cfg.get("web_ratings_enabled", True)):
+        return out
+    fetch = _musicbrainz_answers(cache)
+
+    # The files, read ONCE for both halves: the identity the ratings are asked
+    # by and the empty GENRE slots are the same read of the same container.
+    rows = []
+    try:
+        names = sorted(f for f in os.listdir(path) if is_audio_file(f))
+    except OSError:
+        return out
+    for name in names:
+        try:
+            af = AudioFile(os.path.join(path, name))
+            if getattr(af, "audio", None) is None:
+                continue
+            rows.append(af)
+        except Exception:
+            continue
+    if not rows:
+        return out
+
+    # ---- the public score --------------------------------------------------
+    cache = cache if isinstance(cache, dict) else {}
+    scoped = dict(cfg)
+    scoped["targets"] = [r.path for r in rows]
+    # A score the file already holds is ASKED ABOUT only when the caller says
+    # so (`ratings=True`): the manual refresh pulls the answer anew — a public
+    # score the release has since moved is the point of asking — while the
+    # SCHEDULED pass fills the gaps, because every album of a large library
+    # being re-asked every week is the request bill that made the schedule
+    # off by default. Either way the write is forced when it happens.
+    out["fields"] = fields if isinstance(fields, dict) else {}
+    web_ours = set(out["fields"].get("web_ours") or ())
+    ask = bool(out["fields"].get("ratings", True))
+
+    def ours_for(file_path):
+        """The tags the app may overwrite on THIS file: one whose value the
+        plan says the app wrote. A tag the file holds with any other value
+        stays the file's."""
+        return {tag for (p_, tag, value) in web_ours
+                if os.path.normcase(os.path.normpath(str(p_)))
+                == os.path.normcase(os.path.normpath(str(file_path)))
+                and _value_now(file_path, tag) == value}
+
+    try:
+        # The fetch is wrapped as `lambda *a: fetch(*a)` ON PURPOSE: the runner
+        # hands it the four positional arguments it documents, and a closure is
+        # what keeps the injected callable's own signature (a test's fake, the
+        # real fetchers) out of the wrapper's shape.
+        out["ratings"] = run_web_ratings(
+            scoped, fetch=lambda *a: fetch(*a), force=False,
+            stamp=stamp, ask_set=ask, replace_for=ours_for)
+        _drop_tag_cache([path])
+    except Exception:
+        traceback.print_exc()
+    if not isinstance(fields, dict):
+        # No plan for this album yet: this run IS the record, of what each file
+        # states before its gaps are filled below.
+        out["fields"] = _read_fields(rows, _asked(out["ratings"] or {}))
+
+    # ---- the album's own genres, into the slots nothing answered ----------
+    # `genre_ours` is the plan's word on whether the GENRE these files hold is
+    # the app's own: then the release's current names REPLACE it, exactly as
+    # the public score below replaces its own. A file that states its own
+    # genre (no record, or a different value) is never touched.
+    genre_ours = bool(out["fields"].get("genre_ours"))
+    names = [str(n).strip() for n in (genres or []) if str(n).strip()]
+    if not names:
+        # The caller holds no release payload (a re-pointed link, a payload
+        # from an older cache): the release group is the album tier's own
+        # identity, one cached MusicBrainz request.
+        try:
+            from server import integrations as intg
+            rg = next((str(af.get_tag("MUSICBRAINZ_RELEASEGROUPID") or "").strip()
+                       for af in rows
+                       if str(af.get_tag("MUSICBRAINZ_RELEASEGROUPID") or "").strip()), "")
+            if rg:
+                names = list(intg.release_group_genres(rg) or [])
+        except Exception:
+            traceback.print_exc()
+    out["lyrics_written"] = _refresh_lyrics(path, cfg)
+    _drop_tag_cache([path])
+    if names and bool(cfg.get("genre_autofill", True)):
+        try:
+            from .autotag import genre_count
+            from .genres import normalize_genres
+        except Exception:
+            return out
+        cap = genre_count(cfg)
+        want = normalize_genres(names, cap)
+        out["genres"] = want
+        if want:
+            for af in rows:
+                try:
+                    have = str(af.get_tag("GENRE") or "").strip()
+                    if have and not genre_ours:
+                        continue  # the track's own name is the file's
+                    if not should_write_audio_tag(cfg, "GENRE", filepath=af.path):
+                        continue
+                    if af.set_tag("GENRE", want):
+                        out["genres_written"] += 1
+                except Exception:
+                    continue
+    return out
+
+
+def _asked(stats):
+    """The tag/value pairs a ratings run's answers would land, per file.
+
+    `run_web_ratings` speaks in per-album counts, not per file, but the pair
+    it lands for an answered entity is one of two tags whose VALUE it has
+    already chosen — and the writer's own counts (`written`) say whether a file
+    took one. Rewritten here from the stats the runner publishes, so the plan
+    can mark the app's own values without the runner growing a second return.
+    """
+    out = {}
+    for row in (stats.get("rows") or []):
+        pairs = []
+        for kind in ("album", "track"):
+            tag = LEVEL_TAGS[kind][0]
+            if row.get(kind):
+                pairs.append((tag, str(int(row[kind]))))
+        if pairs:
+            out[row.get("path")] = tuple(pairs)
+    return out
+
+
+def _value_now(file_path, tag):
+    try:
+        return str(AudioFile(file_path).get_tag(tag) or "").strip()
+    except Exception:
+        return None
+
+
+def _read_fields(rows, asked=None):
+    """What these files state about the two families this pass owns, and which
+    of those values the answer this pass is landing replaces.
+
+    Read BEFORE the writes: `asked` maps a file to the tag/value pairs an
+    answer came back for, so the record says "the app put both numbers there"
+    rather than "one was there and one was not". The job keeps it, which is
+    what lets the next run tell the app's own score from the user's (see
+    `refresh_musicbrainz_tags`).
+    """
+    asked = asked or {}
+    out = {}
+    for af in rows:
+        try:
+            fields = _refresh_fields(af)
+        except Exception:
+            continue
+        landed = asked.get(af.path) or ()
+        for tag, pair in (fields.get("web") or {}).items():
+            fields["web"][tag] = [pair[0], (tag, str(pair[0])) in landed]
+        out[af.path] = fields
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -643,7 +964,8 @@ def _album_identity(rows):
     return artist, album, rg, artist_mbid, release_mbid
 
 
-def run_web_ratings(config, fetch=None):
+def run_web_ratings(config, fetch=None, *, force=None, stamp=None,
+                    ask_set=None, replace_for=None):
     """Script 24 — fill every album's web rating, and every track's.
 
     ALBUM-SCOPED like its neighbours: the album list comes from
@@ -699,7 +1021,14 @@ def run_web_ratings(config, fetch=None):
             stats["errors"].append(str(e))
             return stats
 
-    force = bool(config.get(FORCE_KEY, False))
+    # *force* is the caller's word (the tag refresh pulls the answer anew, so a
+    # public score the release has since moved must land); absent, the config's
+    # own `force_web_ratings` switch decides exactly as before.
+    force = bool(config.get(FORCE_KEY, False) if force is None else force)
+    # *stamp*: the pull time a REFRESH puts on every value it writes, so the
+    # score and `MUSICBRAINZ_UPDATED` describe one pull; absent, the writer
+    # takes the moment it saves.
+    stamp = str(stamp or "").strip()
     order = provider_order(config)
     log("sources: " + (" -> ".join(SOURCE_LABELS[s] for s in order)
                        if order else "none (nothing to ask)"))
@@ -811,7 +1140,18 @@ def run_web_ratings(config, fetch=None):
         # the writes (R362/R11). The test is `_existing` — the writer's own —
         # so a skip here can never disagree with it and lose a value it would
         # have accepted.
-        need_album = force or any(not row["album_web_rating"] for row in rows)
+        # *ask_set* is the fill-the-gaps pass (the scheduled tag refresh): a
+        # value the file holds makes no request, even forced — the write below
+        # still forces an answer that DID come back.
+        ask_held = bool(force) if ask_set is None else bool(ask_set)
+        if ask_held is False:
+            # The scheduled pass asks only for what is MISSING: a held value
+            # makes no request. The write still forces any answer that came
+            # back (`force` itself stays as the caller set it).
+            ask_force = False
+        else:
+            ask_force = force
+        need_album = ask_force or any(not row["album_web_rating"] for row in rows)
 
         def _track_answer(row):
             """One track's own rating — its OWN row, nothing shared.
@@ -824,7 +1164,7 @@ def run_web_ratings(config, fetch=None):
             that files the release under the localized name answers only to
             that name. A track that found something pays nothing extra.
             """
-            if not force and row["web_rating"]:
+            if not ask_force and row["web_rating"]:
                 return None
             artist_row = row["artist"] or row["albumartist"]
             around = {"artist": artist, "album": album, "mbid": rg,
@@ -878,13 +1218,17 @@ def run_web_ratings(config, fetch=None):
         # The writes happen on THIS thread, once the pool has joined, in the
         # sorted-`rows` order — each track writes only its own file, and the
         # counters below are the album's own dict.
+        results = []
         for row, track_answer in zip(rows, answers):
             out["tracks"] += 1
             level = (track_answer or {}).get("level")
             if level:
                 out["levels"][level] = out["levels"].get(level, 0) + 1
             res = write_ratings(row["af"], album=album_answer,
-                                track=track_answer, cfg=config, force=force)
+                                track=track_answer, cfg=config, force=force,
+                                stamp=stamp,
+                                replace=replace_for(row["path"]) if replace_for else None)
+            results.append(res)
             if res.get("error"):
                 out["errors"].append(f"{os.path.basename(row['path'])}: {res['error']}")
                 continue
@@ -896,6 +1240,17 @@ def run_web_ratings(config, fetch=None):
                 out["gated"] = True
             for source in (album_answer or {}).get("answered", []):
                 out["by_source"][source] = out["by_source"].get(source, 0) + 1
+        # The per-file answers this album landed — the plan's record of what
+        # the app wrote (see `refresh_musicbrainz_tags`). Only files the writer
+        # actually took a value for are named.
+        out["rows"] = [{
+            "path": row["path"],
+            # One writer call per file holds BOTH pairs, so its own
+            # `wrote` is the word on each: the album answer is written to
+            # every file, so a file that took it says so here.
+            "album": ((album_answer or {}) if "ALBUMWEBRATING" in res["wrote"] else {}).get("value"),
+            "track": ((track_answer or {}) if "WEBRATING" in res["wrote"] else {}).get("value"),
+        } for row, track_answer, res in zip(rows, answers, results)]
         if out["wrote"]:
             _drop_tag_cache([album_dir])
         return out

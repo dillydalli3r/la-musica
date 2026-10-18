@@ -2143,6 +2143,9 @@ export type TagJob = {
   id: string; source: string; status: "running" | "done" | "error";
   started: number; finished: number | null; total: number; done: number;
   refreshed: number; written: number; current: string; workers: number;
+  /** The two MusicBrainz answers the identity pass does not carry: files that
+   *  took a public score, and tracks that gained a genre. */
+  ratings?: number; genres?: number;
   skipped: { path: string; reason: string }[];
   errors: { path: string; error: string }[];
 };

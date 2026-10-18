@@ -639,6 +639,44 @@ if "partial album" not in out:
 # --------------------------------------------------------------------------- #
 # 5. a genuinely standalone single is still its own album
 # --------------------------------------------------------------------------- #
+# THE OWNER'S LAIKA COME HOME (2026-10-18): a rip whose file NAME states a
+# disc AND a position ("6-06 5_4 (P.45).flac") while its TRACKNUMBER tag says
+# only "06". Read off the tag alone it shared (1, 6) with the release's own
+# "5/4 (P.45)", so the real track 6 read missing and the stray read extra.
+print("== a file whose NAME states a disc and a track is read by its name ==")
+eq(discs.track_of_filename("6-06 5_4 (P.45).flac"), 6,
+   "the name's own position is read (disc 6, track 6)")
+eq(discs.track_of_filename("06 - Plain.flac"), None,
+   "a bare '06 - Title' name states no disc, so it states no position either")
+_six = tempfile.mkdtemp(prefix="mlo-ssi-six-")
+_six_stray = os.path.join(_six, "6-06 5_4 (P.45).flac")
+_six_real = os.path.join(_six, "1-06 5_4 (P.45).flac")
+for _p in (_six_stray, _six_real):
+    with open(_p, "wb") as _fh:
+        _fh.write(b"")
+eq(discs.disc_number_of_path(_six_stray), 6, "…and the file's own disc")
+eq(discs.disc_number_of_path(_six_real), 1, "…while a 1-06 name is disc 1")
+shutil.rmtree(_six, ignore_errors=True)
+
+print("== an artist gets ONE folder, whatever spelling an import arrives with ==")
+_one = tempfile.mkdtemp(prefix="mlo-ssi-artist-")
+for _n in ("Spacemonkeyz [8df68f6c-40c0-4c9a-9343-ed949cb5ffcd]",
+           "System Of A Down"):
+    os.makedirs(os.path.join(_one, _n))
+_eq = mlo_main._existing_artist_dir
+eq(os.path.basename(_eq(_one, "Space Monkeyz") or ""),
+   "Spacemonkeyz [8df68f6c-40c0-4c9a-9343-ed949cb5ffcd]",
+   "a spaced spelling joins the folder the library already has")
+eq(os.path.basename(_eq(_one, "System of a Down [cc0b7089-c08d-4c10-b6b0-873582c17fd6]") or ""),
+   "System Of A Down",
+   "…and an id the existing folder does not name still finds it by name")
+eq(os.path.basename(_eq(_one, "Spacemonkeyz [8df68f6c-40c0-4c9a-9343-ed949cb5ffcd]") or ""),
+   "Spacemonkeyz [8df68f6c-40c0-4c9a-9343-ed949cb5ffcd]",
+   "the exact folder is the first answer, with no search needed")
+eq(_eq(_one, "Brand New Artist"), "",
+   "an artist the library does not have yet opens its own folder")
+shutil.rmtree(_one, ignore_errors=True)
+
 print("== a standalone single keeps its own album ==")
 solo_name = "01 - Solo Track.flac"
 make_track(os.path.join(RIP, solo_name), 4.0, 1, "Solo Track", tagged=False)

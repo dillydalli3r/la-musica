@@ -2301,19 +2301,6 @@ def _credit_files(album_dir, limit=60):
     return out
 
 
-def _mb_credit_rows(fetch, mbid):
-    """MusicBrainz credits, or a 502 carrying MusicBrainz's own reason.
-
-    An unavailable or busy MusicBrainz is MB's answer, not a bug in here, so
-    it must never surface as a 500: 502 + the reason is the same report the
-    rest of the UI gives for the same outage.
-    """
-    try:
-        return fetch(mbid)
-    except Exception as e:
-        raise HTTPException(502, f"MusicBrainz credits unavailable: {e}")
-
-
 # --------------------------------------------------------------------------- #
 # The FILE's own MusicBrainz-derived tags -> credit rows
 # --------------------------------------------------------------------------- #
@@ -2494,18 +2481,16 @@ def credits(path: str = Query(""), album: str = Query("")):
         # already carries as `track_mbid` — so the header never shows the tag's
         # spelling beside the route's answer.
         identity["track_mbid"] = identity["recording_mbid"] = track_mbid
-        live_rows = []
-        if track_mbid:
-            try:
-                live_rows = _mb_credit_rows(intg.recording_credits, track_mbid)
-            except HTTPException:
-                # MusicBrainz unavailable: the file's own tags are still an
-                # answer, so a dead or throttled MB never turns a credits
-                # request into an error while the file states its own data.
-                live_rows = []
-        rows = _merge_credit_rows(live_rows, file_rows)
-        if not live_rows:
-            source = "tags"
+        # CREDITS ARE READ FROM THE TAGS ALONE (the owner's rule, 2026-10-18):
+        # "all credits in the app should be read STRICTLY from local tags, no
+        # musicbrainz querying every time". The tags a MusicBrainz writer left
+        # (PERFORMER, PRODUCER, ENGINEER, MIX, ARRANGER …) ARE the release's
+        # credits, already landed on the file — asking recording/<id> for the
+        # same relations again on every panel open was a rate-limited request
+        # per track for data the file already states, and a panel that opened
+        # slowly or failed when the network did.
+        rows = file_rows
+        source = "tags"
     elif album:
         d = os.path.normpath(mbresolve.resolve_album(album) or album)
         if not os.path.isdir(d):
@@ -2532,12 +2517,11 @@ def credits(path: str = Query(""), album: str = Query("")):
             if artist and release_mbid:
                 break
         identity["release_mbid"] = release_mbid
-        if release_mbid:
-            rows = _mb_credit_rows(intg.release_credits, release_mbid)
-        if not rows:
-            source = "tags"
-            for t in tagsets:
-                rows += intg.credit_rows_from_tags(t)
+        # The tags alone, the same rule the track branch keeps: every file's
+        # own credit tags, tidied as one list. No release relation request.
+        source = "tags"
+        for t in tagsets:
+            rows += intg.credit_rows_from_tags(t)
     else:
         raise HTTPException(404, "path or album is required")
     if not path:
@@ -4541,6 +4525,17 @@ async def import_upload(
             if not album_path:
                 album_path = os.path.normpath(
                     os.path.join(root, re_safe_filename(album_name) or safe))
+        # ONE FOLDER PER ARTIST: the album goes into the artist folder the
+        # library already has, whatever spelling or id the arriving copy
+        # carries — otherwise a second album of one artist opens a second
+        # artist folder beside the first ("System Of A Down" beside "System of
+        # a Down [id]", "Spacemonkeyz vs. Gorillaz" beside "Spacemonkeyz
+        # [id]").
+        artist_here = os.path.dirname(album_path)
+        if os.path.normcase(os.path.dirname(artist_here)) == os.path.normcase(root):
+            settled = _existing_artist_dir(root, os.path.basename(artist_here))
+            if settled and os.path.normcase(settled) != os.path.normcase(artist_here):
+                album_path = os.path.join(settled, os.path.basename(album_path))
         if not _in_music_folder(album_path, folder):
             raise HTTPException(400, "target outside music folder")
         # Whether this call CREATED the album folder — read before anything
@@ -4608,6 +4603,76 @@ async def import_upload(
             # already holds was NOT asked to give up.
             "collided": collided, "kept": kept,
             "created": not merged and not existed_before}
+
+
+# HOW MANY ARTIST FOLDERS ONE ARTIST MAY HAVE (the owner's report, 2026-10-18:
+# "importing creating folders that commonly look like this in the artist
+# directory" — "Spacemonkeyz [id]" beside "Spacemonkeyz vs. Gorillaz", "System
+# of a Down [id]" beside "System Of A Down"). A library has ONE folder per
+# artist; an import that arrives with another spelling, or without the
+# MusicBrainz id the naming script appends, must land in the folder that is
+# already there rather than open a second one beside it.
+def _artist_id(name: str) -> str:
+    """The MusicBrainz artist id a folder name states in brackets, or ""."""
+    from mlo.artistdata import folder_mbid
+    return folder_mbid(name) or ""
+
+
+def _artist_key(name: str) -> tuple:
+    """What two artist folder names must agree on to be one artist.
+
+    The MusicBrainz id when the name states one (the id IS the artist — a
+    renamed artist keeps its id and changes its name). Otherwise the name with
+    its id suffix off and the spacing folded out: "Spacemonkeyz" and "Space
+    Monkeyz" are one folder, exactly as the cover policy reads a release
+    credit.
+    """
+    from mlo.artistdata import strip_mbid_suffix
+    from mlo.cover_choice import _fold
+    artist_id = _artist_id(name)
+    if artist_id:
+        return ("id", artist_id)
+    return ("name", _fold(strip_mbid_suffix(name)).replace(" ", "").casefold())
+
+
+def _existing_artist_dir(root: str, wanted: str) -> str:
+    """The artist folder *wanted* belongs in, or "" when none is there yet.
+
+    *wanted* is the folder name the call was about to create, and *root* the
+    library's Artists folder. A folder already there is the answer when it IS
+    this artist by `_artist_key` — the same id, or the same name with spacing
+    folded — so the album goes inside it instead of opening a second folder
+    beside it. An exact-name match is the common case and needs no key work.
+
+    A folder that names the artist the way only ONE side spells it is caught
+    by the NAME key too: "System Of A Down" (no id) and "System of a Down
+    [id]" fold to the same name, so whichever of them the library already
+    holds wins.
+    """
+    from mlo.artistdata import strip_mbid_suffix
+    from mlo.cover_choice import _fold
+
+    def name_key(entry: str) -> str:
+        return _fold(strip_mbid_suffix(entry)).replace(" ", "").casefold()
+
+    try:
+        entries = sorted(e for e in os.listdir(root)
+                         if os.path.isdir(os.path.join(root, e)))
+    except OSError:
+        return ""
+    if wanted in entries:
+        return os.path.join(root, wanted)
+    want_id = _artist_id(wanted)
+    want_name = name_key(wanted)
+    if want_id:
+        for entry in entries:
+            if _artist_id(entry) == want_id:
+                return os.path.join(root, entry)
+    if want_name:
+        for entry in entries:
+            if name_key(entry) == want_name:
+                return os.path.join(root, entry)
+    return ""
 
 
 def _write_upload_bytes(dest: str, data: bytes) -> None:

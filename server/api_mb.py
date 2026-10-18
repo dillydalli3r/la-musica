@@ -548,13 +548,29 @@ def _lyrics_record(hit, artist="", track="", album=None, duration=None):
 async def lyrics_search(
     artist: str = Query(...), track: str = Query(...),
     album: str = Query(None), duration: int = Query(None),
+    all: int = Query(0),
 ):
     """Lyrics candidates from the configured provider chain.
 
-    At most one row (the chain returns its best hit); the list shape is what
-    the editor's candidate picker expects, and a miss is an empty list rather
-    than a 404 so a search can just say "nothing found".
+    One row by default (the chain's best hit) — the list shape the editor's
+    candidate picker reads, and a miss is an empty list rather than a 404 so a
+    search can just say "nothing found". ``all=1`` is the READER's list: every
+    candidate the providers hold for the name, best first, each with its own
+    score, duration, album and provider (``mlo.lyrics_providers
+    .lyrics_candidates``), so a person can pick the version their file is
+    instead of trusting one automatic choice.
     """
+    if all:
+        from mlo.lyrics_providers import Deadline, lyrics_candidates
+        try:
+            rows = await asyncio.to_thread(
+                lyrics_candidates, load_config(), artist, track, album,
+                duration, deadline=Deadline(45))
+        except Exception as e:
+            raise HTTPException(502, f"lyrics search failed: {e}")
+        return [{**_lyrics_record(r, artist, track, album, duration),
+                 "score": r.get("score")} for r in rows if _lyrics_record(
+                     r, artist, track, album, duration)]
     from mlo.lyrics_providers import fetch_lyrics
     try:
         hit = await asyncio.to_thread(

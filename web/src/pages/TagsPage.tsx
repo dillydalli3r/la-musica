@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import type { ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle, CalendarClock, Check, ChevronDown, ChevronRight, Clock,
@@ -149,14 +150,6 @@ export default function TagsPage() {
           </label>
           <span className="text-zinc-600">·</span>
           <label className="flex items-center gap-2" title="Scheduled refreshes run in the background; the queue is bounded and never updates the whole library at once">
-            <input
-              type="checkbox"
-              checked={!!(cfg.data?.tag_refresh_enabled ?? data.scheduled)}
-              onChange={(e) => void save({ tag_refresh_enabled: e.target.checked })}
-            />
-            Refresh on a schedule
-          </label>
-          <label className="flex items-center gap-2">
             every
             <input
               className="input w-16 py-1 tap"
@@ -178,6 +171,14 @@ export default function TagsPage() {
               value={Number(cfg.data?.tag_refresh_workers ?? 8)}
               onChange={(e) => void save({ tag_refresh_workers: Math.max(1, Math.min(16, Number(e.target.value) || 8)) })}
             />
+          </label>
+          <label className="flex items-center gap-2" title="Off by default. A refresh also fetches a lyric for an album whose tracks lack one (script 13's own runner, fill-only — a line the file states is never replaced)">
+            <input
+              type="checkbox"
+              checked={!!(cfg.data?.lyrics_auto_fetch ?? false)}
+              onChange={(e) => void save({ lyrics_auto_fetch: e.target.checked })}
+            />
+            also fetch missing lyrics
           </label>
           <label className="flex items-center gap-2" title="How often the background scheduler looks for due albums (minutes)">
             check every
@@ -202,8 +203,25 @@ export default function TagsPage() {
           hint={`past ${data.days} days or never pulled`} tone={counts.due ? "warn" : "ok"} />
         <Card icon={Clock} label="Oldest pull" value={day(data.oldest)}
           hint={data.oldest ? iso(data.oldest) : "no album carries a stamp yet"} />
+        {/* THE SCHEDULE, and its switch IN THE BOX. The on/off used to be a
+            checkbox in the header row above, four boxes away from the status
+            it governs — and the status said "turn it on above", which is a
+            sentence that exists only because the control was somewhere else.
+            The box now owns both: the status line, and the one button that
+            changes it. */}
         <Card icon={RefreshCw} label="Schedule" value={data.scheduled ? `every ${cfg.data?.tag_refresh_days ?? data.days} d` : "off"}
-          hint={data.scheduled ? `checks every ${data.interval_minutes} min · last auto ${data.last_auto ? iso(new Date(data.last_auto * 1000).toISOString()) : "—"}` : "turn it on above; nothing runs by itself"} />
+          hint={data.scheduled ? `checks every ${data.interval_minutes} min · last auto ${data.last_auto ? iso(new Date(data.last_auto * 1000).toISOString()) : "—"}` : "nothing runs by itself"}
+          action={
+            <button
+              className={`btn-ghost !py-1 text-[11px] tap ${data.scheduled ? "!text-accent !border-accent/50" : ""}`}
+              disabled={cfg.isLoading}
+              onClick={() => void save({ tag_refresh_enabled: !(cfg.data?.tag_refresh_enabled ?? data.scheduled) })}
+              title="Scheduled refreshes run in the background; the queue is bounded and never updates the whole library at once"
+            >
+              {data.scheduled ? "Turn off" : "Turn on"}
+            </button>
+          }
+          footer={<span className="text-[10px] text-zinc-600">{data.scheduled ? "Refreshing on a schedule" : "Refresh on a schedule"}</span>} />
       </div>
 
       {/* Queue */}
@@ -218,6 +236,8 @@ export default function TagsPage() {
             </span>
             <span className="text-zinc-500 text-xs">
               {job.done}/{job.total} albums · {job.refreshed} refreshed · {job.written} file(s) written
+              {job.ratings ? ` · ${job.ratings} took a rating` : ""}
+              {job.genres ? ` · ${job.genres} gained a genre` : ""}
               {job.skipped.length ? ` · ${job.skipped.length} skipped` : ""}
               {job.errors.length ? ` · ${job.errors.length} error(s)` : ""}
               {job.workers ? ` · ${job.workers} worker(s)` : ""}
@@ -399,20 +419,27 @@ function TrackList({ path }: { path: string }) {
 }
 
 function Card({
-  icon: Icon, label, value, hint, tone = "plain",
+  icon: Icon, label, value, hint, tone = "plain", action, footer,
 }: {
   icon: typeof Database; label: string; value: string; hint?: string;
   tone?: "plain" | "ok" | "warn";
+  /** A control the box OWNS (the schedule's on/off): drawn beside the label,
+   *  so the status and the switch that changes it are one object. */
+  action?: ReactNode;
+  /** A line under the hint — what the action means, said in words. */
+  footer?: ReactNode;
 }) {
   return (
     <div className="panel p-3">
       <div className="flex items-center gap-2 text-[10px] uppercase tracking-wider text-zinc-500">
         <Icon className="h-3.5 w-3.5" /> {label}
+        {action && <span className="ml-auto normal-case tracking-normal">{action}</span>}
       </div>
       <div className={`text-xl font-semibold pt-1 ${tone === "warn" ? "text-amber-400" : tone === "ok" ? "text-emerald-500" : ""}`}>
         {value}
       </div>
       {hint && <div className="text-[11px] text-zinc-600 pt-0.5">{hint}</div>}
+      {footer && <div className="pt-0.5">{footer}</div>}
     </div>
   );
 }

@@ -770,8 +770,43 @@ def _add_expected_tracks(res, album_dir):
     # the discs whose manifest and files are numbered in different conventions
     # (see `expected_tracks_state`): a 2-CD release numbered 14-26 against a
     # manifest numbered 1-13 read as "not imported" for the whole second disc.
-    rows_on_disk = [{"disc": int(tr.get("discnumber") or 1),
-                     "position": tr.get("tracknumber"),
+    #
+    # The POSITION is read from the file's NAME first and the tag second, the
+    # way `mlo.discs.disk_rows` (which the manifest readers use) reads it: a
+    # rip whose names say 1-01 … while a track's TRACKNUMBER tag disagrees —
+    # a kept original numbering, a hand edit — used to key this row on the tag
+    # and call the tagged file extra AND the release row missing, for a folder
+    # that is the whole release (the owner's Laika Come Home: 12 named files,
+    # one of them "not in this release").
+    from mlo import discs as discs_mod
+
+    def _disk_position(tr):
+        """Where this file sits, the way `mlo.discs.disk_rows` reads it.
+
+        A name that states a disc AND a position ("6-06 5_4 (P.45)") is the
+        rip's own statement — a single-track disc, a bonus appended as its own
+        disc — so it is read BEFORE the tag, which for such a file is usually
+        the raw TRACKNUMBER ("06") with no disc beside it. A bare name states
+        no disc (`disc_number_of_path` is None) and then the tag's
+        TRACKNUMBER is the one statement there is: the ordinary
+        "06 - Title.flac" file is not "extra" just because its name is
+        plain."""
+        path = str(tr.get("path") or "")
+        if discs_mod.disc_number_of_path(path):
+            pos = discs_mod.track_of_filename(os.path.basename(path))
+            if pos:
+                return pos
+        return tr.get("tracknumber")
+
+    def _disc_number(tr):
+        """The disc this file sits on: its name's statement first (the same
+        rule `_disk_position` reads the position by), else its DISCNUMBER
+        tag."""
+        path = str(tr.get("path") or "")
+        return discs_mod.disc_number_of_path(path) or tr.get("discnumber")
+
+    rows_on_disk = [{"disc": (_disc_number(tr) or 1),
+                     "position": _disk_position(tr),
                      "title": str((tr.get("tags") or {}).get("TITLE") or "").strip(),
                      "file": os.path.basename(str(tr.get("file") or ""))}
                     for tr in res.get("tracks", [])]

@@ -1,8 +1,9 @@
 import { useState } from "react";
-import { Disc3, Fingerprint, Loader2, Search } from "lucide-react";
+import { Check, Disc3, FileText, Fingerprint, Loader2, Search } from "lucide-react";
 import Modal from "./Modal";
 import { api } from "../api";
 import { toast } from "../store";
+import type { ImportLogMatch } from "../api";
 import type { AcoustidAlbumMatch } from "../types";
 
 /** One album the import dialog asks about: the release it names (prefilled in
@@ -110,9 +111,14 @@ export default function ImportIdentifyDialog({
   /** The free MusicBrainz query per row (artist + album). Unset falls back to
    *  what the files' tags say, so an untouched row searches by itself. */
   const [query, setQuery] = useState<Record<string, string>>({});
-  const [busy, setBusy] = useState<Record<string, "detect" | "search" | "find" | "start">>({});
+  const [busy, setBusy] = useState<Record<string, "detect" | "search" | "find" | "log" | "start">>({});
   const [detected, setDetected] = useState<Record<string, AcoustidAlbumMatch>>({});
   const [found, setFound] = useState<Record<string, any[]>>({});
+  /** What each row's rip log answered (`GET /api/import/log-match`): the disc
+   *  id its own TOC hashes to, and the release(s) MusicBrainz holds for that
+   *  exact disc. The one lookup that names the PRESSING with no tag, no
+   *  fingerprint and no name search, so the dialog offers it beside AcoustID. */
+  const [logRows, setLogRows] = useState<Record<string, ImportLogMatch>>({});
 
   const setPin = (path: string, value: string) =>
     setPins((cur) => ({ ...cur, [path]: value }));
@@ -166,6 +172,35 @@ export default function ImportIdentifyDialog({
         for (const p of paths) if (next[p] === "detect") delete next[p];
         return next;
       });
+    }
+  };
+
+  /** The rip log's own TOC: the folder's `.log` states the disc's whole track
+   *  table, and that table IS a MusicBrainz Disc ID — the exact pressing the
+   *  rip came from. Pressed, never automatic (a different pressing of the same
+   *  album is a different release), and a folder with no log, or a log with no
+   *  TOC, says so in the row instead of guessing. */
+  const matchFromLog = async (al: IdentifyAlbum) => {
+    setBusy((b) => ({ ...b, [al.path]: "log" }));
+    try {
+      const res = await api.importLogMatch(al.path);
+      setLogRows((cur) => ({ ...cur, [al.path]: res }));
+      const hit = (res.logs ?? []).find((l) => (l.releases ?? []).length);
+      if (!hit?.releases?.length) {
+        const why = res.reason
+          || (res.logs ?? []).map((l) => `${l.file}: ${l.error}`).filter(Boolean).join("; ")
+          || "no release found";
+        toast(`Rip log: ${why}`);
+        return;
+      }
+      const rel = hit.releases[0];
+      setPin(al.path, `https://musicbrainz.org/release/${rel.release_id}`);
+      toast(`Rip log: ${rel.artist ? `${rel.artist} — ` : ""}${rel.title}`
+        + (rel.disc_position ? ` (disc ${rel.disc_position} of ${rel.discs})` : ""));
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setBusy(({ [al.path]: _gone, ...rest }) => rest);
     }
   };
 
@@ -340,6 +375,19 @@ export default function ImportIdentifyDialog({
                   : <Fingerprint className="h-3.5 w-3.5" />}
                 Detect with AcoustID
               </button>
+              {/* The rip log beside the fingerprint: both are evidence about
+                  what this folder IS, and the log's is about the PRESSING. */}
+              <button
+                className="btn-ghost !py-1 text-xs tap"
+                onClick={() => void matchFromLog(al)}
+                disabled={pending}
+                title="Read this folder's rip log, hash its TOC into a MusicBrainz Disc ID and fill in the release that disc belongs to"
+              >
+                {busy[al.path] === "log"
+                  ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  : <FileText className="h-3.5 w-3.5" />}
+                Match from rip log
+              </button>
               <span className="inline-flex items-center gap-1.5">
                 <input
                   className="input !py-1 !w-44 text-xs"
@@ -413,6 +461,40 @@ export default function ImportIdentifyDialog({
                   <>AcoustID: {det.reason || det.status || "no match"}</>
                 )}
               </p>
+            )}
+            {logRows[al.path] && (logRows[al.path].logs ?? []).length > 0 && (
+              <div className="text-[11px] leading-relaxed text-zinc-400 space-y-0.5">
+                {logRows[al.path].logs.map((l) => (
+                  <p key={l.file}>
+                    <FileText className="inline h-3 w-3 mr-1 text-zinc-500" />
+                    <span className="font-mono">{l.file}</span>:{" "}
+                    {l.disc_id
+                      ? <span className="font-mono text-zinc-300">{l.disc_id}</span>
+                      : <span className="text-amber-300/80">{l.error || "no TOC table"}</span>}
+                    {l.releases.length > 0 && (
+                      <>
+                        {" — "}
+                        {(l.releases ?? []).slice(0, 4).map((r, i) => (
+                          <span key={r.release_id}>
+                            {i > 0 && " · "}
+                            <button
+                              className="text-accent-soft hover:text-white underline underline-offset-2"
+                              title={`Use release ${r.release_id}`}
+                              onClick={() => setPin(al.path, `https://musicbrainz.org/release/${r.release_id}`)}
+                            >
+                              {r.artist ? `${r.artist} — ` : ""}{r.title}
+                              {r.disc_position ? ` (disc ${r.disc_position}/${r.discs})` : ""}
+                            </button>
+                          </span>
+                        ))}
+                      </>
+                    )}
+                    {l.releases.length === 1 && (
+                      <Check className="inline h-3 w-3 ml-1 text-emerald-500" />
+                    )}
+                  </p>
+                ))}
+              </div>
             )}
             {rows && rows.length > 0 && (
               <ul className="space-y-1">

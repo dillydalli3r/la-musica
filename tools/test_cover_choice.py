@@ -298,6 +298,41 @@ for name in ("Radiohead", "OK Computer OKNOTOK 1997 2017", "Störagéd", "Björk
     eq(cc._fold(name), discovery.norm(name),
        f"the policy folds {name!r} exactly as the app's own normalizer does")
 
+# A CREDIT is not a different artist. The owner's Laika Come Home: the album is
+# filed under "Space Monkeyz" and every store files its release under
+# "Gorillaz & Space Monkeyz", so all 20 candidates were rejected as "a
+# different artist's release" and none could be picked — the one row the policy
+# must never throw out is the one whose credit NAMES the album's artist.
+split = cc._Context(order=(), target=1200, minimum=1200, square_threshold=0.0,
+                    enforce_square=True, artist="Space Monkeyz",
+                    album="Laika Come Home", tracks=12)
+# The row states NO track count: this album's folder holds 12 files of a
+# 12-track release plus a stray, so the count the caller passes is the
+# folder's — a credit that NAMES the album's artist is the album itself even
+# when the numbers disagree (a different edition is `count`, never `other`).
+verdict, why = cc._identity_verdict(
+    {"artist": "Gorillaz & Space Monkeyz", "title": "Laika Come Home"}, split)
+eq(verdict, "same", "a split credit that names the album's artist is that album's release")
+has(why, "credit", "and the verdict says it was read as a credit")
+eq(cc._identity_verdict({"artist": "Gorillaz feat. Space Monkeyz",
+                         "title": "Laika Come Home"}, split)[0], "same",
+   "…so is a featured credit")
+# A DIFFERENT member of the credit: the album is filed as "Space Monkeyz",
+# its credit reads "Gorillaz & Space Monkeyz", and a count that disagrees is
+# a different EDITION of that release — never another artist's.
+eq(cc._identity_verdict({"artist": "Gorillaz & Space Monkeyz",
+                         "title": "Laika Come Home", "tracks": 10}, split)[0], "count",
+   "a credit that names the artist with another tracklist is a different edition")
+# The credit rule opens nothing else: a karaoke record and another album by
+# someone the album does not name stay rejected.
+eq(cc._identity_verdict({"artist": "Karaoke Hits Band",
+                         "title": "Laika Come Home"},
+                        split)[0], "other",
+   "a credit that names somebody else is still another artist's release")
+eq(cc._identity_verdict({"artist": "Space Monkeyz", "title": "Another Album"},
+                        split)[0], "other",
+   "and a different album by the same artist is no cover of this one either")
+
 # The payload says what the rows were checked against.
 payload = cc.cover_payload([real], CFG, identity=IDENT)
 eq(payload["identity"], {"artist": "Radiohead", "album": "OK Computer", "tracks": 12},

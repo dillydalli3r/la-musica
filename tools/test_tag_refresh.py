@@ -177,6 +177,127 @@ check("nothing due starts no job and says why", none_due["job"] is None and none
       none_due)
 
 # --------------------------------------------------------------------------- #
+# A refresh lands the release's WHOLE MusicBrainz answer, not only its identity
+# --------------------------------------------------------------------------- #
+# The owner's report: "ensure all relevant tags are updated with Tag refreshes,
+# such as genres as those are pulled from musicbrainz". The identity was the
+# only half re-read, so a public score the release had since moved stayed where
+# a year-old pull left it, and a genre a track never got stayed missing.
+_landed = []
+
+
+def fake_web_refresh(album_dir, cfg=None, stamp=None, genres=None, fields=None,
+                     cache=None):
+    _landed.append({"path": album_dir, "stamp": stamp, "genres": list(genres or []),
+                    "fields": dict(fields or {})})
+    return {"ratings": {"written": 3}, "genres": ["grunge"], "genres_written": 2,
+            "lyrics_written": 0, "fields": {}}
+
+
+from mlo import web_ratings as _wr  # noqa: E402
+_real_web = _wr.refresh_musicbrainz_tags
+_wr.refresh_musicbrainz_tags = fake_web_refresh
+_real_plan_write = tr._plan_write
+tr._plan_write = lambda files: None
+
+imports.refresh_release_tags = lambda path, release=None, cfg=None: {
+    "skipped": False, "reason": "", "release": "rel-1", "tracks": 2,
+    "identity": {"written": 2, "skipped": 0, "failed": 0},
+    "mb": {"genres": ["grunge", "alternative rock"]}}
+_landed.clear()
+_real_plan_for = tr._plan_for
+_real_outer = tr._plan_for
+tr._plan_for = lambda album_dir, source: {**_real_plan_for(album_dir, source),
+                                          "ratings": source == "manual"}
+out2 = tr.refresh(paths=[os.path.join(TMP, "Alpha", "Fresh").replace("\\", "/")],
+                  cfg=CFG, source="manual")
+job2 = out2["job"]
+deadline = time.time() + 10
+while time.time() < deadline:
+    job2 = tr.job_state()
+    if job2 and job2["status"] != "running":
+        break
+    time.sleep(0.02)
+check("the refresh hands the release's own genres to the ratings/genre pass",
+      _landed and _landed[0]["genres"] == ["grunge", "alternative rock"], _landed)
+check("...and the pull time it stamped, so both describe ONE pull",
+      _landed and _landed[0]["stamp"] == _landed[0]["stamp"].strip()
+      and str(_landed[0]["stamp"]).endswith("Z"), _landed)
+check("the job counts what the second pass wrote",
+      job2["ratings"] == 3 and job2["genres"] == 2, job2)
+check("a MANUAL refresh asks the score anew (the plan allows a replace)",
+      _landed and _landed[0]["fields"].get("ratings") is True, _landed)
+
+# The plan: a value the app wrote last time is the app's to MOVE; one it did
+# not (the user's own genre, another tagger's score) is never touched.
+_plan_file = os.path.join(TMP, "plan.json")
+_real_plan_path = tr._plan_path
+# The REAL file operation: the swaps above (the fake refresh's own album, the
+# stubbed plan writer) are restored FIRST, or this write goes to a stub that
+# drops it and every assertion below reads an empty plan.
+tr._plan_write = _real_plan_write
+tr._plan_for = _real_plan_for
+tr._plan_path = lambda: _plan_file
+# The loaded plan is keyed by PATH — reset it so the swap above is not read
+# as "the same file the old plan was loaded from" (the earlier swap pointed
+# it at a different file, and `_plan_write` only reloads when the path moved).
+tr._plan_loaded.update({"path": _plan_file, "data": {}})
+tr._plan_write({
+    os.path.join(TMP, "Alpha", "Old", "1.flac"): {
+        "web": {"WEBRATING": ["70", True], "ALBUMWEBRATING": ["80", False]},
+        "genre": "grunge",
+    },
+})
+plan = tr._plan_for(os.path.join(TMP, "Alpha", "Old").replace("\\", "/"), "schedule")
+check("the scheduled pass fills gaps by default, never re-asks a held score",
+      plan["ratings"] is False, plan)
+check("the plan names the tags the app itself wrote",
+      (os.path.join(TMP, "Alpha", "Old", "1.flac"), "WEBRATING", "70")
+      in plan["web_ours"] and not any(t == "ALBUMWEBRATING" for _p, t, _v in plan["web_ours"]),
+      plan["web_ours"])
+check("the plan knows the genre it wrote, so a refresh may replace it",
+      plan["genre_ours"] is True, plan)
+check("the MANUAL pass re-asks the score", tr._plan_for(
+      os.path.join(TMP, "Alpha", "Old").replace("\\", "/"), "manual")["ratings"] is True)
+check("a folder the plan knows nothing about has nothing of the app's",
+      tr._plan_for(os.path.join(TMP, "Alpha", "Fresh").replace("\\", "/"), "manual")["web_ours"] == set())
+tr._plan_for = _real_outer
+tr._plan_path = _real_plan_path
+tr._plan_loaded.update({"path": None, "data": {}})
+tr._plan_write = _real_plan_write
+_wr.refresh_musicbrainz_tags = _real_web
+
+# --------------------------------------------------------------------------- #
+# A refresh whose release answers NOTHING (no genre, no score, no lyrics to ask
+# by) still ENDS as "done" — the queue is the last word on an album's tags, and
+# a missing answer is a gap the report names, never a failed run.
+# --------------------------------------------------------------------------- #
+def fake_quiet(album_dir, cfg=None, stamp=None, genres=None, fields=None,
+               cache=None):
+    return {"ratings": {"written": 0}, "genres": [], "genres_written": 0,
+            "lyrics_written": 0, "fields": {}}
+
+
+imports.refresh_release_tags = lambda path, release=None, cfg=None: {
+    "skipped": False, "reason": "", "release": "rel-1", "tracks": 0,
+    "identity": {"written": 0, "skipped": 0, "failed": 0}, "mb": {"genres": []}}
+_wr.refresh_musicbrainz_tags = fake_quiet
+_quiet = tr.refresh(paths=[os.path.join(TMP, "Alpha", "Old").replace("\\", "/")],
+                    cfg=CFG, source="manual")
+_qjob = _quiet["job"]
+deadline = time.time() + 10
+while time.time() < deadline:
+    _qjob = tr.job_state()
+    if _qjob and _qjob["status"] != "running":
+        break
+    time.sleep(0.02)
+check("a release with nothing to say still finishes the job", _qjob["status"] == "done", _qjob)
+check("…and it wrote nothing, without inventing a failure",
+      _qjob["ratings"] == 0 and _qjob["genres"] == 0 and not _qjob["errors"], _qjob)
+_wr.refresh_musicbrainz_tags = _real_web
+imports.refresh_release_tags = fake_refresh
+
+# --------------------------------------------------------------------------- #
 # The scheduler is OFF by default and never starts a job when off
 # --------------------------------------------------------------------------- #
 off = tr.tick()

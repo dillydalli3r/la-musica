@@ -3307,47 +3307,6 @@ def credit_rows_from_tags(tags):
     return tidy_credit_rows(rows)
 
 
-def recording_credits(recording_mbid):
-    """Credit rows for ONE recording — its players AND its work's songwriters.
-
-    Two relation families from the one request: the recording's own artist
-    relations (players, producer, engineer, mix…), and the relations of the
-    work the recording performs (`work-rels` names it, `work-level-rels` inlines
-    its composer / lyricist / writer). Raises MusicBrainzError (or httpx's own
-    error) when MB cannot answer — the caller reports that reason rather than
-    an empty result.
-    """
-    data = mb_get_cached(f"recording/{recording_mbid}",
-                         {"inc": "artist-rels+work-rels+work-level-rels",
-                          "fmt": "json"})
-    return tidy_credit_rows(_credit_rows((data or {}).get("relations")))
-
-
-def release_credits(release_mbid):
-    """Credit rows for a whole RELEASE — every track's recording and work.
-
-    The release request carries each track's own relations (`recording-level-
-    rels`) AND the relations of every work those recordings perform
-    (`work-level-rels`), so this stays ONE request per album and still merges
-    three families: the release's own relations, each recording's, and each
-    work's. Only the aggregate is capped, not the request count.
-    """
-    data = mb_get_cached(
-        f"release/{release_mbid}",
-        {"inc": "recordings+artist-rels+recording-level-rels+work-rels"
-                "+work-level-rels", "fmt": "json"})
-    rows = _credit_rows((data or {}).get("relations"))
-    recordings = 0
-    for medium in (data or {}).get("media") or []:
-        for track in medium.get("tracks") or []:
-            if (recordings >= CREDITS_MAX_RECORDINGS
-                    or len(rows) >= CREDITS_MAX_ROWS):
-                break
-            recordings += 1
-            _credit_rows((track.get("recording") or {}).get("relations"), rows)
-    return tidy_credit_rows(rows)
-
-
 def _release_artist_mbids(artist, album, release, cfg):
     """The release's artist MBIDs, resolved from the name when it has none."""
     from server import discovery

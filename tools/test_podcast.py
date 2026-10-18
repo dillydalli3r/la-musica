@@ -334,7 +334,12 @@ try:
     # rule, and none is a CD-rip expectation: the episode's medium is Digital
     # Media, so the rip-log family never applies to it.
     failing = sorted(codes)
-    ok(all(text.startswith(("Missing", "EXPECTED_TRACKS")) for text in failing),
+    # The album-level roll-up ("Track failed its own checks: …", the owner's
+    # rule that one failed track fails its album) is the SAME finding restated
+    # once for the folder — not a music rule and not a CD-rip expectation.
+    ok(all(text.startswith(("Missing", "EXPECTED_TRACKS",
+                            "Track failed its own checks"))
+           for text in failing),
        f"its failures are missing-tag artefacts ({failing})")
     ok(not any(("log" in text.lower() or "cue" in text.lower()
                 or "Accur" in text or text.startswith("Rip "))

@@ -425,60 +425,42 @@ RELATIONS = [
      "work": {"id": MBID_RG, "title": "Kid A"}},
 ]
 
-# --- one track: the recording's own relations ------------------------------
+# --- one track: the TAGS, and no MusicBrainz request at all ----------------
+# Credits are read strictly from local tags (the owner's rule, 2026-10-18):
+# the relations below are what a MusicBrainz WRITER lands on the file, and a
+# credits panel must show them without asking recording/<id> again.
 mb = _install(FakeMB())
 mb.lookup[f"recording/{MBID_REC}"] = {"id": MBID_REC, "relations": RELATIONS}
 r = _client.get("/api/credits", params={"path": TRACK_FILES[0]})
 assert r.status_code == 200, r.text
 body = r.json()
-assert body["source"] == "musicbrainz", body
+assert body["source"] == "tags", body
 assert body["artist"] == "Test Artist" and body["album"] == "Test Album", body
 assert body["track_mbid"] == MBID_REC, body
 roles = {(row["role"], row["artist"]) for row in body["rows"]}
-assert ("producer", "Nigel Godrich") in roles, roles
-assert ("performer", "Thom Yorke") in roles, roles
-vocal = next(row for row in body["rows"] if row["artist"] == "Thom Yorke")
-assert vocal["attributes"] == ["vocals", "piano"] and vocal["mbid"] == MBID_ARTIST, vocal
-assert ("work", "Kid A") in roles, roles
-assert sorted(row["role"] for row in body["rows"]) == [row["role"] for row in body["rows"]], body
-assert len(mb.calls) == 1, mb.calls                        # one request per track
+assert ("performer", "Lenny Kaye") in roles, roles
+assert ("performer", "Patti Smith") in roles, roles
+vocal = next(row for row in body["rows"] if row["artist"] == "Patti Smith")
+assert vocal["attributes"] == ["vocals"], vocal
+assert ("musicbrainz recording id", MBID_REC) in roles, roles
+assert not mb.calls, mb.calls                     # the tags answer alone
 
-# --- the album: the release request's own track relations, ONE request -----
+# --- the album: every file's tags, still no request ------------------------
 mb = _install(FakeMB())
 mb.lookup[f"release/{MBID_RELEASE}"] = {
     "id": MBID_RELEASE, "title": "Test Album",
     "relations": [{"type": "mastering", "artist": {"id": MBID_ARTIST, "name": "Tim Young"},
                    "attributes": []}],
-    "media": [{"tracks": [
-        {"recording": {"relations": [RELATIONS[1]]}},
-        {"recording": {"relations": [{"type": "engineer",
-                                      "artist": {"id": MBID_ARTIST, "name": "Danton Supple"},
-                                      "attributes": []}]}},
-    ]}],
+    "media": [{"tracks": []}],
 }
 r = _client.get("/api/credits", params={"album": ALBUM_DIR})
 assert r.status_code == 200, r.text
 body = r.json()
-assert body["source"] == "musicbrainz", body
+assert body["source"] == "tags", body
 assert body["release_mbid"] == MBID_RELEASE, body
 roles = {(row["role"], row["artist"]) for row in body["rows"]}
-assert ("mastering", "Tim Young") in roles, roles          # the release's own relations
-assert ("performer", "Thom Yorke") in roles, roles         # per-track, from the same payload
-assert ("engineer", "Danton Supple") in roles, roles
-assert len(mb.calls) == 1, mb.calls                        # one request, not one per track
-
-# --- MusicBrainz has nothing: the files' own credit tags -------------------
-mb = _install(FakeMB())
-mb.lookup[f"release/{MBID_RELEASE}"] = {"id": MBID_RELEASE, "title": "Test Album",
-                                        "relations": [], "media": []}
-body = _client.get("/api/credits", params={"album": ALBUM_DIR}).json()
-assert body["source"] == "tags", body
-assert body["rows"], body                                  # never an empty box
-performer = next(row for row in body["rows"] if row["role"] == "performer")
-assert performer["artist"] in ("Lenny Kaye", "Patti Smith"), performer
-assert performer["mbid"] == "", performer
-kaye = next(row for row in body["rows"] if row["artist"] == "Lenny Kaye")
-assert kaye["attributes"] == ["guitar"], kaye
+assert ("performer", "Patti Smith") in roles, roles
+assert not mb.calls, mb.calls                     # one album, zero requests
 
 # --- and with no MB ID and no credit tags, the identity block still names
 # --- the file: the panel's header comes from the tags, so this is an answer

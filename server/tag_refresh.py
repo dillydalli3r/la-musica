@@ -26,6 +26,7 @@ import os
 import threading
 import time
 import traceback
+import json
 from concurrent.futures import ThreadPoolExecutor
 
 DEFAULT_DAYS = 7
@@ -55,6 +56,96 @@ _job = None            # the running/last job's state (see `_new_job`)
 _job_pool = None
 _last_auto = 0.0
 _started = False
+
+# The app's own claims for the two families a refresh OWNS (the public score
+# and the genre), per file, kept from the last pull that wrote them:
+# ``{"web": {TAG: [value, by_app]}, "genre": "<the genre the app wrote>"}`` in
+# ``<music>/.mlo/data/tag_refresh.json``. A refresh may move a value it wrote
+# itself and must never touch one the user stated — and a tag alone cannot say
+# which is which once the gap has been filled. System MUTABLE (never an import
+# product, never synced), and dropped with the music folder it belongs to.
+_plan_lock = threading.Lock()
+_plan_loaded = {"path": None, "data": {}}
+
+
+def _plan_path():
+    try:
+        from mlo.paths import app_data_dir
+        return os.path.join(app_data_dir(), "tag_refresh.json")
+    except Exception:
+        return ""
+
+
+def _plan():
+    path = _plan_path()
+    if not path:
+        return {}
+    with _plan_lock:
+        if _plan_loaded["path"] != path:
+            try:
+                with open(path, encoding="utf-8") as f:
+                    data = json.load(f)
+                _plan_loaded["data"] = data if isinstance(data, dict) else {}
+            except (OSError, ValueError):
+                _plan_loaded["data"] = {}
+            _plan_loaded["path"] = path
+        return _plan_loaded["data"]
+
+
+def _plan_write(files):
+    """Merge ONE album's written claims into the plan and store it."""
+    path = _plan_path()
+    if not path or not files:
+        return
+    with _plan_lock:
+        # `_plan` takes the same lock only on the load path, which this call
+        # has already passed; reading the loaded dict directly is what keeps
+        # two albums of one queue from swapping a stale copy back in.
+        if _plan_loaded["path"] != path:
+            _plan_loaded["path"], _plan_loaded["data"] = path, {}
+        data = _plan_loaded["data"]
+        data.update(files)
+        _plan_loaded["data"] = data
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+            os.replace(tmp, path)
+        except OSError:
+            pass
+
+
+def _plan_for(album_dir, source):
+    """The ``fields`` argument `refresh_musicbrainz_tags` decides by.
+
+    A value the PLAN says the app wrote is the app's to MOVE — the release's
+    public score changes, and a scheduled refresh that only ever filled gaps
+    would leave the first number it ever saw on the file forever. Everything
+    else (no record, or the record's value no longer matches the file's) is
+    somebody else's: the user's typed genre, another tagger's score. ``source``
+    makes the SCHEDULED pass the gap-filler by default — it walks the whole
+    library every week, and re-asking MusicBrainz about every score of it is
+    the request bill that keeps most installs off a schedule.
+    """
+    plan = _plan()
+    out = {"ratings": source == "manual", "web_ours": set(), "genre_ours": False}
+    norm = os.path.normcase(os.path.normpath(str(album_dir or "")))
+    for path, fields in plan.items():
+        if os.path.normcase(os.path.dirname(os.path.normpath(str(path)))) != norm:
+            continue
+        web = (fields or {}).get("web") or {}
+        for tag, pair in web.items():
+            try:
+                value, by_app = pair[0], bool(pair[1])
+            except (TypeError, IndexError):
+                continue
+            if by_app:
+                out["web_ours"].add((path, tag, str(value)))
+        genre = str((fields or {}).get("genre") or "")
+        if genre:
+            out["genre_ours"] = True
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -301,6 +392,14 @@ def _new_job(paths, cfg, source):
         "done": 0,
         "refreshed": 0,
         "written": 0,
+        # The two MusicBrainz answers the identity pass does not carry: files
+        # that took a public score, and tracks that gained a genre.
+        "ratings": 0,
+        "genres": 0,
+        # The last pull's OWN record of what the app wrote, per file (see
+        # `_plan_for`). Not shown: it is what tells the next run that a value
+        # is the app's to move, not the user's to keep.
+        "plan": {},
         "skipped": [],
         "errors": [],
         "current": "",
@@ -383,6 +482,32 @@ def _run_job(job, paths, cfg):
                                                "reason": out.get("reason") or ""})
                 else:
                     stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                    # THE REST OF THE RELEASE'S OWN TAGS. The identity alone is
+                    # half the release: the public score and the genre are
+                    # MusicBrainz answers too, and a scheduled pass that only
+                    # moved MEDIA/country left an album scored a year ago
+                    # scored a year ago (see `refresh_musicbrainz_tags`). Fed
+                    # the payload the identity was just stamped from, so this
+                    # costs no second lookup.
+                    try:
+                        from mlo import web_ratings
+                        extra = web_ratings.refresh_musicbrainz_tags(
+                            path, cfg=cfg, stamp=stamp,
+                            genres=(out.get("mb") or {}).get("genres"),
+                            fields=_plan_for(path, job.get("source") or "manual"))
+                        with _job_lock:
+                            job["ratings"] += int(
+                                ((extra.get("ratings") or {}).get("written")
+                                 if isinstance(extra.get("ratings"), dict) else 0) or 0)
+                            job["genres"] += int(extra.get("genres_written") or 0)
+                    except Exception as e:  # noqa: BLE001 — recorded, never fatal
+                        with _job_lock:
+                            job["errors"].append({"path": path,
+                                                  "error": f"ratings/genres: {e}"})
+                    try:
+                        _plan_write(extra.get("fields") or {})
+                    except Exception:
+                        traceback.print_exc()
                     with _lock:
                         _fresh[os.path.normcase(os.path.normpath(path))] = stamp
                     with _job_lock:

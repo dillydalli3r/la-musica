@@ -960,6 +960,28 @@ def check_grading(fx, root):
           off["pass_count"] == off["total_checks"],
           f"{off['pass_count']}/{off['total_checks']} {off['issues']}")
 
+    # "FLAC MD5 not verified" IS a failure (the owner's rule, 2026-10-18: "also
+    # the album should fail if this error is present on any track(s)"). The
+    # state is reached when nothing could establish the digest — no decoder to
+    # ask — and the finding must then be CHARGED, not merely reported.
+    from mlo.flac import MD5_UNKNOWN as _UNK
+    real_state = mlo_grader._flac_md5_state
+    mlo_grader._flac_md5_state = lambda *a, **k: (
+        _UNK, "no flac/ffmpeg to verify the stream with")
+    try:
+        unverified = mlo_grader._grade_album(album, "EMBEDDED", dict(cfg))
+    finally:
+        mlo_grader._flac_md5_state = real_state
+    check("'FLAC MD5 not verified' fails the track",
+          any("FLAC_MD5_UNVERIFIED" in (tr.get("issues") or [])
+              for tr in unverified["tracks"]), str(unverified["tracks"][0]))
+    check("…and therefore fails the album",
+          unverified["pass_count"] != unverified["total_checks"],
+          f"{unverified['pass_count']}/{unverified['total_checks']}")
+    check("…and the finding says those words",
+          any("FLAC MD5 not verified" in k for k in unverified["issues"]),
+          str(list(unverified["issues"])[:4]))
+
     # A good file must not start failing because of this check: the honest
     # fixture on its own still grades clean.
     good_album = os.path.join(root, "grade_good", "Album")

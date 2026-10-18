@@ -242,9 +242,15 @@ CFG = {"music_folder": MF, "targets": [ALBUM],
 # --------------------------------------------------------------------------- #
 print("== the owner's file, before ==")
 issues, sentences = grade(ALBUM)
+# The album also carries the roll-up "Track failed its own checks: …" (the
+# owner's rule that one failed track fails the album, R472): the finding it
+# names for this file is the SAME ACOUSTID_ID. The report's own sentence is
+# still there, and the roll-up names the same issue.
 check("the grader reports the owner's failure, named the way the owner saw it",
       issues == ["ACOUSTID_ID"]
-      and sentences == ["Missing ACOUSTID_ID (run Fix AcoustID pairs)"],
+      and "Missing ACOUSTID_ID (run Fix AcoustID pairs)" in sentences
+      and any("Track failed its own checks" in s and "ACOUSTID_ID" in s
+              for s in sentences),
       f"issues={issues} sentences={sentences}")
 
 stub_tools()

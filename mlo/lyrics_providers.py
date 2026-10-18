@@ -925,6 +925,195 @@ def _search_chain(cfg, order, artist, title, album, duration, floor,
     return None, plain
 
 
+def _provider_rows(pid, artist, title, album, duration, cfg):
+    """One provider's OWN candidate list, best-first — every recording it
+    states for the name asked, not only the one the chain would keep.
+
+    The chain takes the first answer that clears its floor; a READER choosing
+    between versions of a song (a remaster, an edit, a live cut) wants the
+    rest, so the same search endpoints return what they found and the SCORE
+    (``hit_score``) says how close each one is. Only the few best rows are
+    fetched for lyric text — the same capped, throttled fan-out the chain
+    makes — and a provider that cannot list its candidates (Kugou answers only
+    the best) contributes its one hit when it has it.
+    """
+    rows = []
+
+    def add(synced, plain, m_artist, m_title, m_album=None, m_duration=None):
+        synced = (synced or "").strip()
+        plain = (plain or "").strip()
+        if not synced and not plain:
+            return
+        rows.append((m_artist or artist, m_title or title, m_album or album,
+                     m_duration or duration, synced, plain))
+
+    if pid == "lrclib":
+        for album_filter in dict.fromkeys((album, None)):
+            search = {"track_name": title, "artist_name": artist}
+            if album_filter:
+                search["album_name"] = album_filter
+            hits = _lrclib_get("search", search)
+            for rec in (hits if isinstance(hits, list) else [])[:8]:
+                add(rec.get("syncedLyrics"), rec.get("plainLyrics"),
+                    rec.get("artistName"), rec.get("trackName"),
+                    rec.get("albumName"), rec.get("duration"))
+            if rows:
+                break
+    elif pid == "netease":
+        query = urllib.parse.urlencode(
+            {"s": f"{artist} {title}".strip(), "type": 1, "limit": 8, "offset": 0})
+        data = _get_json(f"{NETEASE_BASE}/search/get?{query}",
+                         headers=_NETEASE_HEADERS)
+        songs = [s for s in ((data or {}).get("songs") or [])
+                 if isinstance(s, dict) and s.get("id")]
+
+        def artists_of(song):
+            return [a.get("name") for a in (song.get("artists") or [])
+                    if isinstance(a, dict)]
+
+        for song in _ranked(songs, artist, title, duration, artists_of,
+                            lambda s: s.get("name"),
+                            lambda s: (s.get("duration") or 0) / 1000.0)[:4]:
+            lyr = _get_json(
+                f"{NETEASE_BASE}/song/lyric?id={song['id']}&lv=1&kv=1&tv=-1",
+                headers=_NETEASE_HEADERS)
+            synced = ((lyr or {}).get("lrc") or {}).get("lyric") or ""
+            add(synced, _lrc_to_plain(synced),
+                ", ".join(n for n in artists_of(song) if n),
+                song.get("name"), (song.get("album") or {}).get("name"),
+                (song.get("duration") or 0) / 1000.0)
+    elif pid == "qq":
+        query = urllib.parse.urlencode(
+            {"w": f"{artist} {title}".strip(), "new_json": 1, "cr": 1,
+             "p": 1, "n": 8, "format": "json"})
+        data = _get_json(f"{QQ_SEARCH}?{query}", headers=_QQ_HEADERS)
+        songs = (((data or {}).get("data") or {}).get("song") or {}).get("list")
+
+        def artists_of(song):
+            return [s.get("name") for s in (song.get("singer") or [])
+                    if isinstance(s, dict)]
+
+        rows_all = [s for s in (songs or []) if isinstance(s, dict) and s.get("mid")]
+        for song in _ranked(rows_all, artist, title, duration, artists_of,
+                            lambda s: s.get("name"),
+                            lambda s: s.get("interval"))[:4]:
+            lyr = _get_json(f"{QQ_LYRIC}?{urllib.parse.urlencode({
+                'format': 'json', 'nobase64': 1, 'songmid': song['mid']})}",
+                headers=_QQ_HEADERS)
+            synced = (lyr or {}).get("lyric") or ""
+            alb = song.get("album") or {}
+            add(synced, _lrc_to_plain(synced),
+                ", ".join(n for n in artists_of(song) if n),
+                song.get("name"), alb.get("name") or alb.get("title"),
+                song.get("interval"))
+    elif pid == "kuwo":
+        query = urllib.parse.urlencode(
+            {"all": f"{artist} {title}".strip(), "ft": "music", "client": "kt",
+             "pn": 0, "rn": 8, "rformat": "json", "encoding": "utf8",
+             "ver": _KUWO_CLIENT, "vipver": "1", "show_copyright_off": "1"})
+        data = _kuwo_json(f"{KUWO_SEARCH}?{query}")
+        cands = [r for r in ((data or {}).get("abslist") or [])
+                 if isinstance(r, dict)]
+        for row in _ranked(cands, artist, title, duration,
+                           lambda r: [_kuwo_text(r.get("ARTIST"))],
+                           lambda r: _kuwo_text(r.get("SONGNAME")),
+                           lambda r: r.get("DURATION"))[:4]:
+            music_id = str(row.get("MUSICRID") or "").replace("MUSIC_", "").strip()
+            if not music_id:
+                continue
+            lyr = _kuwo_json(f"{KUWO_LYRIC}?{urllib.parse.urlencode({'musicId': music_id})}")
+            synced = _kuwo_lrc(((lyr or {}).get("data") or {}).get("lrclist"))
+            add(synced, _lrc_to_plain(synced),
+                _kuwo_text(row.get("ARTIST")), _kuwo_text(row.get("SONGNAME")),
+                _kuwo_text(row.get("ALBUM")), row.get("DURATION"))
+    else:
+        # A provider with no listing route (the YouTube captions source, a
+        # test's own source): its one answer, when it has one.
+        hit = _PROVIDERS[pid](artist, title, album, duration, cfg)
+        if isinstance(hit, dict):
+            add(hit.get("synced"), hit.get("plain"), hit.get("matched_artist"),
+                hit.get("matched_title"), hit.get("matched_album"),
+                hit.get("duration"))
+
+    out = []
+    for m_artist, m_title, m_album, m_duration, synced, plain in rows:
+        score = _match_score([m_artist], m_title, m_duration, artist, title, duration)
+        if score < _MIN_SCORE:
+            continue
+        if m_title and not _variant_guard(title, m_title):
+            continue
+        # A karaoke/instrumental marker lifted off the TITLE, the same way
+        # `server.integrations.title_variant_kind` decides it for the chain.
+        try:
+            from server.integrations import title_variant_kind
+            instrumental = title_variant_kind(m_title) == "instrumental"
+        except Exception:
+            instrumental = False
+        out.append({
+            "provider": pid,
+            "provider_label": SOURCE_LABELS[pid],
+            "score": round(score, 3),
+            "kind": "synced" if synced else "plain",
+            "synced": synced,
+            "plain": plain or (_lrc_to_plain(synced) if synced else ""),
+            "matched_artist": m_artist,
+            "matched_title": m_title,
+            "matched_album": m_album,
+            "duration": m_duration,
+            "instrumental": instrumental,
+        })
+    return out
+
+
+# How many candidates a reader is shown: the best of each provider, and the
+# whole list capped here — a picker, not a dump.
+CANDIDATE_LIMIT = 12
+
+
+def lyrics_candidates(cfg, artist, title, album=None, duration=None,
+                      deadline=None):
+    """EVERY candidate the configured providers hold for a track, best first.
+
+    The chain (`fetch_lyrics`) answers with the ONE hit it would write. This is
+    the reader's view of the same search — the top versions of a song across
+    the providers, each with its own score, duration, album and kind — so a
+    person can pick the take their file actually is instead of trusting a
+    single pick: a remaster, an edit, a live cut and the studio take all clear
+    the chain's floor and only the duration hints which is which.
+
+    Ordered by ``hit_score`` (title, artist, duration), NESTED by provider with
+    the configured order as the tie-break — the same score the chain accepts
+    by, so the row the chain would have written is normally first. Providers
+    never raise (a failure is a miss), the walk is bounded by *deadline* where
+    the caller gave one, and at most ``CANDIDATE_LIMIT`` rows come back.
+    """
+    cfg = cfg or {}
+    if not (artist and title):
+        return []
+    out = []
+    for i, pid in enumerate(provider_order(cfg)):
+        if deadline is not None and deadline.spent():
+            break
+        try:
+            rows = _provider_rows(pid, artist, title, album, duration, cfg)
+        except Exception:
+            rows = []
+        for j, row in enumerate(rows):
+            row["rank"] = (i, j)
+            out.append(row)
+    out.sort(key=lambda r: (-float(r.get("score") or 0), r["rank"]))
+    # One row per DISTINCT text: two providers holding the same lyrics are one
+    # choice with two sources, not two candidates.
+    seen, keep = set(), []
+    for row in out:
+        key = (str(row.get("synced") or row.get("plain") or "").strip()[:400])
+        if key in seen:
+            continue
+        seen.add(key)
+        keep.append(row)
+    return keep[:CANDIDATE_LIMIT]
+
+
 # A walk that found nothing is remembered for this long: the lyrics manager
 # asks `get` (the file's own chain) and then `search` (the same questions) on
 # the miss it just paid for.

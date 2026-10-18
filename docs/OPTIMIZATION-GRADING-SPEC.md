@@ -9487,6 +9487,42 @@ Found by a whole-app audit (backend and frontend, measured on the 12-album /
   year and exactly one rating row, and no album surface in `HomePage.tsx` draws
   a `<CoverImg>` of its own.
 
+- **R470 - a refresh lands the release's whole MusicBrainz answer.** The
+  scheduled/manual tag refresh re-read the release IDENTITY only, so a public
+  score the release had since moved stayed where a year-old pull left it and a
+  track with no genre stayed that way. `mlo.web_ratings.refresh_musicbrainz_tags`
+  now rides inside every refresh, from the SAME payload the identity was
+  stamped from (no second lookup): script 24's ladder writes `WEBRATING` /
+  `ALBUMWEBRATING` and the release group's genres go into EMPTY `GENRE` slots.
+  What the app may MOVE is its own: `<music>/.mlo/data/tag_refresh.json`
+  records the values each pass wrote, so a refresh corrects a number it put
+  there and never one the user stated. The scheduled pass fills gaps by default
+  (it walks the whole library); TAGS' own manual press re-asks. A missing lyric
+  can ride along (`lyrics_auto_fetch`, off by default, fill-only).
+- **R471 - credits come from the tags alone.** `GET /api/credits` asked
+  MusicBrainz for a recording's or a release's relations on every panel open -
+  a rate-limited request per track for data the file already carries. Both
+  branches answer from the files' own credit tags (`source: "tags"`), the
+  recorder/release relation readers are deleted, and a track's own
+  `MUSICBRAINZ_TRACKID` never turns into a request.
+- **R472 - "FLAC MD5 not verified" fails the track and the album.** The
+  UNVERIFIED states (a stream that will not decode, a digest nothing could
+  establish) were reported and not charged; they now add their check
+  (`FLAC_MD5_UNVERIFIED`). `MD5_ABSENT` - the stream decodes and states no
+  digest - stays reported and uncharged. Independently, a grade re-reads its
+  tracks at the end: a track whose issues reached no counter is charged once,
+  by name, so no album passes with a failed track in it.
+- **R473 - one folder per artist.** An import whose artist spelling or id
+  suffix differed from the library's opened a SECOND artist folder beside the
+  first. The upload target resolves to the existing folder by MusicBrainz
+  artist id first, then by name with spacing folded (`_existing_artist_dir`).
+- **R474 - a file's own name states its disc and position first.** A rip named
+  "6-06 5_4 (P.45).flac" was read by its `TRACKNUMBER` tag alone ("06"), so it
+  shared the release's track 6 of disc 1: the album read partial AND listed a
+  stray file. `mlo.discs.track_of_filename` reads the position the name
+  states, and the library's disk rows prefer it whenever the name names a
+  disc.
+
 ---
 
 ## 10. Honest limits of this spec

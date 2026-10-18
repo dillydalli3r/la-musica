@@ -1732,8 +1732,11 @@ export const api = {
       body: JSON.stringify({ tracks, staged }),
     }).then(noteContainerSwap),
 
-  lyricsSearch: (artist: string, track: string, album?: string, duration?: number) =>
-    json<any[]>(`${API}/lyrics/search?artist=${encodeURIComponent(artist)}&track=${encodeURIComponent(track)}${album ? `&album=${encodeURIComponent(album)}` : ""}${duration ? `&duration=${duration}` : ""}`),
+  /** Lyrics candidates. One row by default (the chain's best hit); `all` is
+   *  the reader's list — every version the providers hold, best first, each
+   *  with its score, duration and album (`GET /api/lyrics/search?all=1`). */
+  lyricsSearch: (artist: string, track: string, album?: string, duration?: number, all = false) =>
+    json<any[]>(`${API}/lyrics/search?artist=${encodeURIComponent(artist)}&track=${encodeURIComponent(track)}${album ? `&album=${encodeURIComponent(album)}` : ""}${duration ? `&duration=${duration}` : ""}${all ? "&all=1" : ""}`),
   lyricsGet: (artist: string, track: string, album?: string, duration?: number) =>
     json<any>(
       `${API}/lyrics/get?artist=${encodeURIComponent(artist)}&track=${encodeURIComponent(track)}${album ? `&album=${encodeURIComponent(album)}` : ""}${duration ? `&duration=${duration}` : ""}`

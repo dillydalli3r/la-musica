@@ -524,23 +524,51 @@ def _fold(text):
 def _same_name(a, b):
     """Whether two FOLDED names are the same release's.
 
-    Equality, or one being a whole PHRASE of the other — a provider spells a
+    Equality, or one being a WHOLE PHRASE of the other — a provider spells a
     credit its own way ("Radiohead, レディオヘッド*"), a reissue spells its title
     its own way ("OK Computer OKNOTOK 1997 2017"), and a correct row thrown out
     for the spelling is the one failure this comparison must not have. The
     comparison is word-bounded rather than a bare substring: an artist really
     called "A" (or an album called "T") would otherwise match every name that
-    happens to contain that letter. Containment can still be generous — it
-    accepts an artist credit that merely mentions the real one — which is why
-    the track count is read too; a clearly different artist or album, the case
-    that rejects, matches neither way.
+    happens to contain that letter. Spacing is not part of a name either, so
+    "Space Monkeyz" and "Spacemonkeyz" are one.
     """
     if not a or not b:
         return False
-    if a == b:
+    if a == b or a.replace(" ", "") == b.replace(" ", ""):
         return True
     short, long = (a, b) if len(a) <= len(b) else (b, a)
-    return f" {short} " in f" {long} "
+    if f" {short} " in f" {long} ":
+        return True
+    packed_short, packed_long = short.replace(" ", ""), long.replace(" ", "")
+    return f" {packed_short} " in f" {packed_long} "
+
+
+# How a release CREDIT is split into the names it credits: " & ", " and ",
+# ",", and the featured markers a credit also carries. The split is only ever
+# used to ask "does this credit NAME the album's artist", never to pick a
+# canonical spelling.
+_CREDIT_SPLIT_RE = re.compile(
+    r"\s*(?:&|\+|/|;|,|\band\b|\bfeat\.?\b|\bft\.?\b|\bfeaturing\b)\s*",
+    re.IGNORECASE)
+
+
+def _fold_when_shared(value):
+    """The credit's whole spelling with its separator spaces dropped:
+    "Space Monkeyz" and "Spacemonkeyz" are one name.
+
+    Only the CREDIT comparison reads this — a store and a library disagreeing
+    about a space inside a compound name is a spelling difference, not a
+    different artist."""
+    folded = _fold(value)
+    return folded.replace(" ", "") if " " in folded else folded
+
+
+def _first_credit(value):
+    """The first name a release credit states, folded nowhere — the primary
+    performer of "A & B" / "A feat. C" / "A, B & C". The empty string when the
+    credit is empty."""
+    return _CREDIT_SPLIT_RE.split(str(value or "").strip(), maxsplit=1)[0].strip()
 
 
 def _identity_verdict(row, ctx):
@@ -566,6 +594,15 @@ def _identity_verdict(row, ctx):
                    `_rejection` turns this into a rejection: the wrong album's
                    art must never be the automatic pick.
 
+    A CREDIT is not a different artist: a store files a split / featured
+    release under every name it credits ("Gorillaz & Space Monkeyz") while the
+    album is filed under one of them ("Space Monkeyz") — the owner's Laika Come
+    Home, where all 20 candidates said "Gorillaz & Space Monkeyz" and not one
+    could be chosen. The ROW's artist is therefore read AS A CREDIT (its whole
+    name, and each name it credits, against the album's artist); the ALBUM's
+    own artist is ONE name, never split, so a store row called "Gorillaz"
+    alone does not become an album filed under "Gorillaz & Space Monkeyz".
+
     Only fields BOTH sides state are compared, so a half-known album (its
     artist off the folder name, say) cannot condemn a row over a name it never
     really had.
@@ -576,8 +613,11 @@ def _identity_verdict(row, ctx):
     got_artist = _fold(row.get("artist"))
     got_album = _fold(row.get("title"))
     if got_artist and want_artist and not _same_name(got_artist, want_artist):
-        return "other", (f"the source's own release says “{row.get('artist')}”, "
-                         f"not “{ctx.artist}” — a different artist's release")
+        names = [str(row.get("artist") or "")]
+        names += _CREDIT_SPLIT_RE.split(names[0])
+        if not any(_same_name(_fold(part), want_artist) for part in names if part.strip()):
+            return "other", (f"the source's own release says “{row.get('artist')}”, "
+                             f"not “{ctx.artist}” — a different artist's release")
     if got_album and want_album and not _same_name(got_album, want_album):
         return "other", (f"the source's own release is “{row.get('title')}”, "
                          f"not “{ctx.album}” — a different album")
@@ -593,7 +633,12 @@ def _identity_verdict(row, ctx):
     if not checked:
         return "unknown", ("the source states no artist or title — the row "
                            "cannot be checked against this album")
-    return "same", "the source's own release: " + " — ".join(stated)
+    # The credit is only a NOTE here: it accepted a row whose artist merely
+    # NAMES the album's artist (a split credit), and the sentence a reader
+    # gets should say so rather than claim the names were identical.
+    note = (" (a credit that names this album's artist)"
+            if got_artist and want_artist and got_artist != want_artist else "")
+    return "same", "the source's own release: " + " — ".join(stated) + note
 
 
 def _identity_level(verdict, why):

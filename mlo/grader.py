@@ -2971,18 +2971,29 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                 failed_checks += 1
                 add_issue(md5_finding(md5_state, md5_detail), basename)
                 track["issues"].append("FLAC_MD5")
-            elif md5_state in (MD5_ABSENT, MD5_FAILED, MD5_UNKNOWN):
-                # Not a failed check — nothing established that this file is
-                # wrong — but never a silent pass either: the finding is in
-                # the album's report and the track's own issue list, and the
-                # words say UNVERIFIED rather than OK.
-                add_issue(md5_finding(md5_state, md5_detail)
-                          if md5_state == MD5_ABSENT
-                          else f"FLAC MD5 not verified: {md5_detail}",
-                          basename)
-                track["issues"].append("FLAC_MD5_ABSENT"
-                                       if md5_state == MD5_ABSENT
-                                       else "FLAC_MD5_UNKNOWN")
+            elif md5_state in (MD5_FAILED, MD5_UNKNOWN):
+                # "FLAC MD5 not verified: <why>" IS A FINDING, and the owner's
+                # rule (2026-10-18) is that it fails the TRACK — and therefore
+                # the album. Two states reach it and BOTH are counted: the
+                # stream would not decode (a corrupt file, whatever its tags
+                # say) and nothing could establish the digest (no flac/ffmpeg
+                # to verify with, a bit depth that cannot be compared). A
+                # library whose tools are missing should say so on the album
+                # and be fixed, not read as "fine because nothing checked it".
+                # The ONE state that is not a failure is MD5_ABSENT: the stream
+                # states no digest at all (all zero) and still decodes — nothing
+                # is wrong with the audio, and scrub_absent_md5 writes one.
+                total_checks += 1
+                failed_checks += 1
+                add_issue(f"FLAC MD5 not verified: {md5_detail}", basename)
+                track["issues"].append("FLAC_MD5_UNVERIFIED")
+            elif md5_state == MD5_ABSENT:
+                # Not a failed check — the file decodes and states no digest —
+                # but never a silent pass either: the finding is in the album's
+                # report and the track's own issue list, and the words say
+                # UNVERIFIED rather than OK.
+                add_issue(md5_finding(md5_state, md5_detail), basename)
+                track["issues"].append("FLAC_MD5_ABSENT")
 
         # The MusicBrainz identity link — required for a PASS. ONE link is
         # graded: the release (falling back to its release group).
@@ -4992,6 +5003,36 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
             total_checks += 1
             failed_checks += 1
             add_issue(EXPECTED_TRACKS_MISSING, "album")
+
+    # THE ROW A FAILED TRACK PUTS ON THE WHOLE ALBUM (the owner's rule,
+    # 2026-10-18: "any grading failures in any track of any album should make
+    # that respective album fail grading"). One failed check already fails the
+    # album (readers compare pass_count with total_checks, which is the same
+    # as failed_checks == 0), but a failed check that never reached this
+    # counter would still read as a clean album — so the tracks' own verdicts
+    # are re-read here and the disagreement itself is charged, once, by name.
+    # A file the loop graded and a count that forgot it can no longer produce
+    # a passing album.
+    stray_failed = [tr for tr in tracks if tr.get("issues")]
+    counted_failures = sum(1 for tr in tracks
+                           if tr.get("failed_checks")
+                           and not tr.get("issues"))
+    if counted_failures:
+        total_checks += counted_failures
+        failed_checks += counted_failures
+    if stray_failed:
+        stray = [tr for tr in tracks
+                 if tr.get("issues") and not tr.get("failed_checks")]
+        for tr in stray:
+            add_issue("Track failed its own checks: "
+                      + ", ".join(str(i) for i in tr.get("issues") or []),
+                      str(tr.get("file") or tr.get("path") or "track"))
+    if any(tr.get("issues") for tr in tracks) and failed_checks == 0:
+        # Nothing above could be charged (a track whose issues were recorded
+        # without a counter): the album fails on the evidence anyway.
+        total_checks += 1
+        failed_checks += 1
+        add_issue("A track failed its checks", "album")
 
     pass_count = max(0, total_checks - failed_checks)
 

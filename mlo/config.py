@@ -682,6 +682,9 @@ DEFAULT_CONFIG = {
     # states NO MD5 (all zero) is not a failure but is not verified either —
     # it is reported as "FLAC MD5 absent" / UNVERIFIED (issue code
     # FLAC_MD5_ABSENT), because reading an all-zero field as "fine" is how a
+    # -- a stream that will not decode, or one whose digest could not be
+    # compared (no flac/ffmpeg), is "FLAC MD5 not verified" and FAILS the
+    # track and the album (FLAC_MD5_UNVERIFIED) —
     # file nobody checked passes as one that was. The answer comes from the
     # audit's own record when script 6 already decoded these bytes, and
     # otherwise from the reference check itself (`flac -t`), so a good file
@@ -1462,6 +1465,12 @@ DEFAULT_CONFIG = {
     "tag_refresh_days": 7,
     "tag_refresh_workers": 8,
     "tag_refresh_interval_minutes": 60,
+    # Whether a refresh also fetches a lyric for an album whose tracks lack one
+    # (script 13's own runner, fill-only). OFF like the schedule itself: the
+    # MusicBrainz families (genre, public rating) are the release's own facts
+    # and come with the pull, while a lyric is a second provider and a second
+    # decision.
+    "lyrics_auto_fetch": False,
     # How often the library refreshes ITSELF, in minutes (server.library_refresh).
     # A refresh re-walks the library, re-runs the file-structure (layout) scan
     # and stores its report — the same full pass the Home/Library Refresh button

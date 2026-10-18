@@ -22,6 +22,12 @@ const CODE_WORDS: Record<string, string> = {
   FLAC_MD5: "FLAC MD5 mismatch",
   FLAC_MD5_ABSENT: "FLAC MD5 absent (unverified)",
   FLAC_MD5_UNKNOWN: "FLAC MD5 not verified",
+  // The FAILING half of "not verified" (mlo.grader): the stream would not
+  // decode, or nothing could establish its digest. The owner's rule is that
+  // this fails the track and therefore the album — `FLAC_MD5_ABSENT` is the
+  // one that is reported and not charged. Kept beside `FLAC_MD5_UNKNOWN` so a
+  // payload written by an older build still reads.
+  FLAC_MD5_UNVERIFIED: "FLAC MD5 not verified (fails the album)",
   CD_FORMAT: "CD format",
   UNREADABLE: "unreadable file",
   TAGS: "tags",
