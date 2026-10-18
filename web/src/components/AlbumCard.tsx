@@ -1,3 +1,4 @@
+import { memo, useMemo } from "react";
 import { Link } from "react-router-dom";
 import { Play } from "lucide-react";
 import { useStore } from "../store";
@@ -50,7 +51,7 @@ function storedGridSize(): GridSize {
  * "more like this" and every Home shelf draw an album with this one card, so
  * one album can never look like two. The library payload enriches albums with
  * an `artist` display name; elsewhere it falls back to the album-artist tag. */
-export default function AlbumCard({ al, artistName, selectable, selected, onSelect, href, actions, extraMeta, size }: {
+function AlbumCard({ al, artistName, selectable, selected, onSelect, href, actions, extraMeta, size }: {
   /** `owned: false` marks a row the library does not hold (a favourite whose
    *  folder moved away): nothing has graded it and
    *  there is no audio to play or favourite yet, so the card draws identity
@@ -103,7 +104,15 @@ export default function AlbumCard({ al, artistName, selectable, selected, onSele
   // and the codec/bitrate summary. Read once here because the overlay draws the
   // ADR chip, the button and the chips as ONE column, in that order.
   const dr = al.meta?.["ALBUM DYNAMIC RANGE"] ?? null;
-  const tech = albumTech(al.tracks, true);
+  // ONE pass over the album's tracks per drawn card, reused for both the chip
+  // and its tooltip: this used to run twice on every render (the tooltip's
+  // full form is `albumTech(al.tracks)`), and the card is one of the things a
+  // selection toggle repaints for every album on screen.
+  const techMemo = useMemo(
+    () => ({ short: albumTech(al.tracks, true), full: albumTech(al.tracks) }),
+    [al.tracks]
+  );
+  const tech = techMemo.short;
   // The server thumbnail this card's cover asks for: the caller's size when it
   // owns the control, else the stored setting (see storedGridSize).
   const coverW = GRID_COVER_W[size ?? storedGridSize()];
@@ -250,7 +259,7 @@ export default function AlbumCard({ al, artistName, selectable, selected, onSele
               {tech && (
                 <span
                   className="pointer-events-auto max-w-full break-words bg-black/65 text-zinc-300 text-[9px] font-mono tracking-wide rounded px-1 py-0.5 border border-white/10"
-                  title={`Formats: ${albumTech(al.tracks)}`}
+                  title={`Formats: ${techMemo.full}`}
                 >
                   {tech}
                 </span>
@@ -359,3 +368,10 @@ export default function AlbumCard({ al, artistName, selectable, selected, onSele
     </div>
   );
 }
+
+/** Memoized on the album OBJECT, plus the props a caller can change without
+ *  touching it: the library payload hands the same `al` reference back for an
+ *  album that did not change, so a selection toggle (which re-renders the
+ *  whole grid) repaints only the card that was toggled. `memo` also compares
+ *  `selected`, `selectable` and the callbacks, so those still flow through. */
+export default memo(AlbumCard);

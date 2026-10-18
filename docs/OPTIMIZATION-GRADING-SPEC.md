@@ -9398,6 +9398,80 @@ dialog appearing before its rows are read.
   waits only its own documented interval — scripts 25/26 (the free lane) no
   longer queue behind every genre/advisory ask at a flat 1.05 s.
 
+### 7.88 Every page and every scan stops paying twice for the same answer
+
+Found by a whole-app audit (backend and frontend, measured on the 12-album /
+63-track `perf_pipeline` library and a 40-album / 200-track one).
+
+- **R459 — a tool's version is asked ONCE per binary.** `mlo.tools._probe_version`
+  is memoized on the binary's own `(path, mtime_ns, size)` — a reinstall moves
+  the mtime and puts the probe back, the same rule `deps_dir_signature` uses for
+  the tool cache. Before: every cache miss ran the probe again for all nine
+  tools, ~200 ms of process creation each on Windows, INSIDE the first library
+  read that asked for ffmpeg/flac. Measured: the cold library build of the
+  40-album library went **7.1 s → 0.4 s**, because that build was paying for
+  eight console spawns it never needed.
+- **R460 — the album index's state signature is an INDEX, not a scan per
+  album.** `state_stamp` asked, for every album, every row of the four state
+  stores (audit evidence is one row per audited file). `tagindex._album_rows`
+  files each row once per store revision under the folder its key names and
+  every folder the key sits in, so an album's share is a dict lookup plus a walk
+  up its own parents — and the answer is byte-identical to the per-row scan
+  (pinned in `tools/test_tagindex.py`). A build is now
+  O(store rows + albums x path depth) instead of O(albums x store rows).
+- **R461 — one ratings read per library build.** `build_albums_map` hands the
+  grader `cfg["_rating_store"]` (the private key `run_grade_library` already
+  used) from `server.ratings.all_track_tags()`, so the RATING check no longer
+  opens the ratings table once per album. The caller's config is copied, so the
+  key can never reach a saved config or an index key (`config_key` is computed
+  before it).
+- **R462 — a play is one INSERT, not a config parse.** `plays._conn()` keeps one
+  connection per thread (keyed on the database path, so a repointed scope still
+  opens its own file) and `record()` takes the config the route already loaded
+  for its retention sweep. Measured: a play start **104 ms → 3.8 ms**.
+- **R463 — keyboard typing never fetches the library.** The top bar's library
+  search enabled its `/api/library` fetch on the RAW text and keyed it on the
+  SETTLED text, so every keystroke fetched the whole library for a four-row
+  preview. It now settles first (`useSettled`, the debounce MB mode already
+  used); a typed query costs zero to one fetch instead of one per character.
+- **R464 — a page subscribes to the FIELDS it reads.** `ArtistPage`,
+  `OptimizationPage`, `PlaylistsPage` and `PlaylistDetailPage` called a
+  selector-less `useStore()`, so every progress frame (many per second during a
+  run), volume drag and toast repainted the whole page — an album grid, the
+  script table, a whole tracklist. Each now selects its own fields (the queue as
+  the boolean the enqueue rule reads), the rule `App.tsx` states.
+- **R465 — an album card scans its tracks once, and repaints only when its album
+  changed.** `AlbumCard` runs `albumTech` twice per render (chip + tooltip) and
+  was not memoized. Both forms are computed in one `useMemo` on `al.tracks`, and
+  the component is `memo`'d on its props, so a selection toggle or a star click
+  repaints the one card that changed rather than every drawn card.
+- **R466 — the Library copies the rows it DRAWS, not the library.** The Rating
+  column is answered by a non-enumerable getter (`withRating`), so sorting by it
+  reads the same values `sortRows` always read, and the shallow copies
+  (`materialise`) are made only for the windowed rows. A filter keystroke no
+  longer allocates a copy of every album and every track to hang one number on
+  it.
+- **R467 — the entry chunk is the shell, not the dialogs.** Measured with the
+  build's own output: **524.6 kB → 496.3 kB** (gzip **160.1 → 152.3 kB**), the
+  difference being `ExportDialog` (27 kB) moving out of the entry chunk. The
+  bundle is dominated by `react-dom` (611 kB unminified), then `PlayerBar`
+  (179 kB), `App` (82 kB) and the whole of `@tauri-apps/api/window` (66 kB) —
+  so the remaining wins are those three, not another dialog: the export page
+  (a first-class navigation target) and the album page (a deep link can land
+  on it) both still import the wizard eagerly, and a row menu's lazy import of
+  it adds no second copy because the bundler hoists the shared module.
+
+- **R468 — a chart, a lyrics miss and a tool's banner are each paid ONCE.**
+  `plays._library_index` (the whole library folded to path maps) is memoized on
+  the payload's identity — Charts re-walked every album and track for ten rows
+  (measured **170 ms → 0.4 ms** on a 12-album scope); `fetch_lyrics` remembers a
+  walk that found NOTHING for five minutes, so the lyrics manager's
+  get-then-search pair costs one walk (a HIT is never remembered — the file's
+  own get path wants the live chain); and a tool's version probe runs for
+  several tools at once on a cold detection pass (measured **708 → 419 ms**,
+  with every version identical). Each cache is keyed on the thing that makes it
+  true: the payload object, the exact names asked, the binary's own stat.
+
 ---
 
 ## 10. Honest limits of this spec

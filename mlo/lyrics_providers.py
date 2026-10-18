@@ -925,6 +925,14 @@ def _search_chain(cfg, order, artist, title, album, duration, floor,
     return None, plain
 
 
+# A walk that found nothing is remembered for this long: the lyrics manager
+# asks `get` (the file's own chain) and then `search` (the same questions) on
+# the miss it just paid for.
+_MISS_TTL = 300.0
+_miss_cache = {}
+_miss_lock = threading.Lock()
+
+
 def fetch_lyrics(cfg, artist, title, album=None, duration=None,
                  min_score=None, aliases=None, deadline=None):
     """The chain's answer for a track, or None when none of them has it.
@@ -974,6 +982,37 @@ def fetch_lyrics(cfg, artist, title, album=None, duration=None,
     cfg = cfg or {}
     if not (artist and title):
         return None
+    # A walk whose providers are throttled is measured in SECONDS, and the two
+    # surfaces a reader presses (the lyrics manager's search box, the find
+    # button) ask the same question twice — `get` first, then `search` on that
+    # miss. The miss is remembered with the answer, so the second press costs
+    # nothing; a hit is not (the file's own get path wants the live answer).
+    cache_key = (str(artist).strip().casefold(), str(title).strip().casefold(),
+                 str(album or "").strip().casefold(),
+                 round(float(duration or 0)), float(_MIN_SCORE if min_score is None
+                                                    else max(_MIN_SCORE, float(min_score))),
+                 tuple(provider_order(cfg) or ()), bool(aliases))
+    with _miss_lock:
+        miss_at = _miss_cache.get(cache_key)
+    if miss_at is not None and time.time() - miss_at < _MISS_TTL:
+        return None
+    hit = _fetch_lyrics(cfg, artist, title, album, duration, min_score,
+                        aliases, deadline)
+    if hit is None:
+        with _miss_lock:
+            if len(_miss_cache) > 512:
+                _miss_cache.clear()
+            _miss_cache[cache_key] = time.time()
+    else:
+        with _miss_lock:
+            _miss_cache.pop(cache_key, None)
+    return hit
+
+
+def _fetch_lyrics(cfg, artist, title, album, duration, min_score, aliases,
+                  deadline):
+    """`fetch_lyrics` itself, without the miss memo (the cached entry point
+    above is the one every caller uses)."""
     floor = _MIN_SCORE if min_score is None else max(_MIN_SCORE, float(min_score))
     order = provider_order(cfg)
     synced, plain = _search_chain(cfg, order, artist, title, album, duration,

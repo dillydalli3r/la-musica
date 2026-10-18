@@ -20,7 +20,9 @@ import type { Playlist, StreamingImportResult } from "../types";
 export default function PlaylistsPage() {
   const qc = useQueryClient();
   const navigate = useNavigate();
-  const { playNow } = useStore();
+  // FIELD selector, not `useStore()`: the grid must not reconcile on the
+  // progress frames a running script writes many times a second.
+  const playNow = useStore((s) => s.playNow);
   const { t } = useI18n();
   const { data: playlists, isLoading } = useQuery({ queryKey: ["playlists"], queryFn: api.playlists });
   const { data: lib } = useQuery({ queryKey: ["library"], queryFn: () => api.library() });

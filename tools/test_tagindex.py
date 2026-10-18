@@ -465,6 +465,48 @@ with open(EVIDENCE, "w", encoding="utf-8") as fh:
 check("this album's own evidence changes it",
       tagindex.dir_signature(ALBUM, CFG) != sig_before)
 
+# The share is answered from a per-store INDEX now (`_album_rows`) instead of a
+# test of every row per album, so the two must agree ROW FOR ROW — an index
+# that dropped a record would silently stop invalidating an album, which is a
+# stale page nobody could explain. (The reference also DEDUPES: a record whose
+# key is both a folder and one the album sits under is one fact, stated once.)
+def _scan_share(store, root):
+    out, seen = [], set()
+    for low, key, value in tagindex._state_rows(store):
+        if low == root or low.startswith(root + os.sep) or root.startswith(low + os.sep):
+            if (key, value) in seen:
+                continue
+            seen.add((key, value))
+            out.append((key, value))
+    out.sort()  # `_state_rows` is sorted; the de-dupe must not reorder it
+    return out
+
+root_album = os.path.normcase(os.path.normpath(os.path.abspath(OTHER)))
+check("the indexed share equals the per-row scan for an album",
+      tagindex._album_rows(EVIDENCE, root_album) == _scan_share(EVIDENCE, root_album),
+      f"{tagindex._album_rows(EVIDENCE, root_album)} vs {_scan_share(EVIDENCE, root_album)}")
+with open(EVIDENCE, "w", encoding="utf-8") as fh:
+    json.dump({os.path.dirname(os.path.dirname(OTHER)): {"artist": 1},
+               OTHER_TRACK: [1, 2, True, "x", "ok"]}, fh)
+root_artist = os.path.normcase(os.path.normpath(os.path.abspath(os.path.dirname(OTHER))))
+root_lib = os.path.normcase(os.path.normpath(os.path.abspath(os.path.dirname(os.path.dirname(OTHER)))))
+for label, root in (("an artist folder's own record", root_artist),
+                    ("a library-level record", root_lib),
+                    ("an album under a filed record", root_album)):
+    check(f"the indexed share equals the per-row scan for {label}",
+          tagindex._album_rows(EVIDENCE, root) == _scan_share(EVIDENCE, root),
+          f"{tagindex._album_rows(EVIDENCE, root)} vs {_scan_share(EVIDENCE, root)}")
+# The album sits UNDER the library-level record, so that record belongs to its
+# share; a SIBLING album's own track record must not. (Probed with a file the
+# album does not hold, since the library record is legitimately in both.)
+_sib = os.path.join(os.path.dirname(OTHER), "Album Three", "01 - Sib.flac")
+_sib = os.path.normcase(os.path.normpath(_sib))
+with open(EVIDENCE, "w", encoding="utf-8") as fh:
+    json.dump({root_lib: {"artist": 1}, _sib: [9]}, fh)
+check("a sibling's records are not pulled in through a shared parent",
+      [k for k, _v in tagindex._album_rows(EVIDENCE, root_album)] == [root_lib],
+      str(tagindex._album_rows(EVIDENCE, root_album)))
+
 # --------------------------------------------------------------------------- #
 # 10) A payload belongs to the BUILD that wrote it
 # --------------------------------------------------------------------------- #

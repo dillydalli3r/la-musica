@@ -210,28 +210,96 @@ def _first_version(text):
     return found.group(0) if found else None
 
 
+# One version probe per binary for the life of the process, keyed on the exact
+# stat of the file it asks. Spawning a tool costs ~200 ms on Windows (process
+# creation, then its banner), and detection ran the probe again for every tool
+# on every cache miss — so the first library read after a restart spent
+# seconds opening consoles that could not have changed. The stat key is the
+# same rule the tool cache itself uses (`deps_dir_signature`): a reinstall
+# rewrites the binary, which moves its mtime and puts the probe back.
+_VERSION_PROBE_CACHE = {}
+_VERSION_PROBE_LOCK = __import__("threading").Lock()
+
+
 def _probe_version(exe, args=("--version",)):
     """Ask *exe* for its version, None when it will not say.
 
     Never raises: a tool that is present but mute (or that hangs until the
     timeout) must not take the whole detection pass down with it — the version
-    is a label, not the detection itself.
+    is a label, not the detection itself. Memoized on the binary's own stat
+    (`_VERSION_PROBE_CACHE`): the answer for a given file can only change when
+    that file does.
     """
     if not exe:
         return None
+    try:
+        st = os.stat(exe)
+        key = (os.path.normcase(exe), st.st_mtime_ns, st.st_size, tuple(args))
+    except OSError:
+        key = None
+    if key is not None:
+        with _VERSION_PROBE_LOCK:
+            if key in _VERSION_PROBE_CACHE:
+                return _VERSION_PROBE_CACHE[key]
     try:
         from .subproc import run_tool
         result = run_tool([exe, *args], capture_output=True, text=True,
                           encoding="utf-8", errors="replace", timeout=15)
     except Exception:
         return None
-    return _first_version(f"{result.stdout or ''}\n{result.stderr or ''}")
+    version = _first_version(f"{result.stdout or ''}\n{result.stderr or ''}")
+    if key is not None:
+        with _VERSION_PROBE_LOCK:
+            _VERSION_PROBE_CACHE[key] = version
+    return version
 
 
 def _system_entry(key, **paths):
-    """A detected system tool, with the version its own binary reports."""
+    """A detected system tool, with the version its own binary reports.
+
+    The probe is the EXPENSIVE half of detection on Windows (~110 ms a spawn,
+    measured), so a detection pass that resolves several tools asks them at
+    once instead of one after another; the answers are memoized per binary
+    (`_probe_version`), so only a pass that really must ask pays for it.
+    """
     main = next((p for p in paths.values() if p), None)
-    return {"version": _probe_version(main, _VERSION_ARGS[key]), **paths}
+    _probes_for_this_thread().append((key, main))
+    return {"version": None, **paths}
+
+
+# Tools whose version the running detection pass still has to ask for. Per
+# thread, because two threads may detect at once (the lifespan's warmers) and
+# neither may answer for the other's pass.
+_THREAD_PROBES = __import__("threading").local()
+
+
+def _probes_for_this_thread():
+    ask = getattr(_THREAD_PROBES, "ask", None)
+    if ask is None:
+        ask = []
+        _THREAD_PROBES.ask = ask
+    return ask
+
+
+def _fill_probe_versions(tools):
+    """Ask every tool the pass resolved for its version, all at once."""
+    ask = getattr(_THREAD_PROBES, "ask", None) or []
+    _THREAD_PROBES.ask = []
+    if not ask:
+        return tools
+    from concurrent.futures import ThreadPoolExecutor
+    jobs = [(key, exe) for key, exe in ask if exe and key in tools]
+    def _ask(job):
+        # A tool whose probe flag is not listed is asked the MUTE way: its
+        # version stays None, exactly as before (no new spawn is invented).
+        key, exe = job
+        args = _VERSION_ARGS.get(key)
+        return None if args is None else _probe_version(exe, args)
+    with ThreadPoolExecutor(max_workers=min(8, len(jobs) or 1)) as pool:
+        for (key, _exe), version in zip(jobs, pool.map(_ask, jobs)):
+            if key in tools:
+                tools[key]["version"] = version
+    return tools
 
 
 def _detect_system_tools():
@@ -310,7 +378,7 @@ def _detect_system_tools():
     # and without this the app could install oxipng and still call it missing.
     tools.update(_detect_deps_native())
 
-    return tools
+    return _fill_probe_versions(tools)
 
 
 # How a native install is reported: (field for the executable run_name() names,

@@ -292,11 +292,69 @@ def state_stamp(album_dir, cfg) -> str:
             continue
         # The store's share of THIS album: a key inside it, or one it sits
         # under (artist- and library-level records every album beneath them
-        # reads). Both directions, exactly as `_shares_folder` states them.
-        for low, key, value in _state_rows(path):
-            if low == root or low.startswith(root + os.sep) or root.startswith(low + os.sep):
-                parts.append(f"{name}:{key}={value}")
+        # reads). Both directions, exactly as `_shares_folder` states them —
+        # answered from ONE index built per store revision instead of a test
+        # of every row per album, which made a build O(albums x audited files).
+        for key, value in _album_rows(path, root):
+            parts.append(f"{name}:{key}={value}")
     return ";".join(parts)
+
+
+# store path -> (file revision, {folder: [(folded, raw_key, value), ...]}).
+# Every row is filed under the folder its key NAMES and under every folder the
+# key sits IN (`key` is this folder's own record, `key/…` is one inside it),
+# so an album's own folder answers the first two arms of the rule in one lookup.
+_state_folder_cache = {}
+
+
+def _under_album(path, album):
+    """The rows of *path* whose key is a folder the album sits UNDER.
+
+    The third arm of `_shares_folder` (`album.startswith(key + sep)`): the
+    album's parent, its grandparent, … — never a sibling's records, so this is
+    a walk up the album's own chain of parents, not a set of every folder.
+    """
+    try:
+        st = os.stat(path)
+        rev = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return []
+    hit = _state_folder_cache.get(path)
+    if hit is not None and hit[0] == rev:
+        index = hit[1]
+    else:
+        index = {}
+        for low, key, value in _state_rows(path):
+            index.setdefault(low, []).append((low, key, value))
+            folder = os.path.dirname(low)
+            while folder and folder != low:
+                index.setdefault(folder, []).append((low, key, value))
+                low = folder
+                folder = os.path.dirname(low)
+        if len(_state_folder_cache) > 8:
+            _state_folder_cache.clear()
+        _state_folder_cache[path] = (rev, index)
+    out = list(index.get(album, ()))
+    parent = os.path.dirname(album)
+    while parent and parent != album:
+        # Only a row whose KEY is that parent covers the album (its own
+        # records, not the records of something filed inside it).
+        out.extend(r for r in index.get(parent, ()) if r[0] == parent)
+        album, parent = parent, os.path.dirname(parent)
+    # The store's own ORDER (its rows are sorted by the folded key), so the
+    # signature text is the one the per-row scan built.
+    out.sort(key=lambda r: r[0])
+    return out
+
+
+def _album_rows(path, album):
+    """`(raw_key, value)` for every store row that speaks about *album*.
+
+    Folded exactly as the per-row scan did, and in the same order (by the
+    folded key), so a signature built from this is the signature the scan
+    built — the cache that reads it stays valid.
+    """
+    return [(key, value) for _low, key, value in _under_album(path, album)]
 
 
 def dir_signature(album_dir, cfg) -> "str | None":

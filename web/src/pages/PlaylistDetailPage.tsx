@@ -61,7 +61,16 @@ export default function PlaylistDetailPage() {
   const pid = Number(id);
   const navigate = useNavigate();
   const qc = useQueryClient();
-  const { playNow, queue, queueAdd } = useStore();
+  // FIELD selectors — this page draws a whole tracklist, and a bare
+  // `useStore()` reconciled it on every store write (each volume tick of a
+  // drag, every progress frame). `queued` is the BOOLEAN the enqueue rule
+  // reads, so a track added elsewhere while this page is open still answers
+  // "start playing" correctly without the list re-rendering per queue change.
+  const playNow = useStore((s) => s.playNow);
+  const queueAdd = useStore((s) => s.queueAdd);
+  // queue length alone, as a boolean: the enqueue rule asks only "is a queue
+  // already playing".
+  const queued = useStore((s) => s.queue.length > 0);
   const { t } = useI18n();
 
   const { data: playlist, isLoading, error } = useQuery({
@@ -166,7 +175,7 @@ export default function PlaylistDetailPage() {
 
   const enqueue = (position: "next" | "end") => {
     if (!queueTracks.length) return;
-    if (!queue.length) {
+    if (!queued) {
       playNow(queueTracks, 0, String(pid));
       return;
     }

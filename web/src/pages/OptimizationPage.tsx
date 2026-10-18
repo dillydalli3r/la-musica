@@ -31,7 +31,11 @@ function loadSel(): number[] {
  * refresh — everything that used to live in the top bar, in one place. */
 export default function OptimizationPage() {
   const qc = useQueryClient();
-  const { progress } = useStore();
+  // FIELD selector: a bare `useStore()` re-rendered the whole hub (script
+  // table, run-all panel, last-run report) on every store write — and this is
+  // the page the progress frames are about, so that was one full subtree
+  // reconcile per frame.
+  const progress = useStore((s) => s.progress);
   const { data: config } = useQuery({ queryKey: ["config"], queryFn: api.config });
   const { forceRun, toggle: toggleForce, forceSel, setSel } = useForceRun();
   const [busy, setBusy] = useState(false);

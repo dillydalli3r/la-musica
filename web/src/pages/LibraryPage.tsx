@@ -353,6 +353,29 @@ function parseQueryTerms(raw: string): QueryTerms {
   return { words, tags };
 }
 
+/* ---- the Rating column without copying the library ----
+ *
+ * `withRating` keeps the caller's rows and answers the `rating` key from a
+ * getter, so `sortRows` (whose `rowValue` reads plain properties) can sort by
+ * the star column exactly as before, while the copies that carry the number
+ * are made only for the rows a view draws (`materialise`). Both are identity
+ * functions when a payload states the field already. */
+type Rated<T> = T & { rating?: number };
+
+function withRating<T extends Record<string, any>>(rows: T[], ratingOf: (row: T) => number): Rated<T>[] {
+  return rows.map((row) => {
+    if (Object.prototype.hasOwnProperty.call(row, "rating")) return row;
+    const out = { ...row } as Rated<T>;
+    Object.defineProperty(out, "rating", { get: () => ratingOf(row), enumerable: false, configurable: true });
+    return out;
+  });
+}
+
+function materialise<T extends Record<string, any>>(rows: Rated<T>[], ratingOf: ((row: T) => number) | null): Rated<T>[] {
+  if (!ratingOf) return rows;
+  return rows.map((row) => ({ ...row, rating: ratingOf(row) }));
+}
+
 export default function LibraryPage() {
   // The page's own strings: the toolbar's alphabet pair, and the one line a
   // list emptied by those controls says.
@@ -1055,8 +1078,15 @@ export default function LibraryPage() {
   // columns show — `sortRows` resolves a dotted key against the row — so the
   // albums the tables render carry it, like `video_count` above. Shallow
   // copies: the track lists stay shared.
+  //
+  // The rating column is answered LAZILY, on the row's own `rating` key, and
+  // the copies happen only for the rows a view is about to DRAW (`withRating`
+  // below). Each of these three used to copy EVERY album/track of the library
+  // to hang one number on it — and `sortRows` sorts with `rowValue`, which
+  // reads a plain property, so an accessor answers the column and the header
+  // sort alike without a second pass over the whole library.
   const ratedAlbums = useMemo(
-    () => filtered.albums.map((al) => ({ ...al, rating: ratingOf(albumRatings, al.path) })),
+    () => withRating(filtered.albums, (al) => ratingOf(albumRatings, al.path)),
     [filtered.albums, albumRatings]
   );
 
@@ -1065,7 +1095,7 @@ export default function LibraryPage() {
   // star the column DRAWS is the value a click on its header sorts by. Shallow
   // copies (the tags and tech records stay shared).
   const ratedTracks = useMemo(
-    () => filtered.tracks.map((t) => ({ ...t, rating: ratingOf(ratings, t.path) })),
+    () => withRating(filtered.tracks, (t) => ratingOf(ratings, t.path)),
     [filtered.tracks, ratings]
   );
 
@@ -1156,9 +1186,18 @@ export default function LibraryPage() {
     `${view}\u0000${listKey}\u0000${artistSort?.key ?? ""}:${artistSort?.dir ?? ""}`, sortedArtists.length);
   const [shownTracks, growTracks] = useRenderCap(
     `${view}\u0000${listKey}\u0000${trackSort?.key ?? ""}:${trackSort?.dir ?? ""}`, sortedTracks.length);
-  const albumWindow = useMemo(() => sortedAlbums.slice(0, shownAlbums), [sortedAlbums, shownAlbums]);
+  // The DRAWN rows, with the rating column materialised: one shallow copy per
+  // drawn row (not per library row), so a scroll grows this list by a chunk
+  // and a star click only re-derives the ratings it changed.
+  const albumWindow = useMemo(
+    () => materialise(sortedAlbums.slice(0, shownAlbums), albumRatings ? (al) => ratingOf(albumRatings, al.path) : null),
+    [sortedAlbums, shownAlbums, albumRatings]
+  );
   const artistWindow = useMemo(() => sortedArtists.slice(0, shownArtists), [sortedArtists, shownArtists]);
-  const trackWindow = useMemo(() => sortedTracks.slice(0, shownTracks), [sortedTracks, shownTracks]);
+  const trackWindow = useMemo(
+    () => materialise(sortedTracks.slice(0, shownTracks), ratings ? (t) => ratingOf(ratings, t.path) : null),
+    [sortedTracks, shownTracks, ratings]
+  );
 
   /** The rail's own numbers: counted off the list the VIEW on screen draws
    *  (the artist table counts artists, the track table tracks, the three album
@@ -1942,7 +1981,7 @@ export default function LibraryPage() {
                     size="sm"
                     label="Album rating"
                     hint={`Your rating for the album. ${FOLDER_RATING_NOTE}`}
-                    value={al.rating}
+                    value={al.rating ?? 0}
                     onChange={(v) => setAlbumRating(al.path, v)}
                     pending={albumPending(al.path)}
                     {...webStarProps(albumWebRating(al.tracks))}

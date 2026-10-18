@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams } from "react-router-dom";
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import {
   BarChart3, ChevronDown, ChevronRight, ClipboardCheck, Disc3, FileDown, ImagePlus,
   ListChecks, Loader2, Music2, Pencil, Play, RefreshCw, Square, SquareCheck, Trash2,
@@ -81,7 +81,11 @@ export default function ArtistPage() {
     queryKey: ["artist", decoded],
     queryFn: () => api.artist(decoded),
   });
-  const { playNow } = useStore();
+  // A FIELD selector, never a bare `useStore()` — the same rule App.tsx states:
+  // the store also carries the progress frames a run emits many times a second,
+  // and this page draws an album grid, so a selector-less call reconciled every
+  // card per frame. `playNow` is a stable action, so it costs one render total.
+  const playNow = useStore((s) => s.playNow);
   const [statsOpen, setStatsOpen] = useState(false);
   const [imageOpen, setImageOpen] = useState(false);
   const [descEditing, setDescEditing] = useState(false);
@@ -94,6 +98,18 @@ export default function ArtistPage() {
   const [collapsed, setCollapsed] = useState<Set<ReleaseType>>(new Set());
   const [selectMode, setSelectMode] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
+
+  // Stable, so the memoized album cards are not repainted by a new function
+  // identity on every render of this page: `AlbumCard`'s memo compares the
+  // `onSelect` prop, and this toggle only needs `setSelected` itself.
+  const toggleSel = useCallback((albumPath: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(albumPath)) next.delete(albumPath);
+      else next.add(albumPath);
+      return next;
+    });
+  }, []);
   const [reviewOpen, setReviewOpen] = useState(false);
   const navigate = useNavigate();
   // The artist's OWN rating: one request for the artist scope, deduped by the
@@ -227,15 +243,6 @@ export default function ArtistPage() {
    * (its buttons re-run on whatever is ticked, and this is the largest tick a
    * reader can ask for here). */
   const allAlbumsSelected = data.albums.length > 0 && data.albums.every((al) => selected.has(al.path));
-
-  const toggleSel = (albumPath: string) => {
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (next.has(albumPath)) next.delete(albumPath);
-      else next.add(albumPath);
-      return next;
-    });
-  };
 
   const toggleSelectMode = () => {
     setSelectMode((on) => !on);

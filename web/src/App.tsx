@@ -61,6 +61,12 @@ const MBRecordingPage = lazy(() => import("./pages/MusicBrainzPage").then((m) =>
 // Not lazy: the sign-in screen is what a signed-out client sees FIRST, and a
 // chunk fetch that itself needs the server would be a poor greeting.
 import LoginPage from "./pages/LoginPage";
+// The export page is a FIRST-class navigation target (the sidebar's Export),
+// so it stays eager — and because it imports `ExportOptionsPanel` from the
+// export dialog, the wizard is in the entry chunk anyway. `TagActionsMenu`'s
+// lazy copy of that dialog adds no second chunk (the bundler hoists the
+// shared module); it exists so the ROW menus read as what they are: a fetch
+// the first time a row's Export is pressed.
 // The client shells (desktop/iOS/Android) get their own first-run wizard: the
 // web app is served BY the server it talks to, so it never has to be told
 // where that server is — a shell does, and it must be able to change its mind
@@ -268,9 +274,12 @@ export function applyAccent(name: string | null) {
   applyAccentVars(resolveAccent(name));
 }
 
-/** How often the bars check the lock registry for a producer that died without
- *  saying so. ONE timer for the whole stack, and none at all while no bar is
- *  up — never a timer per bar. */
+/** How often the bars check for a producer that died without saying so. It
+ *  READS the lock registry's own poll (`useJobLocks`, one query every 2 s,
+ *  shared with the player bar and In progress) instead of asking the server a
+ *  second time: this timer only decides whether a quiet bar is due to go, and
+ *  the registry's answer is already in the cache. One timer for the whole
+ *  stack, and none at all while no bar is up — never a timer per bar. */
 const PROGRESS_SWEEP_MS = 1000;
 
 /** Bars end on the producer's own `progress_end` (the socket handler below).
@@ -331,6 +340,7 @@ function useProgressSweep(count: number) {
     }, PROGRESS_SWEEP_MS);
     return () => window.clearInterval(tick);
   }, [live, prune, qc]);
+
 }
 
 /** The export row's ✕. The server checks its own flag at the next file
@@ -804,7 +814,14 @@ export default function App() {
   // with direct links into the library. The library payload is fetched ONLY
   // while the dropdown is open — same query key as the library page, so an
   // already-loaded library costs nothing.
-  const q = query.trim().toLowerCase();
+  //
+  // The query is SETTLED before anything is asked for. It used to key the
+  // query on the settled text but enable the fetch on the RAW text, so each
+  // typed character — which re-rendered this shell — enabled the dropdown's
+  // fetch for one render, and a reader with a cold cache fetched the whole
+  // library once per keystroke for a four-row preview. `useSettled` is the
+  // debounce MusicBrainz mode below already uses.
+  const q = useSettled(query.trim().toLowerCase());
   const { data: lib } = useQuery<LibraryData>({
     queryKey: ["library"],
     queryFn: () => api.library(),

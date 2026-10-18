@@ -44,7 +44,11 @@ def record_play(path, user="", cfg=None, now=None, playlist=""):
     """Store one play of *path* for *user* (the plain function the route
     wraps, so the seam is testable without an app)."""
     try:
-        return plays.record(path, user=user, at=now, playlist=playlist)
+        # The already-loaded config rides along: `record` hands it to its
+        # retention sweep, which otherwise re-reads and re-validates the whole
+        # config on every play start — a second parse on the playback path the
+        # route had just paid for.
+        return plays.record(path, user=user, at=now, playlist=playlist, cfg=cfg)
     except ValueError as e:
         raise HTTPException(400, str(e))
 

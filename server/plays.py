@@ -60,13 +60,32 @@ def db_path():
 
 _init_lock = threading.Lock()
 _initialized = False
+# The path each thread's connection was opened on. One connection per thread,
+# reused: a track change used to open, configure and close a fresh sqlite
+# connection for ONE insert, and the reads behind /api/top did the same per
+# call. A repointed music folder (another scope, a test) is a different file,
+# so the path is what decides whether the cached handle still applies.
+_thread_conn = threading.local()
 
 
 def _conn():
     global _initialized
-    os.makedirs(os.path.dirname(db_path()), exist_ok=True)
-    conn = sqlite3.connect(db_path(), timeout=30)
-    conn.row_factory = sqlite3.Row
+    path = db_path()
+    cached = getattr(_thread_conn, "conn", None)
+    if cached is not None and getattr(_thread_conn, "path", None) == path:
+        conn = cached
+    else:
+        if cached is not None:
+            try:
+                cached.close()
+            except sqlite3.Error:
+                pass
+            _thread_conn.conn = None
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        conn = sqlite3.connect(path, timeout=30)
+        conn.row_factory = sqlite3.Row
+        _thread_conn.conn = conn
+        _thread_conn.path = path
     # Schema on FIRST USE, not on import: creating the file at import time
     # planted an empty database in the state dir before the migration could
     # move the user's real one in (see mlo.config._move_state_dir).
@@ -84,10 +103,20 @@ def _conn():
 
 def reset():
     """Forget that the schema was built (tests that repoint the music folder).
-    The next `_conn()` re-runs `_init`, which is additive — no data is lost."""
+    The next `_conn()` re-runs `_init`, which is additive — no data is lost.
+    This thread's cached handle is dropped too, so nothing carries a connection
+    to the previous file; other threads notice by the path on their next call."""
     global _initialized
     with _init_lock:
         _initialized = False
+    cached = getattr(_thread_conn, "conn", None)
+    if cached is not None:
+        try:
+            cached.close()
+        except sqlite3.Error:
+            pass
+        _thread_conn.conn = None
+        _thread_conn.path = None
 
 
 def _init():
@@ -184,7 +213,7 @@ def _prune(c, cfg=None, now=None):
                      (cutoff,)).rowcount
 
 
-def record(path, user="", at=None, playlist=""):
+def record(path, user="", at=None, playlist="", cfg=None):
     """Store ONE play of *path* and answer what was written.
 
     Deliberately ONE insert (plus the optional retention sweep, which reads the
@@ -204,7 +233,7 @@ def record(path, user="", at=None, playlist=""):
             c.execute("INSERT INTO plays (user, path, album, started_at, playlist) "
                       "VALUES (?, ?, ?, ?, ?)", (str(user or ""), p, album, started,
                                                   str(playlist or "")))
-            pruned = _prune(c)
+            pruned = _prune(c, cfg)
         # AFTER the `with` commits: `PRAGMA incremental_vacuum` is a no-op
         # inside a transaction, and reclaiming the pruned rows' pages is the
         # point of pruning a database at all.
@@ -303,6 +332,18 @@ def window_payload(period, now=None, bounds=None):
 # --------------------------------------------------------------------------- #
 # The top-by-window read
 # --------------------------------------------------------------------------- #
+# payload id -> the folded index built from it. The charts fold the WHOLE
+# library into three path maps, and they were doing it per request: one press
+# of Charts (or an artist page's counts) re-walked every album and track for a
+# list of ten rows. The payload object is the identity — `server.library`
+# serves one cached tree between rebuilds, so the same object means the same
+# library, and a rebuilt one is a new object (a stale entry is simply never
+# asked for and falls off the end of the dict).
+_index_memo = {}
+_index_memo_lock = threading.Lock()
+_INDEX_MEMO_MAX = 4
+
+
 def _library_index(lib):
     """The library payload folded to what the charts need: what each track,
     album and artist path IS, so a stored play can be named and linked.
@@ -310,6 +351,9 @@ def _library_index(lib):
     Both directions are path-keyed (`api_path`), because a play row only knows
     a path. An artist is looked up by its NAME as well, since the artists fold
     has an album's album-artist and no artist path."""
+    hit = _index_memo.get(id(lib)) if lib is not None else None
+    if hit is not None and hit[0] is lib:
+        return hit[1]
     tracks, albums, artists = {}, {}, {}
     for artist in (lib or {}).get("artists") or []:
         apath = api_path(artist.get("path"))
@@ -346,7 +390,15 @@ def _library_index(lib):
                     # it is the track's own (measured by the library scan).
                     "length": length,
                 }
-    return {"tracks": tracks, "albums": albums, "artists": artists}
+    out = {"tracks": tracks, "albums": albums, "artists": artists}
+    if lib is not None:
+        # Remembered by the payload's IDENTITY (`hit[0] is lib`), so a rebuilt
+        # library is a different answer and the old entry is only ever evicted.
+        with _index_memo_lock:
+            if len(_index_memo) >= _INDEX_MEMO_MAX:
+                _index_memo.clear()
+            _index_memo[id(lib)] = (lib, out)
+    return out
 
 
 def _library(cfg, lib):

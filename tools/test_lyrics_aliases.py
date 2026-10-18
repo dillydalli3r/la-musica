@@ -71,6 +71,12 @@ class Patch:
         self.obj, self.attrs, self.old = obj, attrs, {}
 
     def __enter__(self):
+        # The chain remembers a walk that found nothing (a lyrics manager asks
+        # get then search for the same names); each case here asks "what does
+        # the chain do with THESE stubs", so the memo starts empty per block.
+        cache = getattr(self.obj, "_miss_cache", None)
+        if isinstance(cache, dict):
+            cache.clear()
         for k, v in self.attrs.items():
             self.old[k] = getattr(self.obj, k)
             setattr(self.obj, k, v)

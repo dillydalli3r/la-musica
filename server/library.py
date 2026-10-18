@@ -794,6 +794,23 @@ def _add_expected_tracks(res, album_dir):
                                  f"album's tracklist are in this folder")
 
 
+def _rating_store_for_build(cfg):
+    """One read of the app's rating store for a whole build ("" when none).
+
+    The grader's RATING check reads `cfg["_rating_store"]` when it is present —
+    the same private-key pattern `mlo.grader.run_grade_library` uses — and
+    otherwise opens the ratings table once PER ALBUM. A library build is the
+    other caller that grades every album at once, so without this it paid one
+    full scan of the ratings table per album. The caller's config is copied, so
+    the private key can never leak into a saved config or a cache key.
+    """
+    try:
+        from server import ratings as _ratings
+        return _ratings.all_track_tags()
+    except Exception:
+        return {}
+
+
 def build_albums_map(album_dirs, cfg, light=False, cfg_key=None):
     """Every album payload keyed by its folder, built on ONE thread pool.
 
@@ -813,6 +830,9 @@ def build_albums_map(album_dirs, cfg, light=False, cfg_key=None):
     workers = worker_count(cfg, maximum=min(8, os.cpu_count() or 1),
                            items=len(album_dirs))
     results = {}
+    if not isinstance(cfg.get("_rating_store"), dict):
+        cfg = dict(cfg)
+        cfg["_rating_store"] = _rating_store_for_build(cfg)
 
     def _one(alb):
         try:

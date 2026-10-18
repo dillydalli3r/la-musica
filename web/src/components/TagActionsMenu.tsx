@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { lazy, Suspense, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -8,7 +8,10 @@ import {
 import type { LucideIcon } from "lucide-react";
 import { api } from "../api";
 import BulkTagsDialog from "./BulkTagsDialog";
-import ExportDialog from "./ExportDialog";
+// The export wizard is BIG (format table, structure preview, EQ panel, codec
+// pickers) and this menu is drawn on every listed row — so it is fetched the
+// first time a row's Export is actually pressed, not with the first paint.
+const ExportDialogLazy = lazy(() => import("./ExportDialog"));
 import OverflowMenu from "./OverflowMenu";
 import MetadataReviewModal from "./MetadataReviewModal";
 import Modal from "./Modal";
@@ -483,11 +486,13 @@ export default function TagActionsMenu({
         />
       )}
       {exportOpen && (
-        <ExportDialog
-          paths={paths}
-          onClose={() => setExportOpen(false)}
-          subtitle={albumPath ? "the selection" : "this track"}
-        />
+        <Suspense fallback={null}>
+          <ExportDialogLazy
+            paths={paths}
+            onClose={() => setExportOpen(false)}
+            subtitle={albumPath ? "the selection" : "this track"}
+          />
+        </Suspense>
       )}
     </>
   );

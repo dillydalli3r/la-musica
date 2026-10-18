@@ -130,6 +130,13 @@ class Patch:
 
     def __enter__(self):
         self.saved = {k: getattr(self.module, k) for k in self.attrs}
+        # A block asks what the chain does with THESE providers, and the chain
+        # remembers a walk that found nothing (the lyrics manager's get-then-
+        # search pair costs one walk). Cleared per block, so one case's miss
+        # can never answer the next case's question.
+        cache = getattr(self.module, "_miss_cache", None)
+        if isinstance(cache, dict):
+            cache.clear()
         for k, v in self.attrs.items():
             setattr(self.module, k, v)
         return self
@@ -325,6 +332,27 @@ with Patch(lp, _PROVIDERS={"lrclib": fixed_hit("Hikaru Utada", "Hikari")}):
                           "宇多田ヒカル", "光", None, 230.0, aliases=ALIASES)
 assert hit is None, hit
 assert calls == [("宇多田ヒカル", "光")], calls
+
+# a walk that found NOTHING is remembered: the lyrics manager asks `get` and
+# then `search` for the same names, and the second press costs no walk at all.
+# A walk that FOUND something is never remembered (the file's own get path
+# wants the live chain), which the block below also pins.
+calls = []
+with Patch(lp, _PROVIDERS={"lrclib": fixed_hit("Nobody", "Nothing")}):
+    first = lp.fetch_lyrics({"lyrics_sources": ["lrclib"]}, "宇多田ヒカル", "光",
+                            None, 230.0)
+    after_first = len(calls)
+    second = lp.fetch_lyrics({"lyrics_sources": ["lrclib"]}, "宇多田ヒカル", "光",
+                             None, 230.0)
+assert first is None and second is None, (first, second)
+assert after_first > 0 and len(calls) == after_first, calls
+calls = []
+with Patch(lp, _PROVIDERS={"lrclib": fixed_hit("宇多田ヒカル", "光")}):
+    a = lp.fetch_lyrics({"lyrics_sources": ["lrclib"]}, "宇多田ヒカル", "光", None, 230.0)
+    n1 = len(calls)
+    b = lp.fetch_lyrics({"lyrics_sources": ["lrclib"]}, "宇多田ヒカル", "光", None, 230.0)
+assert a is not None and b is not None and len(calls) == n1 * 2, (
+    "a hit must be asked again, not remembered", len(calls), n1)
 
 # a lazy alias source is only asked for when the ordinary pass found nothing
 asked = []
