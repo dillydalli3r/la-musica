@@ -832,6 +832,17 @@ export const CONFIG_GROUPS: CfgGroup[] = [
         { k: "artist_watch_auto_add", label: "Queue a matched release into the library automatically", type: "bool", help: "Off, a watch only reports what it found (the notification is the whole output) — which is what you want if you pick the edition by hand." },
       ],
     },
+    {
+      title: "For you (auto-acquire)",
+      blurb:
+        "The recommendation shelf's other half: the worker asks MusicBrainz for albums by the artists you actually play that the library does not hold, and queues the newest ALBUM/EP through the same add-to-library path a wish uses. It is not a chart download — only a played artist is asked about, live records and compilations are left alone, and the per-cycle cap is the anti-dump rule.",
+      fields: [
+        { k: "recommendation_auto_acquire_enabled", label: "Fetch missing albums by artists you play", type: "bool", help: "Off, the recommendation shelf still works, but nothing is queued by itself. The master Automatic acquisition switch still gates every unattended download." },
+        { k: "recommendation_auto_acquire_interval_hours", label: "Check interval (hours)", type: "number", min: 1, max: 720, help: "How long between two cycles; the worker itself ticks more often." },
+        { k: "recommendation_auto_acquire_limit", label: "Albums queued per cycle", type: "number", min: 1, max: 50, help: "The hard anti-dump cap across all artists — three by default." },
+        { k: "recommendation_auto_acquire_artists", label: "Artists checked per cycle", type: "number", min: 1, max: 10, help: "How many of your most-played artists one cycle asks MusicBrainz about (one browse each; MusicBrainz etiquette is one request a second)." },
+      ],
+    },
 ];
 
 /** The groups the wizard's steps unfold. A group this does not name renders

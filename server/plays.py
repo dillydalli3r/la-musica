@@ -484,6 +484,35 @@ def counts(column="path", user=""):
     return {str(r["grp"]): int(r["plays"]) for r in rows}
 
 
+def counts_since(column="path", days=90, user="", now=None):
+    """{group: plays} for the rows inside the last *days* (a sliding window).
+
+    The charts' windows are calendar periods (`month` means this calendar
+    month, which on the 1st is a few hours); a recommendation's sense of "what
+    you are into lately" wants the same span every day, so this answers the
+    trailing window instead. Same grouping vocabulary as `counts`, one indexed
+    group-by, and `days<=0` means the whole history.
+    """
+    column = str(column or "path")
+    if column not in ("path", "album", "playlist"):
+        raise ValueError("column must be path, album or playlist")
+    try:
+        days = float(days)
+    except (TypeError, ValueError):
+        days = 90.0
+    sql = ("SELECT %s AS grp, COUNT(*) AS plays FROM plays WHERE user = ?"
+           % column)
+    args = [str(user or "")]
+    if days > 0:
+        sql += " AND started_at >= ?"
+        args.append((time.time() if now is None else float(now)) - days * 86400.0)
+    sql += " GROUP BY grp"
+    with _lock:
+        with _conn() as c:
+            rows = c.execute(sql, args).fetchall()
+    return {str(r["grp"]): int(r["plays"]) for r in rows}
+
+
 def _window_paths(conn, start, end, user):
     """Every play the window holds, as `(path, at)` — the raw rows behind the
     totals (`plays_total`, `listened_seconds`), which must cover the WHOLE

@@ -698,6 +698,54 @@ eq(cfgmod.normalize_config({"artist_watch_interval_hours": 99999})["artist_watch
    720, "the interval is clamped")
 
 # --------------------------------------------------------------------------- #
+# 15. recommendations → acquisition (server.recommend_worker)
+#
+# The worker is the recommendation shelf's acquisition half: the artists the
+# listener plays are browsed, a live record is left alone, the newest studio
+# ALBUM is queued through the same add-to-library path a watch uses, and a
+# second cycle does not queue the same release group again.
+# --------------------------------------------------------------------------- #
+print("\nrecommendation acquisition")
+reset()
+import server.recommend_worker as recommend_worker  # noqa: E402
+
+add_group(1, "Live Record", days_after_watch(3), primary="album",
+          secondary=["live"])
+add_group(2, "Studio Record", days_after_watch(1))
+recommend_worker._top_artists = lambda cfg, limit: [
+    {"kind": "artist", "name": ARTIST_NAME, "plays": 12,
+     "path": "/Artists/Test Artist", "in_library": True}]
+recommend_worker._library_artists = lambda cfg: {
+    ARTIST_NAME.casefold(): ({"name": ARTIST_NAME}, ARTIST)}
+recommend_worker._state["last_run"] = 0
+_rcfg = dict(CFG, recommendation_auto_acquire_enabled=True,
+             recommendation_auto_acquire_interval_hours=24,
+             recommendation_auto_acquire_limit=5,
+             recommendation_auto_acquire_artists=1)
+out = recommend_worker.run_cycle(force=True, cfg=_rcfg)
+eq([q["title"] for q in out["queued"]], ["Studio Record"],
+   "only the studio album is queued (the live record is not an ALBUM here)")
+eq(len(wishes.list_wishes()), 1, "one wish created through the add path")
+eq(len(folders()), 1, "one framework album created")
+# A second cycle sees the release group the wish already holds and adds none.
+out2 = recommend_worker.run_cycle(force=True, cfg=_rcfg)
+eq(out2["queued"], [], "the same release group is never queued twice")
+# The switches gate it: off queues nothing, and the master switch wins too.
+off = recommend_worker.run_cycle(force=True, cfg=dict(_rcfg, recommendation_auto_acquire_enabled=False))
+eq(off["queued"], [], "recommendation acquisition can be switched off")
+master_off = recommend_worker.run_cycle(
+    force=True, cfg=dict(_rcfg, auto_acquisition_enabled=False))
+eq(master_off["queued"], [], "the automatic-acquisition master switch gates it")
+ok("off" in off["summary"].lower() or "automatic" in master_off["summary"].lower(),
+   "the refused cycle says why")
+# The shipped defaults are the cap the Settings UI describes.
+base_rec = cfgmod.normalize_config({})
+eq(base_rec["recommendation_auto_acquire_enabled"], True,
+   "recommendation acquisition ships on")
+eq(base_rec["recommendation_auto_acquire_limit"], 3, "per-cycle cap default")
+eq(base_rec["recommendation_auto_acquire_artists"], 4, "artist cap default")
+
+# --------------------------------------------------------------------------- #
 print()
 if FAILED:
     print(f"FAILED: {len(FAILED)}")

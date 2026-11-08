@@ -344,16 +344,42 @@ def test_split_image_rip(base):
                  '  TRACK 01 AUDIO\n    TITLE "One"\n    INDEX 01 00:00:00\n'
                  '  TRACK 02 AUDIO\n    TITLE "Two/2"\n    INDEX 01 00:02:00\n'
                  '  TRACK 03 AUDIO\n    TITLE "Three"\n    INDEX 01 00:05:00\n')
+    # Album-level identity the image arrived with: every split track must
+    # inherit it (the image itself is trashed, so nothing else can carry it).
+    from mlo.audio import AudioFile as _AF
+    _image = _AF(os.path.join(folder, "CDImage.flac"))
+    _image.set_tag("ALBUM", "Split Album")
+    _image.set_tag("ALBUMARTIST", "Split Artist")
 
-    written = split_image_rip(folder, config={"music_folder": base})
+    hook = []
+    written = split_image_rip(
+        folder, config={"music_folder": base},
+        on_split=lambda image, made: hook.append((image, made)))
     names = sorted(os.path.basename(w) for w in written)
+    assert hook and hook[0][1] == written, hook
+    assert hook[0][0].endswith("CDImage.flac"), hook
     # The "/" in track 2's title is a path separator the app must not honour.
     assert names == ["01 One.flac", "02 Two_2.flac", "03 Three.flac"], names
     assert not os.path.exists(os.path.join(folder, "CDImage.flac")), \
         "the image must not survive its own split"
     assert os.path.exists(os.path.join(folder, "CDImage.cue")), \
         "the .cue describes the album and stays"
-    print("PASS  an image rip becomes one file per track, image trashed")
+    # The image's album-level identity reaches every split track, and the cue
+    # is repointed at the split files with each track's INDEX 01 reset:
+    # leaving `FILE "CDImage.flac"` behind made grade_check_cue_files report a
+    # file the album no longer holds.
+    from mlo.audio import AudioFile
+    image_tags = AudioFile(os.path.join(folder, "01 One.flac"))
+    assert image_tags.get_tag("ALBUM") == "Split Album", image_tags.all_tags()
+    assert image_tags.get_tag("ALBUMARTIST") == "Split Artist", image_tags.all_tags()
+    assert image_tags.get_tag("TITLE") == "One", image_tags.all_tags()
+    assert image_tags.get_tag("TRACKNUMBER") == "1", image_tags.all_tags()
+    assert image_tags.get_tag("TRACKTOTAL") == "3", image_tags.all_tags()
+    cue_text = open(os.path.join(folder, "CDImage.cue"), encoding="utf-8").read()
+    assert 'FILE "01 One.flac" WAVE' in cue_text, cue_text
+    assert 'FILE "02 Two_2.flac" WAVE' in cue_text, cue_text
+    assert "00:02:00" not in cue_text and cue_text.count("INDEX 01 00:00:00") == 3, cue_text
+    print("PASS  split tracks carry the album identity and the cue is repointed")
 
     for name, seconds in (("01 One.flac", 2.0), ("02 Two_2.flac", 3.0),
                           ("03 Three.flac", 1.5)):
@@ -373,6 +399,38 @@ def test_split_image_rip(base):
     print("PASS  a second run splits nothing")
 
 
+def test_split_nested_discs(base):
+    """A multi-disc image rip laid out as CD1/, CD2/ is split disc by disc.
+
+    The splitter used to list only the folder it was handed, so a release whose
+    discs live in subfolders (the layout the app itself calls legitimate) was
+    never split at all. Two 6.5 s images, two cues, four tracks between them.
+    """
+    from mlo.cue import image_rip_info, split_image_rip
+
+    flac = find_flac()
+    folder = os.path.join(base, "Nested")
+    for disc in ("CD1", "CD2"):
+        d = os.path.join(folder, disc)
+        os.makedirs(d)
+        make_flac(flac, os.path.join(d, "disc.flac"), 6.5)
+        with open(os.path.join(d, "disc.cue"), "w", encoding="utf-8") as fh:
+            fh.write('FILE "disc.flac" WAVE\n'
+                     '  TRACK 01 AUDIO\n    TITLE "First"\n    INDEX 01 00:00:00\n'
+                     '  TRACK 02 AUDIO\n    TITLE "Second"\n    INDEX 01 00:03:00\n')
+    info = image_rip_info(folder)
+    assert info["rip"] and info["tracks"] == 4, info
+    written = split_image_rip(folder, config={"music_folder": base})
+    names = sorted(os.path.relpath(p, folder).replace("\\", "/") for p in written)
+    assert names == ["CD1/01 First.flac", "CD1/02 Second.flac",
+                     "CD2/01 First.flac", "CD2/02 Second.flac"], names
+    # Each disc's cue now names its own split tracks, not the trashed image.
+    cue = open(os.path.join(folder, "CD1", "disc.cue"), encoding="utf-8").read()
+    assert 'FILE "01 First.flac" WAVE' in cue and 'FILE "disc.flac"' not in cue, cue
+    assert split_image_rip(folder, config={"music_folder": base}) == []
+    print("PASS  nested CD1/CD2 image rips split per disc and repoint their cues")
+
+
 def main():
     flac = find_flac()
     if flac is None:
@@ -388,6 +446,7 @@ def main():
         test_extra_entry_removed(base)
         test_converted_source_repoints(base)
         test_split_image_rip(base)
+        test_split_nested_discs(base)
         print("All cue-rename tests passed.")
         return 0
     finally:

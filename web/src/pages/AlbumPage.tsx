@@ -104,6 +104,7 @@ export default function AlbumPage() {
   // = search from scratch, staged rows = the import's own picks).
   const [coverSearch, setCoverSearch] = useState<{ results?: CoverResult[]; provider?: string | null } | null>(null);
   const [beetsBusy, setBeetsBusy] = useState(false);
+  const [splitBusy, setSplitBusy] = useState(false);
   // The genre chain is a live network walk over every ticked source, so the
   // menu entry disables and renames itself while it runs (a second click used
   // to start a second chain over the same files).
@@ -475,6 +476,36 @@ export default function AlbumPage() {
       navigate("/");
     } catch (e) {
       toast.error(String(e));
+    }
+  };
+
+  /** Split a whole-disc image rip in place — the same all-or-nothing split an
+   *  import runs, for an album that arrived before it could. */
+  const splitImageRip = async () => {
+    if (!window.confirm(
+      "Split this album's whole-disc image rip into one FLAC per track?\n" +
+      "The cue's INDEX 01 points are the boundaries; the image is moved to the Trash " +
+      "only after every track has been written."
+    )) return;
+    setSplitBusy(true);
+    try {
+      const r = await api.importSplitImage(data.path);
+      if (!r.ok) {
+        toast.error(r.reason || "The image rip could not be split");
+        return;
+      }
+      if (!r.split) {
+        toast(r.reason || "No whole-disc image rip in this album");
+        return;
+      }
+      toast(`Split into ${r.split} track${r.split === 1 ? "" : "s"} — the album now plays track by track`);
+      invalidateLibrary(qc);
+      qc.invalidateQueries({ queryKey: ["album", decoded] });
+      qc.invalidateQueries({ queryKey: ["coverColor", decoded] });
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSplitBusy(false);
     }
   };
 
@@ -989,6 +1020,7 @@ export default function AlbumPage() {
                   items: [
                     { label: "Import & link", icon: Wand2, onClick: () => navigate(`/import?album=${encodeURIComponent(data.path)}`) },
                     { label: "Organize (naming script)", icon: FolderSync, onClick: organizeAlbum },
+                    { label: splitBusy ? "Splitting image rip…" : "Split whole-disc image rip", icon: Disc3, disabled: splitBusy, title: "One file + .cue for the whole disc → one FLAC per cue track (all or nothing)", onClick: splitImageRip },
                     { label: "Open folder", icon: FolderOpen, onClick: async () => { try { await api.openFolder(data.path); } catch (e) { toast.error(String(e)); } } },
                     { label: "Stats", icon: BarChart3, onClick: () => setStatsOpen(true) },
                     { label: "Details", icon: InfoIcon, onClick: () => setDetailsOpen(true) },

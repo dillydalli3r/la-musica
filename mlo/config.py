@@ -1571,6 +1571,24 @@ DEFAULT_CONFIG = {
     # only reports what it found (the notification is the whole output), which
     # is what a user who wants to choose the edition by hand wants.
     "artist_watch_auto_add": True,
+
+    # Recommendations → acquisition (server/recommend_worker). The listener's
+    # most-played artists are asked for release groups the library does NOT
+    # hold, and the newest ALBUM/EP among them is queued through the same
+    # "add to library" path an artist watch uses (framework album + wish, then
+    # the existing wish worker searches it). It is not a chart download: only
+    # an artist the person already plays is asked about, the type filter is the
+    # artist watch's own (album/EP, never a live record or a compilation), and
+    # `recommendation_auto_acquire_limit` is the hard anti-dump cap. The
+    # `auto_acquisition_enabled` master switch still gates it.
+    "recommendation_auto_acquire_enabled": True,
+    # How long between two cycles (the worker ticks far more often than this).
+    "recommendation_auto_acquire_interval_hours": 24,
+    # Albums queued per cycle, across all artists — the anti-dump cap.
+    "recommendation_auto_acquire_limit": 3,
+    # How many of the listener's top artists one cycle asks MusicBrainz about
+    # (one browse each; MusicBrainz etiquette is 1 request/s).
+    "recommendation_auto_acquire_artists": 4,
     # Desktop/mobile/web notifications for the events the app already has:
     # a wish found on Soulseek, a download finished, an album ready to
     # import — plus the two "it began" halves of a Soulseek transfer, a
@@ -2181,6 +2199,12 @@ _INT_RANGES = {
     # floor is 1: a watch that may queue nothing would never add anything.
     "artist_watch_interval_hours": (1, 720),
     "artist_watch_max_per_cycle": (1, 50),
+    # Recommendation acquisition: at least hourly (MusicBrainz's browse
+    # etiquette is the same 1 req/s), and the per-cycle cap has a real floor so
+    # "enabled" can never mean "queue nothing" by accident.
+    "recommendation_auto_acquire_interval_hours": (1, 720),
+    "recommendation_auto_acquire_limit": (1, 50),
+    "recommendation_auto_acquire_artists": (1, 10),
     "video_flac_level": (0, 8),
     "jpegxl_effort": (1, 10),
     "lrc_timestamp_precision": (2, 3),

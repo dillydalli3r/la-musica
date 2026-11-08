@@ -9728,3 +9728,76 @@ matching (R442) stay exactly where they were.
   for, plus libjxl on ARM, where no asset of any kind exists): each is graded
   normally when the distro provides it, and its row says what upstream has and
   what the package manager would install.
+
+## 2026-11-08 — faster pipelines, listener recommendations, accurate image-rip splits
+
+- **R482 — A whole-disc image rip is split once, before the import stamps it,
+  and the cue is repointed at the result.** `mlo.cue.split_image_rip` cuts at
+  the sheet's `INDEX 01` points (a pregap stays with the track in front of it),
+  carries the image's album-level tags onto every track through
+  `mlo.audio.AudioFile` (track-level ones are replaced by the cue's own
+  number/title), copies embedded cover art, and writes one FLAC per track. It
+  walks the album's own disc subfolders (`CD1/`, `CD2/`) as well as its top
+  level, so the layout R336 calls one album is split disc by disc. On success
+  the image goes to the Trash and the sheet is rewritten as a valid per-track
+  cue (one FILE block per written track, `INDEX 01` reset to zero) — leaving
+  `FILE "Album.flac"` behind made `grade_check_cue_files` report a file the
+  album no longer held. All-or-nothing per image: any ffmpeg or tag failure
+  removes the tracks it wrote and keeps the image. `POST
+  /api/import/split-image` runs the same splitter on an album already in the
+  library (the album page's *Split whole-disc image rip* action), so a rip
+  imported whole is fixable without a re-import; the library caches are
+  invalidated after it. A playlist that held the trashed image path is
+  repointed at the split tracks in their order
+  (`server.playlists.replace_track_path`), on the manual route and on the
+  import funnel alike.
+- **R483 — A Soulseek image-rip candidate's cue is evidence, not decoration.**
+  Candidate matching still accepts an image rip on shape (one audio file per
+  disc plus its cue), because a search result carries no cue content. Once the
+  files are on disk, `_image_rip_cue_problems` compares every image-style
+  cue's `TRACK` count with the release's own tracklist for that disc and
+  rejects the candidate on a mismatch (naming both numbers); a per-track cue is
+  left to normal file matching. The winning folder is split BEFORE `_import`
+  moves and MusicBrainz-stamps it, so the tagging/naming pass sees real
+  per-track files; `finish_album`'s own split remains the idempotent backstop.
+- **R484 — Recommendations are the listener's, and the queue's extension is
+  re-ranked by that affinity.** `server.recommend.listener_affinity` folds the
+  play store (all-time and a 90-day trailing window), track/album/artist
+  stars, likes and favourites into normalised artist/genre/mood weights. The
+  "For you" shelf (`server.recommend.for_you`, Home and the Library strip)
+  picks owned albums on those weights, ranks an unplayed record above one
+  already on repeat, caps one record per artist in its first pass, and states
+  the reason each row is there. The queue extension
+  (`recommend_for_queue`) keeps the tag-similarity list as its FLOOR — the
+  same `_relevant` gate — and uses affinity as a re-rank plus a gentle
+  novelty penalty for a track already played heavily; with no history the
+  answer is byte-for-byte the similarity list it always was. A request's
+  signed-in user selects whose stores are read; `""` is the default scope.
+- **R485 — The recommendation shelf's acquisition half is bounded and only
+  asks about artists the listener plays.** `server.recommend_worker` (started
+  by the lifespan) takes the play store's top artists for the month (falling
+  back to all time), browses MusicBrainz for release groups the library does
+  not hold, keeps the artist watch's own ALBUM/EP type rule (a live record or
+  compilation is not "another album"), takes at most ONE album per artist per
+  cycle, and queues at most `recommendation_auto_acquire_limit` albums per
+  cycle through the same `pending_albums.create` + wish path an artist watch
+  uses. Duplicates are
+  answered by the one rule (`owned_mbids`, `queued_release_groups`,
+  `handled_release_groups`). The cycle honours
+  `recommendation_auto_acquire_enabled`, the `auto_acquisition_enabled` master
+  switch, and its interval; its last run persists in
+  `<music>/.mlo/data/recommend_acquire.json`, so restarts do not re-run it.
+- **R486 — Independent work runs in lanes; the album lane stays serial.**
+  The album lane still runs one tag-writing step at a time (R388's correctness
+  contract). What changed is the independent work around it: the import's
+  metadata and cover fetches run on two lanes and are joined before the chain
+  starts (with a `*_review` switch on they stay in their own order, because
+  both stage into one unshared review record); MEDIA, DISCNUMBER and a batch
+  `/api/import/finish` run their
+  per-file/per-album work on bounded pools (`worker_count`, max 8; four album
+  chains at once, each already claim-guarded); scripts 25/26 walk artist
+  folders on `worker_count` lanes instead of one provider chain after another;
+  and image-rip split lanes take their share of the thread budget
+  (`-threads`), so four decoders cannot each claim every core. The
+  process-wide pool / budget rules (R388, R404, the advisory serial pass) are
+  unchanged: a global provider interval is still never laned.

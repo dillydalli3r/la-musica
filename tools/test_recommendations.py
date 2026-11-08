@@ -411,4 +411,52 @@ assert _q_batch, "web/src/lib/recommend.ts no longer states QUEUE_BATCH"
 assert int(_q_batch.group(1)) == recommend.QUEUE_DEFAULT_LIMIT, \
     f"the web asks for {_q_batch.group(1)}, the server defaults to {recommend.QUEUE_DEFAULT_LIMIT}"
 
+# --------------------------------------------------------------------------- #
+# Listener affinity — the "For you" shelf and the queue's re-rank. The stores
+# are patched (this suite runs without a library database): a heavily played,
+# five-star Alpha album must make Alpha's OTHER record the first pick, and the
+# queue's reasons must say why. A synthetic library whose folder does not exist
+# must not consult the install's stores at all (that is what keeps a test run
+# from reading the owner's history).
+# --------------------------------------------------------------------------- #
+from server import plays as _plays
+from server import ratings as _ratings
+from server import playlists as _playlists
+
+_saved = (_plays.counts, _plays.counts_since, _ratings.map_for,
+          _playlists.list_likes, _playlists.list_favorites)
+try:
+    _plays.counts = lambda column="path", user="": (
+        {"C:/lib/Alpha/Black": 20} if column == "album"
+        else {"C:/lib/Alpha/Black/One.flac": 20})
+    _plays.counts_since = lambda column="path", days=90, user="", now=None: (
+        {"C:/lib/Alpha/Black": 10} if column == "album"
+        else {"C:/lib/Alpha/Black/One.flac": 10})
+    _ratings.map_for = lambda paths=None, user="", adopt=True, scope="track": (
+        {"C:/lib/Alpha/Black": 10} if scope == "album" else {})
+    _playlists.list_likes = lambda user="": []
+    _playlists.list_favorites = lambda user="": {"albums": [], "artists": []}
+    lib_mod.build_library = lambda cfg, progress=None: LIB
+    recommend.invalidate()
+    _real_folder = {"music_folder": os.getcwd()}
+    for_you = recommend.for_you(_real_folder, user="", limit=5,
+                                exclude=["C:/lib/Alpha/Black"])
+    assert for_you and for_you[0]["path"] == "C:/lib/Alpha/Black2", for_you
+    assert "Because you play Alpha" in for_you[0]["reasons"], for_you[0]
+    assert for_you[0]["score"] > for_you[-1]["score"], for_you
+    personalised = recommend.recommend_for_queue(
+        _real_folder, ["C:/lib/Alpha/Black/One.flac"], 5)
+    assert personalised, personalised
+    assert any("Because you play Alpha" in row["reasons"]
+               for row in personalised), personalised
+    # A fixture library that is not on this machine never asks the stores.
+    _plays.counts = lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("a synthetic folder must not read the stores"))
+    recommend.invalidate()
+    assert recommend.listener_affinity({"music_folder": "C:/nope"}, lib=LIB)["artists"] == {}
+finally:
+    (_plays.counts, _plays.counts_since, _ratings.map_for,
+     _playlists.list_likes, _playlists.list_favorites) = _saved
+    recommend.invalidate()
+
 print("ok")

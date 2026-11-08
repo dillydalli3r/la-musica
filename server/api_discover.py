@@ -96,10 +96,25 @@ def _drop_owned(rows, kind, cfg):
 
 
 def _library_genre(cfg):
-    """The genre the library listens to most — the "For you" shelf's seed."""
+    """The genre the listener PLAYS most — the online "For you" shelf's seed.
+
+    The play/rating affinity is the first answer, folded to its broad family
+    (`metal`, not one of its subgenres, because the storefront's genre browse
+    is organised by family). A listener with no plays yet falls back to the
+    library's most-owned genre, which is what this function always did.
+    """
     from server import library as lib_mod
     from mlo.genres import split_stored
 
+    try:
+        from server import recommend
+        from mlo.genre_vocab import top_of
+        affinity = recommend.listener_affinity(cfg)
+        if affinity.get("genres"):
+            best = max(affinity["genres"], key=affinity["genres"].get)
+            return top_of(best) or best
+    except Exception:
+        pass
     counts = Counter()
     try:
         lib = lib_mod.build_library(cfg)

@@ -102,16 +102,93 @@ def recommend_body(request: Request, body: RecommendBody):
     return _answer(request, body.kind, body.id, body.target, body.seeds, body.limit)
 
 
-def _queue_answer(paths, limit):
+@router.get("/api/recommend/for-you")
+def recommend_for_you(
+    request: Request,
+    limit: int = Query(12, ge=1, le=recommend.MAX_LIMIT,
+                       description="rows to return"),
+    exclude: list[str] | None = Query(None, description="album paths already shown"),
+):
+    """Owned albums picked for THIS listener (Home's "For you" shelf).
+
+    Not a similarity shelf: the score is the person's own plays, stars and
+    likes folded into an artist/genre/mood affinity (`server.recommend.
+    listener_affinity`), with unplayed records ranked above worn-out ones. Every
+    row carries the reason it is here, and an empty profile answers `[]` rather
+    than a random list — a recommendation with no evidence behind it is not one.
+
+    `exclude` names album paths already on another shelf, so the same card does
+    not appear twice on one page. The row shape is the Home shelf's own (the
+    library album row plus `reason`/`reasons`/`affinity_score`), because the
+    Library's strip draws the same `AlbumCard`.
+    """
+    cfg = load_config()
+    try:
+        from server import recommendations
+        return {"items": recommendations.for_you_shelf(
+            cfg, user=current_user(request), limit=limit,
+            exclude=exclude or ())}
+    except Exception:
+        return {"items": []}
+
+
+@router.get("/api/recommend/acquire")
+def recommend_acquire_status():
+    """What the recommendation-acquisition worker last did and when it is due.
+
+    The worker is bounded by its own switches and cap (see
+    server.recommend_worker); this is its readout, not a second controller.
+    """
+    from server import recommend_worker
+    return recommend_worker.status()
+
+
+@router.post("/api/recommend/acquire")
+def recommend_acquire_now():
+    """Kick one acquisition cycle now, in the background.
+
+    The worker's own interval is bypassed; its switches, type filter and cap
+    are not. A cycle already in flight answers `ok: false` with its sentence
+    rather than starting a second one.
+    """
+    import threading
+    from mlo import import_policy
+    from server import recommend_worker
+
+    cfg = load_config()
+    if not cfg.get("recommendation_auto_acquire_enabled", True):
+        return {"ok": False,
+                "reason": "recommendation acquisition is switched off "
+                          "(Settings → For you)",
+                "status": recommend_worker.status()}
+    if not import_policy.auto_acquisition_enabled(cfg):
+        return {"ok": False,
+                "reason": import_policy.AUTO_OFF_NOTE,
+                "status": recommend_worker.status()}
+    status = recommend_worker.status()
+    if status.get("running"):
+        return {"ok": False, "reason": "a cycle is already running", "status": status}
+    threading.Thread(target=recommend_worker.run_cycle, kwargs={"force": True},
+                     daemon=True, name="recommend-acquire-now").start()
+    return {"ok": True, "status": status}
+
+
+def _queue_answer(request: Request, paths, limit):
     """The queue's batch, or [] when anything about the request went wrong.
 
     A queue that cannot be extended is not an error: the play simply ends where
     it ended before the switch existed, so a bad `limit`, a broken index or an
     empty library degrades to "nothing to add" instead of breaking the caller
     that plays music with this answer.
+
+    The request's user rides along: the tag similarity is the floor, and the
+    person's own plays/stars re-rank the batch (server.recommend's
+    `recommend_for_queue`). In a loopback install with no sessions this is
+    "" — the default scope, which is exactly who the plays belong to.
     """
     try:
-        items = recommend.recommend_for_queue(load_config(), paths, limit)
+        items = recommend.recommend_for_queue(
+            load_config(), paths, limit, user=current_user(request))
     except Exception:
         items = []
     return {"items": items}
@@ -119,6 +196,7 @@ def _queue_answer(paths, limit):
 
 @router.get("/api/recommend/queue")
 def recommend_queue(
+    request: Request,
     paths: list[str] | None = Query(None, description="the playing queue's own track paths, repeatable"),
     limit: int | None = Query(None, description=f"1..{recommend.QUEUE_MAX_LIMIT} (one batch; default {recommend.QUEUE_DEFAULT_LIMIT})"),
 ):
@@ -132,11 +210,11 @@ def recommend_queue(
     no longer holds, or a queue whose tracks share nothing with anything else
     answers `[]`, and the play then simply ends as it did before.
     """
-    return _queue_answer(paths, limit)
+    return _queue_answer(request, paths, limit)
 
 
 @router.post("/api/recommend/queue")
-def recommend_queue_body(body: QueueBody):
+def recommend_queue_body(request: Request, body: QueueBody):
     """Same answer as GET, for a queue (a playlist's worth of paths) too long
     to fit in a URL."""
-    return _queue_answer(body.paths, body.limit)
+    return _queue_answer(request, body.paths, body.limit)

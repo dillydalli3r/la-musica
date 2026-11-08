@@ -293,10 +293,26 @@ def run_fetch_artist_images(config):
 
     counts = {"ok": 0, "skip": 0, "fail": 0}
     pbar = mlo_stats._make_pbar(len(folders), "Artist images", unit="image")
-    for folder in folders:
+    from concurrent.futures import ThreadPoolExecutor
+
+    def one(folder):
         where, artist = _artist_folder_name(folder)
+        try:
+            return folder, where, fetch_artist_image(folder, artist, config,
+                                                     force=force)
+        except Exception as e:  # noqa: BLE001 — one artist never fails the run
+            return folder, where, {"status": "error", "path": "", "source": "",
+                                   "error": str(e)[:200]}
+
+    # Each artist folder is independent (the shared provenance map is
+    # merge-on-save under its own lock), so the sequential walk — one provider
+    # chain after another — runs in lanes now. `ex.map` keeps the input order,
+    # so the log sequence is the serial pass's.
+    workers = mlo_stats.worker_count(config, maximum=8, items=len(folders))
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        results = list(ex.map(one, folders))
+    for folder, where, res in results:
         stats["total_scanned"] += 1
-        res = fetch_artist_image(folder, artist, config, force=force)
         if res["status"] == "written":
             stats["modified_count"] += 1
             log(c(f"{where}: {os.path.basename(res['path'])} from {res['source']}", Color.GREEN))
@@ -350,10 +366,22 @@ def run_fetch_artist_descriptions(config):
 
     counts = {"ok": 0, "skip": 0, "fail": 0}
     pbar = mlo_stats._make_pbar(len(folders), "Artist descriptions", unit="artist")
-    for folder in folders:
+    from concurrent.futures import ThreadPoolExecutor
+
+    def one(folder):
         where, artist = _artist_folder_name(folder)
+        try:
+            return folder, where, fetch_artist_description(
+                folder, artist, config, force=force)
+        except Exception as e:  # noqa: BLE001 — one artist never fails the run
+            return folder, where, {"status": "error", "path": "", "source": "",
+                                   "error": str(e)[:200]}
+
+    workers = mlo_stats.worker_count(config, maximum=8, items=len(folders))
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        results = list(ex.map(one, folders))
+    for folder, where, res in results:
         stats["total_scanned"] += 1
-        res = fetch_artist_description(folder, artist, config, force=force)
         if res["status"] == "written":
             stats["modified_count"] += 1
             log(c(f"{where}: {os.path.basename(res['path'])} from {res['source'] or 'auto'}", Color.GREEN))

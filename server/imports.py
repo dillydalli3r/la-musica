@@ -948,9 +948,20 @@ def _finish_album(path, cfg, progress=None, force=None, release=None,
     # is a single file where the whole chain expects a tracklist. Idempotent:
     # a folder already split, or never an image rip, is untouched, which is
     # what makes this safe to call from every path into the funnel.
+    def _repoint_playlists(image, made):
+        # An image already in the library may be on a playlist. The manual
+        # split route does this too; an import-time split covers the same
+        # album when the user re-runs its chain instead of pressing Split.
+        try:
+            from server import playlists
+            playlists.replace_track_path(image, made)
+        except Exception:
+            traceback.print_exc()
+
     try:
         from mlo.cue import split_image_rip
-        split_image_rip(path, cfg, log_fn=lambda line: print(f"[mlo] {line}"))
+        split_image_rip(path, cfg, log_fn=lambda line: print(f"[mlo] {line}"),
+                        on_split=_repoint_playlists)
     except Exception:
         # A folder that cannot be split is imported as it always was — the
         # image rip is a legitimate album, just a less useful one.
@@ -1222,10 +1233,11 @@ def _finish_album(path, cfg, progress=None, force=None, release=None,
     # album's identity is settled by the genre step above, which is what the
     # metadata lookup reads — `album_identity`) and joined before the chain,
     # which is the first thing that needs them on disk (script 5 processes the
-    # images, the grade wants the cover). ONE worker for BOTH steps in their
-    # own order, because they stage into ONE review record and must not
-    # clobber each other (`stage_metadata` / the `covers` entry of the same
-    # file).
+    # images, the grade wants the cover). The two steps run side by side when
+    # they write their own files; with a `*_review` switch on they stage into
+    # ONE review record and run in their own order instead, because
+    # `stage_metadata` / `stage_cover_candidates` are an unshared
+    # read-modify-write (`_files_step` below owns that rule).
     #
     # Both run on EVERY path, chain or no chain: `metadata_auto_fetch` /
     # `cover_auto_fetch` are their own switches, and the unattended import has
@@ -1245,15 +1257,35 @@ def _finish_album(path, cfg, progress=None, force=None, release=None,
         _phase("Fetching metadata and cover art…")
 
     def _files_step():
+        # The two fetches answer different questions and write different
+        # files: the metadata step fills the artist folder and the album
+        # description, the cover step writes the album's artwork. They used to
+        # run one after the other on a single worker, which made an import
+        # wait out two independent provider chains for no reason.
+        #
+        # EXCEPT with a review switch on: both steps stage their candidates
+        # into the SAME review record (`stage_metadata` / `covers`), a
+        # read-modify-write with no lock, so a reviewed import keeps them in
+        # their own order. The default (both auto-fetch) has no shared file
+        # and runs the two lanes side by side, joined before the chain starts
+        # (the cover must exist before script 5 processes the album's images).
         got = {}
-        try:
-            got["metadata"] = run_metadata_step(path, run_cfg)
-        except Exception:
-            traceback.print_exc()
-        try:
-            got["cover"] = run_cover_step(path, run_cfg)
-        except Exception:
-            traceback.print_exc()
+        steps = [("metadata", run_metadata_step), ("cover", run_cover_step)]
+        if run_cfg.get("metadata_review") or run_cfg.get("cover_review"):
+            for name, fn in steps:
+                try:
+                    got[name] = fn(path, run_cfg)
+                except Exception:
+                    traceback.print_exc()
+            return got
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = {name: pool.submit(fn, path, run_cfg)
+                       for name, fn in steps}
+            for name, future in futures.items():
+                try:
+                    got[name] = future.result()
+                except Exception:
+                    traceback.print_exc()
         return got
 
     _files_pool = ThreadPoolExecutor(max_workers=1)
@@ -2227,17 +2259,22 @@ def stamp_folder_discs(album_dir, cfg=None):
     album_dir = _album_dir(album_dir)
     if not os.path.isdir(album_dir):
         return 0
+    from concurrent.futures import ThreadPoolExecutor
+    from mlo.stats import worker_count
+
     cfg = cfg if cfg is not None else load_config()
-    stamped = 0
+    jobs = []
     for path in _audio_files(album_dir):
         disc = disc_number_of_path(path)
-        if not disc or not should_write_audio_tag(cfg, "DISCNUMBER",
-                                                  filepath=path):
-            continue
+        if disc and should_write_audio_tag(cfg, "DISCNUMBER", filepath=path):
+            jobs.append((path, disc))
+
+    def one(job):
+        path, disc = job
         try:
             af = AudioFile(path)
             if af.audio is None or str(af.get_tag("DISCNUMBER") or "").strip():
-                continue
+                return 0
             af.defer_save(True)
             ok = False
             try:
@@ -2246,11 +2283,16 @@ def stamp_folder_discs(album_dir, cfg=None):
             finally:
                 if af.defer_save(False) is False:
                     ok = False
-            if ok:
-                stamped += 1
+            return 1 if ok else 0
         except Exception:
             traceback.print_exc()
-    return stamped
+            return 0
+
+    if not jobs:
+        return 0
+    workers = worker_count(cfg, maximum=8, items=len(jobs))
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        return sum(ex.map(one, jobs))
 
 
 def _stamp_one_disc(path, disc, cfg):
@@ -2311,14 +2353,23 @@ def stamp_disc_map(dest, mapping, cfg=None):
     if not mapping:
         return 0
     cfg = cfg if cfg is not None else load_config()
-    stamped = 0
     if os.path.isfile(dest):
         # A single-file placement: the map's one entry names its basename.
         return _stamp_one_disc(dest, next(iter(mapping.values())), cfg)
-    for rel, disc in mapping.items():
-        dst_path = os.path.join(dest, rel)
-        if os.path.isfile(dst_path):
-            stamped += _stamp_one_disc(dst_path, disc, cfg)
+    from concurrent.futures import ThreadPoolExecutor
+    from mlo.stats import worker_count
+
+    jobs = [(os.path.join(dest, rel), disc) for rel, disc in mapping.items()]
+    jobs = [(p, d) for p, d in jobs if os.path.isfile(p)]
+    if not jobs:
+        return 0
+
+    def one(job):
+        return _stamp_one_disc(job[0], job[1], cfg)
+
+    workers = worker_count(cfg, maximum=8, items=len(jobs))
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        stamped = sum(ex.map(one, jobs))
     return stamped
 
 
@@ -2804,6 +2855,11 @@ def fetch_instrumentals(paths, cfg=None):
 # until the user applies one through POST /api/metadata/apply); with it OFF
 # the best candidate is saved as part of the import.
 _METADATA_REVIEW_NAME = "metadata_review.json"
+# ONE review record is shared by every album an import is working on (and by
+# every album a bulk import runs beside), so its read-modify-write is held
+# under one lock. The file always was a shared record; parallel imports made
+# the lost-update window reachable in earnest.
+_REVIEW_WRITE_LOCK = threading.Lock()
 
 
 def _metadata_review_path(cfg=None):
@@ -2888,25 +2944,39 @@ def staged_metadata(album_dir, cfg=None):
 
 
 def stage_metadata(album_dir, entry, cfg=None):
-    """Record an album's staged candidates (entry=None clears the entry)."""
+    """Record an album's staged candidates (entry=None clears the entry).
+
+    The record is ONE JSON file for the whole library, so the read, the merge
+    and the write happen under `_REVIEW_WRITE_LOCK`; two imports finishing
+    side by side could otherwise each write a record missing the other's
+    album. The temp name is unique per write for the same reason.
+    """
     import json
     path = _metadata_review_path(cfg)
     if not path:
         return
-    data = _review_load(path) if os.path.isfile(path) else {}
-    key = _review_key(album_dir)
-    if entry is None:
-        data.pop(key, None)
-    else:
-        data[key] = entry
-    try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
-            json.dump(data, fh, ensure_ascii=False, indent=1)
-        os.replace(tmp, path)
-    except OSError:
-        traceback.print_exc()
+    with _REVIEW_WRITE_LOCK:
+        data = _review_load(path) if os.path.isfile(path) else {}
+        key = _review_key(album_dir)
+        if entry is None:
+            data.pop(key, None)
+        else:
+            data[key] = entry
+        tmp = ""
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
+            with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
+                json.dump(data, fh, ensure_ascii=False, indent=1)
+            os.replace(tmp, path)
+        except OSError:
+            traceback.print_exc()
+        finally:
+            try:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+            except OSError:
+                pass
 
 
 def _album_identity(album_dir):

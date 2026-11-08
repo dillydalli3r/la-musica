@@ -125,6 +125,17 @@ rec(A1)
 check(plays.count() == 3, "a repeat play is another row", plays.count())
 check(plays.count(period="week", now=NOW) == 3,
       "and lands in the window that contains it", plays.count(period="week", now=NOW))
+# The recommendation affinity's trailing window: same rows, a sliding span
+# rather than a calendar period, and a now beyond it drops them.
+check(plays.counts_since("path", 90, now=NOW + 86400) == {A1: 3},
+      "the trailing window counts the plays inside it",
+      plays.counts_since("path", 90, now=NOW + 86400))
+check(plays.counts_since("album", 90, now=NOW + 86400) ==
+      {"C:/Music/Slowdive/Souvlaki": 3},
+      "…and groups by album", plays.counts_since("album", 90, now=NOW + 86400))
+check(plays.counts_since("path", 90, now=NOW + 91 * 86400) == {},
+      "a play older than the window is out",
+      plays.counts_since("path", 90, now=NOW + 91 * 86400))
 
 plays.record(A1.replace("/", "\\"), user="alice")
 check(plays.count() == 3, "another user's play is not the default user's",

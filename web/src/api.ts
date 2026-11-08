@@ -17,6 +17,7 @@ import type {
   DownloadsPayload,
   DownloadsEntryDetail,
   GradeWarning,
+  HomeAlbum,
   HomeData,
   ImportAutonomy,
   ImportBulkJob,
@@ -3223,6 +3224,23 @@ export const api = {
   home: (refresh = false) =>
     json<HomeData>(`${API}/home${refresh ? "?refresh=1" : ""}`, undefined, 120000),
 
+  /** The listener's affinity picks (`GET /api/recommend/for-you`): library
+   *  album rows plus the reason each is here. Used by Home's "For you" shelf
+   *  and the Library's strip; `exclude` names albums already drawn on the same
+   *  page so one record never appears twice. */
+  recommendForYou: (limit = 12, exclude: string[] = []) => {
+    const q = new URLSearchParams({ limit: String(limit) });
+    for (const p of exclude) q.append("exclude", p);
+    return json<{ items: HomeAlbum[] }>(`${API}/recommend/for-you?${q}`, undefined, 60000);
+  },
+  /** One recommendation-acquisition cycle now (the background worker's own
+   *  interval is bypassed; its switches and cap are not). */
+  recommendAcquireNow: () =>
+    json<{ ok: boolean; reason?: string; status?: Record<string, unknown> }>(
+      `${API}/recommend/acquire`, { method: "POST" }, 30000),
+  recommendAcquireStatus: () =>
+    json<Record<string, unknown>>(`${API}/recommend/acquire`, undefined, 30000),
+
   /** ONE podcast series and its episodes, newest first. `series` is the name
    *  the Home shelf links by — the name the app stored on the episodes' files
    *  (MusicBrainz's disambiguation included), which is also what keeps two
@@ -3433,6 +3451,19 @@ export const api = {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ paths, force, staged }),
+      },
+      1800000
+    ),
+  /** Split a whole-disc image rip (.flac + .cue) into one FLAC per track.
+   *  The same all-or-nothing split the import funnel runs, exposed for an
+   *  album already in the library; a second press reports `split: 0`. */
+  importSplitImage: (path: string, staged = false) =>
+    json<{ ok: boolean; path: string; split: number; tracks: number; files: string[]; reason: string }>(
+      `${API}/import/split-image`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path, staged }),
       },
       1800000
     ),

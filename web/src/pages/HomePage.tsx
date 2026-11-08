@@ -2,9 +2,9 @@ import { useQuery } from "@tanstack/react-query";
 import { useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import {
-  BarChart3, Clock, Compass, Disc3, Flame, Headphones, Heart, ListChecks,
-  ListMusic, Moon, Music2, Play, Radio, RefreshCw, Sparkles, Star, Tags,
-  TrendingUp, Users, Waves,
+  BarChart3, Clock, CloudDownload, Compass, Disc3, Flame, Headphones, Heart,
+  ListChecks, ListMusic, Moon, Music2, Play, Radio, RefreshCw, Sparkles, Star,
+  Tags, TrendingUp, Users, Waves,
 } from "lucide-react";
 import { api } from "../api";
 import { EmptyState, PageLoading } from "../components/Badges";
@@ -22,7 +22,7 @@ import { useI18n } from "../lib/i18n";
 import { GRID_SIZE_MIN, fmtDuration } from "../lib/fmt";
 import { albumRef } from "../lib/refs";
 import { GRID_SIZES, useGridSize, useSelectMode } from "../lib/libraryView";
-import { useStore } from "../store";
+import { toast, useStore } from "../store";
 import type { ReactNode } from "react";
 import type {
   HomeAlbum, HomeData, HomeLane, HomePlayedArtist,
@@ -45,6 +45,7 @@ import type {
  *  card has no room for a second caption — the reader wants the album. */
 function Shelf<T extends HomeAlbum>({
   title, icon: Icon, items, blurb, gridSize, selectable, selected, onSelect,
+  showReason, action,
 }: {
   title: string;
   icon: typeof Sparkles;
@@ -54,14 +55,20 @@ function Shelf<T extends HomeAlbum>({
   selectable: boolean;
   selected: string[];
   onSelect: (path: string) => void;
+  /** Draw each card's own reason (the "For you" shelf does; the others say
+   *  why in their heading instead). */
+  showReason?: boolean;
+  /** A control at the heading's right (the "For you" shelf's fetch button). */
+  action?: ReactNode;
 }) {
-  if (!items.length) return null;
+  if (!items.length && !action) return null;
   return (
     <section className="space-y-2">
       <div className="flex items-baseline gap-2 px-1">
         <Icon className="h-4 w-4 text-accent self-center" />
         <h2 className="text-sm font-semibold tracking-tight">{title}</h2>
         {blurb && <span className="text-[11px] text-zinc-600">{blurb}</span>}
+        {action && <span className="ml-auto">{action}</span>}
       </div>
       <div
         className="grid gap-x-4 gap-y-5 stagger"
@@ -78,6 +85,14 @@ function Shelf<T extends HomeAlbum>({
               selected={selected.includes(a.path)}
               onSelect={onSelect}
               size={gridSize}
+              extraMeta={showReason && (a.reasons?.[0] || a.reason) ? (
+                <span
+                  className="chip max-w-full truncate text-[9px] text-accent-soft border border-accent/30 bg-accent/10"
+                  title={(a.reasons?.length ? a.reasons : [a.reason]).join(" · ")}
+                >
+                  {a.reasons?.[0] || a.reason}
+                </span>
+              ) : undefined}
             />
           );
         })}
@@ -332,6 +347,19 @@ export default function HomePage() {
     forceRefresh.current = true;
     void refetch();
   };
+  const [fetchingMore, setFetchingMore] = useState(false);
+  const fetchMore = async () => {
+    setFetchingMore(true);
+    try {
+      const r = await api.recommendAcquireNow();
+      if (r.ok) toast("Checking the artists you play for albums the library is missing…", "success");
+      else toast(r.reason || "A recommendation cycle is already running", "error");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : String(e));
+    } finally {
+      setFetchingMore(false);
+    }
+  };
   const [gridSize, pickGridSize] = useGridSize();
   const { selectMode, toggleSelectMode } = useSelectMode();
   const [statsOpen, setStatsOpen] = useState(false);
@@ -344,6 +372,7 @@ export default function HomePage() {
     const tracks: Track[] = [];
     const seen = new Set<string>();
     for (const row of [
+      ...(data?.for_you ?? []),
       ...(data?.recent ?? []), ...(data?.top_albums ?? []),
       ...(data?.rated_albums ?? []), ...(data?.rediscover ?? []),
       ...(data?.favorites ?? []), ...(data?.podcasts ?? []),
@@ -480,6 +509,20 @@ export default function HomePage() {
         </span>
         <span className="text-[11px] text-accent-soft shrink-0">Open →</span>
       </Link>
+
+      {/* The listener's own affinity picks, above the play charts: a
+          recommendation is the next record to love, not another list of what
+          was already played. Only drawn when the stores hold evidence. */}
+      <Shelf title="For you" icon={Sparkles} items={data.for_you ?? []}
+        blurb="picked from what you play, rate and love" showReason {...shelfProps}
+        action={
+          <button className="btn-ghost !py-1 text-[11px] tap" onClick={fetchMore}
+            disabled={fetchingMore}
+            title="Ask MusicBrainz for albums by artists you play that the library does not hold, and queue them through the wish worker (the per-cycle cap still applies)">
+            <CloudDownload className={`h-3.5 w-3.5 ${fetchingMore ? "animate-pulse" : ""}`} />
+            {fetchingMore ? "Checking…" : "Fetch missing"}
+          </button>
+        } />
 
       {/* What you have been listening to — the page's own opening answer. */}
       <TrackList title="Most played tracks" icon={TrendingUp} rows={data.top_tracks}

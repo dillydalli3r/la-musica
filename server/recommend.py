@@ -27,6 +27,7 @@ from __future__ import annotations
 import os
 import re
 import threading
+import time
 from collections import Counter
 
 from mlo.genre_vocab import is_parent, parent_of, top_of
@@ -188,7 +189,7 @@ def _aggregate(entries):
     }
 
 
-def _track_entry(track, album, album_artist):
+def _track_entry(track, album, album_artist, artist_path=""):
     tags = track.get("tags") or {}
     meta = (album or {}).get("meta") or {}
     specs, fams = _genres(tags)
@@ -205,6 +206,7 @@ def _track_entry(track, album, album_artist):
         "title": str(tags.get("TITLE") or "").strip() or _stem(path),
         "subtitle": artist,
         "artist_key": artist.casefold(),
+        "artist_path": _norm(artist_path),
         "album_path": _norm((album or {}).get("path")),
         "cover_path": _norm((album or {}).get("path")) or os.path.dirname(path),
         "cover": track.get("cover_file") or (album or {}).get("cover_file"),
@@ -216,7 +218,7 @@ def _track_entry(track, album, album_artist):
     }
 
 
-def _album_entry(album, artist_name, tracks):
+def _album_entry(album, artist_name, tracks, artist_path=""):
     meta = album.get("meta") or {}
     path = _norm(album.get("path"))
     artist = str(meta.get("ALBUMARTIST") or "").strip() or artist_name
@@ -228,9 +230,11 @@ def _album_entry(album, artist_name, tracks):
         "title": str(meta.get("ALBUM") or "").strip() or _stem(path),
         "subtitle": artist,
         "artist_key": artist.casefold(),
+        "artist_path": _norm(artist_path),
         "album_path": path,
         "cover_path": path,
         "cover": album.get("cover_file"),
+        "pending": bool(album.get("pending")),
         "track_paths": frozenset(t["path"] for t in tracks),
     }
     entry.update(_aggregate(tracks))
@@ -253,9 +257,9 @@ def _build(lib):
             path = _norm(album.get("path"))
             if not path:
                 continue
-            entries = [_track_entry(t, album, artist_name)
+            entries = [_track_entry(t, album, artist_name, artist_dir)
                        for t in album.get("tracks", [])]
-            entry = _album_entry(album, artist_name, entries)
+            entry = _album_entry(album, artist_name, entries, artist_dir)
             albums.append(entry)
             album_by_path[path] = entry
             for t in entries:
@@ -292,6 +296,304 @@ def invalidate():
     with _lock:
         _cache["lib"] = None
         _cache["index"] = None
+    with _affinity_lock:
+        _affinity_cache.update({"lib": None, "user": None, "data": None,
+                                "t": 0.0})
+
+
+# --------------------------------------------------------------------------- #
+# Listener affinity — what the person actually plays, rates and likes
+# --------------------------------------------------------------------------- #
+# The similarity scorer above answers "what sounds like this"; it deliberately
+# knows nothing about who is listening. Both Home's "For you" shelf and the
+# queue's extension need the other half: the artists, genres and moods this
+# listener returns to. The stores already hold that evidence (plays, stars,
+# likes, favorites), so the affinity is folded from them once per library
+# payload and reused for every row a request scores.
+#
+# Weights are log-scaled, because one 200-play album must not make an artist
+# unbeatable, and recent plays count for more than old ones
+# (`plays.counts_since(90)`). A rating is a deliberate statement, so it carries
+# a bigger weight than a play; a heart carries one bigger still. Everything is
+# normalised to 0..1 per dimension, so one very heavy listener cannot make
+# every score in the library look weak.
+_affinity_lock = threading.Lock()
+_affinity_cache = {"lib": None, "user": None, "data": None, "t": 0.0}
+AFFINITY_RECENT_DAYS = 90
+# How long one profile is reused. The library payload can stay the same object
+# for hours while a person keeps playing; a profile that only changed when the
+# TREE changed would recommend from last week's listening. Five minutes is the
+# balance: a new favourite becomes visible while listening, and a queue
+# extension does not re-read the stores on every batch.
+AFFINITY_TTL = 300.0
+
+
+def _norm_map(mapping):
+    return {_norm(k): v for k, v in (mapping or {}).items() if _norm(k)}
+
+
+def listener_affinity(cfg=None, user="", lib=None):
+    """The listener's taste profile, folded from the stores (cached).
+
+    -> {"artists": {artist_key: 0..1}, "genres": {folded: 0..1},
+        "moods": {mood: 0..1}, "album_plays": {path: n},
+        "track_plays": {path: n}, "album_stars": {path: half},
+        "liked": set(paths)}
+
+    The store reads are best-effort: a library with no plays/ratings (a new
+    install, a broken database) answers an empty profile rather than an error,
+    and every caller then behaves exactly as it did before affinity existed.
+    """
+    from math import log1p
+
+    from mlo import load_config
+    from server import library as lib_mod
+
+    if lib is None:
+        lib = lib_mod.build_library(cfg or load_config())
+    with _affinity_lock:
+        hit = _affinity_cache
+        if (hit["data"] is not None and hit["lib"] is lib
+                and hit["user"] == str(user or "")
+                and (time.time() - float(hit.get("t") or 0.0)) < AFFINITY_TTL):
+            return hit["data"]
+
+    idx = _index_for(lib, cfg)
+    empty = {"artists": {}, "genres": {}, "moods": {},
+             "album_plays": {}, "track_plays": {}, "album_stars": {},
+             "liked": set()}
+    # A caller building a SYNTHETIC library (the recommendation suite, a
+    # wizard preview) names a folder that is not on this machine; the stores
+    # belong to the install, not to that fixture, so they are not consulted
+    # for it. A real library always has its folder.
+    folder = str((cfg or {}).get("music_folder") or "")
+    if folder and not os.path.isdir(folder):
+        return empty
+    try:
+        from server import plays as plays_store
+        album_plays = _norm_map(plays_store.counts("album", user=user))
+        track_plays = _norm_map(plays_store.counts("path", user=user))
+        recent_albums = _norm_map(plays_store.counts_since(
+            "album", AFFINITY_RECENT_DAYS, user=user))
+        recent_tracks = _norm_map(plays_store.counts_since(
+            "path", AFFINITY_RECENT_DAYS, user=user))
+    except Exception:
+        album_plays, track_plays, recent_albums, recent_tracks = {}, {}, {}, {}
+    try:
+        from server import ratings as ratings_store
+        album_stars = _norm_map(ratings_store.map_for(user=user, scope="album"))
+        track_stars = _norm_map(ratings_store.map_for(user=user, scope="track"))
+        artist_stars = _norm_map(ratings_store.map_for(user=user, scope="artist"))
+    except Exception:
+        album_stars, track_stars, artist_stars = {}, {}, {}
+    try:
+        from server import playlists as pl
+        liked = {_norm(p) for p in (pl.list_likes(user) or []) if _norm(p)}
+        favs = pl.list_favorites(user) or {}
+        fav_albums = {_norm(p) for p in (favs.get("albums") or []) if _norm(p)}
+        fav_artists = {_norm(p) for p in (favs.get("artists") or []) if _norm(p)}
+    except Exception:
+        liked, fav_albums, fav_artists = set(), set(), set()
+
+    artists, genres, moods = Counter(), Counter(), Counter()
+    artist_of = {}
+    for album in idx["albums"]:
+        path = album["path"]
+        key = album["artist_key"]
+        if not key:
+            continue
+        # Every artist the library holds is known here, even one the stores
+        # have no play for yet: a FAVOURITED artist (or a favourite album) is
+        # evidence in its own right, and it is applied below.
+        artist_of.setdefault(key, album.get("artist_path") or "")
+        plays = int(album_plays.get(path, 0)) or sum(
+            int(track_plays.get(tp, 0)) for tp in album["track_paths"])
+        recent = int(recent_albums.get(path, 0)) or sum(
+            int(recent_tracks.get(tp, 0)) for tp in album["track_paths"])
+        stars = int(album_stars.get(path, 0))
+        liked_here = sum(1 for tp in album["track_paths"] if tp in liked)
+        track_stars_here = sum(int(track_stars.get(tp, 0))
+                               for tp in album["track_paths"])
+        # What one album contributes to its artist and its tags. A play is
+        # worth log1p; a recent play half again; a star is a deliberate
+        # verdict; a heart is a stronger one.
+        weight = (log1p(plays + 0.6 * recent) + 0.28 * stars
+                  + 0.9 * liked_here + 0.06 * track_stars_here)
+        if path in fav_albums:
+            weight += 2.0
+        if weight <= 0:
+            continue
+        artists[key] += weight
+        for spec in album["specs"]:
+            genres[spec] += weight
+        for fam in album["fams"]:
+            genres[fam] += weight * 0.45
+        if album["mood"]:
+            moods[album["mood"]] += weight
+        # Per-track evidence: a rated or hearted track says something about the
+        # artist even when the album as a whole was never played.
+        for track_path in album["track_paths"]:
+            tr = idx["track_by_path"].get(track_path)
+            if tr is None:
+                continue
+            tw = (0.12 * int(track_plays.get(track_path, 0))
+                  + 0.9 * (1 if track_path in liked else 0)
+                  + 0.12 * int(track_stars.get(track_path, 0)))
+            if tw <= 0:
+                continue
+            artists[key] += tw * 0.5
+            for spec in tr["specs"]:
+                genres[spec] += tw
+            for fam in tr["fams"]:
+                genres[fam] += tw * 0.45
+            if tr["mood"]:
+                moods[tr["mood"]] += tw
+    # A followed artist / an artist-level star is a statement about the whole
+    # artist, so it lifts every genre they are already associated with.
+    for key, folder in list(artist_of.items()):
+        if not folder:
+            continue
+        bonus = 0.0
+        if folder in fav_artists:
+            bonus += 2.5
+        if artist_stars.get(folder):
+            bonus += 0.3 * int(artist_stars[folder])
+        if bonus:
+            artists[key] += bonus
+    # An artist whose albums the library holds but the store knows nothing
+    # about has no affinity yet; nothing is invented for them.
+    def norm(counter):
+        top = max(counter.values()) if counter else 0
+        if not top:
+            return {}
+        return {k: round(v / top, 4) for k, v in counter.items() if v > 0}
+
+    data = {
+        "artists": norm(artists),
+        "genres": norm(genres),
+        "moods": norm(moods),
+        "album_plays": album_plays,
+        "track_plays": track_plays,
+        "album_stars": album_stars,
+        "liked": liked,
+    }
+    with _affinity_lock:
+        _affinity_cache.update({"lib": lib, "user": str(user or ""),
+                                "data": data, "t": time.time()})
+    return data
+
+
+def _index_for(lib, cfg=None):
+    """The scorable index for ONE library payload (object-identity cached)."""
+    with _lock:
+        if _cache["index"] is not None and _cache["lib"] is lib:
+            return _cache["index"]
+    built = _build(lib)
+    with _lock:
+        _cache["lib"] = lib
+        _cache["index"] = built
+    return built
+
+
+def _affinity_genre(aff, entry):
+    """The strongest genre signal an album carries, specifics weighted over
+    families (a shared family is a weaker reason than one shared genre)."""
+    best = 0.0
+    for spec in entry["specs"]:
+        best = max(best, aff["genres"].get(spec, 0.0))
+    for fam in entry["fams"]:
+        best = max(best, aff["genres"].get(fam, 0.0) * 0.6)
+    return best
+
+
+def for_you(cfg, user="", limit=DEFAULT_LIMIT, exclude=(), lib=None):
+    """Owned albums picked for THIS listener, with the reason each is here.
+
+    The shelf answers the gap the similarity scorer cannot: it is not "more
+    like the thing you opened", it is "the next record you are likely to love".
+    A candidate qualifies only on a real affinity signal — a played/starred
+    artist, a genre the listener returns to, or a mood they favour — and an
+    unplayed record is ranked above one already on repeat (the point of a
+    recommendation is music you have not worn out).
+
+    `exclude` is the set of album paths already on another Home shelf, so the
+    same card does not appear twice on one page. Rows are returned library
+    data first: `path`, `title`, `artist`, `score`, `reason`, and a short
+    `reasons` list for a tooltip.
+    """
+    from mlo import load_config
+    from mlo.genres import display_name
+
+    try:
+        limit = max(1, min(int(limit), MAX_LIMIT))
+    except (TypeError, ValueError):
+        limit = DEFAULT_LIMIT
+    from server import library as lib_mod
+    if lib is None:
+        lib = lib_mod.build_library(cfg or load_config())
+    idx = _index_for(lib, cfg)
+    aff = listener_affinity(cfg, user=user, lib=lib)
+    if not (aff["artists"] or aff["genres"] or aff["moods"]):
+        return []
+    skip = {_norm(p) for p in (exclude or ()) if _norm(p)}
+    scored = []
+    for album in idx["albums"]:
+        path = album["path"]
+        if not path or path in skip or album.get("pending"):
+            continue
+        artist = aff["artists"].get(album["artist_key"], 0.0)
+        genre = _affinity_genre(aff, album)
+        mood = aff["moods"].get(album["mood"], 0.0) if album["mood"] else 0.0
+        # Strong signal required: a candidate carried only by a broad family
+        # or by the artist's sheer presence is not a recommendation.
+        if artist < 0.2 and genre < 0.25 and mood < 0.35:
+            continue
+        plays = int(aff["album_plays"].get(path, 0))
+        novelty = 1.0 if plays <= 0 else 0.45 + 0.55 / (1.0 + plays / 3.0)
+        score = ((0.50 * artist + 0.32 * genre + 0.18 * mood)
+                 * (0.55 + 0.45 * novelty))
+        if score <= 0.02:
+            continue
+        components = [("artist", artist), ("genre", genre), ("mood", mood)]
+        kind, _value = max(components, key=lambda pair: pair[1])
+        reasons = []
+        if artist >= 0.2:
+            reasons.append(f"Because you play {album['subtitle']}")
+        best_spec = max(album["specs"], key=lambda s: aff["genres"].get(s, 0),
+                        default=None) if album["specs"] else None
+        if best_spec and aff["genres"].get(best_spec, 0) >= 0.2:
+            reasons.append(f"A genre you love: {display_name(best_spec)}")
+        if mood >= 0.35:
+            reasons.append(f"Your {album['mood']} mood")
+        if plays <= 0:
+            reasons.append("Not played yet")
+        reason = reasons[0] if reasons else "Picked for you"
+        scored.append({
+            "kind": "album",
+            "path": path,
+            "title": album["title"],
+            "artist": album["subtitle"],
+            "score": round(score, 4),
+            "reason": reason,
+            "reasons": reasons[:3],
+            "plays": plays,
+        })
+    scored.sort(key=lambda r: (-r["score"], r["path"]))
+    # One record per artist first, then fill the rest: a prolific favourite
+    # would otherwise own the whole shelf.
+    picked, seen, rest = [], set(), []
+    for row in scored:
+        key = (row.get("artist") or "").casefold()
+        if key and key not in seen:
+            seen.add(key)
+            picked.append(row)
+        else:
+            rest.append(row)
+        if len(picked) >= limit:
+            break
+    if len(picked) < limit:
+        picked.extend(rest[:limit - len(picked)])
+    return picked[:limit]
 
 
 def _score(src, cand):
@@ -609,7 +911,7 @@ def recommend(cfg, kind, ref="", limit=None, user="", seeds=None, target=None,
     return [_item(profile, cand, score) for score, cand in scored[:limit]]
 
 
-def recommend_for_queue(cfg, paths, limit=None):
+def recommend_for_queue(cfg, paths, limit=None, user=""):
     """Rows to KEEP A PLAYING QUEUE GOING: tracks similar to the queue's own
     set, and never a track it already holds.
 
@@ -621,6 +923,14 @@ def recommend_for_queue(cfg, paths, limit=None):
     is skipped rather than fatal — a queue holding a file that was since deleted
     still gets its extension.
 
+    The tag similarity is the FLOOR (the same `_relevant` gate the shelves
+    use); the listener's own plays and stars are a re-rank on top, so the next
+    batch leans towards the artists and genres this person returns to instead
+    of being a purely acoustic match. A track already on repeat is gently
+    down-ranked so a queue does not keep replaying the same favourites. With
+    no play/rating history the affinity is empty and the answer is exactly the
+    similarity list it always was.
+
     The answer is BOUNDED by `QUEUE_MAX_LIMIT` whatever the caller asks, and
     defaults to `QUEUE_DEFAULT_LIMIT`: this extends a queue someone is
     listening to, it is not a shelf, and nothing about it is worth a stall. An
@@ -630,5 +940,49 @@ def recommend_for_queue(cfg, paths, limit=None):
     if limit is None:
         limit = QUEUE_DEFAULT_LIMIT
     limit = max(1, min(int(limit), QUEUE_MAX_LIMIT))
-    return recommend(cfg, "tracks", seeds=list(paths or []), limit=limit,
-                     min_rows=1)
+    from mlo import load_config
+    from server import library as lib_mod
+
+    lib = lib_mod.build_library(cfg or load_config())
+    idx = _index_for(lib, cfg)
+    picked = _source(idx, "tracks", "", cfg, lib, user, list(paths or []), "tracks")
+    if picked is None:
+        return []
+    profile, entries, extra = picked
+    candidates = _candidates(idx, entries, "tracks", extra)
+    aff = listener_affinity(cfg, user=user, lib=lib)
+    listened = bool(aff["artists"] or aff["genres"] or aff["moods"])
+    scored = []
+    for cand in candidates:
+        base = _score(profile, cand)
+        if base <= 0 or not _relevant(profile, cand, base):
+            continue
+        if not listened:
+            scored.append((base, cand, []))
+            continue
+        artist = aff["artists"].get(cand["artist_key"], 0.0)
+        genre = _affinity_genre(aff, cand)
+        mood = aff["moods"].get(cand["mood"], 0.0) if cand["mood"] else 0.0
+        affinity = 0.50 * artist + 0.30 * genre + 0.20 * mood
+        plays = int(aff["track_plays"].get(cand["path"], 0))
+        novelty = 1.0 if plays <= 0 else 0.45 + 0.55 / (1.0 + plays / 6.0)
+        final = (base * (0.80 + 0.20 * affinity) * (0.85 + 0.15 * novelty)
+                 + 0.08 * affinity)
+        reasons = []
+        if artist >= 0.2:
+            reasons.append(f"Because you play {cand['subtitle']}")
+        best = max((aff["genres"].get(g, 0.0) for g in cand["specs"]),
+                   default=0.0)
+        if best >= 0.2:
+            reasons.append("A genre you keep playing")
+        scored.append((final, cand, reasons))
+    if not scored:
+        return []
+    scored.sort(key=lambda pair: (-pair[0], pair[1]["path"]))
+    out = []
+    for score, cand, reasons in scored[:limit]:
+        item = _item(profile, cand, min(1.0, score))
+        if reasons:
+            item["reasons"] = (reasons + list(item["reasons"]))[:4]
+        out.append(item)
+    return out

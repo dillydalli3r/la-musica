@@ -3,6 +3,7 @@ import os
 import re
 import subprocess
 import tempfile
+import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .atomic import replace_locked
@@ -435,9 +436,31 @@ def _track_name(track, stem, prefix=""):
     return sanitize_segment(name)
 
 
+# Tags that describe ONE track, and so must not be copied from the whole-disc
+# image onto every split track. Everything else (ALBUM, ALBUMARTIST, DATE,
+# GENRE, the MusicBrainz release ids, RELEASECOUNTRY, …) is album-level and is
+# carried over, so a split track keeps the identity the rip arrived with
+# instead of being re-identified from scratch.
+_PER_TRACK_TAGS = frozenset({
+    "TITLE", "TITLESORT", "TRACKNUMBER", "TRACKTOTAL", "TOTALTRACKS",
+    "MUSICBRAINZ_TRACKID", "MUSICBRAINZ_RELEASETRACKID",
+    "ACOUSTID_ID", "ACOUSTID_FINGERPRINT", "ISRC",
+    "RATING", "LYRICS", "LYRICIST", "COMMENT", "MOOD", "ENERGY",
+    "BPM", "KEY", "INITIALKEY", "DYNAMIC RANGE",
+})
+
+
 def _split_one(args):
-    """Write ONE track of an image rip -> (path, error); path "" on failure."""
-    ffmpeg, image, dest, start, dur, tags = args
+    """Write ONE track of an image rip -> (path, error); path "" on failure.
+
+    *tags* is the FULL tag set the split track should carry: the image's own
+    album-level tags, with this track's number/title filled in. ffmpeg gets
+    only the two keys it can safely write (an arbitrary MusicBrainz value in a
+    `-metadata` argument is one shell-level escaping problem the tag writer
+    below does not have); the rest land through `AudioFile`, the app's one
+    canonical tag writer, after the audio exists.
+    """
+    ffmpeg, image, dest, start, dur, track_no, title, tags, threads = args
     cmd = [
         ffmpeg, "-y", "-v", "error", "-nostdin",
         # -ss BEFORE -i so ffmpeg seeks instead of decoding the disc from the
@@ -447,10 +470,20 @@ def _split_one(args):
         # shift a track by up to one frame (~93 ms at 44.1 kHz). FLAC -> FLAC
         # is lossless either way, so nothing is lost but a little CPU.
         "-ss", f"{start:.3f}", "-i", image,
-        "-t", f"{dur:.3f}", "-map", "0:a:0", "-c:a", "flac",
+        "-t", f"{dur:.3f}", "-map", "0:a:0", "-map", "0:v?",
+        # Cover art rides along (an attached picture is a video stream in
+        # FLAC); everything else is written deliberately below, so ffmpeg must
+        # not inherit the image's per-track tags into every split track.
+        "-c:a", "flac", "-c:v", "copy", "-map_metadata", "-1",
+        "-metadata", f"TRACKNUMBER={track_no}",
     ]
-    for key, value in tags.items():
-        cmd += ["-metadata", f"{key}={value}"]
+    if title:
+        cmd += ["-metadata", f"TITLE={title}"]
+    if threads:
+        # Each split job gets its share of the process's worker budget; four
+        # decoders each claiming every core is the one place in the engine
+        # that used to bypass `tool_threads`.
+        cmd += ["-threads", str(int(threads))]
     cmd.append(dest)
     try:
         run_tool(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
@@ -459,10 +492,210 @@ def _split_one(args):
         return "", f"{os.path.basename(dest)}: {e}"
     if not os.path.isfile(dest) or not os.path.getsize(dest):
         return "", f"{os.path.basename(dest)}: ffmpeg wrote no file"
+    # The album-level identity, through the ONE tag writer (canonical spelling,
+    # atomic swap, a queued write when the file is held): a split track must
+    # not depend on the later chain to learn which release it belongs to.
+    try:
+        from .audio import AudioFile
+        af = AudioFile(dest)
+        af.defer_save(True)
+        for key, value in tags.items():
+            if value is None or str(value).strip() == "":
+                continue
+            af.set_tag(key, value)
+        if af.defer_save(False) is False:
+            raise RuntimeError("the tag write did not land")
+    except Exception as e:  # noqa: BLE001 — an untagged track is a failed split
+        try:
+            os.remove(dest)
+        except OSError:
+            pass
+        return "", f"{os.path.basename(dest)}: tags failed ({e})"
     return dest, ""
 
 
-def split_image_rip(folder, config=None, log_fn=None):
+def _image_folders(folder, depth=0):
+    """Every folder under *folder* that holds a cue plus an audio image.
+
+    A one-disc rip keeps both at the album's top level, while a multi-disc
+    release that arrived as `CD1/CD1.flac` + `CD1/CD1.cue`, `CD2/…` keeps them
+    one level down. The splitter used to list only the folder it was handed,
+    so those discs were never split. This walks the album's own subfolders
+    (bounded to three levels, and never into the app's hidden state folders)
+    and answers each folder that carries the pair.
+
+    A folder WITH a cue is treated as a complete disc folder and is not walked
+    further: its subfolders are artwork or scans, not another disc. A folder
+    WITHOUT one is walked, which is how `CD1/`, `CD2/` are found.
+    """
+    from .paths import LIB_AUDIO_EXTS
+
+    if not folder or not os.path.isdir(folder) or depth > 3:
+        return []
+    try:
+        entries = sorted(os.listdir(folder))
+    except OSError:
+        return []
+    cues = [e for e in entries if e.lower().endswith(".cue")]
+    audio = [e for e in entries
+             if os.path.splitext(e)[1].lower() in LIB_AUDIO_EXTS
+             and os.path.isfile(os.path.join(folder, e))]
+    found = [folder] if (cues and audio) else []
+    # A disc folder is usually a leaf, but an album can also hold a bonus
+    # image at its top level BESIDE CD1/CD2. The walk therefore continues
+    # through the children either way; a child with no cue pair contributes
+    # nothing.
+    for name in entries:
+        if name.startswith("."):
+            continue
+        child = os.path.join(folder, name)
+        if os.path.isdir(child):
+            found.extend(_image_folders(child, depth + 1))
+    return found
+
+
+def _image_rips(folder):
+    """The usable image rips in *folder* (including its disc subfolders).
+
+    -> [{folder, image, cue, tracks, starts}], where `starts` are the cue's
+    INDEX 01 points in seconds. One image is claimed by one sheet, and a sheet
+    with fewer than two tracks, no INDEX 01s, or non-increasing points is not
+    a split candidate (there is nothing to cut it up with).
+    """
+    from .discs import read_cue_text
+    from .paths import LIB_AUDIO_EXTS
+
+    out = []
+    for where in _image_folders(folder):
+        try:
+            entries = sorted(os.listdir(where))
+        except OSError:
+            continue
+        audio = [e for e in entries
+                 if os.path.splitext(e)[1].lower() in LIB_AUDIO_EXTS
+                 and os.path.isfile(os.path.join(where, e))]
+        claimed = set()
+        for cue in [e for e in entries if e.lower().endswith(".cue")]:
+            cue_path = os.path.join(where, cue)
+            _files, tracks = _cue_sheet(read_cue_text(cue_path))
+            if len(tracks) < 2:
+                continue
+            starts = [t["start"] for t in tracks]
+            if any(s is None for s in starts):
+                continue
+            if any(b <= a for a, b in zip(starts, starts[1:])):
+                continue
+            image = _image_for(where, audio, tracks)
+            if not image or image in claimed:
+                continue
+            claimed.add(image)
+            out.append({"folder": where, "image": image, "cue": cue_path,
+                        "tracks": tracks, "starts": starts})
+    return out
+
+
+def image_rip_info(folder, config=None):
+    """What a folder holds that a split would act on — the read-only shape the
+    album page asks for before offering the action, and the same records
+    `split_image_rip` works from.
+
+    -> {"rip": bool, "images": [{folder, image, cue, tracks, duration}],
+        "tracks": total}
+    A folder that is not an image rip answers `{"rip": False, "images": [],
+    "tracks": 0}`; nothing here writes, moves or trashes anything.
+    """
+    from .audio import AudioFile
+
+    rips = _image_rips(folder) if folder and os.path.isdir(folder) else []
+    images = []
+    for rec in rips:
+        try:
+            duration = round(float(AudioFile(rec["image"]).audio.info.length), 3)
+        except Exception:
+            duration = None
+        images.append({
+            "folder": rec["folder"],
+            "image": rec["image"],
+            "cue": rec["cue"],
+            "tracks": len(rec["tracks"]),
+            "duration": duration,
+        })
+    return {"rip": bool(images), "images": images,
+            "tracks": sum(i["tracks"] for i in images)}
+
+
+def _cue_file_name(name):
+    """One FILE reference as a cue sheet spells it (quotes escaped)."""
+    return '"' + str(name).replace("\\", "/").replace('"', '\\"') + '"'
+
+
+def _rewrite_cue_for_split(cue_path, tracks, written):
+    """Point a sheet at the SPLIT tracks instead of the trashed image.
+
+    The original sheet said `FILE "Album.flac"` once and gave every TRACK an
+    absolute INDEX 01. After a split that reference names a file the album no
+    longer holds, and each track is now its own file that starts at zero, so the
+    sheet is rewritten as a valid per-track sheet: one FILE block per written
+    track, its own TITLE/PERFORMER/ISRC kept, INDEX 01 reset to 00:00:00. The
+    album-level header (PERFORMER, TITLE, CATALOG, REM) is preserved.
+
+    Returns True when the sheet was rewritten. A failure is not fatal to the
+    split (the audio is already written and correct); the caller logs it.
+    """
+    from .discs import read_cue_text
+
+    if not cue_path or not os.path.isfile(cue_path) or len(tracks) != len(written):
+        return False
+    text = read_cue_text(cue_path)
+    header, blocks, current = [], [], None
+    track_line = re.compile(r"^\s*TRACK\s+\d+", re.IGNORECASE)
+    drop = re.compile(r"^\s*(FILE|INDEX|PREGAP|POSTGAP)\b", re.IGNORECASE)
+    for raw in text.splitlines():
+        if track_line.match(raw):
+            current = [raw]
+            blocks.append(current)
+        elif current is not None:
+            if not drop.match(raw):
+                current.append(raw)
+        elif not re.match(r"^\s*FILE\b", raw, re.IGNORECASE):
+            header.append(raw)
+    if len(blocks) != len(written):
+        return False
+    out = [line for line in header if line.strip()]
+    for block, path in zip(blocks, written):
+        body = [line for line in block if line.strip()]
+        out.append(f'FILE {_cue_file_name(os.path.basename(path))} WAVE')
+        out.extend(body)
+        out.append("    INDEX 01 00:00:00")
+    new_text = "\n".join(out).rstrip() + "\n"
+    if new_text == text:
+        return True
+    tmp_path = None
+    try:
+        fd, tmp_path = tempfile.mkstemp(prefix=".cue_split_", suffix=".cue",
+                                        dir=os.path.dirname(cue_path))
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(new_text)
+            fh.flush()
+            try:
+                os.fsync(fh.fileno())
+            except Exception:
+                pass
+        replace_locked(tmp_path, cue_path)
+        fsync_dir(os.path.dirname(cue_path))
+        tmp_path = None
+        return True
+    except Exception:
+        return False
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+
+def split_image_rip(folder, config=None, log_fn=None, on_split=None):
     """Split every whole-disc image rip in *folder* into one FLAC per track.
 
     An IMAGE RIP is one audio file for a whole disc plus the .cue describing
@@ -481,17 +714,28 @@ def split_image_rip(folder, config=None, log_fn=None):
     All or nothing, per image: if any track fails to write, the tracks already
     written are removed and the image stays, because a half-split album is
     worse than an intact one. On success the image itself goes to the app's
-    Trash (never a bare delete) and the .cue is left exactly as it is — the
-    app already reads an image-style sheet whose FILE no longer exists
-    (`mlo.discs.fix_cue_filenames` patches that reference, and
-    `_cue_matches_disc` is pregap-tolerant by design).
+    Trash (never a bare delete) and the .cue is repointed at the split tracks
+    (one FILE block per track, INDEX 01 reset to zero — see
+    `_rewrite_cue_for_split`), so the default `grade_check_cue_files` check
+    keeps passing instead of reporting a FILE the album no longer holds.
+
+    Album-level tags on the image (ALBUM, ALBUMARTIST, DATE, GENRE, the
+    MusicBrainz release ids, …) are carried onto every split track through the
+    app's canonical tag writer; track-level ones are replaced by the cue's own
+    number/title. Embedded cover art is copied along when the image had it.
+
+    *on_split* is an optional ``fn(image_path, written_paths)`` called after a
+    successful split, before the function moves on to the next image. The HTTP
+    split uses it to repoint playlist entries that held the trashed image; the
+    import funnel does not need it.
 
     Returns the paths written; [] when the folder holds no image rip, or none
     could be split (no INDEX 01s, no ffmpeg, unreadable durations).
     """
     from .audio import AudioFile
-    from .discs import read_cue_text
-    from .paths import LIB_AUDIO_EXTS, trash_file
+    from .discs import disc_dir_number, disc_number_of_path
+    from .paths import trash_file
+    from .stats import tool_threads
     from .tools import detect_all_tools
 
     def say(line):
@@ -503,68 +747,73 @@ def split_image_rip(folder, config=None, log_fn=None):
 
     if not folder or not os.path.isdir(folder):
         return []
-    try:
-        entries = sorted(os.listdir(folder))
-    except OSError:
-        return []
-    cues = [e for e in entries if e.lower().endswith(".cue")]
-    audio = [e for e in entries
-             if os.path.splitext(e)[1].lower() in LIB_AUDIO_EXTS
-             and os.path.isfile(os.path.join(folder, e))]
-    if not cues or not audio:
+    rips = _image_rips(folder)
+    if not rips:
         return []
     ffmpeg = str((detect_all_tools().get("ffmpeg") or {}).get("ffmpeg_exe") or "")
     if not ffmpeg or not os.path.isfile(ffmpeg):
         return []
 
-    albums = []   # (image path, tracks, starts)
-    claimed = set()
-    for cue in cues:
-        _files, tracks = _cue_sheet(read_cue_text(os.path.join(folder, cue)))
-        if len(tracks) < 2:
-            continue
-        starts = [t["start"] for t in tracks]
-        if any(s is None for s in starts):
-            continue
-        if any(b <= a for a, b in zip(starts, starts[1:])):
-            continue
-        image = _image_for(folder, audio, tracks)
-        if not image or image in claimed:
-            continue
-        claimed.add(image)
-        albums.append((image, tracks, starts))
-    if not albums:
-        return []
+    # How many images share ONE folder: only those need a `<stem>-` prefix, so
+    # two discs' "01 …" tracks cannot collide. Images in different disc
+    # folders are already told apart by their folder.
+    per_folder = {}
+    for rec in rips:
+        per_folder[rec["folder"]] = per_folder.get(rec["folder"], 0) + 1
 
-    multi = len(albums) > 1
     written, failures = [], []
-    for image, tracks, starts in albums:
+    for rec in rips:
+        image, tracks, starts = rec["image"], rec["tracks"], rec["starts"]
+        where = rec["folder"]
         try:
-            total = float(AudioFile(image).audio.info.length)
+            source = AudioFile(image)
+            total = float(source.audio.info.length)
+            source_tags = source.all_tags() or {}
         except Exception:
-            total = 0.0
+            total, source_tags = 0.0, {}
         if total <= starts[-1]:
             say(f"image rip not split: {os.path.basename(image)} — its cue's "
                 "last track starts past the end of the audio")
             continue
+        # Album-level identity travels to every split track; track-level tags
+        # are replaced by this track's own. ReplayGain is per FILE (a short
+        # track has a different loudness), so the image's values must not be
+        # copied onto tracks that were never measured.
+        carry = {key: value for key, value in source_tags.items()
+                 if str(key).upper() not in _PER_TRACK_TAGS
+                 and not str(key).upper().startswith("REPLAYGAIN")}
+        disc_no = (disc_dir_number(os.path.basename(where))
+                   or disc_number_of_path(image))
+        if disc_no:
+            carry["DISCNUMBER"] = str(disc_no)
         stem = os.path.splitext(os.path.basename(image))[0]
-        prefix = f"{stem}-" if multi else ""
+        prefix = f"{stem}-" if per_folder.get(where, 1) > 1 else ""
         jobs = []
         for i, track in enumerate(tracks):
             start = 0.0 if i == 0 else starts[i]
             end = starts[i + 1] if i + 1 < len(starts) else total
             if end <= start:
                 continue
-            tags = {"TRACKNUMBER": str(track["position"])}
+            tags = dict(carry)
+            tags["TRACKNUMBER"] = str(track["position"])
+            tags["TRACKTOTAL"] = str(len(tracks))
             if track["title"]:
                 tags["TITLE"] = track["title"]
-            jobs.append((ffmpeg, image, os.path.join(folder, _track_name(track, stem, prefix)),
-                         start, end - start, tags))
+            jobs.append((ffmpeg, image, os.path.join(where, _track_name(track, stem, prefix)),
+                         start, end - start, str(track["position"]),
+                         track["title"] or "", tags))
         if not jobs:
             continue
         lanes = worker_count(config, maximum=4, items=len(jobs))
+        threads = tool_threads(config, lanes) if lanes > 0 else 0
         with ThreadPoolExecutor(max_workers=lanes) as ex:
-            results = list(ex.map(_split_one, jobs))
+            # The ffmpeg lanes are capped at their share of the process's
+            # thread budget: without `-threads` each of the four decoders
+            # claimed every core, the one place in the engine that bypassed
+            # `tool_threads`.
+            args = [(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], threads)
+                    for a in jobs]
+            results = list(ex.map(_split_one, args))
         errs = [e for _p, e in results if e]
         made = [p for p, _e in results if p]
         if errs:
@@ -591,6 +840,18 @@ def split_image_rip(folder, config=None, log_fn=None):
                 "be moved to the Trash, so the split was undone")
             continue
         written.extend(made)
+        if _rewrite_cue_for_split(rec["cue"], tracks, made):
+            say(f"cue repointed: {os.path.basename(rec['cue'])} -> {len(made)} per-track FILE blocks")
+        else:
+            say(f"warning: {os.path.basename(rec['cue'])} still names the image "
+                f"({os.path.basename(image)}); it could not be repointed")
         say(f"image rip split: {os.path.basename(image)} -> {len(made)} track(s)")
+        if on_split is not None:
+            try:
+                on_split(image, made)
+            except Exception:
+                # A consumer's own bookkeeping must never undo a finished
+                # split (the audio is correct and the image is already gone).
+                traceback.print_exc()
     return written
 

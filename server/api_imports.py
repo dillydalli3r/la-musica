@@ -41,6 +41,12 @@ names:
          only some albums are busy runs the rest and reports the refused ones
          in their own album entry's `errors`/`note`.
 
+    POST /api/import/split-image      {path, staged?}
+         -> {ok, path, split, tracks, files, reason}
+         Splits a whole-disc image rip (.flac + .cue) into one FLAC per track;
+         the same all-or-nothing split the import funnel runs, for an album
+         already in the library. `split: 0` on a second press or no image.
+
     POST /api/import/bulk             {items: [{path, move?, release?}]}
          -> {ok: True, job: {...}} | {ok: False, error: "…"}
 
@@ -314,21 +320,101 @@ def import_finish(req: FinishRequest):
     # `albums[i]` as the album it sent at `targets[i]` (that is how it adopts
     # the folder a chain's beets/organize step moved the album to), so a
     # refusal has to sit in its own path's slot rather than being appended.
-    albums, refusals = [], []
-    for p in req.paths:
+    from concurrent.futures import ThreadPoolExecutor
+
+    # Each album is claimed independently inside `finish_album`, so a batch of
+    # distinct folders may run its chains side by side; a batch that names one
+    # album twice still has the second refused by the claim. Four lanes is the
+    # cap: every lane can run the full chain (tag writes, provider fetches),
+    # and a wider batch belongs in the bulk queue, which has its own budget.
+    def one(p):
         try:
-            albums.append(imports.finish_album(p, force=req.force, wait=False))
+            return imports.finish_album(p, force=req.force, wait=False), None
         except script_runners.RunBusy as e:
-            refusals.append(str(e))
+            return None, str(e)
+
+    if req.paths:
+        workers = max(1, min(4, len(req.paths)))
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            results = list(ex.map(one, req.paths))
+    else:
+        results = []
+    albums, refusals = [], []
+    for p, (result, refusal) in zip(req.paths, results):
+        if refusal is not None:
+            refusals.append(refusal)
             albums.append({"path": p, "scripts": [], "chain": [],
-                           "errors": [str(e)], "chained": False,
+                           "errors": [refusal], "chained": False,
                            "chain_off": False,
-                           "note": f"the script chain could not start: {e}"})
+                           "note": f"the script chain could not start: {refusal}"})
+        else:
+            albums.append(result)
     if refusals and len(refusals) == len(req.paths):
         # Nothing at all started: the whole request is the refusal, answered
         # the way `/api/run` answers a double-pressed run.
         raise HTTPException(409, refusals[0])
     return {"albums": albums}
+
+
+class SplitImageRequest(BaseModel):
+    path: str
+    staged: bool = False  # the wizard's album folder, wherever the user put it
+
+
+@router.post("/api/import/split-image")
+def import_split_image(req: SplitImageRequest):
+    """Split an album's whole-disc image rip into one FLAC per cue track.
+
+    The import funnel already does this for an album it is FINISHING
+    (`server.imports._finish_album`), but an album that arrived before the
+    splitter existed — or one whose rip was imported whole because the split
+    failed at the time — had no way to be fixed without a full re-import. This
+    is that way: the album page's own action, scoped to one folder, safe to
+    press twice (a split album has no image left, so the second answer is
+    `split: 0`).
+
+    The split is all-or-nothing per image (see `mlo.cue.split_image_rip`) and
+    the album is held for the duration, so a script run or an import cannot
+    rewrite the files underneath it. The library payloads are invalidated
+    after a successful split, so the page's next read lists the new tracks.
+    """
+    _require_manual()
+    if not str(req.path or "").strip():
+        raise HTTPException(400, "path required")
+    _guard([req.path], req.staged)
+    from mlo.config import load_config
+    from mlo.cue import image_rip_info, split_image_rip
+    from server import job_locks
+
+    info = {"rip": False, "tracks": 0}
+    try:
+        with job_locks.holding([req.path], kind="import",
+                               label="Split image rip", wait=False):
+            info = image_rip_info(req.path)
+            if not info["rip"]:
+                return {"ok": True, "path": req.path, "split": 0,
+                        "tracks": 0, "files": [],
+                        "reason": "no whole-disc image rip in this folder"}
+            def repoint_playlists(image, made):
+                from server import playlists
+                playlists.replace_track_path(image, made)
+
+            written = split_image_rip(req.path, load_config(),
+                                      on_split=repoint_playlists)
+    except job_locks.PathLocked as e:
+        raise HTTPException(409, str(e)) from None
+    except Exception as e:  # noqa: BLE001 — the folder is reported, not the app
+        traceback.print_exc()
+        return {"ok": False, "path": req.path, "split": 0,
+                "tracks": info.get("tracks", 0), "files": [],
+                "reason": str(e)[:300]}
+    if written:
+        _invalidate_library_payloads()
+    return {"ok": True, "path": req.path, "split": len(written),
+            "tracks": info["tracks"],
+            "files": [os.path.basename(p) for p in written],
+            "reason": "" if written else
+                      "the rip could not be split (its cue or audio needs attention)"}
 
 
 @router.post("/api/import/bulk")

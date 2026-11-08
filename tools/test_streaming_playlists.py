@@ -744,5 +744,25 @@ except ImportError as e:                                     # pragma: no cover
     print(f"  SKIP  TestClient unavailable: {e}")
 
 # --------------------------------------------------------------------------- #
+# A manual image-rip split trashes the one file a playlist held; the entry is
+# repointed at the split tracks in order, in every user's playlist.
+# --------------------------------------------------------------------------- #
+from server import playlists as _pl  # noqa: E402
+
+_pid = _pl.create_playlist("Image rip", user="")
+_old = "C:/music/Image Album/CDImage.flac"
+_pl.add_tracks(_pid, [_old, "C:/music/Other/track.flac"], user="")
+_changed = _pl.replace_track_path(_old, ["C:/music/Image Album/01 One.flac",
+                                         "C:/music/Image Album/02 Two.flac"])
+check("a split image is replaced by its tracks, in order",
+      _changed == 1 and (_pl.get_playlist(_pid, user="") or {}).get("tracks") == [
+          "C:/music/Image Album/01 One.flac",
+          "C:/music/Image Album/02 Two.flac",
+          "C:/music/Other/track.flac"],
+      (_changed, (_pl.get_playlist(_pid, user="") or {}).get("tracks")))
+check("replacing it again is a no-op (the path is gone)",
+      _pl.replace_track_path(_old, ["C:/music/Image Album/01 One.flac"]) == 0)
+
+# --------------------------------------------------------------------------- #
 print(f"\nstreaming playlist import: {'FAILED — ' + ', '.join(FAILED) if FAILED else 'all checks passed'}")
 sys.exit(1 if FAILED else 0)

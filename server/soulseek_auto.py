@@ -3637,6 +3637,67 @@ def _has_image_rip(album_dir, audio):
     return False
 
 
+def _image_rip_cue_problems(album_dir, release):
+    """A disc-image rip's cue must describe the release it was downloaded for.
+
+    Candidate matching accepts an image rip on SHAPE (one audio file per disc
+    plus a cue) because a search result carries no cue content — the note in
+    `_image_rip_audio` said a wrong-cue rip could only be caught after the
+    download. This is that catch: once the files are on disk, every image-style
+    cue's TRACK count is compared with the release's own tracklist. A five-track
+    cue for an eleven-track release is rejected with a sentence naming both
+    numbers, instead of being split into five files and imported as the album.
+
+    A per-track cue (one FILE per track) states no image, and is left to the
+    normal file matching; a cue whose disc cannot be placed against the release
+    is not guessed at.
+    """
+    from mlo.cue import _cue_sheet
+    from mlo.discs import read_log_text
+
+    expected = _expected_tracks(release)
+    if not expected:
+        return []
+    per_disc = {}
+    for t in expected:
+        per_disc[t["disc"]] = per_disc.get(t["disc"], 0) + 1
+    problems = []
+    for root, _dirs, files in os.walk(album_dir):
+        for name in sorted(files):
+            if not name.lower().endswith(".cue"):
+                continue
+            path = os.path.join(root, name)
+            try:
+                _refs, tracks = _cue_sheet(read_log_text(path) or "")
+            except Exception:
+                continue
+            if len(tracks) < 2:
+                continue
+            refs = {str(t.get("file") or "") for t in tracks}
+            refs.discard("")
+            if len(refs) != 1:
+                continue          # a per-track sheet, not an image rip
+            # The disc the cue EXPLICITLY names: its own file/folder first
+            # ("CD2/disc.cue", "2 - Album.cue"), then the image its FILE row
+            # names ("CD2.flac"). `_disc_of` would default to 1, and on a
+            # multi-disc release that compares disc 2's cue with disc 1's
+            # count and rejects a correct download. With no evidence at all,
+            # a single-disc release is the only shape where 1 is not a guess.
+            disc = _named_disc(path) or _named_disc(next(iter(refs)))
+            if disc is None:
+                if len(per_disc) != 1:
+                    continue
+                disc = next(iter(per_disc))
+            want = per_disc.get(disc)
+            if want is None:
+                continue
+            if len(tracks) != want:
+                problems.append(
+                    f"{name}: its cue states {len(tracks)} track(s) on disc "
+                    f"{disc}, but the release has {want}")
+    return problems
+
+
 def _folder_has_log(album_dir):
     """Whether the download folder holds a .log file, anywhere under it. The CD
     audit checks each track against a log's per-track CRCs; when there is no log
@@ -4246,7 +4307,7 @@ def _candidate_got(ddir, attempt):
     return out
 
 
-def _verify_group(slsk, ddir, group, cfg, is_cd, media=None):
+def _verify_group(slsk, ddir, group, cfg, is_cd, media=None, release=None):
     """Verify several candidates' albums AT ONCE: [(o, root, ok, problems)].
 
     The .log-vs-track CRC check (CD) and the decode check (digital) are the
@@ -4278,9 +4339,15 @@ def _verify_group(slsk, ddir, group, cfg, is_cd, media=None):
                         ["downloaded files did not land in one album folder "
                          "under the download dir"])
             _stamped, tag_problems = _stamp_media(root, media, cfg)
+            # An image rip's cue is the only tracklist evidence a share gave
+            # us, so it is compared with the release BEFORE the download is
+            # declared good (see _image_rip_cue_problems).
+            cue_problems = (_image_rip_cue_problems(root, release)
+                            if release else [])
             ok, problems = _verify_album(root, cfg, is_cd)
-            problems = list(tag_problems) + list(problems)
-            return (o, root, ok and not tag_problems, problems)
+            problems = list(tag_problems) + cue_problems + list(problems)
+            return (o, root, ok and not tag_problems and not cue_problems,
+                    problems)
         except Exception as e:
             return (o, None, False, [str(e)[:120]])
         finally:
@@ -4577,11 +4644,14 @@ def _try_batch(slsk, ddir, batch, release, cfg, is_cd, min_score,
         # says which pressing this is rather than flattening it to "CD".
         media = (cd_media_value(release) or "CD") if is_cd else "Digital Media"
         _stamped, tag_problems = _stamp_media(local_root, media, cfg)
+        # The cue of an image rip is the only tracklist evidence the share
+        # gave us: compare it with the release before this copy can win.
+        cue_problems = _image_rip_cue_problems(local_root, release)
         ok, problems = _verify_album(local_root, cfg, is_cd)
         # A MEDIA tag that could not be written makes verify_album_checksums
         # skip every file, so it is a verification problem, never a warning.
-        problems = list(tag_problems) + list(problems)
-        ok = ok and not tag_problems
+        problems = list(tag_problems) + cue_problems + list(problems)
+        ok = ok and not tag_problems and not cue_problems
         # Every candidate the batch verified, this one first: {id: (o, root, ok,
         # problems)}. The winner is the FIRST in rank order that verified good.
         verdicts = {id(a): (a, local_root, ok, problems)}
@@ -4599,7 +4669,8 @@ def _try_batch(slsk, ddir, batch, release, cfg, is_cd, min_score,
             if mates:
                 _log(f"Verifying {len(mates)} other complete candidate(s) at once…")
                 for o, root, ok_o, probs in _verify_group(slsk, ddir, mates, cfg,
-                                                          is_cd, media):
+                                                          is_cd, media,
+                                                          release=release):
                     verdicts[id(o)] = (o, root, ok_o, probs)
         # Reject every candidate the batch verified and found wanting — the
         # reason names the cause, not just the count: a CD rip is judged on its
@@ -4641,6 +4712,18 @@ def _try_batch(slsk, ddir, batch, release, cfg, is_cd, min_score,
                     f"{a['username']} delivered the album first — this candidate "
                     f"was cancelled and its partial files removed")
             _drop_candidate(slsk, ddir, o["username"], o["wanted"])
+        # The winning album is an image rip more often than not on CD: split it
+        # HERE, before the import moves and MB-stamps it, so the tagging pass
+        # sees real per-track files (and the cue's track count has just been
+        # checked against the release). The import funnel's own split stays as
+        # the backstop; a folder already split is a no-op there.
+        try:
+            from mlo.cue import split_image_rip
+            made = split_image_rip(local_root, cfg, log_fn=_log)
+            if made:
+                _log(f"  image rip split before import: {len(made)} track(s)")
+        except Exception as e:  # noqa: BLE001 — the import can still use the image
+            _log(f"  image rip split failed ({e}) — importing the image whole")
         return {"candidate": a["cand"], "username": a["username"], "dir": a["dir"],
                 "wanted": a["wanted"], "got": got, "root": local_root}
     return None

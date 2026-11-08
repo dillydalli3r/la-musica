@@ -94,6 +94,7 @@ const GROUP_TAB: Record<string, string> = {
   "Auto-import (MusicBrainz → Soulseek)": "import",
   "Wishes (auto-fill)": "import",
   "Artist watch": "import",
+  "For you (auto-acquire)": "import",
   "Downloads & playback": "downloads",
   "Soulseek (managed slskd)": "downloads",
   "Videos (script 11)": "downloads",
@@ -1036,6 +1037,17 @@ export default function SettingsPage() {
         { k: "artist_watch_max_per_cycle", label: "Releases queued per artist per check", type: "number", min: 1, max: 50, help: "The hard anti-dump cap. One is the shipped default: a watch that queued a hundred at once is the discography dump this feature exists to avoid." },
         { k: "artist_watch_types", label: "Release types a watch may queue", type: "multi", options: [["album","Album"],["ep","EP"],["single","Single"],["broadcast","Broadcast"],["other","Other"],["compilation","Compilation"],["soundtrack","Soundtrack"],["spokenword","Spoken word"],["interview","Interview"],["audiobook","Audiobook"],["live","Live"],["remix","Remix"],["dj-mix","DJ mix"],["mixtape/street","Mixtape / street"],["demo","Demo"],["audio drama","Audio drama"],["field recording","Field recording"],["podcast","Podcast"]], help: "MusicBrainz's own type names, plus the app's derived one: Podcast (a podcast is a MusicBrainz SERIES, and an episode is a Broadcast release group linked to it — not a release-group type MusicBrainz publishes). A release group matches when its primary type is ticked or ANY secondary type is (a live album is Album + Live, so ticking Live finds it); Podcast matches only a group whose series relation the app read. A watch can narrow this per artist." },
         { k: "artist_watch_auto_add", label: "Queue a matched release into the library automatically", type: "bool", help: "Off, a watch only reports what it found (the notification is the whole output) — which is what you want if you pick the edition by hand." },
+      ],
+    },
+    {
+      title: "For you (auto-acquire)",
+      blurb:
+        "The recommendation shelf's other half: the worker asks MusicBrainz for albums by the artists you actually play that the library does not hold, and queues the newest ALBUM/EP through the same add-to-library path a wish uses. It is not a chart download — only a played artist is asked about, live records and compilations are left alone, and the per-cycle cap is the anti-dump rule.",
+      fields: [
+        { k: "recommendation_auto_acquire_enabled", label: "Fetch missing albums by artists you play", type: "bool", help: "Off, the recommendation shelf still works, but nothing is queued by itself. The master Automatic acquisition switch still gates every unattended download." },
+        { k: "recommendation_auto_acquire_interval_hours", label: "Check interval (hours)", type: "number", min: 1, max: 720, help: "How long between two cycles; the worker itself ticks more often." },
+        { k: "recommendation_auto_acquire_limit", label: "Albums queued per cycle", type: "number", min: 1, max: 50, help: "The hard anti-dump cap across all artists — three by default." },
+        { k: "recommendation_auto_acquire_artists", label: "Artists checked per cycle", type: "number", min: 1, max: 10, help: "How many of your most-played artists one cycle asks MusicBrainz about (one browse each; MusicBrainz etiquette is one request a second)." },
       ],
     },
     {

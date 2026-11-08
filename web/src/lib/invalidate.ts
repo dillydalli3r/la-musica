@@ -9,6 +9,9 @@ export function invalidateLibrary(qc: QueryClient): void {
   for (const queryKey of [
     ["library"],
     ["home"],
+    // The Library's "For you" strip and the queue's own consumer read the
+    // affinity shelf; a rating, a play-driven import or a new album changes it.
+    ["forYou"],
     ["album"],
     ["artist"],
     ["track-tags"],

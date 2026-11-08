@@ -6,7 +6,7 @@ import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import {
   ArrowDownAZ, ArrowDownUp, BarChart3, ChevronDown, ChevronRight, CloudDownload,
   FileVideo, FolderSync, FolderTree, Import, Info as InfoIcon, Layers, Library, ListChecks,
-  ListFilter, ListPlus, Play, RefreshCw, Search, Tag, Trash2, Wand2, X,
+  ListFilter, ListPlus, Play, RefreshCw, Search, Sparkles, Tag, Trash2, Wand2, X,
 } from "lucide-react";
 import { api } from "../api";
 import { LAYOUT_REPORT_KEY, rescanLayout } from "../lib/layoutScan";
@@ -424,8 +424,21 @@ export default function LibraryPage() {
       // and re-asking this key reads the report that press just stored — no
       // second scan.
       qc.invalidateQueries({ queryKey: LAYOUT_REPORT_KEY });
+      // The affinity store is rebuilt from the same library/plays data.
+      qc.invalidateQueries({ queryKey: ["forYou"] });
     });
   };
+  // The listener's affinity picks, above the table: a small strip of records
+  // the play/rating stores point at. Deliberately NOT another filter — the
+  // table below stays the whole library, and this only answers "what next"
+  // without making the reader search for it. Empty profile → no strip.
+  const { data: forYou } = useQuery({
+    queryKey: ["forYou"],
+    queryFn: () => api.recommendForYou(8),
+    staleTime: 5 * 60_000,
+    retry: false,
+  });
+  const forYouRows = forYou?.items ?? [];
   const { data: config } = useQuery({ queryKey: ["config"], queryFn: api.config });
   // The layout report the last scan stored (script 20's own scan or apply).
   // Read, never walked: this is what lets the page state a
@@ -1716,6 +1729,42 @@ export default function LibraryPage() {
         </div>
       </div>
       </PageHeader>
+
+      {/* The listener's own picks, drawn with the shared album card. A shelf,
+          not a filter: the table below is still the whole library, and this
+          answers "what next" without hiding anything from it. */}
+      {forYouRows.length > 0 && (
+        <section className="space-y-2">
+          <div className="flex items-baseline gap-2 px-1">
+            <Sparkles className="h-4 w-4 text-accent self-center" />
+            <h2 className="text-sm font-semibold tracking-tight">For you</h2>
+            <span className="text-[11px] text-zinc-600">picked from what you play, rate and love</span>
+            <Link to="/discover" className="ml-auto text-[11px] text-accent-soft hover:underline">
+              Discover more →
+            </Link>
+          </div>
+          <div
+            className="grid gap-x-4 gap-y-5 stagger"
+            style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${GRID_SIZE_MIN[gridSize]}px, 1fr))` }}
+          >
+            {forYouRows.slice(0, 8).map((al) => (
+              <AlbumCard
+                key={al.path}
+                al={al}
+                size={gridSize}
+                extraMeta={(al.reasons?.[0] || al.reason) ? (
+                  <span
+                    className="chip max-w-full truncate text-[9px] text-accent-soft border border-accent/30 bg-accent/10"
+                    title={(al.reasons?.length ? al.reasons : [al.reason]).join(" · ")}
+                  >
+                    {al.reasons?.[0] || al.reason}
+                  </span>
+                ) : undefined}
+              />
+            ))}
+          </div>
+        </section>
+      )}
 
       {/* selection toolbar */}
       {selectionCount > 0 && (

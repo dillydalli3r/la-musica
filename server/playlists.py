@@ -386,6 +386,59 @@ def set_order(pid, paths, user=""):
                       (time.time(), pid, user))
 
 
+def replace_track_path(old, new_paths):
+    """Replace ONE stored track path with several, in every user's playlists.
+
+    A whole-disc image rip is one library path until it is split; a manual
+    split (the album page's action) trashes that file, so a playlist that held
+    it would otherwise point at the Trash. The entries keep their position and
+    become the split tracks in their own order — the album's listening order —
+    with the playlist's `updated` stamp moved. Smart playlists store no tracks
+    and are untouched. Returns how many playlists changed.
+    """
+    old_key = _pathkey(old)
+    fresh = [str(p) for p in (new_paths or []) if str(p or "").strip()]
+    if not old_key or not fresh:
+        return 0
+    with _lock:
+        with _conn() as c:
+            # DESCENDING position order: replacing a higher occurrence shifts
+            # only the rows ABOVE it, so the lower occurrences' snapshot
+            # positions stay valid. Ascending order made a playlist that held
+            # the image path twice delete one of the split tracks just
+            # inserted for the first occurrence.
+            rows = sorted(
+                (r for r in c.execute(
+                    "SELECT playlist_id, path, position, user FROM playlist_tracks"
+                ).fetchall() if _pathkey(r["path"]) == old_key),
+                key=lambda r: (str(r["playlist_id"]), str(r["user"]),
+                               -int(r["position"] or 0)))
+            changed = set()
+            for row in rows:
+                pid, user = row["playlist_id"], row["user"]
+                pos = int(row["position"] or 0)
+                existing = {_pathkey(r["path"]) for r in c.execute(
+                    "SELECT path FROM playlist_tracks WHERE playlist_id=? AND user=?",
+                    (pid, user))}
+                add = [p for p in dict.fromkeys(fresh)
+                       if _pathkey(p) not in existing]
+                c.execute("DELETE FROM playlist_tracks WHERE playlist_id=?"
+                          " AND user=? AND position=?", (pid, user, pos))
+                if add:
+                    c.execute("UPDATE playlist_tracks SET position=position+?"
+                              " WHERE playlist_id=? AND user=? AND position>?",
+                              (len(add) - 1, pid, user, pos))
+                    for i, p in enumerate(add):
+                        c.execute("INSERT INTO playlist_tracks"
+                                  " (playlist_id, path, position, mbid, user)"
+                                  " VALUES (?,?,?,?,?)",
+                                  (pid, p, pos + i, _mbid_for(p), user))
+                c.execute("UPDATE playlists SET updated=? WHERE id=? AND user=?",
+                          (time.time(), pid, user))
+                changed.add((pid, user))
+            return len(changed)
+
+
 def remove_tracks(pid, paths, user=""):
     with _lock:
         with _conn() as c:

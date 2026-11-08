@@ -1332,6 +1332,10 @@ export interface HomeData {
   };
   recent: HomeAlbum[];
   favorites: HomeAlbum[];
+  /** The listener's own affinity picks (`server.recommend.for_you`), with the
+   *  reason each row is here. Empty until the play/rating stores hold
+   *  something — Home then draws no shelf rather than inventing one. */
+  for_you?: HomeAlbum[];
   rediscover: HomeAlbum[];
   podcasts?: HomePodcast[];
   /** Genres, most listened first, each with a handful of its albums. */
@@ -1398,6 +1402,10 @@ export type HomeAlbum = Album & {
   mbid?: string | null;
   /** MusicBrainz entity type behind `mbid` — "rg" (release group) or "release". */
   mb_kind?: string;
+  /** Why the row is on the "For you" shelf, strongest signal first. */
+  reasons?: string[];
+  /** The affinity score behind the shelf's order (0..1). */
+  affinity_score?: number | null;
 };
 
 /* ---------------------------------------------------------------------- *

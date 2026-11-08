@@ -166,6 +166,13 @@ async def _lifespan(app: FastAPI):
         artist_watch_worker.start()
     except Exception as e:
         print(f"[mlo] artist watch worker failed to start: {e}")
+    # Recommendations → acquisition: queues missing albums by the artists the
+    # listener actually plays (capped; see server/recommend_worker).
+    try:
+        from server import recommend_worker
+        recommend_worker.start()
+    except Exception as e:
+        print(f"[mlo] recommendation acquisition worker failed to start: {e}")
     # Soulseek status watcher: pushes a frame the moment the login state,
     # daemon state or port conflict changes (see _soulseek_watch).
     threading.Thread(target=_soulseek_watch, daemon=True).start()
@@ -5383,28 +5390,38 @@ def _tag_media_for_albums(album_dirs):
     from mlo.audio import AudioFile
     from mlo.config import should_write_audio_tag
 
+    from concurrent.futures import ThreadPoolExecutor
+    from mlo.stats import worker_count
+
     cfg = load_config()
-    tagged = 0
+    jobs = []
     for d in album_dirs:
         media = _detect_rip_media(d)
         if not media:
             continue
         for root, _dirs, files in os.walk(d):
             for f in sorted(files):
-                if not is_audio_file(f):
-                    continue
-                path = os.path.join(root, f)
-                try:
-                    af = AudioFile(path)
-                    if af.audio is None:
-                        continue
-                    if (not str(af.get_tag("MEDIA") or "").strip()
-                            and should_write_audio_tag(cfg, "MEDIA", filepath=path)):
-                        af.set_tag("MEDIA", media)
-                    tagged += 1
-                except Exception:
-                    continue
-    return tagged
+                if is_audio_file(f):
+                    jobs.append((os.path.join(root, f), media))
+
+    def one(job):
+        path, media = job
+        try:
+            af = AudioFile(path)
+            if af.audio is None:
+                return 0
+            if (not str(af.get_tag("MEDIA") or "").strip()
+                    and should_write_audio_tag(cfg, "MEDIA", filepath=path)):
+                af.set_tag("MEDIA", media)
+            return 1
+        except Exception:
+            return 0
+
+    if not jobs:
+        return 0
+    workers = worker_count(cfg, maximum=8, items=len(jobs))
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        return sum(ex.map(one, jobs))
 
 
 def _stamp_import_identity(album_dirs):
@@ -5486,7 +5503,16 @@ def _import_one_album(album, cfg, chain_async=True, progress=None):
         # this path; the call is idempotent (there is no image left to split),
         # which is what lets the funnel and this pre-pass both keep it.
         from mlo.cue import split_image_rip
-        split_image_rip(album, cfg, log_fn=lambda line: print(f"[mlo] {line}"))
+
+        def _repoint(image, made):
+            try:
+                from server import playlists
+                playlists.replace_track_path(image, made)
+            except Exception:
+                traceback.print_exc()
+
+        split_image_rip(album, cfg, log_fn=lambda line: print(f"[mlo] {line}"),
+                        on_split=_repoint)
     except Exception:
         traceback.print_exc()
         out["errors"].append("image-rip split failed (the rip was imported whole)")

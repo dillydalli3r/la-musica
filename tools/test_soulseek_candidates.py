@@ -1239,6 +1239,32 @@ try:
 finally:
     shutil.rmtree(_img_dir, ignore_errors=True)
 
+# The cue's TRACK count is compared with the RELEASE's own disc, and a cue
+# that does not name its disc is not guessed at when the release has several.
+_cue_dir = tempfile.mkdtemp(prefix="mlo-cue-count-")
+try:
+    os.makedirs(os.path.join(_cue_dir, "CD1"))
+    os.makedirs(os.path.join(_cue_dir, "CD2"))
+    open(os.path.join(_cue_dir, "CD1", "disc.flac"), "wb").close()
+    open(os.path.join(_cue_dir, "CD2", "disc.flac"), "wb").close()
+    with open(os.path.join(_cue_dir, "CD1", "disc.cue"), "w", encoding="utf-8") as _fh:
+        _fh.write('FILE "disc.flac" WAVE\nTRACK 01 AUDIO\nTRACK 02 AUDIO\n')
+    with open(os.path.join(_cue_dir, "CD2", "disc.cue"), "w", encoding="utf-8") as _fh:
+        _fh.write('FILE "disc.flac" WAVE\nTRACK 01 AUDIO\nTRACK 02 AUDIO\nTRACK 03 AUDIO\n')
+    _problems = soulseek_auto._image_rip_cue_problems(_cue_dir, LAYOUT_CD2)
+    assert len(_problems) == 1 and "disc 2" in _problems[0], _problems
+    # Both cues named no disc and the release has two: no false rejection.
+    _unnamed = tempfile.mkdtemp(prefix="mlo-cue-unnamed-")
+    try:
+        open(os.path.join(_unnamed, "album.flac"), "wb").close()
+        with open(os.path.join(_unnamed, "album.cue"), "w", encoding="utf-8") as _fh:
+            _fh.write('FILE "album.flac" WAVE\nTRACK 01 AUDIO\nTRACK 02 AUDIO\nTRACK 03 AUDIO\n')
+        assert soulseek_auto._image_rip_cue_problems(_unnamed, LAYOUT_CD2) == []
+    finally:
+        shutil.rmtree(_unnamed, ignore_errors=True)
+finally:
+    shutil.rmtree(_cue_dir, ignore_errors=True)
+
 # (c) flat "Artist/Album - 01 - Title.flac": accepted, but stage 2 must stay
 #     inside the release and never enqueue the artist's other album
 flat_artist = layout_candidate([

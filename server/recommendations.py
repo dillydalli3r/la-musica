@@ -808,6 +808,48 @@ def _rediscover(albums, featured, limit):
     return [_owned_row(a, reason="Rediscover") for a in pool[:limit]]
 
 
+def for_you_shelf(cfg, user="", limit=12, exclude=(), lib=None):
+    """Home's "For you" shelf: the listener's own affinity picks, as library
+    rows (the shared album card draws them exactly like every other shelf).
+
+    The scoring lives in `server.recommend` beside the similarity scorer it
+    complements; this function is the join from its album paths back to the
+    library payload and the shelf's `reason`/`reasons`/`affinity_score` fields.
+    An empty profile (no plays, no stars, no likes) answers no rows at all —
+    Home then draws no shelf rather than inventing one.
+    """
+    from server import library as lib_mod
+    from server import recommend as rec
+
+    try:
+        if lib is None:
+            lib = lib_mod.build_library(cfg)
+        items = rec.for_you(cfg, user=user, limit=limit, exclude=exclude,
+                            lib=lib)
+    except Exception:
+        return []
+    if not items:
+        return []
+    by_path = {}
+    for ar in lib.get("artists", []):
+        for alb in ar.get("albums", []):
+            key = os.path.normcase(os.path.normpath(str(alb.get("path") or "")))
+            if key:
+                by_path[key] = alb
+    rows = []
+    for item in items:
+        key = os.path.normcase(os.path.normpath(str(item.get("path") or "")))
+        alb = by_path.get(key)
+        if alb is None:
+            continue
+        row = _owned_row(alb, reason=str(item.get("reason") or "Picked for you"))
+        row["reasons"] = list(item.get("reasons") or ())
+        row["affinity_score"] = item.get("score")
+        row["plays"] = int(item.get("plays") or 0)
+        rows.append(row)
+    return rows
+
+
 def build_home(cfg, user=""):
     """Full Home payload for the given config and user (TTL-cached, SWR).
 
@@ -925,10 +967,18 @@ def _build_home_payload(cfg, user, recent_count):
     favorites = _favorites(lib, limit, user)
     featured = {os.path.normcase(os.path.normpath(r["path"]))
                 for r in recent + favorites}
+    # "For you" is the listener's affinity shelf; it excludes the cards the
+    # same page already shows above it, so one record is not drawn twice.
+    shown_elsewhere = [r.get("path") for r in
+                       recent + favorites
+                       + list(listening.get("top_albums") or [])
+                       + list(listening.get("rated_albums") or [])]
     data = {
         "stats": stats,
         "recent": recent,
         "favorites": favorites,
+        "for_you": for_you_shelf(cfg, user=user, limit=recent_count,
+                                 exclude=shown_elsewhere, lib=lib),
         **listening,
         "rediscover": _rediscover(albums, featured, limit),
         # One row per podcast SERIES in the library, its newest episode on it —
