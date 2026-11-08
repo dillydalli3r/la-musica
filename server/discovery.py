@@ -3043,6 +3043,48 @@ def itunes_genre_albums(genre, limit=25, offset=0, cfg=None, timeout=None):
     return {"rows": rows[offset:][:limit], "total": seen}
 
 
+def itunes_genre_songs(genre, limit=50, offset=0, cfg=None, timeout=None):
+    """Apple's genreIndex SONG search — top songs for one genre, keyless.
+
+    `attribute=genreIndex` is Apple's own genre filter (verified against the
+    Search API), and `entity=song` answers recordings rather than albums. Apple
+    ignores `offset` like the album variant, so a deeper page asks for
+    `offset + limit` rows and returns this page's slice, up to Apple's 200-row
+    ceiling. The rows are the catalogue's own relevance order, which is the
+    best "top songs in this genre" answer a keyless Apple route gives; no
+    invented popularity number is attached.
+    """
+    term = str(genre or "").strip()
+    if not term:
+        return {"rows": [], "total": None}
+    offset = max(0, int(offset or 0))
+    limit = max(1, min(200, int(limit)))
+    want = max(1, min(200, offset + limit))
+    data = _json(f"{ITUNES_BASE}/search",
+                 {"term": term, "entity": "song", "attribute": "genreIndex",
+                  "limit": want, "country": integrations._apple_country(cfg)},
+                 timeout=timeout, host="itunes.apple.com")
+    rows = []
+    for item in (data or {}).get("results") or []:
+        art = item.get("artworkUrl100") or item.get("artworkUrl60")
+        rows.append({
+            "kind": "track",
+            "itunes_id": _int(item.get("trackId")),
+            "title": item.get("trackName") or "",
+            "artist": item.get("artistName") or "",
+            "album": item.get("collectionName") or "",
+            "cover": itunes_artwork(art, 600) if art else None,
+            "year": (item.get("releaseDate") or "")[:4],
+            "duration": _int(item.get("trackTimeMillis")) // 1000
+                        if item.get("trackTimeMillis") else None,
+            "genre": item.get("primaryGenreName") or term,
+            "link": item.get("trackViewUrl"),
+            "source": "itunes",
+        })
+    seen = offset + len(rows)
+    return {"rows": rows[offset:][:limit], "total": seen}
+
+
 # Apple's most-played feed (the marketing RSS, not the Search API): the one
 # Apple route that IS a chart. It is a ROLLING window refreshed daily — Apple
 # publishes no dated chart and no earlier one — so it answers `all` and the

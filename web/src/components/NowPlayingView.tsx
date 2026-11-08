@@ -27,7 +27,7 @@ import Popover, { MenuItem } from "./Popover";
 import ScrubSeek from "./ScrubSeek";
 import { MAX_DB, MIN_DB, activeAnalyser } from "../lib/analyser";
 import Visualizer from "./Visualizer";
-import { parsePlayerLrc, parseLrc, splitStoredLines, lyricsKindOf, activeLineRange, KaraokeWords, type LrcLine } from "./LyricsViewer";
+import { parsePlayerLrc, parseLrc, splitStoredLrc, lyricsKindOf, activeLineRange, KaraokeWords, type LrcLine } from "./LyricsViewer";
 import type { Playlist } from "../types";
 import { useLyricsFollow, lyricHold, LYRICS_PAD_BOTTOM, LYRICS_PAD_TOP } from "../lib/lyrScroll";
 import { nextSpeed, fmtSpeed } from "../lib/playback";
@@ -844,7 +844,7 @@ export default function NowPlayingView(p: Props) {
   // Stale values render until the fresh payload lands; freshness is gated
   // where wrong info would matter (title fallback, instrumental, BPM).
   const [tagsFor, setTagsFor] = useState<string | null>(null);
-  const [transforms, setTransforms] = useState<Record<string, string[]>>({});
+  const [transforms, setTransforms] = useState<Record<string, LrcLine[]>>({});
   // The PRIMARY text line of each block — with translations/romanization the
   // outer block also carries sub-lines, and centering the block would push
   // the sung line off the middle. The scroller centers this element.
@@ -1254,13 +1254,13 @@ export default function NowPlayingView(p: Props) {
         setTagsFor(p.current.path);
         setLyricsText(typeof t.lyrics === "string" ? t.lyrics : null);
         setLyricsFor(p.current.path);
-        const seeded: Record<string, string[]> = {};
+        const seeded: Record<string, LrcLine[]> = {};
         const main = typeof t.lyrics === "string" ? t.lyrics : null;
         const withLeader = !!main && parsePlayerLrc(main).length > parseLrc(main).length;
         if (typeof t.lyrics_xlit === "string" && t.lyrics_xlit.trim())
-          seeded.transliterate = splitStoredLines(t.lyrics_xlit, withLeader);
+          seeded.transliterate = splitStoredLrc(t.lyrics_xlit, withLeader);
         if (typeof t.lyrics_trans === "string" && t.lyrics_trans.trim())
-          seeded.translate = splitStoredLines(t.lyrics_trans, withLeader);
+          seeded.translate = splitStoredLrc(t.lyrics_trans, withLeader);
         setTransforms(seeded);
       })
       .catch(() => {
@@ -1361,7 +1361,11 @@ export default function NowPlayingView(p: Props) {
 
   // A word / syllable sweep on screen is the one consumer that needs the
   // clock at full rate; line changes ride the 20 Hz tick.
-  const sweeping = karaoke && !!lines[aStart]?.words?.length;
+  const sweeping = karaoke && (
+    !!lines[aStart]?.words?.length
+    || !!transforms.transliterate?.[aStart]?.words?.length
+    || !!transforms.translate?.[aStart]?.words?.length
+  );
   useEffect(() => {
     sweepRef.current = sweeping;
   }, [sweeping]);
@@ -1501,15 +1505,18 @@ export default function NowPlayingView(p: Props) {
     // timestamp, and a past-the-duration target drives it straight into
     // `ended`, advancing the queue again.
     const seekable = synced && !staleLyrics;
-    const xlit = showXlit ? transforms.transliterate?.[i] : undefined;
-    const trans = showTrans ? transforms.translate?.[i] : undefined;
+    const xlitLine = showXlit ? transforms.transliterate?.[i] : undefined;
+    const transLine = showTrans ? transforms.translate?.[i] : undefined;
+    const xlit = xlitLine?.text;
+    const trans = transLine?.text;
     // When transliteration is on, the romanized text IS the primary line —
     // for Latin-script originals it equals the original, so hiding the
-    // original loses nothing. Karaoke word timing only fits the original
-    // wording, so it applies only when the original is displayed (and only
-    // for synced lyrics, which is where word timings exist).
+    // original loses nothing. A stored transform may carry its own ELRC
+    // word/syllable timings (mlo.lyrics_xlit re-syncs at the original's own
+    // granularity or richer), so karaoke follows whichever text is primary.
     const replaced = !!xlit && xlit.trim() !== "" && xlit.trim() !== l.text.trim();
     const primary = replaced ? xlit : l.text;
+    const primaryWords = replaced ? xlitLine?.words : l.words;
     // A "translation" that repeats the line it sits under (English lyrics
     // "translated" to English) adds nothing — skip those sub-lines.
     const essence = (s: string) => s.toLowerCase().replace(/[\W_]+/g, "");
@@ -1564,9 +1571,9 @@ export default function NowPlayingView(p: Props) {
               : { transform: `scale(${INACTIVE_SCALE[lyricSize]})`, transformOrigin: "0 50%" }
           }
         >
-          {!replaced && isActive && karaoke && l.words?.length ? (
+          {isActive && karaoke && primaryWords?.length ? (
             <KaraokeWords
-              words={l.words}
+              words={primaryWords}
               time={dispTime}
               currentClass={ink.wordNow}
               sungClass={ink.wordSung}
@@ -1586,7 +1593,17 @@ export default function NowPlayingView(p: Props) {
               already wears this ink. `data-lyric-trans` is the hook
               tools/check_np_metadata_contrast.cjs reads this sub-line by. */}
           {trans && !transDup && (
-            <div data-lyric-trans className={`${size.xlit} font-normal mt-0.5 leading-snug`}>{trans}</div>
+            <div data-lyric-trans className={`${size.xlit} font-normal mt-0.5 leading-snug`}>
+              {isActive && karaoke && transLine?.words?.length ? (
+                <KaraokeWords
+                  words={transLine.words}
+                  time={dispTime}
+                  currentClass={ink.wordNow}
+                  sungClass={ink.wordSung}
+                  upcomingClass={ink.wordNext}
+                />
+              ) : trans}
+            </div>
           )}
         </div>
       </div>
@@ -2583,27 +2600,10 @@ export default function NowPlayingView(p: Props) {
             the overflow across both edges and the cover lands half a gap left
             of the middle. Packed from the start, the cover column is the whole
             row and the art sits dead centre, which is also where the
-            no-lyrics layout puts it.
-
-            `overflow-x-clip`, on this row AND on the cover column: a box that
-            scrolls on ONE axis (here `overflow-y-auto`) and says nothing about
-            the other has `overflow-x: auto` computed for it, so anything wider
-            than it paints a horizontal scrollbar. The artwork's halo is
-            `-inset-6` — 24 px past the art on every side — so with the art as
-            wide as its column the halo's side overhang was exactly such an
-            overflow: measured at the owner's 1061x1024, the column (419 px,
-            `scrollWidth` 451) painted a scrollbar along its bottom-left edge,
-            which is the reported "scroll bar in the bottom left of the
-            fullscreen player". `clip` and not `hidden`: a hidden box is still a
-            scroll container. Nothing visible changes where the reader actually
-            is — with animations frozen the cover and its halo are
-            pixel-identical to the state before this (the overhang was never
-            painted at scrollLeft 0; only the bar being removed could reveal the
-            21 px of it at the column's right edge) — and the vertical scrolling
-            this column exists for is untouched. */}
+            no-lyrics layout puts it. */}
         {!videoPath && (
         <>
-        <div className={`safe-np-body flex-1 min-h-0 flex flex-col lg:flex-row items-center gap-4 sm:gap-8 overflow-x-clip ${
+        <div className={`safe-np-body flex-1 min-h-0 flex flex-col lg:flex-row items-center gap-4 sm:gap-8 ${
           paneOpen
             ? "overflow-y-auto [@media(min-height:560px)]:overflow-clip"
             : "overflow-y-auto"
@@ -2641,7 +2641,7 @@ export default function NowPlayingView(p: Props) {
           <div
             className={`w-full flex flex-col items-center gap-4 shrink-0 min-w-0 transition-[width] duration-300 ease-out [&>*:first-child]:mt-auto [&>*:last-child]:mb-auto ${
               paneOpen
-                ? "overflow-x-clip lg:w-[42%] lg:h-full lg:max-h-full lg:min-h-0 lg:overflow-y-auto"
+                ? "lg:w-[42%] lg:h-full lg:max-h-full lg:min-h-0 lg:overflow-y-auto"
                 : "my-auto max-h-full min-h-0 overflow-x-clip overflow-y-auto"
             }`}
           >

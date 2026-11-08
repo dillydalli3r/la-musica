@@ -10,6 +10,7 @@ export default {
   "nav.trash": "Papierkorb",
   "nav.playlists": "Wiedergabelisten",
   "nav.favorites": "Favoriten",
+  "nav.downloads": "Downloads",
   "nav.import": "Importieren",
   "nav.charts": "Charts",
   "nav.musicbrainz": "MusicBrainz",
@@ -23,6 +24,8 @@ export default {
   "nav.equalizer": "Equalizer",
   "nav.settings": "Einstellungen",
   "nav.donations": "Spenden",
+  "nav.soulseek": "Soulseek",
+  "nav.watched": "Beobachtete Künstler",
 
   "topbar.search": "Bibliothek durchsuchen…",
   "topbar.back": "Zurück",
@@ -502,4 +505,15 @@ export default {
   "rating.webAlbumAria": "Album-Web-Bewertung: {value} von 5",
 
   // —— Soulseek acquisition: the download queue's rows and the MBID search ——
+  "queue.step": "Jetzt: {text}",
+  "queue.asking": "Frage {label}: {title}",
+  "queue.peer": "{user} · {dir}",
+  "queue.wait_next": "Nächste Suche in {when}",
+  "queue.wait_retry": "Neuer Versuch in {when}",
+  "queue.chain_running": "In der Bibliothek — die Import-Kette läuft noch",
+  "queue.chain_running_brief": "die Import-Kette läuft noch",
+  "queue.rejected": "Abgelehnte Kandidaten ({count})",
+  "soulseek.mbid.chip": "Nach MBID suchen",
+  "soulseek.mbid.hint": "Das sieht nach einer MusicBrainz-ID aus — „Suchen“ sucht diesen einen Titel: Interpret und Titel, sein Album und die ID selbst, alles auf einmal.",
+  "soulseek.mbid.label": "MBID-Suche: {label}",
 } as const;

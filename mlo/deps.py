@@ -84,6 +84,12 @@ _TOOL_FEATURES = (
      "install libjxl, libjpeg-turbo or oxipng from Dependencies"),
     ("keybpm", "Key & BPM detection (librosa)",
      (("librosa",),), "install librosa from Dependencies"),
+    # The Soulseek daemon. The Dependencies page is where it is installed (the
+    # Soulseek page's empty state says so), and the feature row is what makes
+    # that row's absence VISIBLE: without it a build whose slskd is missing
+    # reports every other capability and says nothing about this one.
+    ("soulseek", "Soulseek downloads (slskd)",
+     (("slskd",),), "install slskd from Dependencies"),
 )
 
 # Features that never leave this process. They work wherever Python runs —

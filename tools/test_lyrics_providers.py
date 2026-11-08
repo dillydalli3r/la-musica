@@ -289,6 +289,97 @@ with Patch(lp, _get_json=fake_api([LRCLIB_PLAIN_ONLY])):
 
 
 # --------------------------------------------------------------------------- #
+# Sync granularity: syllable > word > line, then provider order
+# --------------------------------------------------------------------------- #
+# The owner's rule: a source that states richer timing wins over an earlier
+# provider that only states lines. A syllable answer ends the walk at once.
+LINE_LRC = "[00:01.00]hello\n[00:02.00]world\n"
+WORD_LRC = "[00:01.00]<00:01.00>hello <00:01.50>world\n"
+SYLLABLE_LRC = ("[00:01.00]<00:01.00>hel<00:01.20>lo "
+                "<00:01.50>world\n")
+
+
+def level_hit(text):
+    """A provider stub returning one fixed lyric text, counting calls."""
+    def provider(_artist, _title, album=None, duration=None, cfg=None,
+                 youtube_id=None):
+        calls.append((_artist, _title))
+        return lp._hit(text, None, _artist, _title)
+    return provider
+
+
+# a later WORD answer beats an earlier LINE one
+calls = []
+with Patch(lp, _PROVIDERS={"lrclib": level_hit(LINE_LRC),
+                           "kugou": level_hit(WORD_LRC)}):
+    hit = lp.fetch_lyrics({"lyrics_sources": ["lrclib", "kugou"]},
+                          "Slowdive", "Alison")
+assert hit["provider"] == "kugou" and hit["sync_level"] == "word", hit
+assert calls == [("Slowdive", "Alison"), ("Slowdive", "Alison")], calls
+
+# a later SYLLABLE answer beats an earlier WORD one
+calls = []
+with Patch(lp, _PROVIDERS={"lrclib": level_hit(WORD_LRC),
+                           "kugou": level_hit(SYLLABLE_LRC)}):
+    hit = lp.fetch_lyrics({"lyrics_sources": ["lrclib", "kugou"]},
+                          "Slowdive", "Alison")
+assert hit["provider"] == "kugou" and hit["sync_level"] == "syllable", hit
+
+# a SYLLABLE answer is the best possible: the walk stops there
+calls = []
+with Patch(lp, _PROVIDERS={"lrclib": level_hit(SYLLABLE_LRC),
+                           "kugou": level_hit(WORD_LRC)}):
+    hit = lp.fetch_lyrics({"lyrics_sources": ["lrclib", "kugou"]},
+                          "Slowdive", "Alison")
+assert hit["provider"] == "lrclib" and hit["sync_level"] == "syllable", hit
+assert calls == [("Slowdive", "Alison")], calls
+
+# equal timing keeps the configured provider order
+calls = []
+with Patch(lp, _PROVIDERS={"lrclib": level_hit(WORD_LRC),
+                           "kugou": level_hit(WORD_LRC)}):
+    hit = lp.fetch_lyrics({"lyrics_sources": ["lrclib", "kugou"]},
+                          "Slowdive", "Alison")
+assert hit["provider"] == "lrclib" and hit["sync_level"] == "word", hit
+
+# a plain answer still loses to any timed one, however poor
+calls = []
+with Patch(lp, _PROVIDERS={"lrclib": level_hit(LINE_LRC),
+                           "kugou": lambda *a, **k: lp._hit(
+                               None, PLAIN_ONLY, "Slowdive", "Alison")}):
+    hit = lp.fetch_lyrics({"lyrics_sources": ["lrclib", "kugou"]},
+                          "Slowdive", "Alison")
+assert hit["provider"] == "lrclib" and hit["kind"] == "synced", hit
+
+# The shared upgrade helper: a line lyric becomes word/syllable on request,
+# a richer source answer is never downgraded, and untimed words stay untimed.
+from mlo.lyrics import (SYNC_LEVEL_RANK, sync_level_of, text_meets_sync_level,
+                        upgrade_sync_level)
+
+assert SYNC_LEVEL_RANK == {"plain": 0, "line": 1, "word": 2, "syllable": 3}
+assert sync_level_of(LINE_LRC) == "line"
+assert sync_level_of(WORD_LRC) == "word"
+assert sync_level_of(SYLLABLE_LRC) == "syllable"
+# grading defaults to LINE: line lyrics pass, word/syllable are opt-in
+assert text_meets_sync_level(LINE_LRC, None) is True
+assert text_meets_sync_level(LINE_LRC, "") is True
+assert text_meets_sync_level(LINE_LRC, "LINE") is True
+assert text_meets_sync_level(LINE_LRC, "WORD") is False
+assert text_meets_sync_level(WORD_LRC, "WORD") is True
+assert text_meets_sync_level(WORD_LRC, "SYLLABLE") is False
+assert text_meets_sync_level(SYLLABLE_LRC, "SYLLABLE") is True
+# upgrade: line -> word/syllable, word -> syllable, never a downgrade
+up_word = upgrade_sync_level(LINE_LRC, "WORD")
+assert sync_level_of(up_word) == "word", up_word
+up_syl = upgrade_sync_level(LINE_LRC, "SYLLABLE")
+assert sync_level_of(up_syl) == "syllable", up_syl
+assert upgrade_sync_level(WORD_LRC, "SYLLABLE") != WORD_LRC
+assert upgrade_sync_level(SYLLABLE_LRC, "WORD") == SYLLABLE_LRC
+assert upgrade_sync_level(PLAIN_ONLY, "SYLLABLE") == PLAIN_ONLY
+assert upgrade_sync_level(LINE_LRC, "LINE") == LINE_LRC
+
+
+# --------------------------------------------------------------------------- #
 # The alias pass: a second walk, and only when the first found nothing
 # --------------------------------------------------------------------------- #
 def fixed_hit(artist, title, sync=True):

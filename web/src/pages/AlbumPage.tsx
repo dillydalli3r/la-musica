@@ -15,6 +15,7 @@ import { ExportButton } from "../components/ExportDialog";
 import FavHeart from "../components/FavHeart";
 import TrackTitleCell from "../components/TrackTitleCell";
 import { trackRef, entityLinkClick } from "../lib/refs";
+import { withAlias } from "../lib/mbtext";
 import { invalidateLibrary } from "../lib/invalidate";
 import { auditFails } from "../lib/status";
 import { isVideoFile } from "../lib/fmt";
@@ -693,7 +694,7 @@ export default function AlbumPage() {
                   // mark that tells a reader "this release is explicit" belongs
                   // on the name they are reading, not in a chip two lines down.
                   <span className="inline-flex items-center gap-2 min-w-0">
-                    <span className="truncate">{data.meta?.ALBUM ?? data.path.split("/").pop() ?? ""}</span>
+                    <span className="truncate">{withAlias(data.meta?.ALBUM ?? data.path.split("/").pop() ?? "", data.alias)}</span>
                     {/* the release group's MusicBrainz comment, right after the
                         album name and dimmer than it — "1967–1970 (The Blue
                         Album)", the way MusicBrainz itself renders it */}
@@ -1533,10 +1534,10 @@ export default function AlbumPage() {
                            in `title` (the rule a clip lives by here); `md` and
                            up wrap as before. */
                         className="hover:text-accent-soft break-words min-w-0 max-md:line-clamp-2"
-                        title={`${tr.tags.TITLE ?? tr.file} · Click to play · Ctrl-click to open track page`}
+                        title={`${withAlias(tr.tags.TITLE ?? tr.file, tr.alias)} · Click to play · Ctrl-click to open track page`}
                         onClick={(e) => entityLinkClick(e, () => navigate(trackRef(tr)))}
                       >
-                        {tr.tags.TITLE ?? tr.file}
+                        {withAlias(tr.tags.TITLE ?? tr.file, tr.alias)}
                       </Link>
                       {/* The marks that describe the FILE, directly beside the
                           name they belong to — the EXPLICIT/CLEAN badge first,

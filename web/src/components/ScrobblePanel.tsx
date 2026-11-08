@@ -226,8 +226,8 @@ export default function ScrobblePanel() {
       {!hasApp && (
         <div className="text-[11px] text-amber-400">
           {!st?.key
-            ? "No Last.fm API key saved — paste one on Settings → Connections first."
-            : "No Last.fm shared secret saved — it is shown beside the API key on last.fm; scrobbling cannot be signed without it."}
+            ? "No Last.fm API key saved — paste one in the Last.fm API key field on this page first."
+            : "No Last.fm shared secret saved — paste it in the Last.fm shared secret field on this page; scrobbling cannot be signed without it."}
         </div>
       )}
       <div className="flex items-center gap-2 flex-wrap">

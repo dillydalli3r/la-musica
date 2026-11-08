@@ -403,6 +403,31 @@ async function main() {
     });
   }
 
+  // ---- 10. a drop ANYWHERE is an import ---------------------------------
+  // The App shell's own listener, not the wizard's drop target: the user drops
+  // on whatever page they are on, and the overlay is the only thing telling
+  // them the app noticed.
+  await page.goto(`${BASE}/library`, { waitUntil: "domcontentloaded" });
+  await page.waitForFunction(`document.body.innerText.includes("Library")`,
+    null, { timeout: 20000 }).catch(() => {});
+  const overlayShown = await page.evaluate(async () => {
+    const dt = new DataTransfer();
+    dt.items.add(new File([new Uint8Array([1, 2, 3])], "overlay.flac",
+      { type: "audio/flac" }));
+    window.dispatchEvent(new DragEvent("dragenter",
+      { bubbles: true, cancelable: true, dataTransfer: dt }));
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    return document.body.innerText.includes("Drop files / folders here to import");
+  });
+  check("a dragged file on any page raises the import overlay", overlayShown);
+  const overlayHidden = await page.evaluate(async () => {
+    window.dispatchEvent(new DragEvent("dragleave",
+      { bubbles: true, cancelable: true, relatedTarget: null }));
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    return !document.body.innerText.includes("Drop files / folders here to import");
+  });
+  check("…and leaving the window clears it", overlayHidden);
+
   await browser.close();
   fs.rmSync(TMP, { recursive: true, force: true });
 }

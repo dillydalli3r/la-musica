@@ -101,6 +101,18 @@ def is_audio_file(name):
     return os.path.splitext(name)[1].lower() in LIB_AUDIO_EXTS
 
 
+def _refresh_slskd_shares_soon():
+    """Library changed (organize/import/remove/tag/run) — refresh the slskd
+    share index in the background so the network always sees the current paths.
+
+    This function used to DEFINE `_worker` and never start it, so all of its
+    call sites were silent no-ops and the shared file list went stale until
+    slskd was restarted by hand. The work now lives in server.soulseek (which
+    owns the daemon) and is debounced there."""
+    from server import soulseek
+    soulseek.refresh_shares_soon()
+
+
 def re_safe_filename(name):
     """Older, weaker spelling of the app's ONE filename rule.
 

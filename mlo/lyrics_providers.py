@@ -877,11 +877,16 @@ def _search_chain(cfg, order, artist, title, album, duration, floor,
                   deadline=None):
     """ONE walk of the provider chain, under the names it is given.
 
-    Returns ``(synced_hit, plain_hit)``: the FIRST synced answer — the walk
-    stops there, as it always has — and the best untimed answer seen on the way
-    past it, which is the fallback when no source states timestamps (ties keep
-    the first provider). Both carry ``provider`` / ``provider_label`` /
-    ``score`` and their ``kind``; either may be None.
+    Returns ``(synced_hit, plain_hit)``: the best synced answer by TIMING
+    RICHNESS first — syllable > word > line — then by ``hit_score`` (ties keep
+    the earlier provider), and the best untimed answer seen on the way, which
+    is the fallback when no source states timestamps. A syllable-synced answer
+    ends the walk immediately (nothing can outrank it); a line- or word-synced
+    one is remembered while the remaining providers are asked for a richer
+    answer, because the user's rule is that a source with word/syllable timing
+    is preferred over one with only line stamps. Both hits carry ``provider`` /
+    ``provider_label`` / ``score`` / ``sync_level`` and their ``kind``; either
+    may be None.
 
     *floor* is the acceptance bar (``_MIN_SCORE`` or the caller's ``min_score``)
     and applies to both kinds, and the variant guard runs before it, so a
@@ -894,7 +899,10 @@ def _search_chain(cfg, order, artist, title, album, duration, floor,
     say which source was left instead of a bare "timed out". Without one the
     walk is the unlimited one it always was.
     """
+    from .lyrics import SYNC_LEVEL_RANK, sync_level_of
+
     synced = plain = None
+    best_rank = -1
     for i, pid in enumerate(order):
         if deadline is not None and deadline.spent():
             deadline.cut.extend(order[i:])
@@ -919,10 +927,22 @@ def _search_chain(cfg, order, artist, title, album, duration, floor,
         hit["score"] = round(score, 3)
         hit["kind"] = "synced" if (hit.get("synced") or "").strip() else "plain"
         if hit["kind"] == "synced":
-            return hit, plain
+            level = sync_level_of(hit["synced"])
+            rank = SYNC_LEVEL_RANK.get(level, 0)
+            hit["sync_level"] = level
+            # A syllable-synced answer is the best possible; no later provider
+            # can improve it, so the walk ends here.
+            if rank >= SYNC_LEVEL_RANK["syllable"]:
+                return hit, plain
+            # Otherwise keep the richest timing, then the best match score
+            # (a tie keeps the earlier provider, the configured order).
+            if synced is None or rank > best_rank or (
+                    rank == best_rank and hit["score"] > synced["score"]):
+                synced, best_rank = hit, rank
+            continue
         if plain is None or hit["score"] > plain["score"]:
             plain = hit
-    return None, plain
+    return synced, plain
 
 
 def _provider_rows(pid, artist, title, album, duration, cfg):
@@ -1049,11 +1069,17 @@ def _provider_rows(pid, artist, title, album, duration, cfg):
             instrumental = title_variant_kind(m_title) == "instrumental"
         except Exception:
             instrumental = False
+        try:
+            from .lyrics import sync_level_of as _sync_level_of
+            level = _sync_level_of(synced) if synced else "plain"
+        except Exception:
+            level = "plain"
         out.append({
             "provider": pid,
             "provider_label": SOURCE_LABELS[pid],
             "score": round(score, 3),
             "kind": "synced" if synced else "plain",
+            "sync_level": level,
             "synced": synced,
             "plain": plain or (_lrc_to_plain(synced) if synced else ""),
             "matched_artist": m_artist,
@@ -1128,13 +1154,15 @@ def fetch_lyrics(cfg, artist, title, album=None, duration=None,
 
     SYNCED first, PLAIN as the fallback — the app's own rule: a track whose
     synced lyrics no source has, but whose plain lyrics one does, is a track
-    WITH lyrics. The providers are walked in ``provider_order(cfg)``; the first
-    synced hit that clears the variant guard and the score floor is returned
-    immediately, and an untimed-only answer is REMEMBERED (best ``hit_score``
-    wins, ties keep the first provider) and walked PAST, so a later provider's
-    timestamps still win. When the walk ends with no synced answer the
-    remembered plain hit is returned with ``provider`` / ``provider_label`` /
-    ``score`` filled exactly as a synced one, and ``kind`` saying which it is.
+    WITH lyrics. Among synced answers the TIMING RICHNESS decides first —
+    syllable > word > line — and only then the match score, so a source that
+    states karaoke-grade timing is preferred over an earlier one that has only
+    line stamps; a syllable answer ends the walk at once. An untimed-only
+    answer is REMEMBERED (best ``hit_score`` wins, ties keep the first
+    provider) and walked PAST, so a later provider's timestamps still win. When
+    the walk ends with no synced answer the remembered plain hit is returned
+    with ``provider`` / ``provider_label`` / ``score`` / ``sync_level`` filled
+    exactly as a synced one, and ``kind`` saying which it is.
 
     ``min_score`` raises the bar above the search floor (_MIN_SCORE) for both
     kinds: a hit below it is skipped and the next provider is tried, which is

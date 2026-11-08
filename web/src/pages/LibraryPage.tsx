@@ -28,6 +28,7 @@ import {
 import { gradeSliver, statusFor, IMPORTING_STATUS, auditFails } from "../lib/status";
 import { invalidateLibrary } from "../lib/invalidate";
 import { albumRef, trackRef, artistRef, entityLinkClick } from "../lib/refs";
+import { withAlias } from "../lib/mbtext";
 import { fmtTech, fmtDuration, fmtDateCell, originalYear, GRID_SIZE_MIN } from "../lib/fmt";
 import { EmptyState, GradeBadge, MediaChip, AdvisoryMark, CachedMark, DisambiguationMark, PageLoading, PendingMark } from "../components/Badges";
 import ArtistAvatar from "../components/ArtistAvatar";
@@ -1938,9 +1939,9 @@ export default function LibraryPage() {
                         to={albumRef(al)}
                         onClick={(e) => e.stopPropagation()}
                         className="text-sm font-medium truncate hover:text-accent-soft"
-                        title={al.meta?.ALBUM ?? al.path}
+                        title={withAlias(al.meta?.ALBUM ?? al.path, al.alias)}
                       >
-                        {al.meta?.ALBUM ?? al.path.split("/").pop()}
+                        {withAlias(al.meta?.ALBUM ?? al.path.split("/").pop(), al.alias)}
                       </Link>
                       {/* MusicBrainz's disambiguation comment for the release
                           group, in parentheses right after the album name and
@@ -2045,10 +2046,10 @@ export default function LibraryPage() {
                             }
                           >
                             <Link to={trackRef(t)} className="break-words hover:text-accent-soft min-w-0"
-                              title="Click to play · Ctrl-click to open track page"
+                              title={`${withAlias(t.tags.TITLE ?? t.file, t.alias)} · Click to play · Ctrl-click to open track page`}
                               onClick={(e) => entityLinkClick(e, () => navigate(trackRef(t)))}
                             >
-                              {t.tags.TITLE ?? t.file}
+                              {withAlias(t.tags.TITLE ?? t.file, t.alias)}
                             </Link>
                             <DisambiguationMark value={t.disambiguation} />
                             <AdvisoryMark value={t.tags.ITUNESADVISORY} />
@@ -2405,10 +2406,10 @@ export default function LibraryPage() {
                             <Link
                               to={trackRef(tr)}
                               className="hover:text-accent-soft cell-ellipsis min-w-0"
-                              title={`${tr.tags.TITLE ?? tr.file} · Click to play · Ctrl-click to open track page`}
+                              title={`${withAlias(tr.tags.TITLE ?? tr.file, tr.alias)} · Click to play · Ctrl-click to open track page`}
                               onClick={(e) => entityLinkClick(e, () => navigate(trackRef(tr)))}
                             >
-                              {tr.tags.TITLE ?? tr.file}
+                              {withAlias(tr.tags.TITLE ?? tr.file, tr.alias)}
                             </Link>
                             <DisambiguationMark value={tr.disambiguation} />
                             <AdvisoryMark value={tr.tags.ITUNESADVISORY} />
@@ -2718,7 +2719,7 @@ function AlbumRowGroup({
   return (
     <>
       <AlbumRow
-        title={showAlbumCol ? (album.meta?.ALBUM ?? album.path.split("/").pop()) : null}
+        title={showAlbumCol ? withAlias(album.meta?.ALBUM ?? album.path.split("/").pop(), album.alias) : null}
         titleHref={albumRef(album)}
         titleExtra={
           <>

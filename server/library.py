@@ -909,10 +909,12 @@ def _artist_display_name(artist_dir, albums_data):
     framework-only folder).
 
     The alias mlo.autotag wrote (ARTISTALIAS, the name MusicBrainz states in
-    the reader's locale) is shown BESIDE that name, "宇多田ヒカル (Hikaru
-    Utada)" — the same `withAlias` shape every MusicBrainz row uses — while
-    the ``name`` field keeps the folder's own basename, which is library
-    IDENTITY (paths, lookups), not a caption."""
+    the reader's locale) is the PRIMARY caption and the stored name is shown
+    BESIDE it, "Hikaru Utada (宇多田ヒカル)" — the same `withAlias` shape every
+    MusicBrainz row uses: the reader asked for the locale name, and the
+    original-language spelling stays visible as the parenthetical. The
+    ``name`` field keeps the folder's own basename, which is library IDENTITY
+    (paths, lookups), not a caption."""
     from_tags = next((str(a.get("album_artist") or "").strip()
                       for a in albums_data if a.get("album_artist")), "")
     base = from_tags or strip_mbid_suffix(os.path.basename(artist_dir))
@@ -921,7 +923,7 @@ def _artist_display_name(artist_dir, albums_data):
                   if str((a.get("meta") or {}).get("ARTISTALIAS") or "").strip()),
                  "")
     if alias and alias != base:
-        return f"{base} ({alias})"
+        return f"{alias} ({base})"
     return base
 
 

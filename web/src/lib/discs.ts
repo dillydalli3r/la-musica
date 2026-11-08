@@ -147,6 +147,17 @@ export function bareDiscIndex(name: string): number | null {
  *  to count. */
 export function discDirNumber(name: string): number | null {
   const base = baseName(str(name).replace(/\\/g, "/")).trim();
+  // "Album (CD1)" / "Album [Disc 2]": the decoration itself names the disc,
+  // and stripping it would lose the only statement. Mirror of
+  // `mlo.discs._decoration_disc`.
+  let decorated = base;
+  let dec = DECOR_RE.exec(decorated);
+  while (dec) {
+    const found = discNumberOfName(dec[1]);
+    if (found) return found;
+    decorated = decorated.slice(0, dec.index);
+    dec = DECOR_RE.exec(decorated);
+  }
   const bare = stripDecoration(base);
   if (!bare) return null;
   const word = DISC_DIR_WORD_FULL.exec(bare);

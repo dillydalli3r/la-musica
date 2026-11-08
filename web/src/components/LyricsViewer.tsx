@@ -180,14 +180,25 @@ export function parsePlayerLrc(text: string, shiftMs = 0): LrcLine[] {
 /** Seed stored xlit/trans arrays so index `i` matches main `displayLines[i]`:
  * synced transforms parse WITHOUT the time-0 leader (parseLrc, not
  * parsePlayerLrc), then take the main's leader when it has one — a plain
- * branch adds none either. Both panes share this, so no leader-shift. */
-export function splitStoredLines(s: string, withLeader = false): string[] {
+ * branch adds none either. Both panes share this, so no leader-shift.
+ *
+ * The LRC form is kept (timestamps AND ELRC word/syllable pieces) because a
+ * stored transform can be word- or syllable-synced: the viewer animates it
+ * with the same `KaraokeWords` as the original instead of flattening it to a
+ * plain sub-line. `splitStoredLines` remains the text-only view. */
+export function splitStoredLrc(s: string, withLeader = false): LrcLine[] {
   // honey: blank-leader pad keeps xlit/trans 1:1; per-line realign if sources diverge.
-  const out = /\[\d{1,2}:\d{1,2}/.test(s)
-    ? parseLrc(s).map((l) => l.text)
-    : s.split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
-  if (withLeader && out.length) out.unshift("");
+  const out: LrcLine[] = /\[\d{1,2}:\d{1,2}/.test(s)
+    ? parseLrc(s)
+    : s.split(/\r?\n/).map((x) => x.trim()).filter(Boolean)
+        .map((text) => ({ ts: "", time: 0, text }));
+  if (withLeader && out.length) out.unshift({ ts: "", time: 0, text: "" });
   return out;
+}
+
+/** The text-only view of `splitStoredLrc` (sub-lines that need no timing). */
+export function splitStoredLines(s: string, withLeader = false): string[] {
+  return splitStoredLrc(s, withLeader).map((l) => l.text);
 }
 
 /** The active line range, background vocals included: lines stamped at the

@@ -456,8 +456,8 @@ if _FLAC:
         bool_fields=_api_query.bool_fields())["items"]
     ok([i["path"] for i in _hit] == [_tr["path"]],
        f"a library query finds the track by tags.TITLEALIAS ({_hit})")
-    ok(_lib._artist_display_name(_artist_dir, [_res]) == "宇多田ヒカル (Hikaru Utada)",
-       "the artist's display name shows the alias with the original "
+    ok(_lib._artist_display_name(_artist_dir, [_res]) == "Hikaru Utada (宇多田ヒカル)",
+       "the artist's display name shows the locale alias first, with the original "
        f"({_lib._artist_display_name(_artist_dir, [_res])!r})")
 
     # MusicBrainz's disambiguation comment for the ARTIST — the same fact the

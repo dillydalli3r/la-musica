@@ -39,7 +39,7 @@ import os
 from .audio import AudioFile
 from .lyrics import (
     _atomic_write_text, _format_for_storage, _lrc_for, has_lyrics_text,
-    _process_lyrics_for_audio, sync_level_of,
+    _process_lyrics_for_audio, sync_level_of, upgrade_sync_level,
 )
 from .lyrics_providers import (  # noqa: F401  (lrclib_fetch is a re-export shim)
     SOURCE_LABELS, fetch_lyrics, lrclib_fetch, provider_order,
@@ -241,6 +241,7 @@ def fetch_one(path, config, replace=False, mark_absent=True, deadline=None):
     """
     result = {"path": path, "status": "skipped", "provider": None,
               "provider_label": None, "kind": None, "synced": False,
+              "sync_level": None,
               "wrote": {"embedded": False, "lrc": None},
               "reason": "", "error": ""}
     fmt = str(config.get("lyrics_format") or "EMBEDDED").upper()
@@ -349,6 +350,16 @@ def fetch_one(path, config, replace=False, mark_absent=True, deadline=None):
         # The KIND is what was written: timestamps, or the untimed fallback.
         result["synced"] = bool((hit.get("synced") or "").strip())
         result["kind"] = "synced" if result["synced"] else "plain"
+        # A fetched line-timed lyric is upgraded to the sync granularity the
+        # install asks for (`lrc_sync_level`, WORD/SYLLABLE) before it is
+        # stored, so the reader's karaoke view has word/syllable stamps even
+        # when the provider only stated lines. `upgrade_sync_level` never
+        # downgrades a richer source answer and never invents timing for
+        # untimed words.
+        if result["synced"]:
+            text = upgrade_sync_level(
+                text, config.get("lrc_sync_level", "LINE"))
+        result["sync_level"] = sync_level_of(text)
         if hit.get("alias_pass"):
             # The second pass is what answered — say so, and name the name.
             result["alias_pass"] = dict(hit["alias_pass"])

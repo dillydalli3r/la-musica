@@ -21,7 +21,7 @@ import CoverImg, { TrackCover } from "../components/CoverImg";
 import PageHeader from "../components/PageHeader";
 import { ForceControl, useForceRun } from "../components/ForceRun";
 import { useI18n } from "../lib/i18n";
-import { discDirNumber, isDiscParent } from "../lib/discs";
+import { discDirNumber, isDiscParent, stripDecoration } from "../lib/discs";
 import MetadataReviewModal from "../components/MetadataReviewModal";
 import ImportIdentifyDialog from "../components/ImportIdentifyDialog";
 import type { IdentifyAlbum } from "../components/ImportIdentifyDialog";
@@ -501,6 +501,80 @@ function detectAlbums(imports: ImportFile[], fallbackName: string): AlbumGroup[]
     root: r,
     files: groups.get(r) ?? [],
   }));
+}
+
+/** The album folder a group names on disk, when the desktop shell supplied
+ *  paths. A web pick has no absolute path and cannot be compared across
+ *  batches. */
+function albumFolderOnDisk(batch: StagedBatch, album: AlbumGroup): string {
+  const roots = new Set(album.files.map((f) => f.nativeRoot).filter(Boolean) as string[]);
+  const root = roots.size === 1 ? [...roots][0] : batch.nativeRoot;
+  if (!root) return "";
+  const rel = album.root.replace(/^\/+|\/+$/g, "");
+  return rel ? `${root.replace(/[\\/]+$/, "")}/${rel}` : root;
+}
+
+/** A disc folder's (parent, album stem, disc number) — "…/Album/CD2" and
+ *  "…/Album (Disc 2)" both answer the album their sibling folder belongs to.
+ *  Null when the name states no disc. */
+function discSiblingOf(path: string): { parent: string; stem: string; disc: number } | null {
+  const norm = path.replace(/\\/g, "/").replace(/\/+$/, "");
+  if (!norm) return null;
+  const base = norm.split("/").pop() || "";
+  const disc = discDirNumber(base);
+  if (!disc) return null;
+  const stem = stripDecoration(base)
+    .replace(/[\s._-]*(?:cd|disc|disk|dvd|bd|volume|vol)[\s._-]?\d{1,2}$/i, "")
+    .trim();
+  return { parent: norm.slice(0, Math.max(0, norm.length - base.length - 1)), stem, disc };
+}
+
+/** Fold a batch's disc folders into a sibling already banked (or into each
+ *  other). Two separately picked folders — "Album CD1" and "Album CD2" — are
+ *  two discs of ONE album, not two albums: the same rule `detectAlbums`
+ *  applies when they arrive in one drop, carried across batches because the
+ *  folder picker can hand them over one at a time. Returns the albums that
+ *  still need a batch of their own. */
+function mergeDiscAlbums(batch: StagedBatch, existing: StagedBatch[]): {
+  albums: AlbumGroup[];
+  batches: StagedBatch[];
+} {
+  const batches = existing.map((b) => ({ ...b, albums: b.albums.map((a) => ({ ...a, files: [...a.files] })) }));
+  const kept: AlbumGroup[] = [];
+  for (const album of batch.albums) {
+    const here = discSiblingOf(albumFolderOnDisk(batch, album));
+    let target: { batch: StagedBatch; album: AlbumGroup } | null = null;
+    if (here) {
+      for (const b of batches) {
+        for (const a of b.albums) {
+          const there = discSiblingOf(albumFolderOnDisk(b, a));
+          if (!there || there.parent.toLowerCase() !== here.parent.toLowerCase()) continue;
+          if (there.stem.toLowerCase() !== here.stem.toLowerCase()) continue;
+          if (there.disc === here.disc) continue;
+          target = { batch: b, album: a };
+          break;
+        }
+        if (target) break;
+      }
+    }
+    if (!target) {
+      kept.push(album);
+      continue;
+    }
+    const seen = new Set(target.album.files.map((f) => f.native ?? f.relPath));
+    for (const f of album.files) {
+      const key = f.native ?? f.relPath;
+      if (!seen.has(key)) {
+        target.album.files.push(f);
+        seen.add(key);
+      }
+    }
+    // The merged album is the one the FOLDERS sit in, named by the common
+    // stem ("Album"), not by either disc folder ("Album CD1").
+    const base = here?.stem || here?.parent.split("/").pop() || target.album.name;
+    target.album.name = base || target.album.name;
+  }
+  return { albums: kept, batches };
 }
 
 export default function ImportWizard() {
@@ -1772,13 +1846,26 @@ export default function ImportWizard() {
   /** Does the selection being built hold anything to import? */
   const activeHasContent = () => albums.some((g) => g.files.length && g.name.trim());
 
+  /** Bank one batch, folding any disc folder into a sibling already banked:
+   *  two separately picked folders ("Album CD1", "Album CD2") are two discs of
+   *  ONE album (see `mergeDiscAlbums`), while unrelated batches keep their own
+   *  place and order. */
+  const bankBatch = (batch: StagedBatch) => {
+    setStagedBatches((bs) => {
+      const merged = mergeDiscAlbums(batch, bs);
+      return merged.albums.length
+        ? [...merged.batches, { ...batch, albums: merged.albums }]
+        : merged.batches;
+    });
+  };
+
   /** Bank the selection being built (if any) so a NEW selection can never throw
    *  it away — the owner's "the second cd vanished" was exactly this: the
    *  second drop REPLACED the first batch. Every entry point that starts a new
    *  selection calls this first. */
   const bankActiveSelection = () => {
     if (!activeHasContent()) return;
-    setStagedBatches((bs) => [...bs, activeBatch()]);
+    bankBatch(activeBatch());
   };
 
   /** Bank the selection being built as a batch of its own and clear the drop
@@ -1789,7 +1876,7 @@ export default function ImportWizard() {
       toast("Nothing to add — pick files or a folder first");
       return;
     }
-    setStagedBatches((bs) => [...bs, activeBatch()]);
+    bankBatch(activeBatch());
     setAlbums([]);
     setExcluded(new Set());
     setUnpacked([]);
@@ -1812,8 +1899,17 @@ export default function ImportWizard() {
 
   const doImport = async (auto = false) => {
     // The worklist, in order: the banked batches, then the selection being
-    // built. One press stages every one of them and queues them together.
-    const pending = [...stagedBatches, ...(activeHasContent() ? [activeBatch()] : [])];
+    // built. The active selection is folded through the same disc-sibling
+    // rule as a banked one, so a second disc dropped into the drop zone (and
+    // not yet banked) still joins the first as ONE album.
+    const activeNow = activeHasContent() ? activeBatch() : null;
+    const mergedActive = activeNow ? mergeDiscAlbums(activeNow, stagedBatches) : null;
+    const pending = [
+      ...(mergedActive ? mergedActive.batches : stagedBatches),
+      ...(activeNow && mergedActive && mergedActive.albums.length
+        ? [{ ...activeNow, albums: mergedActive.albums }]
+        : []),
+    ];
     if (!pending.length) {
       toast("Nothing to import — add files first");
       return;
@@ -1830,8 +1926,14 @@ export default function ImportWizard() {
     // can be retried; a failing batch never stalls the ones after it.
     const okIds = new Set<string>();
     // The selection being built, when there is one, is the LAST entry in the
-    // worklist; it is the one cleared from the drop zone once it stages.
-    const active = activeHasContent() ? pending[pending.length - 1] : null;
+    // worklist; it is the one cleared from the drop zone once it stages. A
+    // disc folder that merged entirely into an already-banked sibling has no
+    // entry of its own, but it is still consumed by this press.
+    const active = activeNow
+      ? (mergedActive && mergedActive.albums.length
+        ? pending[pending.length - 1]
+        : activeNow)
+      : null;
     try {
       // `owned` = THIS press created the album folder in the library, so a
       // Cancel may remove it again. The server states it (`created` on the
@@ -1962,6 +2064,12 @@ export default function ImportWizard() {
       if (!results.length) {
         toast(failed.length ? String(failed[0].error) : "Nothing to import");
         return;
+      }
+      // A disc folder that merged into a banked sibling has no pending entry
+      // of its own: the sibling staged it, so the drop zone is consumed too.
+      if (active && activeNow && mergedActive
+          && mergedActive.albums.length === 0 && results.length) {
+        okIds.add(active.id);
       }
       setUploaded(results);
       setAlbumIndex(0);

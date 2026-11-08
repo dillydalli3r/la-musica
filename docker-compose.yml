@@ -59,6 +59,11 @@ services:
     container_name: la-musica
     ports:
       - "8000:8000"
+      # The Soulseek listen port (soulseek_listen_port in the shared config).
+      # The panel's obfuscated readout is listen+1 (21455 -> 21456), but slskd
+      # implements no obfuscated route: nothing binds that number, so there is
+      # nothing to publish for it.
+      - "21455:21455"
     environment:
       # Folder inside the container to treat as the music library.
       - MLO_MUSIC_FOLDER=/music

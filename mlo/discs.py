@@ -332,6 +332,25 @@ def bare_disc_index(name):
     return _positive(int(base))
 
 
+def _decoration_disc(name):
+    """The disc number a trailing decoration states, or None.
+
+    A rip often spells the disc inside the folder's parentheses/brackets —
+    "Album (CD1)", "Album [Disc 2]" — and `strip_decoration` would remove the
+    only place the disc is named. This reads the decoration BEFORE stripping,
+    for the same token vocabulary `disc_number_of_name` uses.
+    """
+    text = str(name or "")
+    while True:
+        m = DECOR_RE.search(text)
+        if not m:
+            return None
+        found = disc_number_of_name(m.group(1))
+        if found:
+            return found
+        text = text[:m.start()]
+
+
 def disc_dir_number(name):
     """The disc a DIRECTORY name states, or None when the folder is not a disc
     folder of its parent.
@@ -339,11 +358,15 @@ def disc_dir_number(name):
     The ONE rule the search's candidate tree, the importer's mover and the
     readiness check ask, for a folder that names its disc: "CD1", "CD 1",
     "CD-1", "Disk1", "Disc 2", "Volume 1", "DVD 2", "CD1 [FLAC]" (the share's
-    decoration is stripped), plus the loose spellings disc_number_of_name
+    decoration is stripped), "Album (CD1)"/"Album [Disc 2]" (the decoration
+    itself states the disc), plus the loose spellings disc_number_of_name
     reads. Anything else — "Album [FLAC]", "Extras", "Log+Cue", "Scans" — is
     not a disc folder whatever else it may be. The bare index ("1", "02") is
     answered by :func:`bare_disc_index`, which needs the siblings to count."""
     base = os.path.basename(str(name or "").replace("\\", "/")).strip()
+    decorated = _decoration_disc(base)
+    if decorated:
+        return decorated
     bare = strip_decoration(base)
     if not bare:
         return None

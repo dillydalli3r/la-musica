@@ -2,8 +2,8 @@ import { useQuery } from "@tanstack/react-query";
 import { useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import {
-  BarChart3, Clock, Disc3, Flame, Headphones, Heart, ListChecks, ListMusic,
-  Moon, Music2, Play, Radio, RefreshCw, Sparkles, Star, Tags,
+  BarChart3, Clock, Compass, Disc3, Flame, Headphones, Heart, ListChecks,
+  ListMusic, Moon, Music2, Play, Radio, RefreshCw, Sparkles, Star, Tags,
   TrendingUp, Users, Waves,
 } from "lucide-react";
 import { api } from "../api";
@@ -460,6 +460,26 @@ export default function HomePage() {
           </Link>
         </div>
       )}
+
+      {/* The online storefront, one press away: top songs by genre and the
+          streaming services' charts (the Discover page owns the shelves, so
+          Home never waits on a provider to paint). */}
+      <Link
+        to="/discover"
+        className="panel flex items-center gap-3 !py-3 hover:border-accent/50 transition-colors"
+        title="Top songs by genre, Apple Music's chart and a library-seeded online shelf"
+      >
+        <span className="h-9 w-9 rounded-lg bg-accent/15 text-accent-soft flex items-center justify-center shrink-0">
+          <Compass className="h-4 w-4" />
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="block text-sm font-medium text-zinc-100">Discover online</span>
+          <span className="block text-[11px] text-zinc-500">
+            Top songs by genre and what Apple Music, Deezer and Last.fm are ranking now
+          </span>
+        </span>
+        <span className="text-[11px] text-accent-soft shrink-0">Open →</span>
+      </Link>
 
       {/* What you have been listening to — the page's own opening answer. */}
       <TrackList title="Most played tracks" icon={TrendingUp} rows={data.top_tracks}

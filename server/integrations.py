@@ -5061,9 +5061,17 @@ def releases_for_disc_id(disc_id):
         for m in ([mine] if mine is not None else media):
             for t in (m.get("tracks") or []):
                 tracks.append({"position": t.get("position"),
-                               "title": t.get("title") or t.get("name") or ""})
+                               "title": t.get("title") or t.get("name") or "",
+                               # MusicBrainz states a recording's length in ms;
+                               # the log's TOC states seconds. Both are kept so
+                               # the matcher can compare the rip to the release
+                               # track by track.
+                               "length": int(t.get("length") or 0)})
+        rg = rel.get("release-group") or {}
         rows.append({
             "release_id": rid,
+            "release_group_id": str(rg.get("id") or ""),
+            "release_group_title": rg.get("title") or "",
             "title": rel.get("title") or "",
             "artist": artist,
             "artist_mbid": artist_mbid,
@@ -5128,8 +5136,8 @@ def auto_import_targets(mbid, kind=None, mode="best", types=None,
     # queuing a release or a group the library already holds downloaded the
     # same album a second time, and the duplicate then landed beside it.
     from mlo.config import load_config
-    from server import library as lib_mod
-    owned = lib_mod.owned_mbids(load_config())
+    from server import wishes
+    owned = wishes.owned_mbids(load_config())
     if kind == "release":
         rel, rid = resolve_release(mbid)
         if not rid:

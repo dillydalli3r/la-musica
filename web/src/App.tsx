@@ -3,7 +3,7 @@ import type { ReactNode } from "react";
 import { Navigate, NavLink, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Activity, BarChart3, ChevronLeft, ChevronRight, ClipboardCheck, Disc3, Gauge, HardDriveDownload, Heart, HeartHandshake, Home, Import,
+  Activity, ArrowDownUp, BarChart3, ChevronLeft, ChevronRight, ClipboardCheck, Compass, Disc3, Download, Eye, Gauge, HardDriveDownload, Heart, HeartHandshake, Home, Import,
   Keyboard, Library, ListChecks, ListMusic, Menu, Music2, Music4, PanelLeftClose, Search, Sliders, Tag, Tags, Trash2, User, WifiOff, X,
   Settings as SettingsIcon, Wrench,
 } from "lucide-react";
@@ -22,6 +22,7 @@ import { GradeTraySync } from "./components/GradeWarning";
 import ShortcutsOverlay from "./components/Shortcuts";
 import { applyConfigLocale, useI18n, type MessageKey } from "./lib/i18n";
 import { applyAccentVars, resolveAccent } from "./lib/accent";
+import { publishTransfers } from "./lib/notifications";
 import { useJobLocks, type LocksPayload } from "./lib/locks";
 
 // Route-level code splitting: only the landing page ships in the initial
@@ -45,6 +46,9 @@ const OptimizationPage = lazy(() => import("./pages/OptimizationPage"));
 const EqualizerPage = lazy(() => import("./pages/EqualizerPage"));
 const DependenciesPage = lazy(() => import("./pages/DependenciesPage"));
 const GenrePage = lazy(() => import("./pages/GenrePage"));
+const DownloadsPage = lazy(() => import("./pages/DownloadsPage"));
+const SoulseekPage = lazy(() => import("./pages/SoulseekPage"));
+const WatchedArtistsPage = lazy(() => import("./pages/WatchedArtistsPage"));
 const ImportWizard = lazy(() => import("./pages/ImportWizard"));
 const DonationsPage = lazy(() => import("./pages/DonationsPage"));
 const InProgressPage = lazy(() => import("./pages/InProgressPage"));
@@ -52,6 +56,7 @@ const InProgressPage = lazy(() => import("./pages/InProgressPage"));
 // and from an episode's own page, so the sidebar needs no entry for them).
 const PodcastPage = lazy(() => import("./pages/PodcastPage"));
 const ChartsPage = lazy(() => import("./pages/ChartsPage"));
+const DiscoverPage = lazy(() => import("./pages/DiscoverPage"));
 const CheckStackPage = lazy(() => import("./pages/CheckStackPage"));
 const MBSearchPage = lazy(() => import("./pages/MusicBrainzPage").then((m) => ({ default: m.MBSearchPage })));
 const MBArtistPage = lazy(() => import("./pages/MusicBrainzPage").then((m) => ({ default: m.MBArtistPage })));
@@ -102,6 +107,7 @@ import PageLoading from "./shell/PageLoading";
 import ShellSplash from "./shell/ShellSplash";
 import SearchHit from "./shell/SearchHit";
 import SetupLoading from "./shell/SetupLoading";
+import SlskIconDot from "./shell/SlskIconDot";
 import Toasts from "./shell/Toasts";
 
 // Sidebar sections: a long flat list of 14 entries is hard to scan, so the
@@ -184,16 +190,23 @@ const NAV_GROUPS: { labelKey: MessageKey; items: { to: string; labelKey: Message
       { to: "/trash", labelKey: "nav.trash", icon: Trash2, end: true },
       { to: "/playlists", labelKey: "nav.playlists", icon: ListMusic, end: false },
       { to: "/favorites", labelKey: "nav.favorites", icon: Heart, end: false },
+      { to: "/downloads", labelKey: "nav.downloads", icon: Download, end: true },
     ],
   },
   {
     labelKey: "nav.group.discover",
     items: [
+      // Discover is the online storefront: top songs by genre and the
+      // streaming services' charts, with every row one press from the library.
+      { to: "/discover", labelKey: "nav.discover", icon: Compass, end: false },
       // Charts is the library's own play history, over the windows the user
-      // picked. (The providers' charts that sat beside it are gone with the
-      // online discovery feeds.)
+      // picked.
       { to: "/charts", labelKey: "nav.charts", icon: BarChart3, end: false },
+      // Watched artists are the same queue as Discover: a release group added
+      // here is searched, downloaded and imported by the one pipeline.
+      { to: "/watched", labelKey: "nav.watched", icon: Eye, end: false },
       { to: "/import", labelKey: "nav.import", icon: Import, end: false },
+      { to: "/soulseek", labelKey: "nav.soulseek", icon: ArrowDownUp, end: false },
       // MusicBrainz sits with acquiring: browsing the database IS how a user
       // finds the release they are about to import, and every entity page
       // carries the actions that put one in the library.
@@ -280,6 +293,81 @@ export function applyAccent(name: string | null) {
  *  second time: this timer only decides whether a quiet bar is due to go, and
  *  the registry's answer is already in the cache. One timer for the whole
  *  stack, and none at all while no bar is up — never a timer per bar. */
+/** Soulseek availability dot: green = logged into the Soulseek network,
+ * amber = slskd running but not logged in, hidden = not running. Sits on
+ * the nav icon's corner so it reads the same with the sidebar collapsed.
+ * When logged in, `name` carries the account name — shown in the tooltip.
+ *
+ * `enabled` is false while the shell is behind the login gate: the dot is not
+ * rendered there (the sidebar is not), and a client that has not been told
+ * where its server is must not poll an address it cannot reach — that poll was
+ * one more failed request per 20s on the screen whose whole job is to ask for
+ * the address. */
+function useSlskDot(enabled: boolean) {
+  const { data: st } = useQuery({
+    queryKey: ["soulseek", "status-dot"],
+    queryFn: api.soulseekStatus,
+    enabled,
+    refetchInterval: 20000,
+    refetchIntervalInBackground: false,
+    staleTime: 15000,
+    retry: false,
+  });
+  // What is being TAKEN from this share right now, for the dot. It is the SAME
+  // payload (and query key) the Soulseek page's Sharing panel renders, so the
+  // two share one request and one cache, and the state is what the page already
+  // says in words ("sharing now N").
+  //
+  // A peer starting to download no longer raises a notification
+  // (`notify_soulseek_upload_start` ships off): somebody taking files from this
+  // share is an in-app fact, so it shows HERE — the dot turns blue while files
+  // are being served — and in the Sharing panel, not as an interruption.
+  const sharing = useQuery({
+    queryKey: ["soulseekUploads"],
+    queryFn: api.soulseekUploads,
+    enabled: enabled && !!st?.running && !st?.conflict,
+    refetchInterval: 20000,
+    refetchIntervalInBackground: false,
+    staleTime: 15000,
+    retry: false,
+  });
+  const serving = (sharing.data?.uploads ?? []).reduce(
+    (n, p) => n + (p.active ?? 0), 0);
+  const servingTip = serving > 0
+    ? ` · sharing now (${serving} file${serving === 1 ? "" : "s"})`
+    : "";
+  if (st?.logged_in) {
+    // The LIVE account, not the saved username — those drift apart.
+    const name = String(st.account || st.username || "").trim() || null;
+    if (serving > 0) {
+      // The connection is still what the dot MEANS, so its word comes first and
+      // the activity rides along; the colour is the page's own "sharing now"
+      // colour, which is what makes it visible at a glance at all.
+      return {
+        cls: "bg-sky-400",
+        tip: `${name ? `Soulseek — logged in as ${name}` : "Soulseek — connected"}${servingTip}`,
+        name,
+      };
+    }
+    return {
+      cls: "bg-emerald-500",
+      tip: name ? `Soulseek — logged in as ${name}` : "Soulseek — connected",
+      name,
+    };
+  }
+  if (st?.conflict) return { cls: "bg-red-500", tip: `Soulseek — ${st.conflict}`, name: null };
+  if (st?.running) {
+    // The daemon's own words (INVALIDPASS, no credentials…) beat a generic
+    // "not logged in" — the dot is the only place some users will look.
+    return {
+      cls: "bg-amber-400",
+      tip: (st.error ? `Soulseek — not logged in: ${st.error}` : "Soulseek — running, not logged in")
+        + servingTip,
+      name: null,
+    };
+  }
+  return null;
+}
 const PROGRESS_SWEEP_MS = 1000;
 
 /** Bars end on the producer's own `progress_end` (the socket handler below).
@@ -534,6 +622,53 @@ export default function App() {
     || authFailed
     || (!!auth.data?.required && !auth.data.authenticated);
 
+  const slskDot = useSlskDot(!needsLogin);
+
+  // A finished auto-import is a download the user asked for minutes ago and has
+  // long stopped watching, so the edge announces it wherever they are. Same
+  // query key as the auto panel — one poll, react-query keeps the more
+  // aggressive interval — and the panel's own toast is untouched.
+  //
+  // The observer takes the job's STATE alone, as one primitive, and the album
+  // path is read from the cache only when the edge actually fires. Observing
+  // the raw job (stage text, byte counts, a growing log) re-rendered App on
+  // every poll — and App is the whole shell.
+  const { data: autoStateNow } = useQuery({
+    queryKey: ["soulseekAuto"],
+    queryFn: api.soulseekAutoStatus,
+    // No server to ask yet: the login screen owns the screen and the only
+    // request it should be making is its own status probe.
+    enabled: !needsLogin,
+    // 2s while a job is live is the point of the poll — it is how the queue and
+    // the confirm prompt advance — and it drops to 15s the moment the job
+    // leaves running/confirm, so an idle client is not polling a list at all.
+    refetchInterval: (q) => (q.state.data?.state === "running" || q.state.data?.state === "confirm" ? 2000 : 15000),
+    refetchIntervalInBackground: false,
+    select: (j) => j.state,
+  });
+  const autoState = useRef<string | null>(null);
+  useEffect(() => {
+    const st = autoStateNow ?? null;
+    const prev = autoState.current;
+    autoState.current = st;
+    // Only the running/confirm → done EDGE announces. The ref holds that edge
+    // to one firing, so a later poll, a re-render or a reload of an old
+    // finished job cannot re-announce it.
+    if (st !== "done" || (prev !== "running" && prev !== "confirm")) return;
+    // A wish handoff also ends "done" — but nothing landed on disk to tag.
+    const job = qc.getQueryData<{
+      chain?: { running?: boolean } | null;
+      result?: { album_path?: string } | null;
+    }>(["soulseekAuto"]);
+    const album = job?.result?.album_path ?? "";
+    if (!album) return;
+    // "done" is the DOWNLOAD's edge, not the pipeline's: the album is in the
+    // library while the configured scripts may still be to come.
+    const chainRunning = !!job?.chain?.running;
+    toast(`Imported ${album.split(/[\\/]/).filter(Boolean).pop() || album} — it is in your library`
+      + (chainRunning ? ` — ${t("queue.chain_running_brief")}` : ""));
+  }, [autoStateNow, qc, t]);
+
   // ---- offline ------------------------------------------------------------
   // `isOffline()` is true while the API is answering from the on-disk cache
   // (see lib/offlineCache.ts): the app keeps working — that is the point of
@@ -679,7 +814,8 @@ export default function App() {
   const [dropActive, setDropActive] = useState(0);
   useEffect(() => {
     const carriesFiles = (e: DragEvent) =>
-      Array.from(e.dataTransfer?.items ?? []).some((i) => i.kind === "file");
+      Array.from(e.dataTransfer?.types ?? []).includes("Files")
+      || Array.from(e.dataTransfer?.items ?? []).some((i) => i.kind === "file");
     const onEnter = (e: DragEvent) => {
       if (!carriesFiles(e)) return;
       e.preventDefault();
@@ -692,18 +828,20 @@ export default function App() {
       if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
     };
     const onLeave = (e: DragEvent) => {
-      if (!carriesFiles(e)) return;
-      // Leaving the window is the only decrement that matters; moving across
-      // children fires enter/leave pairs, so the counter can drift — clearing
-      // when the pointer leaves the viewport keeps the overlay honest.
+      // Leaving the window is the only thing that clears the overlay; moving
+      // across children fires enter/leave pairs, so the counter can drift.
+      // `dragleave`'s dataTransfer is usually EMPTY (some browsers hand it no
+      // items at all), so `carriesFiles` cannot gate this: the overlay would
+      // stay up after the pointer left the window.
       if (e.relatedTarget === null) setDropActive(0);
     };
     const onDrop = async (e: DragEvent) => {
-      if (e.defaultPrevented) return;        // a queue reorder owns this drop
-      if (!carriesFiles(e) || !e.dataTransfer) return;
-      e.preventDefault();
+      // Any drop ends the drag, whether or not this listener owns it (a queue
+      // reorder cancels its own event): the overlay must never outlive it.
       setDropActive(0);
-      if (location.pathname.startsWith("/import")) return; // the wizard's own
+      if (!carriesFiles(e) || !e.dataTransfer) return;
+      if (e.defaultPrevented) return;
+      e.preventDefault();
       try {
         const files = await filesFromDrop(e.dataTransfer);
         if (!files.length) return;
@@ -727,7 +865,6 @@ export default function App() {
           if (cancelled) return;
           stopShell = await getCurrentWebview().onDragDropEvent(({ payload }) => {
             if (payload.type !== "drop" || !payload.paths?.length) return;
-            if (location.pathname.startsWith("/import")) return;
             setPendingImport({ kind: "paths", paths: payload.paths });
             navigate("/import");
           });
@@ -995,6 +1132,24 @@ export default function App() {
       ws.onmessage = (e) => {
         try {
           const p = JSON.parse(e.data);
+          if (p?.type === "soulseek") {
+            // The daemon's login/run state changed under us (a login that
+            // just landed, an unexpected logout, a port conflict): re-read
+            // the status both the tab and the nav dot derive from, so the
+            // dot repaints without waiting for the next poll or a reload.
+            qc.invalidateQueries({ queryKey: ["soulseek"] });
+            qc.invalidateQueries({ queryKey: ["soulseekStatus"] });
+            return;
+          }
+          if (p?.type === "transfers") {
+            // Live transfer progress (see server/main.py's transfer watcher).
+            // Handed to the store the Soulseek page draws its bars from — NOT
+            // invalidated, because a byte count changing four times a second
+            // must not refetch anything, and never routed through the
+            // notification tray (lib/notifications.ts keeps the two apart).
+            publishTransfers(p);
+            return;
+          }
           if (p?.type === "progress_end") {
             // The producer's own "finished" — the ONE thing that ends its bar.
             // A total-complete frame does NOT: producers publish those
@@ -1234,6 +1389,7 @@ export default function App() {
               >
                 <span className="nav-icon relative shrink-0 inline-flex">
                   <Icon className="h-4 w-4 shrink-0" />
+                  {to === "/soulseek" && <SlskIconDot dot={slskDot} />}
                 </span>
                 <span
                   className={`overflow-hidden whitespace-nowrap text-ellipsis transition-[max-width,opacity] duration-150 ${
@@ -1301,6 +1457,7 @@ export default function App() {
                   >
                     <span className="nav-icon relative shrink-0 inline-flex">
                       <Icon className="h-4 w-4 shrink-0" />
+                      {to === "/soulseek" && <SlskIconDot dot={slskDot} />}
                     </span>
                     {/* Wrapping, not nowrap: a translation is longer than the
                         English label it was written beside ("Now playing" is
@@ -1556,6 +1713,9 @@ export default function App() {
             <Route path="/genres" element={<GenrePage />} />
             {/* The offline downloads: the tracks this browser can play with
                 the server down, as the library's own album table. */}
+            <Route path="/downloads" element={<DownloadsPage />} />
+            <Route path="/soulseek" element={<SoulseekPage />} />
+            <Route path="/watched" element={<WatchedArtistsPage />} />
             <Route path="/trash" element={<TrashPage />} />
             <Route path="/artist/:path" element={<ArtistPage />} />
             <Route path="/podcast/:series" element={<PodcastPage />} />
@@ -1573,6 +1733,7 @@ export default function App() {
             <Route path="/in-progress" element={<InProgressPage />} />
             {/* What is being played: the user's own play history beside the
                 providers' charts, one window at a time. */}
+            <Route path="/discover" element={<DiscoverPage />} />
             <Route path="/charts" element={<ChartsPage />} />
             <Route path="/checks" element={<CheckStackPage />} />
             <Route path="/dependencies" element={<DependenciesPage />} />
@@ -1620,9 +1781,11 @@ export default function App() {
         <div className="fixed inset-0 z-[70] pointer-events-none bg-bg/70 backdrop-blur-sm flex items-center justify-center">
           <div className="rounded-2xl border-2 border-dashed border-accent/70 bg-panel/90 px-10 py-8 text-center shadow-2xl">
             <Import className="h-8 w-8 mx-auto text-accent" />
-            <div className="mt-2 text-base font-semibold">Drop to import</div>
+            <div className="mt-2 text-base font-semibold">
+              Drop files / folders here to import
+            </div>
             <div className="text-xs text-zinc-400 mt-1">
-              files, folders or archives — they open in the import wizard
+              Files, folders or archives — they open in the import wizard
             </div>
           </div>
         </div>

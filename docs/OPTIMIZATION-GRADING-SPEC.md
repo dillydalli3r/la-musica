@@ -9173,7 +9173,10 @@ and at a short one, by `tools/check_fullscreen_player.cjs`.
 
 ---
 
-### 7.84 The app no longer downloads albums, and a rip log's TOC now names its pressing
+### 7.84 Album download was removed in 2.1.0 (superseded), and a rip log's TOC now names its pressing
+
+*The removal half is historical: the owner asked for the pipeline back on
+2026-11-07, and §7.89/R475 restores it. The TOC half (R442) still stands.*
 
 The owner's decision (2026-10-17): *"I want to remove album download / soulseek
 from the app entirely"*, and *"in MANUAL / auto-importing (with user uploaded
@@ -9181,7 +9184,9 @@ files) it should support .log TOC lookups for matching to musicbrainz
 releases"*. One release, two halves: the acquisition pipeline goes, and the
 manual import grows the evidence the pipeline used to provide.
 
-- **R441 — no download path exists.** Soulseek is gone: no slskd daemon (start,
+- **R441 — no download path exists.** *Superseded 2026-11-07 by R475: the owner
+  asked for the Soulseek pipeline back. The manual-import half of this section
+  (R442) still stands.* Soulseek was gone: no slskd daemon (start,
   stop, autostart, port mapping, sharing, share audit), no search, no
   transfers, no uploads or private messages, no wishlist, no artist watch, no
   acquisition queue, no page downloads, and no downloads staging area of its
@@ -9522,6 +9527,101 @@ Found by a whole-app audit (backend and frontend, measured on the 12-album /
   stray file. `mlo.discs.track_of_filename` reads the position the name
   states, and the library's disk rows prefer it whenever the name names a
   disc.
+
+### 7.89 Soulseek acquisition is back, at the owner's request
+
+The owner's decision (2026-11-07): *"add soulseek / auto-importing back into the
+app from previous versions with all features intact"*. The pipeline is the
+2.0.3 implementation ported onto the 2.2.3 tree; the manual import and its TOC
+matching (R442) stay exactly where they were.
+
+- **R475 — the acquisition pipeline is restored, with one deliberate
+  omission.** Returned: `mlo/portmap.py`, `server/soulseek*.py`,
+  `server/wishes*.py`, `server/artist_watch*.py`, `server/api_queue.py`,
+  `server/api_watch.py`, their routes (slskd start/stop/restart, search,
+  transfers, downloads, uploads, shares, browse, messages, wishes, watches,
+  auto-import, queue, staging, page downloads, share audit), the Downloads /
+  Soulseek / Watched artists pages and the sidebar dot, the config keys
+  (`soulseek_*`, `wishes_*`, `artist_watch_*`, `notify_soulseek_*`,
+  `notify_wish_found`, `auto_acquisition_enabled`) and the `slskd` tool row
+  (`mlo/fetchdeps.py`, installed under `<music>/.mlo/tools`). `Add to library`
+  again attaches a search to its framework album. The listen/obfuscated pair is
+  derived from `soulseek_listen_port` (listen, listen+1), and the port panel
+  reports both.
+  **Not returned:** `server/youtube.py`, its cookie jar and the YouTube route
+  the acquisition pipeline used for a Digital Media video release. That
+  feature was removed separately in 2.1.1 (R444). `server.soulseek_auto` asks
+  `_youtube_module()`; with the module absent, `_youtube_ready` is false, the
+  job logs "YouTube downloads are not available in this build", and the release
+  keeps the Soulseek path. Adding the module back is a separate feature and
+  needs the owner's word (as every download path does).
+
+- **R476 — online discovery is back, and Apple is the preferred storefront.**
+  The owner asked for the online recommendations R443 removed, with streaming
+  services as the data. `server/api_discover.py` restores the
+  `/api/discover/*` routes: `charts` (Apple Music's keyless most-played feed
+  for songs; Deezer for albums/artists; Last.fm and ListenBrainz when their
+  keys exist; Spotify's artist top-tracks when its client credentials are set),
+  `recommended` (a library-seeded shelf whose seed is the genre the library
+  listens to most, with owned rows dropped server-side; an explicit artist
+  seed asks Spotify first and falls back to Deezer), and the genre browse
+  below. Every route is gated by `discovery_enabled` and a
+  provider refusal is an empty shelf with the provider's own words — never a
+  fabricated row. **Amazon Music has no public catalogue API**, so it is not
+  offered as a source; the page names the service that answered. The client is
+  the sidebar's Discover page plus Home's "Discover online" entry.
+- **R477 — top songs by genre are a first-class browse.** `GET
+  /api/discover/genre?genre=&kind=tracks|albums|artists` uses Apple's
+  `genreIndex` search (keyless, `entity=song` or `entity=album`) first and
+  Last.fm's `tag.gettop*` as the keyed fallback. `GET /api/discover/genres`
+  offers the app's own broad `mlo.genre_vocab.FAMILIES` list, so the page's
+  chips cannot drift from the vocabulary the tags are graded against.
+- **R478 — sync richness is a ranking: syllable > word > line.** The lyrics
+  provider chain no longer stops at the first synced answer: it keeps walking
+  until a syllable-synced hit (which ends the walk) or the best word/line hit
+  it saw, then breaks ties by match score and provider order
+  (`mlo.lyrics_providers._search_chain`). `mlo.lyrics.upgrade_sync_level`
+  upgrades a fetched line-timed lyric to the install's configured
+  `lrc_sync_level` (WORD/SYLLABLE) before it is written; it never downgrades a
+  richer source answer and never invents timing for untimed words.
+  `mlo.lyrics_xlit._apply` targets the RICHER of the original's own
+  granularity and the configured level, so a syllable-timed original's
+  romanization/translation stays syllable-timed and a LINE setting never
+  flattens it. **Grading requires LINE by default** (`lrc_sync_level` is
+  `LINE`, and an unset level means LINE); WORD/SYLLABLE are opt-in. The
+  player's lyrics pane renders stored transliterations/translations with their
+  own ELRC word/syllable timings (`splitStoredLrc`), and the lyric editor can
+  stamp, nudge, re-distribute and clear line/word/syllable timings per piece.
+- **R479 — a locale alias is the primary caption.** Every alias display is
+  `alias (original name)` — `Hikaru Utada (宇多田ヒカル)`, not the reverse:
+  the reader asked for the locale name, and the original-language spelling
+  stays visible in parentheses. `web/src/lib/mbtext.ts:withAlias` and
+  `server/library._artist_display_name` are the two renderers; library track
+  rows and album titles use the same helper.
+- **R480 — a rip log matches a release by its evidence, and two folders can
+  be two discs of one album.** `server.imports.log_match` walks every `.log`
+  (disc subfolders included), hashes each TOC into a MusicBrainz Disc ID,
+  scores every release MusicBrainz attaches to it by track count, per-track
+  TOC durations, tags, status and medium position, and groups the results by
+  release: a two-disc rip whose folders each carry a log resolves to ONE
+  release with both disc positions covered, not two independent matches.
+  `GET /api/import/log-match` returns that `best`/`groups` evidence and the
+  import-identify dialog auto-pins a confident answer. The wizard's
+  `mergeDiscAlbums` folds separately picked disc siblings ("Album CD1" /
+  "Album CD2", "Album (CD1)" / "Album [Disc 2]") into one album, and
+  `server.imports.disc_map` reads the source folder's disc and
+  `stamp_disc_map` writes it onto the PLACED copies as DISCNUMBER before the
+  flat destination loses it (the user's own source is never modified).
+- **R481 — a recording add downloads its track first.** The recording row's
+  “Add to library” carries the recording title as `priority_track` through
+  `POST /api/library/add` → the wish (`wishes.priority_track`, additive
+  column) → `soulseek_auto.start_job` → the candidate queue.
+  `soulseek_auto._priority_order` puts the matching file (title-normalized,
+  case/punctuation-insensitive) at the FRONT of the files queued for that
+  candidate; the rest of the album follows in the candidate's own order. The
+  import still runs once the album is complete — the track is downloaded
+  first, not half-imported — and a title the folder does not name leaves the
+  order unchanged.
 
 ---
 

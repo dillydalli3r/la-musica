@@ -134,6 +134,11 @@ export interface Track {
   tags: TrackTags;
   grade_pass: boolean;
   lyrics_present: boolean;
+  /** The locale alias the import wrote (TITLEALIAS), or null when the file
+   *  states none. Rendered as the PRIMARY caption with the stored title in
+   *  parentheses (`withAlias`), the same shape the MusicBrainz pages use:
+   *  "Hikari (光)". Read server-side by `server.library._enrich_track`. */
+  alias?: string | null;
   /** MusicBrainz's disambiguation comment for this recording, or null when it
    *  states none — rendered in parentheses after the title in a dimmer tone
    *  (`DisambiguationMark`), the way MusicBrainz shows "title (comment)".
@@ -221,6 +226,10 @@ export interface Album {
    *  Album)"), dimmer than the name itself. Read from the album's
    *  ALBUMDISAMBIGUATION tag by `server.library.build_album`. */
   disambiguation?: string | null;
+  /** The locale alias the import wrote for the release (ALBUMALIAS), or null.
+   *  Shown as the PRIMARY album caption with the stored name in parentheses
+   *  (`withAlias`): "First Love (ファーストラブ)". */
+  alias?: string | null;
   /** MusicBrainz's disambiguation comment for the credited artist, or null —
    *  the artist caption's own parentheses ("The Beatles (UK rock band)"),
    *  read from the album's ARTISTDISAMBIGUATION tag. Album-level: every file

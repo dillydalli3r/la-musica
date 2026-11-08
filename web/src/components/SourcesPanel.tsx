@@ -123,6 +123,11 @@ const KEY_HOME: Record<string, string> = {
   ai_model: "Settings → AI",
   ai_api_key: "Settings → AI",
   auth_password_hash: "first-run setup, or Sign-in & security",
+  // The two fields the Settings page's Scrobbling group owns. The wizard has
+  // no such group, so there they stay in this panel; in Settings the panel
+  // hides them and points at the one control (see `hideKeys`).
+  lastfm_api_key: "Settings → Connections → Scrobbling & submissions",
+  lastfm_api_secret: "Settings → Connections → Scrobbling & submissions",
   // The credentials the two Connect flows produce themselves: a row that
   // needs one is not a dead end, it names the button that fills it.
   lastfm_session_key: "the Connect button (Settings → Connections, or this panel)",
@@ -140,8 +145,11 @@ const KEY_HOME: Record<string, string> = {
 const TOOL_INFO: Record<string, { label: string; hint: string; tab?: string; tabLink?: string }> = {};
 
 /** `needs` mixes config keys with installed tools: only the keys get an
- *  input, the tools are a dependency note. */
-const promptKeysOf = (row: SourceHealth) => row.needs.filter((k) => k in KEY_INFO);
+ *  input, the tools are a dependency note. `hidden` is the Settings page's
+ *  way of saying "this key has its control on another section" — the row
+ *  still reports the need, and `KEY_HOME` says where it is edited. */
+const promptKeysOf = (row: SourceHealth, hidden?: Set<string>) =>
+  row.needs.filter((k) => k in KEY_INFO && !hidden?.has(k));
 
 /** A panel row: one PROVIDER, whatever number of roles it serves. */
 type PanelRow = SourceHealth & { kinds: SourceKind[] };
@@ -218,7 +226,8 @@ function StatusChip({ row }: { row: SourceHealth }) {
  *  folded into the row's own disclosure. A first run pastes the keys the app
  *  uses; triaging eleven providers is what Settings → Connections is for, and the
  *  panel was 4,800 px of exactly that on the step that exists to ask for keys. */
-export default function SourcesPanel({ only, askKeys }: { only?: SourceKind | SourceKind[]; askKeys?: boolean } = {}) {
+export default function SourcesPanel({ only, askKeys, hideKeys }: { only?: SourceKind | SourceKind[]; askKeys?: boolean; hideKeys?: string[] } = {}) {
+  const hidden = new Set(hideKeys ?? []);
   const qc = useQueryClient();
   const { data: config } = useQuery({ queryKey: ["config"], queryFn: api.config });
   const { data, isLoading, error } = useQuery({
@@ -276,7 +285,7 @@ export default function SourcesPanel({ only, askKeys }: { only?: SourceKind | So
     try {
       await api.saveConfig({
         ...config,
-        ...Object.fromEntries(promptKeysOf(row).map((k) => [k, draft[k] ?? ""])),
+        ...Object.fromEntries(promptKeysOf(row, hidden).map((k) => [k, draft[k] ?? ""])),
       });
       qc.invalidateQueries({ queryKey: ["config"] });
       await probeInto(row);
@@ -296,7 +305,7 @@ export default function SourcesPanel({ only, askKeys }: { only?: SourceKind | So
     // also carries rows whose keys live elsewhere (the AI provider, this
     // server's login), and a row with no field is a status line
     // — those belong to Settings → Connections, not to the step that asks for keys.
-    .filter((r) => !askKeys || promptKeysOf(r).length > 0);
+    .filter((r) => !askKeys || promptKeysOf(r, hidden).length > 0);
   const groups = (Object.keys(KIND_LABEL) as SourceKind[])
     .filter((kind) => !wanted || wanted.includes(kind))
     .map((kind) => [kind, rows.filter((r) => r.kind === kind)] as const)
@@ -355,7 +364,7 @@ export default function SourcesPanel({ only, askKeys }: { only?: SourceKind | So
           {!askKeys && <div className="text-[10px] uppercase tracking-widest text-zinc-500">{KIND_LABEL[kind]}</div>}
           <div className="rounded-md border border-border divide-y divide-border/60">
             {list.map((row) => {
-              const promptKeys = promptKeysOf(row);
+              const promptKeys = promptKeysOf(row, hidden);
               // Programs this row needs (`needs yt-dlp`): no field to type, so
               // the note under the row is where it is named and explained.
               const toolNeeds = row.needs.filter((k) => !(k in KEY_INFO) && k in TOOL_INFO);
@@ -397,7 +406,7 @@ export default function SourcesPanel({ only, askKeys }: { only?: SourceKind | So
                     </span>
                   )}
                   {row.needs
-                    .filter((k) => !(k in KEY_INFO))
+                    .filter((k) => !(k in KEY_INFO) || hidden.has(k))
                     .map((k) => (
                       <span
                         key={k}

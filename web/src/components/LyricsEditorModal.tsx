@@ -73,6 +73,8 @@ export default function LyricsEditorModal({
   const [lines, setLines] = useState<LrcLine[]>(() => toLines(initialLyrics));
   const [draft, setDraft] = useState("");
   const [selIdx, setSelIdx] = useState(0);
+  /** The word/syllable chip being edited inside `selIdx`'s line. */
+  const [pieceSel, setPieceSel] = useState<{ line: number; index: number } | null>(null);
   const [playing, setPlaying] = useState(false);
   const [playTime, setPlayTime] = useState(0);
   const [dur, setDur] = useState(duration ?? 0);  const [speed, setSpeed] = useState(1);
@@ -107,6 +109,7 @@ export default function LyricsEditorModal({
     setLines(toLines(initialLyrics));
     historyRef.current = [];
     pendingRef.current = null;
+    setPieceSel(null);
   }, [initialLyrics]);
 
   // Keep the selected row visible while navigating / stamping.
@@ -158,6 +161,7 @@ export default function LyricsEditorModal({
     }
     setLines(prev);
     pendingRef.current = null;
+    setPieceSel(null);
   };
 
   const audio = () => audioRef.current;
@@ -302,10 +306,73 @@ export default function LyricsEditorModal({
     commit(lines.map((l, j) => (j === idx ? { ...l, time: Math.max(0, l.time + delta), ts: "" } : l)));
   };
 
+  /** Move one stamped word/syllable by ±delta, keeping the line's pieces in
+   * time order: a piece may not cross its neighbours (the ELRC reader takes
+   * the tag order as the sung order). */
+  const nudgePiece = (delta: number) => {
+    if (!pieceSel) return;
+    const { line: li, index: pi } = pieceSel;
+    const l = lines[li];
+    if (!l?.words?.length || pi < 0 || pi >= l.words.length) return;
+    const words = l.words.map((w, i) => (i === pi ? { ...w, time: Math.max(0, w.time + delta) } : w));
+    const prev = pi > 0 ? words[pi - 1].time : 0;
+    const next = pi + 1 < words.length ? words[pi + 1].time : Infinity;
+    words[pi].time = next === Infinity
+      ? Math.max(words[pi].time, prev)
+      : Math.min(Math.max(words[pi].time, prev), next);
+    commit(lines.map((x, j) => (j === li ? { ...x, words } : x)));
+  };
+
+  /** Stamp the selected piece at the current playhead (the ear's correction
+   * for a tap that landed a beat late). */
+  const pieceAtPlayhead = () => {
+    if (!pieceSel) return;
+    const { line: li, index: pi } = pieceSel;
+    const l = lines[li];
+    if (!l?.words?.length || pi < 0 || pi >= l.words.length) return;
+    const words = l.words.map((w, i) => (i === pi ? { ...w, time: Math.max(0, playTime) } : w));
+    commit(lines.map((x, j) => (j === li ? { ...x, words } : x)));
+  };
+
+  /** Distribute one line's word or syllable times across its own slot — the
+   * same length-weighted arithmetic the offline wordsync pass uses, scoped to
+   * the line the editor is on so a single awkward line can be fixed without
+   * re-timing the album. The slot ends at the next timed line, capped at the
+   * backend's 6 s spread. */
+  const distributeLine = (i: number, kind: "word" | "syllable") => {
+    const l = lines[i];
+    if (!l?.text.trim()) return;
+    const pieces = kind === "syllable"
+      ? syllabifyLine(l.text).map((s) => s.text + (s.wordEnd ? " " : ""))
+      : l.text.trim().split(/\s+/).map((w, wi, arr) => (wi < arr.length - 1 ? `${w} ` : w));
+    if (!pieces.length) return;
+    const start = l.time;
+    const next = lines[i + 1]?.time;
+    const end = next && next > start
+      ? Math.min(next, start + 6)
+      : start + Math.min(6, Math.max(1.5, 0.32 * pieces.length));
+    const weights = pieces.map((p) => Math.max(p.trim().length, 1));
+    const total = weights.reduce((a, b) => a + b, 0) || 1;
+    const span = Math.max(end - start, 0.18 * pieces.length);
+    let cursor = start;
+    const words: LrcWord[] = pieces.map((text, wi) => {
+      const at = cursor;
+      cursor += span * (weights[wi] / total);
+      return { text, time: Math.max(0, at) };
+    });
+    commit(lines.map((x, j) => (j === i ? { ...x, words } : x)));
+    setPieceSel({ line: i, index: 0 });
+    toast(`${kind === "syllable" ? "Syllables" : "Words"} distributed across ${fmtStamp(start, dec)}`);
+  };
+
   const updateLine = (i: number, patch: Partial<LrcLine>) => {
     const next = lines.map((l, j) => (j === i ? { ...l, ...patch } : l));
-    // Text edits invalidate half-stamped runs for that line.
-    if (pendingRef.current?.idx === i && "text" in patch) pendingRef.current = null;
+    // Text edits invalidate half-stamped runs for that line, and a piece
+    // selection no longer names a chip once the wording changed.
+    if ("text" in patch) {
+      if (pendingRef.current?.idx === i) pendingRef.current = null;
+      setPieceSel(null);
+    }
     commit(next);
   };
 
@@ -319,6 +386,7 @@ export default function LyricsEditorModal({
 
   const removeLine = (i: number) => {
     commit(lines.filter((_, j) => j !== i));
+    setPieceSel(null);
     setSelIdx((s) => Math.max(0, Math.min(s, lines.length - 2)));
   };
 
@@ -330,6 +398,7 @@ export default function LyricsEditorModal({
     }
     commit(parsed);
     setDraft("");
+    setPieceSel(null);
     setSelIdx(0);
   };
 
@@ -598,7 +667,7 @@ export default function LyricsEditorModal({
                           ? "border-accent/40 bg-white/[0.04]"
                           : "border-transparent hover:border-white/10 hover:bg-white/[0.02]"
                     }`}
-                    onClick={() => setSelIdx(i)}
+                    onClick={() => { setSelIdx(i); setPieceSel(null); }}
                   >
                     <div className="flex items-center gap-2">
                       <button
@@ -644,8 +713,15 @@ export default function LyricsEditorModal({
                         </span>
                       ) : null}
                       <div className="opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100 flex gap-1 transition-opacity shrink-0">
+                        <button
+                          className="text-zinc-500 hover:text-accent-soft"
+                          onClick={(e) => { e.stopPropagation(); distributeLine(i, l.syl ? "syllable" : "word"); }}
+                          title="Distribute this line's word/syllable timings evenly inside its slot"
+                        >
+                          <Wand2 className="h-3.5 w-3.5" />
+                        </button>
                         {l.words?.length ? (
-                          <button className="text-zinc-500 hover:text-amber-300" onClick={(e) => { e.stopPropagation(); updateLine(i, { words: undefined }); }} title="Clear this line's word/syllable timings">
+                          <button className="text-zinc-500 hover:text-amber-300" onClick={(e) => { e.stopPropagation(); updateLine(i, { words: undefined }); setPieceSel(null); }} title="Clear this line's word/syllable timings">
                             <Eraser className="h-3.5 w-3.5" />
                           </button>
                         ) : null}
@@ -669,18 +745,54 @@ export default function LyricsEditorModal({
                       </div>
                     )}
                     {isSel && l.words?.length ? (
-                      // stamped syllable chips: click one to seek to it
-                      <div className="flex flex-wrap gap-1 px-1 mt-1" title="Stamped syllables — click to seek">
-                        {l.words!.map((w, wi) => (
-                          <button
-                            key={wi}
-                            className={`chip text-[9px] border ${w.time <= playTime ? "bg-accent/10 border-accent/25 text-accent-soft" : "bg-white/5 border-white/10 text-zinc-400"} hover:border-accent`}
-                            onClick={(e) => { e.stopPropagation(); seekTo(w.time); }}
-                            title={`Seek to ${fmtStamp(w.time, dec)}`}
-                          >
-                            {w.text.trim() || "·"}
-                          </button>
-                        ))}
+                      // stamped word/syllable chips: click one to select it
+                      // and seek there; the selected chip gets its own nudge
+                      // controls below so a late tap can be corrected by ear.
+                      <div className="px-1 mt-1 space-y-1">
+                        <div className="flex flex-wrap gap-1" title="Stamped words/syllables — click to select and seek">
+                          {l.words!.map((w, wi) => {
+                            const picked = pieceSel?.line === i && pieceSel?.index === wi;
+                            return (
+                              <button
+                                key={wi}
+                                className={`chip text-[9px] border ${
+                                  picked
+                                    ? "bg-accent/25 border-accent text-white"
+                                    : w.time <= playTime
+                                      ? "bg-accent/10 border-accent/25 text-accent-soft"
+                                      : "bg-white/5 border-white/10 text-zinc-400"
+                                } hover:border-accent`}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setPieceSel({ line: i, index: wi });
+                                  seekTo(w.time);
+                                }}
+                                title={`${fmtStamp(w.time, dec)} — click to select`}
+                              >
+                                {w.text.trim() || "·"}
+                              </button>
+                            );
+                          })}
+                        </div>
+                        {pieceSel?.line === i && l.words[pieceSel.index] ? (
+                          <div className="flex flex-wrap items-center gap-1 text-[9px] text-zinc-500">
+                            <span className="font-mono tabular-nums">
+                              {fmtStamp(l.words[pieceSel.index].time, dec)}
+                            </span>
+                            <button className="btn-ghost !px-1 !py-0.5 text-[9px]" onClick={(e) => { e.stopPropagation(); nudgePiece(-0.05); }} title="Move this piece 0.05s earlier">
+                              −0.05
+                            </button>
+                            <button className="btn-ghost !px-1 !py-0.5 text-[9px]" onClick={(e) => { e.stopPropagation(); nudgePiece(0.05); }} title="Move this piece 0.05s later">
+                              +0.05
+                            </button>
+                            <button className="btn-ghost !px-1 !py-0.5 text-[9px]" onClick={(e) => { e.stopPropagation(); pieceAtPlayhead(); }} title="Stamp this piece at the playhead">
+                              at playhead
+                            </button>
+                            <button className="btn-ghost !px-1 !py-0.5 text-[9px]" onClick={(e) => { e.stopPropagation(); distributeLine(i, l.syl ? "syllable" : "word"); }} title="Redistribute this line's timings evenly">
+                              re-distribute
+                            </button>
+                          </div>
+                        ) : null}
                       </div>
                     ) : null}
                     {pieces && pieces.length > 0 && (

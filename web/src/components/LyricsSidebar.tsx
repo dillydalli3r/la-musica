@@ -3,7 +3,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { AudioLines, PenLine, Save, X } from "lucide-react";
 import { api } from "../api";
 import { toast, useLyricsEditLock } from "../store";
-import LyricsViewer, { parsePlayerLrc, parseLrc, splitStoredLines, hasLyricsText, activeLineRange, KaraokeWords, type LrcLine } from "./LyricsViewer";
+import LyricsViewer, { parsePlayerLrc, parseLrc, splitStoredLrc, hasLyricsText, activeLineRange, KaraokeWords, type LrcLine } from "./LyricsViewer";
 import { useLyricsFollow, lyricHold, LYRICS_PAD_BOTTOM, LYRICS_PAD_TOP } from "../lib/lyrScroll";
 import { isInstrumental } from "./Badges";
 import Visualizer from "./Visualizer";
@@ -62,8 +62,8 @@ export default function LyricsSidebar({
 }) {
   const [payload, setPayload] = useState<{
     lyrics: string | null;
-    xlit: string[] | null;
-    trans: string[] | null;
+    xlit: LrcLine[] | null;
+    trans: LrcLine[] | null;
     instrumental: boolean;
     forPath: string | null;
     title?: string;
@@ -179,8 +179,8 @@ export default function LyricsSidebar({
         const withLeader = !!main && parsePlayerLrc(main).length > parseLrc(main).length;
         setPayload({
           lyrics: main,
-          xlit: typeof t.lyrics_xlit === "string" && t.lyrics_xlit.trim() ? splitStoredLines(t.lyrics_xlit, withLeader) : null,
-          trans: typeof t.lyrics_trans === "string" && t.lyrics_trans.trim() ? splitStoredLines(t.lyrics_trans, withLeader) : null,
+          xlit: typeof t.lyrics_xlit === "string" && t.lyrics_xlit.trim() ? splitStoredLrc(t.lyrics_xlit, withLeader) : null,
+          trans: typeof t.lyrics_trans === "string" && t.lyrics_trans.trim() ? splitStoredLrc(t.lyrics_trans, withLeader) : null,
           instrumental: isInstrumental(t.tags),
           forPath: path,
           title: (t.tags as Record<string, string>)?.TITLE,
@@ -286,7 +286,11 @@ export default function LyricsSidebar({
 
   // A word / syllable sweep on screen is the one consumer that needs the
   // clock at full rate; line changes ride the 20 Hz tick.
-  const sweeping = synced && !!lines[activeStart]?.words?.length;
+  const sweeping = synced && (
+    !!lines[activeStart]?.words?.length
+    || !!payload?.xlit?.[activeStart]?.words?.length
+    || !!payload?.trans?.[activeStart]?.words?.length
+  );
   useEffect(() => {
     sweepRef.current = sweeping;
   }, [sweeping]);
@@ -454,8 +458,10 @@ export default function LyricsSidebar({
             {displayLines.map((l, i) => {
             const isActive = synced && activeEnd >= activeStart && i >= activeStart && i <= activeEnd && !staleLyrics;
             const seekable = synced && !staleLyrics;
-            const trans = payload?.trans?.[i];
-            const xlit = payload?.xlit?.[i];
+            const transLine = payload?.trans?.[i];
+            const xlitLine = payload?.xlit?.[i];
+            const trans = transLine?.text;
+            const xlit = xlitLine?.text;
             // a stored sub-line that just mirrors the primary line (same
             // words, ignoring case/punctuation) is noise, not a transform
             const essence = (s: string) => s.toLowerCase().replace(/[\W_]+/g, "");
@@ -510,10 +516,18 @@ export default function LyricsSidebar({
                   )}
                 </div>
                 {xlit && xlit.trim() && !dup(xlit) && xlit.trim() !== l.text.trim() && (
-                  <div className="text-xs text-zinc-400 mt-0.5 leading-snug">{xlit}</div>
+                  <div className="text-xs text-zinc-400 mt-0.5 leading-snug">
+                    {synced && isActive && xlitLine?.words?.length ? (
+                      <KaraokeWords words={xlitLine.words} time={dispTime} />
+                    ) : xlit}
+                  </div>
                 )}
                 {trans && trans.trim() && !dup(trans) && (
-                  <div className="text-xs text-accent-soft/70 mt-0.5 leading-snug">{trans}</div>
+                  <div className="text-xs text-accent-soft/70 mt-0.5 leading-snug">
+                    {synced && isActive && transLine?.words?.length ? (
+                      <KaraokeWords words={transLine.words} time={dispTime} />
+                    ) : trans}
+                  </div>
                 )}
               </div>
             );

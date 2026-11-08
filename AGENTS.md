@@ -1,16 +1,24 @@
 # Notes for coding agents working in this repo
 
-## Album download / Soulseek was REMOVED in 2.1.0
+## Soulseek was restored at the owner's request (2026-11-07)
 
 The acquisition pipeline (slskd, search, transfers, shares, the wishlist,
-artist watch, the acquisition queue, page downloads) is gone — modules, routes,
-pages and config keys. The bullets below that describe Soulseek behaviour are
-history: they explain what the code did and why, and the rules they carry
-(fill-only tag writes, strip_source_on_cd OFF, a serial advisory pass, a
-worker's own cost) still bind wherever the same code runs. **Nothing may add a
-download path back without the owner saying so** (spec R441); what replaces the
-pipeline's evidence is the manual import, whose wizard now matches a CD rip to
-its pressing from the log's own TOC (`/api/import/log-match`, spec R442).
+artist watch, the acquisition queue, page downloads) is BACK: it was removed in
+2.1.0 (spec R441) and the owner asked for it with all Soulseek features intact
+(spec R475). The code is the 2.0.3 implementation, ported onto 2.2.3; the
+bullets below that describe Soulseek behaviour are live rules again, not
+history (fill-only tag writes, strip_source_on_cd OFF, a serial advisory pass, a
+worker's own cost). The manual import and its TOC matching stay: the wizard
+still matches a CD rip to its pressing from the log's own TOC
+(`/api/import/log-match`, spec R442), and "Add to library" again attaches a
+Soulseek search.
+
+The one deliberate omission is the old YouTube acquisition route: `server/youtube.py`
+and its cookie panel were removed separately in 2.1.1 and are NOT back. The
+restored pipeline asks `server.soulseek_auto._youtube_module()`; when that
+module is absent the YouTube half reports itself unavailable and every release
+keeps the Soulseek path. **Do not add a second download path back without the
+owner saying so** (spec R475).
 
 ## Never host the app on port 8000
 

@@ -266,6 +266,8 @@ def fake_transform(config, bodies, mode, lang=""):
 real_transform = xl._transform_unique
 xl._transform_unique = fake_transform
 try:
+    # LINE (the default) leaves a line-timed transform line-timed: no word
+    # tags are invented when the install did not ask for them.
     cfg = {"lrc_sync_level": "LINE"}
     sent.clear()
     new_text, changed = xl._apply(cfg, LRC, "transliterate")
@@ -273,9 +275,32 @@ try:
     stripped = "".join(xl._WORD_TAG_RE.sub("", line3).split())
     ok(changed and stripped == "[00:01.00]君の名は",
        f"the transformed body keeps its line prefix ({line3!r})")
-    ok("<00:" in line3,
-       f"the transform is re-synced at the configured level, not left unsynced ({line3!r})")
+    ok("<00:" not in line3,
+       f"a LINE target writes line timings, not word tags ({line3!r})")
     ok(sent["bodies"] == ["君の名は", "Hello there"], "only the real bodies are sent")
+
+    # WORD/SYLLABLE targets upgrade the transformed text, so the karaoke view
+    # follows the translated/romanized words too.
+    sent.clear()
+    word_text, _ = xl._apply({"lrc_sync_level": "WORD"}, LRC, "transliterate")
+    word_line = word_text.splitlines()[2]
+    ok("<00:" in word_line,
+       f"a WORD target re-syncs the transform word by word ({word_line!r})")
+    from mlo.lyrics import sync_level_of
+    ok(sync_level_of(word_text) == "word",
+       f"the WORD transform really carries word timing ({sync_level_of(word_text)})")
+    syl_text, _ = xl._apply({"lrc_sync_level": "SYLLABLE"}, LRC, "transliterate")
+    ok(sync_level_of(syl_text) == "syllable",
+       f"a SYLLABLE target re-syncs per syllable ({sync_level_of(syl_text)})")
+
+    # A source richer than the setting is never downgraded: a syllable-timed
+    # original keeps syllable timing even when the install asks for LINE.
+    SYLLABLE_SRC = ("[00:01.00]<00:01.00>君<00:01.30>の<00:01.60>名<00:01.90>は\n"
+                    "[00:05.00]Hello there\n")
+    kept, _ = xl._apply({"lrc_sync_level": "LINE"}, SYLLABLE_SRC, "transliterate")
+    ok(sync_level_of(kept) == "syllable",
+       f"a syllable-synced original keeps its karaoke timing ({sync_level_of(kept)})")
+
     unchanged, changed2 = xl._apply(cfg, "[ar:A]\n[00:01.00]", "transliterate")
     ok(not changed2 or unchanged, "a metadata-only text is returned untouched")
 finally:

@@ -1553,12 +1553,20 @@ def _syllabify_token(word):
 
 
 def _body_has_glued_tags(body):
-    """True when the line carries syllable-level (glued) word tags."""
-    ms = list(WORD_TS_RE.finditer(body))
-    for a, b in zip(ms, ms[1:]):
-        seg = body[a.end():b.start()]
-        if seg == "" or (seg == seg.strip() and bool(seg)):
-            return True
+    """True when a LINE carries syllable-level (glued) word tags.
+
+    Checked per line: a word tag ending one line and the next line's leading
+    ``[mm:ss.xx]`` stamp are not "glued syllables" — comparing across the
+    newline classified every multi-line word-synced lyric whose lines hold one
+    word as syllable-synced, which made the provider preference and the
+    editor's own badge lie about what a file carried.
+    """
+    for line in str(body or "").splitlines():
+        ms = list(WORD_TS_RE.finditer(line))
+        for a, b in zip(ms, ms[1:]):
+            seg = line[a.end():b.start()]
+            if seg == "" or (seg == seg.strip() and bool(seg)):
+                return True
     return False
 
 
@@ -1608,8 +1616,13 @@ def sync_level_of(text):
 
 def text_meets_sync_level(text, level):
     """True when `text` carries at least the required sync granularity
-    (lrc_sync_level: SYLLABLE / WORD / LINE)."""
-    level = str(level or "SYLLABLE").upper()
+    (lrc_sync_level: SYLLABLE / WORD / LINE).
+
+    An unset level means LINE — the shipped default and the only requirement
+    grading makes unless the reader raised it in Settings. SYLLABLE/WORD are
+    opt-in: a library of ordinary line-timed LRC is not a failing library.
+    """
+    level = str(level or "LINE").upper()
     lv = sync_level_of(text)
     if level == "WORD":
         return lv in ("word", "syllable")
@@ -1768,6 +1781,42 @@ def elrc_word_sync(lrc_text, max_line_spread_s=6.0, min_word_span_s=0.18,
         # syllable tags inside a word are glued together with no space
         out.append(prefix + " ".join(pieces))
     return "\n".join(out)
+
+
+# The order the app treats sync granularities in: a richer timing always beats
+# a poorer one, and "at least LINE" is what grading asks unless configured.
+SYNC_LEVEL_RANK = {"plain": 0, "line": 1, "word": 2, "syllable": 3}
+
+
+def sync_level_rank(text_or_level):
+    """0..3 for a lyrics text or a level word — the ONE ordering shared by the
+    provider chain (syllable > word > line), the fetch's upgrade step and the
+    transform writer, so no two callers can disagree about "better timing"."""
+    level = str(text_or_level or "").strip().lower()
+    if level in SYNC_LEVEL_RANK:
+        return SYNC_LEVEL_RANK[level]
+    return SYNC_LEVEL_RANK.get(sync_level_of(text_or_level), 0)
+
+
+def upgrade_sync_level(text, level):
+    """Return *text* at least as richly timed as *level*.
+
+    A line-synced text can be upgraded to word/syllable ELRC by
+    `elrc_word_sync`; a word-synced text can be upgraded to syllable. The
+    caller's own text is returned unchanged when it already carries the
+    requested granularity (or a richer one), when the request is LINE/plain,
+    or when the text carries no timestamps at all — synthetic timing is never
+    invented for untimed words.
+    """
+    target = str(level or "LINE").upper()
+    if target not in ("WORD", "SYLLABLE"):
+        return text
+    current = sync_level_of(text)
+    if sync_level_rank(current) >= sync_level_rank(target):
+        return text
+    if current == "plain":
+        return text
+    return elrc_word_sync(text, level=target.lower())
 
 
 # ---------------------------------------------------------------------------- #

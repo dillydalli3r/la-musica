@@ -54,7 +54,10 @@ import re
 import unicodedata
 
 from .audio import AudioFile
-from .lyrics import _atomic_write_text, _lrc_for, elrc_word_sync
+from .lyrics import (
+    _atomic_write_text, _lrc_for, sync_level_of, sync_level_rank,
+    upgrade_sync_level,
+)
 from .paths import AUDIO_EXTS
 from .stats import (
     is_audio_file, new_stats, _collect_targets, _find_albums,
@@ -554,13 +557,21 @@ def _apply(config, text, mode, lang=""):
     new_bodies = [mapping.get(b, b) for b in bodies]
     new_text = _merge_lines(lines, index_map, new_bodies)
     # Word/syllable-level sync for the transformed lyrics: the original is
-    # synced, so the romanization / translation must be too, at the
-    # configured level (karaoke sweeps the transformed line; CJK sweeps
-    # per character, and a kana character is one syllable).
+    # synced, so the romanization / translation must be too. The target is
+    # the RICHER of the original's own granularity and the configured
+    # `lrc_sync_level` — a syllable-timed original must never lose its
+    # karaoke timing because the install's requirement is merely LINE, and a
+    # line-timed original is upgraded when the reader asked for WORD or
+    # SYLLABLE. CJK sweeps per character (one kana is one syllable).
     if config.get("lrc_enhanced_word_sync", True) and \
             any(_LINE_TS_RE.match(l) for l in lines):
-        new_text = elrc_word_sync(
-            new_text, level=str(config.get("lrc_sync_level") or "LINE").lower())
+        original_level = sync_level_of(text)
+        configured = str(config.get("lrc_sync_level") or "LINE").upper()
+        target = (configured
+                  if sync_level_rank(configured) > sync_level_rank(original_level)
+                  else original_level.upper())
+        if target in ("WORD", "SYLLABLE"):
+            new_text = upgrade_sync_level(new_text, target)
     return new_text, new_text != text
 
 

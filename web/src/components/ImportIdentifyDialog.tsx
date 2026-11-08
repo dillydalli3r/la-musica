@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Check, Disc3, FileText, Fingerprint, Loader2, Search } from "lucide-react";
 import Modal from "./Modal";
 import { api } from "../api";
@@ -119,6 +119,10 @@ export default function ImportIdentifyDialog({
    *  exact disc. The one lookup that names the PRESSING with no tag, no
    *  fingerprint and no name search, so the dialog offers it beside AcoustID. */
   const [logRows, setLogRows] = useState<Record<string, ImportLogMatch>>({});
+  /** Rows the automatic rip-log pass pinned (and why), so the row can say
+   *  "from rip log" instead of looking like a hand-typed link. */
+  const [autoLog, setAutoLog] = useState<Record<string, ImportLogMatch["best"]>>({});
+  const autoLogSeen = useRef<Set<string>>(new Set());
 
   const setPin = (path: string, value: string) =>
     setPins((cur) => ({ ...cur, [path]: value }));
@@ -185,24 +189,58 @@ export default function ImportIdentifyDialog({
     try {
       const res = await api.importLogMatch(al.path);
       setLogRows((cur) => ({ ...cur, [al.path]: res }));
-      const hit = (res.logs ?? []).find((l) => (l.releases ?? []).length);
-      if (!hit?.releases?.length) {
+      const best = res.best;
+      if (!best?.release) {
         const why = res.reason
           || (res.logs ?? []).map((l) => `${l.file}: ${l.error}`).filter(Boolean).join("; ")
           || "no release found";
         toast(`Rip log: ${why}`);
         return;
       }
-      const rel = hit.releases[0];
+      const rel = best.release;
       setPin(al.path, `https://musicbrainz.org/release/${rel.release_id}`);
+      setAutoLog((cur) => ({ ...cur, [al.path]: best }));
       toast(`Rip log: ${rel.artist ? `${rel.artist} — ` : ""}${rel.title}`
-        + (rel.disc_position ? ` (disc ${rel.disc_position} of ${rel.discs})` : ""));
+        + (rel.disc_position ? ` (disc ${rel.disc_position} of ${rel.discs})` : "")
+        + ` · ${Math.round((best.score ?? 0) * 100)}% match`
+        + (best.complete ? " · all discs covered" : ""));
     } catch (e) {
       toast.error(String(e));
     } finally {
       setBusy(({ [al.path]: _gone, ...rest }) => rest);
     }
   };
+
+  /** The AUTOMATIC half of `matchFromLog`: every row is asked for its rip
+   *  log's Disc ID as the dialog opens, and a confident single answer is
+   *  pinned without a press. A row that already names a release keeps it —
+   *  the automatic pass only fills a blank — and a folder with no log (or a
+   *  log MusicBrainz does not know) stays untouched. */
+  const autoMatchFromLog = async (al: IdentifyAlbum) => {
+    try {
+      const res = await api.importLogMatch(al.path);
+      setLogRows((cur) => ({ ...cur, [al.path]: res }));
+      const best = res.best;
+      if (best?.confident && !seedOf(al)) {
+        setPin(al.path, `https://musicbrainz.org/release/${best.release.release_id}`);
+        setAutoLog((cur) => ({ ...cur, [al.path]: best }));
+      }
+    } catch {
+      // No log, an unreadable one, or MusicBrainz unavailable: the manual
+      // buttons and the tag search remain, so this is not a dialog error.
+    }
+  };
+
+  useEffect(() => {
+    for (const al of albums) {
+      if (!al.path || autoLogSeen.current.has(al.path)) continue;
+      autoLogSeen.current.add(al.path);
+      void autoMatchFromLog(al);
+    }
+    // `autoMatchFromLog` closes over the setters only; the path set is the
+    // stable identity that decides which rows have been asked.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [albums]);
 
   /** MusicBrainz search, two ways over one row: a free query (artist + album,
    *  which the row prefills from the files' own tags) and the catalogue number,
@@ -320,7 +358,8 @@ export default function ImportIdentifyDialog({
         // Where the row OPENED: the release the files themselves name, either
         // in their own id (`current`) or in their tags. A row the user then
         // re-pointed carries neither chip — that state is "pinned by me".
-        const changed = !!value && value.toLowerCase() !== seed.toLowerCase();
+        const auto = autoLog[al.path];
+        const changed = !!value && value.toLowerCase() !== seed.toLowerCase() && !auto;
         const fromCurrent = !!al.current && !changed && value.toLowerCase() === al.current.trim().toLowerCase();
         const fromTags = !al.current && !!tagSeed && !changed;
         return (
@@ -337,6 +376,14 @@ export default function ImportIdentifyDialog({
               {fromTags && (
                 <span className="chip bg-amber-950/40 text-amber-300 border border-amber-900 text-[9px]" title="The files name no release id, but their own tags name this one — a row left alone keeps it">
                   from tags
+                </span>
+              )}
+              {auto && (
+                <span
+                  className="chip bg-emerald-950/40 text-emerald-300 border border-emerald-900 text-[9px]"
+                  title={`The folder's rip log names this release (${Math.round((auto.score ?? 0) * 100)}% match${auto.complete ? ", all discs covered" : ""}) — change the link to re-point it`}
+                >
+                  from rip log
                 </span>
               )}
               {al.fileCount !== undefined && (
@@ -484,6 +531,7 @@ export default function ImportIdentifyDialog({
                             >
                               {r.artist ? `${r.artist} — ` : ""}{r.title}
                               {r.disc_position ? ` (disc ${r.disc_position}/${r.discs})` : ""}
+                              {typeof r.score === "number" ? ` · ${Math.round(r.score * 100)}%` : ""}
                             </button>
                           </span>
                         ))}

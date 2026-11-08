@@ -37,8 +37,10 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from mlo.config import DEFAULT_RUN_ALL_ORDER, load_config
-from mlo.discs import (DISC_BRACKET_RE, disc_number_of_path, disk_rows,
-                       is_disc_dir, match_disc_row, sidecar_tracklist)
+from mlo.discs import (DISC_BRACKET_RE, album_audio, disc_id_for_log,
+                       disc_number_of_name, disc_number_of_path, disk_rows,
+                       is_disc_dir, match_disc_row, parse_log_track_seconds,
+                       read_log_text, sidecar_tracklist)
 from mlo.naming import sanitize_segment
 from mlo.paths import (AUDIO_EXTS, LIB_AUDIO_EXTS, expected_tracks_state,
                        library_root, load_expected_tracks, move_path,
@@ -1961,6 +1963,238 @@ def record_sidecar_tracklist(album_dir, cfg=None):
     return {"release_id": None, "tracks": manifest}
 
 
+# --------------------------------------------------------------------------- #
+# Rip-log → MusicBrainz release matching
+# --------------------------------------------------------------------------- #
+# A Disc ID names the PRESSING exactly, but MusicBrainz often attaches several
+# releases to one disc (the original, a reissue, a compilation). The matcher
+# below ranks those releases by the evidence the folder itself carries — the
+# log's own track count and per-track durations, and the files' tags — and
+# aggregates several logs so a two-disc rip is matched as ONE release with
+# both mediums covered, not as two unrelated albums.
+def _log_name_score(hit, want):
+    """0..1 name agreement, accent/case/punctuation-insensitive."""
+    try:
+        from mlo.lyrics_providers import _name_score
+        return float(_name_score(hit, want))
+    except Exception:
+        a = re.sub(r"[^a-z0-9]+", "", str(hit or "").lower())
+        b = re.sub(r"[^a-z0-9]+", "", str(want or "").lower())
+        if not a or not b:
+            return 0.0
+        return 1.0 if a == b else (0.8 if a in b or b in a else 0.0)
+
+
+def _log_release_score(row, log, tags=None):
+    """How well one MusicBrainz release matches one rip log, 0..1.
+
+    The Disc ID already says "this disc belongs to this release"; the score
+    decides WHICH release when MusicBrainz lists several, and how much the
+    folder's own evidence agrees. Track count and the log's per-track TOC
+    durations are the strongest signals (a different edition has a different
+    running order), then the tags' artist/album/date, then the release's
+    status and the medium position. A release whose medium is not the one the
+    log came from cannot win the medium-position term.
+    """
+    parts = []
+    reasons = []
+    if row.get("matches_this_disc"):
+        parts.append((1.0, 0.20))
+        reasons.append("disc id on this medium")
+
+    log_seconds = log.get("seconds") or {}
+    log_count = int(log.get("track_count") or len(log_seconds) or 0)
+    rel_tracks = row.get("tracks") or []
+    rel_count = int(row.get("track_count") or len(rel_tracks) or 0)
+    if log_count and rel_count:
+        count_score = max(0.0, 1.0 - abs(log_count - rel_count)
+                          / max(log_count, rel_count))
+        parts.append((count_score, 0.25))
+        if log_count == rel_count:
+            reasons.append(f"{log_count} tracks on both")
+
+    if log_seconds and rel_tracks:
+        diffs = []
+        for pos, sec in log_seconds.items():
+            try:
+                pos_i = int(pos)
+            except (TypeError, ValueError):
+                continue
+            track = next((t for t in rel_tracks
+                          if int(t.get("position") or 0) == pos_i), None)
+            length = int((track or {}).get("length") or 0) / 1000.0
+            if length > 0:
+                diffs.append(abs(float(sec) - length))
+        if diffs:
+            # 0 at a 12 s average miss, 1 at an exact match; a real pressing
+            # is usually within a second or two, another edition far outside.
+            avg = sum(diffs) / len(diffs)
+            parts.append((max(0.0, 1.0 - avg / 12.0), 0.35))
+            reasons.append(f"average duration miss {avg:.1f}s")
+
+    tags = tags or {}
+    artist = str(tags.get("ALBUMARTIST") or tags.get("ARTIST") or "").strip()
+    album = str(tags.get("ALBUM") or "").strip()
+    date = str(tags.get("DATE") or tags.get("ORIGINALDATE") or "").strip()
+    if artist and row.get("artist"):
+        artist_score = _log_name_score(row["artist"], artist)
+        parts.append((artist_score, 0.15))
+        if artist_score >= 0.8:
+            reasons.append("artist agrees")
+    if album and row.get("title"):
+        album_score = _log_name_score(row["title"], album)
+        parts.append((album_score, 0.15))
+        if album_score >= 0.8:
+            reasons.append("album title agrees")
+    if date and row.get("date"):
+        year_ok = date[:4] == str(row["date"])[:4]
+        parts.append((1.0 if year_ok else 0.0, 0.05))
+        if year_ok:
+            reasons.append(f"year {date[:4]}")
+
+    status = str(row.get("status") or "").strip().lower()
+    if status:
+        parts.append((1.0 if status == "official"
+                      else 0.0 if status in ("promotion", "bootleg") else 0.5,
+                      0.05))
+    disc = log.get("disc")
+    if disc and row.get("disc_position"):
+        disc_ok = int(disc) == int(row["disc_position"])
+        parts.append((1.0 if disc_ok else 0.0, 0.05))
+        if disc_ok:
+            reasons.append(f"disc {disc}")
+    total = sum(w for _s, w in parts)
+    if not total:
+        return 0.0, reasons
+    return round(sum(s * w for s, w in parts) / total, 3), reasons
+
+
+def _album_tags_for_log_match(album_dir):
+    """The first audio file's tags, for the log matcher's name/date terms."""
+    try:
+        paths = album_audio(album_dir, LIB_AUDIO_EXTS)
+    except Exception:
+        paths = []
+    if not paths:
+        return {}
+    try:
+        from mlo.audio import AudioFile
+        af = AudioFile(paths[0])
+        return dict(af.all_tags() or {}) if af.audio is not None else {}
+    except Exception:
+        return {}
+
+
+def log_match(album_dir, tags=None, max_logs=16):
+    """Match one album folder's rip logs to MusicBrainz releases.
+
+    Returns ``{ok, logs, groups, best, reason}``:
+
+    * ``logs`` — one row per ``.log`` found (including disc subfolders), with
+      its Disc ID, TOC, track count, the disc its own filename states, and the
+      releases MusicBrainz holds for that disc, best-scored first;
+    * ``groups`` — one row per RELEASE, aggregating every log that named it:
+      the disc positions covered, whether the set is complete, and the score
+      (average per-log agreement, weighted by medium coverage);
+    * ``best`` — the group an automatic import should use, or None.
+
+    A two-disc rip whose folders each carry a log therefore resolves to ONE
+    release with disc 1 and disc 2, instead of two independent matches that
+    could pick different editions. Nothing is written.
+    """
+    from server import integrations as intg
+
+    album_dir = _album_dir(album_dir)
+    if not os.path.isdir(album_dir):
+        return {"ok": False, "logs": [], "groups": [], "best": None,
+                "reason": "folder not found"}
+    tags = tags if tags is not None else _album_tags_for_log_match(album_dir)
+    logs = []
+    for root, dirs, files in os.walk(album_dir):
+        dirs[:] = sorted(d for d in dirs if not d.startswith("."))
+        for name in sorted(files):
+            if not name.lower().endswith(".log"):
+                continue
+            path = os.path.join(root, name)
+            row = {"file": os.path.basename(path), "path": path,
+                   "disc_id": "", "toc": None, "disc": None,
+                   "track_count": 0, "seconds": {}, "releases": [],
+                   "error": ""}
+            try:
+                text = read_log_text(path)
+                disc_id, toc = disc_id_for_log(path)
+                row["disc_id"] = disc_id
+                row["toc"] = toc
+                row["disc"] = disc_number_of_name(name)
+                row["seconds"] = parse_log_track_seconds(text)
+                row["track_count"] = len(row["seconds"])
+            except Exception as e:
+                row["error"] = str(e)[:200]
+            if row["disc_id"]:
+                try:
+                    releases = intg.releases_for_disc_id(row["disc_id"])
+                except Exception as e:
+                    row["error"] = f"MusicBrainz did not answer: {e}"
+                    releases = []
+                for rel in releases:
+                    rel["score"], rel["reasons"] = _log_release_score(rel, row, tags)
+                releases.sort(key=lambda r: (-float(r.get("score") or 0),
+                                             int(r.get("disc_position") or 99)))
+                row["releases"] = releases
+            logs.append(row)
+            if len(logs) >= max_logs:
+                break
+        if len(logs) >= max_logs:
+            break
+
+    groups = {}
+    for row in logs:
+        for rel in (row.get("releases") or [])[:8]:
+            rid = str(rel.get("release_id") or "")
+            if not rid:
+                continue
+            g = groups.setdefault(rid, {
+                "release": rel,
+                "logs": [],
+                "disc_positions": [],
+                "score": 0.0,
+            })
+            g["logs"].append({"file": row["file"], "disc_id": row["disc_id"],
+                              "disc": row["disc"], "score": rel.get("score")})
+            pos = int(rel.get("disc_position") or 0)
+            if pos:
+                g["disc_positions"].append(pos)
+            g["score"] += float(rel.get("score") or 0)
+    for g in groups.values():
+        n = max(1, len(g["logs"]))
+        avg = g["score"] / n
+        discs = int(g["release"].get("discs") or 0)
+        positions = sorted(set(g["disc_positions"]))
+        coverage = (len(positions) / discs) if discs else (1.0 if positions else 0.0)
+        g["score"] = round(avg * (0.6 + 0.4 * coverage), 3)
+        g["discs_covered"] = positions
+        g["complete"] = bool(discs and positions
+                             and positions == list(range(1, discs + 1)))
+    ordered = sorted(groups.values(),
+                     key=lambda g: (-float(g["score"]),
+                                    not g.get("complete"),
+                                    -len(g["logs"])))
+    best = ordered[0] if ordered else None
+    if best is not None:
+        # "Confident" is what the wizard may pin without asking: a strong
+        # per-log score, and either every disc covered or a single-log match.
+        best["confident"] = bool(
+            float(best["score"]) >= 0.72
+            and (best.get("complete") or len(best["logs"]) == 1))
+    return {
+        "ok": bool(logs),
+        "logs": logs,
+        "groups": ordered,
+        "best": best,
+        "reason": "" if logs else "this folder has no rip log to read a TOC from",
+    }
+
+
 def stamp_folder_discs(album_dir, cfg=None):
     """Record the disc each file's own FOLDER states, where no tag states one.
 
@@ -2016,6 +2250,75 @@ def stamp_folder_discs(album_dir, cfg=None):
                 stamped += 1
         except Exception:
             traceback.print_exc()
+    return stamped
+
+
+def _stamp_one_disc(path, disc, cfg):
+    """Fill DISCNUMBER on ONE destination file, fill-only."""
+    from mlo.audio import AudioFile
+    from mlo.config import should_write_audio_tag
+
+    if not disc or not should_write_audio_tag(cfg, "DISCNUMBER", filepath=path):
+        return 0
+    try:
+        af = AudioFile(path)
+        if af.audio is None or str(af.get_tag("DISCNUMBER") or "").strip():
+            return 0
+        af.defer_save(True)
+        ok = False
+        try:
+            af.set_tag("DISCNUMBER", str(disc))
+            ok = True
+        finally:
+            if af.defer_save(False) is False:
+                ok = False
+        return 1 if ok else 0
+    except Exception:
+        traceback.print_exc()
+        return 0
+
+
+def disc_map(source):
+    """``{relative path: disc}`` for the audio under *source* whose PATH names
+    a disc.
+
+    Read BEFORE a move, because a staged source is drained by the ingest; the
+    destination is stamped from this map afterwards. A single file maps its
+    own basename. Files whose path states no disc are absent.
+    """
+    from mlo.discs import disc_number_of_path
+
+    if os.path.isfile(source):
+        disc = disc_number_of_path(source)
+        return {os.path.basename(source): disc} if disc else {}
+    if not os.path.isdir(source):
+        return {}
+    out = {}
+    for root, dirs, files in os.walk(source):
+        dirs[:] = [d for d in dirs if not d.startswith(".")]
+        for name in sorted(files):
+            if os.path.splitext(name)[1].lower() not in _AUDIO_EXTS:
+                continue
+            src_path = os.path.join(root, name)
+            disc = disc_number_of_path(src_path)
+            if disc:
+                out[os.path.relpath(src_path, source)] = disc
+    return out
+
+
+def stamp_disc_map(dest, mapping, cfg=None):
+    """Stamp DISCNUMBER on the DESTINATION files named by `disc_map`."""
+    if not mapping:
+        return 0
+    cfg = cfg if cfg is not None else load_config()
+    stamped = 0
+    if os.path.isfile(dest):
+        # A single-file placement: the map's one entry names its basename.
+        return _stamp_one_disc(dest, next(iter(mapping.values())), cfg)
+    for rel, disc in mapping.items():
+        dst_path = os.path.join(dest, rel)
+        if os.path.isfile(dst_path):
+            stamped += _stamp_one_disc(dst_path, disc, cfg)
     return stamped
 
 

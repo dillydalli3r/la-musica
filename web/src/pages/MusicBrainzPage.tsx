@@ -257,7 +257,7 @@ function useAddToLibrary() {
     kind: "release" | "release_group" | "artist" | "recording",
     mode: ImportMode = "best",
     missing = 0,
-    extra: { title?: string; artist?: string; year?: string; release_mbid?: string } = {}
+    extra: { title?: string; artist?: string; year?: string; release_mbid?: string; priority_track?: string } = {}
   ) => {
     setBusy(true);
     const ack = toast(addTaken(ids, kind, extra));
@@ -1345,7 +1345,9 @@ export function MBSearchPage() {
                               title="Add the release this recording appears on to your library and start searching for it"
                               onClick={(e) => {
                                 e.stopPropagation();
-                                runImport([String(r.id)], "recording", "best");
+                                runImport([String(r.id)], "recording", "best", 0, {
+                                  title: r.title, priority_track: r.title,
+                                });
                               }}
                             >
                               <Library className="h-4 w-4" />
@@ -2427,6 +2429,7 @@ export function MBReleasePage() {
                           run([t.recording_mbid as string], "recording", "best", 0, {
                             release_mbid: r.id, title: r.title, artist,
                             year: (r.date || "").slice(0, 4),
+                            priority_track: t.title,
                           })
                         }
                       >
@@ -2508,6 +2511,7 @@ export function MBRecordingPage() {
               onClick={() =>
                 run([r.id], "recording", "best", 0, {
                   title: r.title, artist: r.artist || "",
+                  priority_track: r.title,
                 })
               }
             >
